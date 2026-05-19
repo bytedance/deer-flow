@@ -7,6 +7,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import (
+    CLOSURE_TICKET_TOOLS,
     REPORT_TEMPLATE_LIFECYCLE_TOOLS,
     REPORT_TEMPLATE_RUNTIME_TOOLS,
     ask_clarification_tool,
@@ -29,6 +30,7 @@ BUILTIN_TOOLS = [
     *REPORT_TEMPLATE_LIFECYCLE_TOOLS,
     *REPORT_TEMPLATE_RUNTIME_TOOLS,
     report_template_record_fallback_tool,
+    *CLOSURE_TICKET_TOOLS,
 ]
 
 SUBAGENT_TOOLS = [

@@ -1,6 +1,15 @@
 "use client";
 
-import { BookOpenIcon, BotIcon, BugIcon, ChevronDownIcon, FileTextIcon, HistoryIcon, MessagesSquare } from "lucide-react";
+import {
+  BookOpenIcon,
+  BotIcon,
+  BugIcon,
+  CheckCircle2Icon,
+  ChevronDownIcon,
+  FileTextIcon,
+  HistoryIcon,
+  MessagesSquare,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ComponentType, useEffect, useMemo, useState } from "react";
@@ -17,6 +26,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { type Agent, type NavItem, useAgentChildren, useAgents } from "@/core/agents";
+import { useClosureRefresh, useClosureSummary } from "@/core/closed-loop";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -147,6 +157,8 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
 
+        <ClosedLoopNavItem active={pathname.startsWith("/workspace/closed-loop")} />
+
         {dynamicNavItems.map((item) => {
           const Icon = NAV_ICON_MAP[item.icon] ?? FileTextIcon;
           return (
@@ -188,5 +200,32 @@ export function WorkspaceNavChatList() {
         onClose={() => setActiveGroup(null)}
       />
     </SidebarGroup>
+  );
+}
+
+function ClosedLoopNavItem({ active }: { active: boolean }) {
+  useClosureRefresh();
+  const { summary } = useClosureSummary({ refetchInterval: 60_000 });
+  const open = summary?.open ?? 0;
+  const overdue = summary?.overdue ?? 0;
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton isActive={active} asChild>
+        <Link className="text-muted-foreground" href="/workspace/closed-loop">
+          <CheckCircle2Icon />
+          <span className="flex-1">闭环管理</span>
+          {overdue > 0 && (
+            <span className="rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">
+              {overdue}
+            </span>
+          )}
+          {overdue === 0 && open > 0 && (
+            <span className="rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+              {open}
+            </span>
+          )}
+        </Link>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 }

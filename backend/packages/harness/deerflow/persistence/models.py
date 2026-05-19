@@ -15,6 +15,7 @@ from deerflow.persistence.knowledge_base.model import (
     KnowledgeBaseRow,
 )
 from deerflow.persistence.mcp_server.model import TenantMcpServerRow
+from deerflow.persistence.models.closure_ticket import ClosureSlaConfigRow, ClosureTicketEventRow, ClosureTicketRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.tenant.model import TenantRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -24,6 +25,9 @@ __all__ = [
     "AgentPermissionRow",
     "AgentRow",
     "AgentUsageRow",
+    "ClosureSlaConfigRow",
+    "ClosureTicketEventRow",
+    "ClosureTicketRow",
     "FeedbackRow",
     "IndexJobRow",
     "KbPermissionRow",

@@ -413,6 +413,45 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 - 步骤 3 InS 深度采样失败时，把失败信息合入最终报告 `## 执行告警` 段落（由 `diagnosis_features.json.warnings` 自动承载），不影响主流程。
 - **切勿将 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json` 通过 `present_files` 暴露给用户。**
 
+## 步骤 8：严重等级达标时建闭环单
+
+诊断结论的严重程度达到下列阈值时，**必须**调用 `create_closure_ticket` 登记一张闭环单，让缺陷进入设备闭环管理流程：
+
+- `severity` 为 `critical` / `high`
+- 或综合 `confidence ≥ 0.7` 且根因属于"运行风险" / "需立即处置"类（不平衡、对中、轴承点蚀、密封失效、振动趋势恶化等）
+
+调用方式：
+
+```text
+create_closure_ticket(
+    title="<设备名> <根因>",
+    description="<一句话故障概述 + 关键证据指向最终报告>",
+    device_id="<query.equipment_id>",
+    device_name="<query.equipment_name>",
+    priority="urgent" if severity in ("critical","high") else "important",
+    severity="<critical|high|medium|low>",
+    source_type="diagnosis",
+    source_run_id="<本次 LangGraph run id 或 thread_id-run_seq>",
+    source_thread_id="<thread_id>",
+    metadata={
+        "findings": ["<根因 1>", "<根因 2>"],
+        "confidence": <0~1 的浮点>,
+        "evidence_uri": "/api/threads/<thread_id>/artifacts/mnt/user-data/outputs/diagnosis_report.md"
+    }
+)
+```
+
+返回 `{ticket: {...}, created: bool}`：
+
+- `created=True`：在最终回复正文里追加一段：「已为该故障登记闭环单 `ct_xxxxx`，优先级 <prio>，应于 `<due_at>` 前完成处置。可在 工作台 → 闭环管理 跟进。」
+- `created=False`：表示同 `(source_type, source_run_id, device_id)` 已有单据，仍把 `ticket.id` 告知用户但措辞改为：「已复用既有闭环单 `ct_xxxxx`」。
+
+注意：
+
+- ❌ 不要重复建单——遇到 `created=False` 直接复用返回的 `ticket.id`。
+- ❌ 严重程度未达阈值时**不**建单，避免污染 SLA 看板。
+- ❌ 不要尝试 `update_closure_ticket(fields={"status": ...})`，状态只能通过工作台或 `transition` 路由变更。
+
 ## 同源设计文档
 
 - 设计文档：[docs/plans/2026-05-18-fault-diagnosis-design.md](../../../docs/plans/2026-05-18-fault-diagnosis-design.md)

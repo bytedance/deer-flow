@@ -160,6 +160,26 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
             run_events_config = RunEventsConfig(**run_events_config)
         app.state.run_event_store = make_run_event_store(run_events_config)
 
+        # Closure (closed-loop) service: ClosureRepository + publisher wired to
+        # the same RunEventStore so closure.* events flow through the existing
+        # SSE/poll plumbing. Skipped when no DB session factory is configured.
+        if sf is not None:
+            from deerflow.closed_loop.events import ClosureEventPublisher
+            from deerflow.closed_loop.repository import ClosureRepository
+            from deerflow.closed_loop.service import ClosureService
+            from deerflow.closed_loop.service_factory import set_default_service
+
+            app.state.closure_service = ClosureService(
+                repository=ClosureRepository(sf),
+                event_publisher=ClosureEventPublisher(app.state.run_event_store),
+            )
+            # Mirror the wired service onto the harness-side singleton so
+            # builtin tools (which run in-process without a FastAPI request)
+            # share the same repository + event publisher.
+            set_default_service(app.state.closure_service)
+        else:
+            app.state.closure_service = None
+
         # RunManager with store backing for persistence
         from deerflow.runtime import RunManager as _RunManager
 
@@ -170,6 +190,12 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         finally:
             set_gateway_store(None)
             set_memory_storage(None)
+            try:
+                from deerflow.closed_loop.service_factory import set_default_service
+
+                set_default_service(None)
+            except Exception:  # noqa: BLE001
+                logger.debug("clearing closure service singleton failed", exc_info=True)
             await close_engine()
 
 
@@ -212,6 +238,14 @@ def get_agent_permission_repo(request: Request):
 def get_tenant_mcp_repo(request: Request):
     """Return the tenant MCP server repository (may be None if DB not available)."""
     return getattr(request.app.state, "tenant_mcp_repo", None)
+
+
+def get_closure_service(request: Request):
+    """Return the closed-loop (closure) service, or 503 when DB is not available."""
+    val = getattr(request.app.state, "closure_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Closure service not available")
+    return val
 
 
 def get_agent_usage_repo(request: Request):

@@ -400,9 +400,26 @@ def _check_section_sources(
     step_outputs: dict[str, set[str]],
     errors: list[ValidationIssue],
 ) -> None:
-    """``sections[].source`` is a dotted path; require it to reference a known step."""
+    """``sections[].source`` is a dotted path; require it to reference a known step.
+
+    ``closure_section`` is exempt — it's filter-driven and never references a
+    step output. Filter validation is delegated to ``_check_closure_filters``.
+    """
     for sec in sections:
-        src = sec.source.strip()
+        if sec.component == "closure_section":
+            _check_closure_filters(sec, errors)
+            continue
+        src_value = sec.source
+        if src_value is None:
+            errors.append(
+                ValidationIssue(
+                    code="SECTION_MISSING_SOURCE",
+                    path=f"sections[{sec.id}].source",
+                    message=f"section {sec.id!r} of component {sec.component!r} requires 'source'",
+                )
+            )
+            continue
+        src = src_value.strip()
         # Try JSONPath form first (`$.steps.X.Y...`)
         if src.startswith("$.") or src.startswith("steps."):
             try:
@@ -663,6 +680,9 @@ def _check_section_component_type_hints(
     warnings: list[ValidationIssue],
 ) -> None:
     for sec in sections:
+        # closure_section is filter-driven — no source string to inspect.
+        if sec.component == "closure_section" or sec.source is None:
+            continue
         hints = _COMPONENT_HINTS.get(sec.component)
         if not hints:
             continue
@@ -679,3 +699,68 @@ def _check_section_component_type_hints(
                     severity="warning",
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# closure_section validation
+# ---------------------------------------------------------------------------
+
+
+_VALID_CLOSURE_STATUSES: frozenset[str] = frozenset(
+    {"pending", "assigned", "in_progress", "pending_verification", "closed", "rejected"}
+)
+
+
+def _check_closure_filters(sec: Section, errors: list[ValidationIssue]) -> None:
+    """Static checks for ``closure_section.filters``.
+
+    The Pydantic schema enforces shape (extra=forbid + closed_loop status enum).
+    Here we add semantics:
+
+    * ``period_start`` < ``period_end`` when both are pure literal strings.
+    * Per-status placeholders aren't allowed (the schema's literal type already
+      catches this; we just surface a friendlier code).
+    """
+    if sec.filters is None:
+        return
+    f = sec.filters
+    path = f"sections[{sec.id}].filters"
+
+    # statuses must already be valid by Pydantic — defensive double-check.
+    if f.statuses:
+        bad = [s for s in f.statuses if s not in _VALID_CLOSURE_STATUSES]
+        if bad:
+            errors.append(
+                ValidationIssue(
+                    code="CLOSURE_FILTER_BAD_STATUS",
+                    path=f"{path}.statuses",
+                    message=f"unknown statuses {bad!r}; allowed: {sorted(_VALID_CLOSURE_STATUSES)}",
+                )
+            )
+
+    # Compare literal date strings only (we can't resolve placeholders here).
+    if (
+        isinstance(f.period_start, str)
+        and isinstance(f.period_end, str)
+        and "{{" not in f.period_start
+        and "{{" not in f.period_end
+        and f.period_start > f.period_end
+    ):
+        errors.append(
+            ValidationIssue(
+                code="CLOSURE_FILTER_PERIOD_INVERTED",
+                path=f"{path}.period_start",
+                message=(
+                    f"period_start={f.period_start!r} is after period_end={f.period_end!r}"
+                ),
+            )
+        )
+
+    if f.page_size is not None and (f.page_size < 1 or f.page_size > 1000):
+        errors.append(
+            ValidationIssue(
+                code="CLOSURE_FILTER_PAGE_SIZE_OUT_OF_RANGE",
+                path=f"{path}.page_size",
+                message=f"page_size must be in [1, 1000], got {f.page_size}",
+            )
+        )

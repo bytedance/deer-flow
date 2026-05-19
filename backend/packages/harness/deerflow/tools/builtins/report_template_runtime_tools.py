@@ -489,7 +489,10 @@ def report_template_assemble_payload_tool(report_run_id: str) -> str:
         expect_status(state, "data_complete")
         dsl = _load_dsl_for(state)
         try:
-            payload = assemble_payload(dsl=dsl, state=state)
+            principal = principal_from_runnable_config(get_config())
+            payload = assemble_payload(
+                dsl=dsl, state=state, tenant_id=principal.tenant_id
+            )
         except PayloadBuildError as e:
             mark_failed(state, code="ASSEMBLE_FAILED", message=str(e))
             write_state(run_dir, state)

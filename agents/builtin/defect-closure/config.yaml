@@ -1,6 +1,6 @@
 name: defect-closure
 display_name: "缺陷闭环"
-description: "擅长缺陷跟踪、处置方案制定、闭环验证管理"
+description: "擅长缺陷登记、派单、处置进度跟踪、验证关闭管理（基于闭环单）"
 icon: "✅"
 order: 5
 model: null
@@ -13,5 +13,6 @@ tags:
   - defect
   - closure
   - tracking
+  - closure-ticket
 advanced:
   subagent_enabled: false

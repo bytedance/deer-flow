@@ -98,6 +98,17 @@ sections:
     component: markdown
     source: $.steps.closure_summary.closure_summary.closure_conclusion
 
+  # Section 6: live closure tickets (closed_loop service-backed)
+  # Demonstrates the `closure_section` block — pulls real-time 闭环单 from the
+  # platform `closed_loop` service instead of from a script. Empty data
+  # auto-renders the "本期无相关闭环单据" placeholder.
+  - id: live_closure_tickets
+    title: 平台闭环单（实时）
+    component: closure_section
+    filters:
+      statuses: ["pending", "assigned", "in_progress", "pending_verification"]
+      page_size: 200
+
 export:
   formats: [md, pdf]
   renderer: generic_report

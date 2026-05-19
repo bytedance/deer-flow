@@ -293,3 +293,32 @@ present_files(["/mnt/user-data/outputs/daily_report.md"])
 - `/mnt/user-data/outputs/daily_kpi.json` 不存在时，提示用户先生成日报。
 - PDF 导出依赖 weasyprint 包；如果未安装，自动降级仅提供 Markdown 下载。
 - **切勿将 `daily_kpi.json` 或 `daily_data.json` 通过 `present_files` 暴露给用户。**
+
+## 整改项闭环登记
+
+如果日报"异常 / 整改 / 待办"段中识别出 **明确的整改项**（设备名称 + 异常描述 + 责任归属），按以下规则处理：
+
+1. 对每个整改项调用一次 `create_closure_ticket`：
+
+```text
+create_closure_ticket(
+    title="<设备名> <整改要点>",
+    description="<整改项原文>",
+    device_id="<设备 id，未知传 None>",
+    device_name="<设备名>",
+    priority="important" if "立即" in 整改项 else "normal",
+    source_type="daily_report",
+    source_run_id="<本次报告 run_id>",
+    source_thread_id="<thread_id>",
+    metadata={"report_run_id": "<run_id>", "items": ["<整改要点>"]}
+)
+```
+
+2. 创建成功后在日报正文末尾追加 **闭环跟踪** 段：列出新建/复用的 `ticket.id` 与 `priority` / `due_at`。
+3. 用户后续如要求撤回整改项，调用 `close_closure_ticket(ticket_id=..., decision="reject", rejection_reason=用户给出的理由)`；当前会话无 `closure:verify` 权限时，提示「请联系租户管理员在 工作台 → 闭环管理 操作」。
+
+注意：
+
+- `created=False` 表示该整改项已存在闭环单——直接复用 `ticket.id`，不要重复登记。
+- 只对"具体可执行的整改项"建单（含设备 + 动作）；不要对"建议持续观察"等模糊语句建单。
+- 不要尝试在 `update_closure_ticket.fields` 写 `status`，状态变更只能通过工作台或 `transition` 路由。

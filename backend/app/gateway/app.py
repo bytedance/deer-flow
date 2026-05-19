@@ -22,6 +22,7 @@ from app.gateway.routers import (
     auth_router,
     auth,
     channels,
+    closure_tickets,
     cost,
     feedback,
     genui,
@@ -39,6 +40,7 @@ from app.gateway.routers import (
     runs,
     skills,
     suggestions,
+    system,
     tenant_agents,
     tenant_connectors,
     tenant_mcp_servers,
@@ -369,6 +371,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
+        # Start the closed-loop overdue-scan periodic task. No-op when
+        # closure_service is unavailable (backend=memory).
+        try:
+            from deerflow.closed_loop.jobs import start_overdue_scanner
+
+            start_overdue_scanner(app)
+        except Exception:
+            logger.exception("Failed to start closure overdue scanner (non-fatal)")
+
         # Start IM channel service if any channels are configured
         try:
             from app.channels.service import start_channel_service
@@ -396,6 +407,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("Failed to start Nacos registration (non-fatal)")
 
         yield
+
+        # Stop closure overdue scanner first so it does not race with engine teardown.
+        try:
+            from deerflow.closed_loop.jobs import stop_overdue_scanner
+
+            await asyncio.wait_for(
+                stop_overdue_scanner(app),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Closure overdue scanner shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop closure overdue scanner")
 
         # Stop Nacos registration on shutdown
         nacos_registry = getattr(app.state, "nacos_registry", None)
@@ -663,6 +690,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Organize tree API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
+
+    # Closed-loop tickets API
+    app.include_router(closure_tickets.router)
+
+    # System diagnostics (admin-only): pdf-converter status etc.
+    app.include_router(system.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

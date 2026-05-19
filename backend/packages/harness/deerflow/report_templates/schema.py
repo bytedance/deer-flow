@@ -225,20 +225,70 @@ class TransformStep(BaseModel):
 # Section / Export layer
 # ---------------------------------------------------------------------------
 
-SectionComponent = Literal["markdown", "card", "card_group", "echart", "table", "image"]
+SectionComponent = Literal[
+    "markdown", "card", "card_group", "echart", "table", "image", "closure_section"
+]
 ExportFormat = Literal["md", "pdf"]
+
+ClosureStatusLiteral = Literal[
+    "pending", "assigned", "in_progress", "pending_verification", "closed", "rejected"
+]
+
+
+class ClosureSectionFilters(BaseModel):
+    """Filters consumed by the ``closure_section`` block at render time.
+
+    Resolved against ``closed_loop.service.list_for_report`` — period bounds are
+    ISO-8601 strings (``2026-05-01`` or ``2026-05-01T00:00:00+08:00``) so the
+    DSL stays declarative and JSON-safe. ``device_ids`` may be either literal
+    ids or ``{{ $.form.<step>.<field> }}`` placeholders that the renderer
+    resolves before invoking the service.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_ids: list[str] | None = None
+    statuses: list[ClosureStatusLiteral] | None = None
+    period_start: str | None = None
+    period_end: str | None = None
+    page_size: int = Field(default=200, gt=0, le=1000)
+    include_overdue_only: bool = False
 
 
 class Section(BaseModel):
-    """A rendered section in the assembled report payload."""
+    """A rendered section in the assembled report payload.
+
+    ``source`` is required for every component except ``closure_section``,
+    which sources its rows from the closure-ticket service via ``filters``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
     title: str
     component: SectionComponent
-    source: str
+    source: str | None = None
     props: dict[str, Any] | None = None
+    filters: ClosureSectionFilters | None = None
+
+    @model_validator(mode="after")
+    def _check_component_payload(self) -> "Section":
+        if self.component == "closure_section":
+            if self.source is not None:
+                raise ValueError(
+                    f"section {self.id!r}: closure_section must not declare 'source' (use 'filters' instead)"
+                )
+            # filters may be omitted -> defaults to "all open tickets, no period bound"
+        else:
+            if self.source is None:
+                raise ValueError(
+                    f"section {self.id!r}: component {self.component!r} requires 'source'"
+                )
+            if self.filters is not None:
+                raise ValueError(
+                    f"section {self.id!r}: 'filters' is only valid for component 'closure_section'"
+                )
+        return self
 
 
 class ExportConfig(BaseModel):

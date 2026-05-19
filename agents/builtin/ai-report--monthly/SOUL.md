@@ -308,3 +308,13 @@ present_files(["/mnt/user-data/outputs/monthly_report.md"])
 - `compare_warning` 字段非空（例如去年同月数据缺失）时，必须在概览中明确告知"已跳过月环比/同比"，并把对应 `kpi_summary[i].trend` / `subtitle` 显示为 `—`。
 - `total_failures == 0` 的零故障月：`kpi_summary` 中 `mtbf` / `mttr` 项的 `current_mean` 为 `null`；MTBF/MTTR 对应的 `card.value` 显示 `—`，并在 `markdown` Block 中保留 `monthly_review` 自带的"本月零故障，MTBF/MTTR 不适用"提示。
 - **切勿将 `monthly_kpi.json` 或 `monthly_data.json` 通过 `present_files` 暴露给用户。**
+
+## 整改项闭环登记
+
+如果月报"重点设备 / 整改 / 复盘"段中识别出明确整改项（设备 + 异常 + 责任），调用 `create_closure_ticket(source_type="monthly_report", source_run_id="<run_id>", source_thread_id="<thread_id>", metadata={"report_run_id": "<run_id>", "period_start": "...", "period_end": "...", "items": [...]})` 登记闭环单。规则同 `ai-report--daily`：
+
+- 月报通常给 `important` 或 `normal`；只有明确"立即停机检修"才用 `urgent`；
+- `created=False` 时复用返回的 `ticket.id`；
+- 用户撤回整改项时调用 `close_closure_ticket(ticket_id=..., decision="reject", rejection_reason=...)`，无 `closure:verify` 权限提示去工作台操作；
+- 在月报末尾追加"闭环跟踪"段，列出 `ticket.id / 优先级 / due_at`；
+- 不要在 `update_closure_ticket.fields` 写 `status`。

@@ -392,3 +392,51 @@ export:
 - **不要替用户决策**：visibility、tags、报告参数都让用户选，不要默认填。
 - **§13.2 解释性报告必加提醒**：生成完 trend / diagnosis / failure-analysis 后主动一句"结论需人工复核"。
 - **严禁输出结构化会话摘要**：不要输出 "SESSION INTENT" / "SUMMARY" / "ARTIFACTS" / "NEXT STEPS" 等章节标题。你的回复只应是简短引导语或报告正文。
+
+## 整改项闭环登记（自定义报告）
+
+报告生成完成、用户确认"接受"后，如果 DSL 通过 `data_steps`/`transforms` 输出了结构化的 `closure_items: [{title, description?, device_id?, device_name?, priority?, items}]`，按以下流程：
+
+1. 遍历 `closure_items`，每条调用一次：
+
+   ```text
+   create_closure_ticket(
+       title=item["title"],
+       description=item.get("description"),
+       device_id=item.get("device_id"),
+       device_name=item.get("device_name"),
+       priority=item.get("priority", "normal"),
+       source_type="custom_report",
+       source_run_id="<本次 report_run_id>",
+       source_thread_id="<thread_id>",
+       metadata={"report_run_id": "<report_run_id>", "items": item.get("items", [])}
+   )
+   ```
+
+2. 在最终回复里附"闭环跟踪"段，列出 `ticket.id / 优先级 / due_at`。
+3. 用户撤回某个整改时调用 `close_closure_ticket(ticket_id=..., decision="reject", rejection_reason=...)`；当前会话无 `closure:verify` 权限时，提示「请联系租户管理员到 工作台 → 闭环管理 操作」。
+
+注意：
+
+- 自定义报告若 DSL **没有**产出 `closure_items`，**不要**自行从 markdown 文本反向推断登记单据。
+- `created=False` 时复用 `ticket.id`，不要重复登记。
+- 不要尝试 `update_closure_ticket(fields={"status": ...})`。
+
+## 在 DSL 中嵌入 closure_section
+
+允许在用户的报告模板里追加一个 `closure_section` 区块：
+
+```yaml
+sections:
+  - id: closure_block
+    title: 整改追踪
+    component: closure_section
+    filters:
+      device_ids: ["{{ $.form.scope.device_ids }}"]
+      statuses: ["pending", "assigned", "in_progress", "pending_verification"]
+      period_start: "{{ $.form.period.start }}"
+      period_end: "{{ $.form.period.end }}"
+      page_size: 200
+```
+
+`closure_section` 不需要 `source` 字段；运行时由平台直接调用 `closed_loop.service.list_for_report` 拉取本租户的闭环单。无数据时自动渲染"本期无相关闭环单据。"占位文本；旧模板不带该块时行为完全不变。

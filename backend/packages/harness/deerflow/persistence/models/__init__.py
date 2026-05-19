@@ -16,10 +16,24 @@ there is no matching entity directory.
 
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.knowledge_base.model import IndexJobRow, KnowledgeBaseDocumentRow, KnowledgeBaseRow
+from deerflow.persistence.models.closure_ticket import ClosureSlaConfigRow, ClosureTicketEventRow, ClosureTicketRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.tenant.model import TenantRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 
-__all__ = ["FeedbackRow", "IndexJobRow", "KnowledgeBaseDocumentRow", "KnowledgeBaseRow", "RunEventRow", "RunRow", "TenantRow", "ThreadMetaRow", "UserRow"]
+__all__ = [
+    "ClosureSlaConfigRow",
+    "ClosureTicketEventRow",
+    "ClosureTicketRow",
+    "FeedbackRow",
+    "IndexJobRow",
+    "KnowledgeBaseDocumentRow",
+    "KnowledgeBaseRow",
+    "RunEventRow",
+    "RunRow",
+    "TenantRow",
+    "ThreadMetaRow",
+    "UserRow",
+]

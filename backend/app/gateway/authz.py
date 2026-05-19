@@ -58,6 +58,11 @@ class Permissions:
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
 
+    # Closure tickets (closed-loop subsystem)
+    CLOSURE_READ = "closure:read"
+    CLOSURE_WRITE = "closure:write"
+    CLOSURE_VERIFY = "closure:verify"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -116,6 +121,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.CLOSURE_READ,
+    Permissions.CLOSURE_WRITE,
+    Permissions.CLOSURE_VERIFY,
 ]
 
 
