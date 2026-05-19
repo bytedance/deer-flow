@@ -125,9 +125,14 @@ class InsBaseAuthProvider(AuthProvider):
                 from deerflow.persistence.tenant import TenantRepository
 
                 self._tenant_repo = TenantRepository(sf)
+                logger.info("_resolve_tenant_id: lazy-created TenantRepository from session_factory")
 
         if self._tenant_repo is None:
-            logger.warning("Tenant repository not available, using factory orgId as tenant_id=%s", factory_org_id)
+            logger.error(
+                "_resolve_tenant_id: tenant_repo is None, session_factory=%s, sf_result=%s. Returning factory orgId without DB persistence!",
+                self._session_factory,
+                self._session_factory() if self._session_factory else "N/A",
+            )
             return factory_org_id
 
         return await self._get_or_create_tenant(factory_org_id, factory_org_name)
@@ -136,6 +141,7 @@ class InsBaseAuthProvider(AuthProvider):
         """Get existing tenant or create a new one with zero limits."""
         existing = await self._tenant_repo.get(tenant_id)
         if existing is not None:
+            logger.info("_get_or_create_tenant: tenant %s already exists in DB", tenant_id)
             return tenant_id
 
         from datetime import UTC, datetime
@@ -151,13 +157,18 @@ class InsBaseAuthProvider(AuthProvider):
             daily_quota_usd=0,
             monthly_quota_usd=0,
         )
+        logger.info("_get_or_create_tenant: creating tenant %s (name=%s)...", tenant_id, name)
         try:
             await self._tenant_repo.create(config)
-            logger.info("Auto-created tenant %s from factory org", tenant_id)
+            logger.info("_get_or_create_tenant: tenant %s created successfully", tenant_id)
         except ValueError:
+            logger.warning("_get_or_create_tenant: tenant %s already exists (ValueError from create)", tenant_id)
             existing = await self._tenant_repo.get(tenant_id)
             if existing is not None:
                 return tenant_id
+            raise
+        except Exception:
+            logger.exception("_get_or_create_tenant: FAILED to create tenant %s", tenant_id)
             raise
 
         return tenant_id

@@ -56,6 +56,12 @@ async def _check_tenant_active(tenant_id: str, request: Request) -> JSONResponse
         return None
     tc = await ts.get(tenant_id)
     if tc is None:
+        logger.error(
+            "_check_tenant_active: tenant %r NOT FOUND in tenant_store (type=%s). Path=%s",
+            tenant_id,
+            type(ts).__name__,
+            request.url.path,
+        )
         return JSONResponse(
             status_code=403,
             content={"detail": f"Tenant {tenant_id!r} does not exist", "code": "tenant_not_found"},
