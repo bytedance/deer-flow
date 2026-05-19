@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "ins-bus-rpc"
 PATH_PREFIX = "/ins-bus-rpc/machineModel"
+COMPONENT_PATH_PREFIX = "/ins-bus-rpc/componentModel"
 
 
 class MachineServiceClient:
@@ -130,6 +131,31 @@ class MachineServiceClient:
         result = await self._rpc.call_raw(
             SERVICE_NAME,
             f"{PATH_PREFIX}/getMachineDetailInfo",
+            "GET",
+            params,
+        )
+        return self._unwrap_ajax_result(result)
+
+    async def get_component_info_by_machine_id(
+        self,
+        machine_id: int,
+        hidden_if_valid: bool = False,
+    ) -> list[dict]:
+        """通过设备id获取部件信息。
+
+        Args:
+            machine_id: 设备ID。
+            hidden_if_valid: 隐藏设置是否有效。
+
+        Returns:
+            list[dict]: ComponentInfo 列表。
+        """
+        params: dict = {"machineId": machine_id}
+        if hidden_if_valid:
+            params["hiddenIfValid"] = True
+        result = await self._rpc.call_raw(
+            SERVICE_NAME,
+            f"{COMPONENT_PATH_PREFIX}/getComponentInfoByMachineId",
             "GET",
             params,
         )

@@ -119,12 +119,13 @@
   "props": {
     "title": "机泵故障诊断 · 第 2 步：选择诊断目标设备",
     "queryParams": {"orgId": 0, "treeType": 1, "typeId": 4},
+    "filterDeviceType": 4,
     "maxSelect": 5
   }
 }
 ```
 
-> **参数说明**：`typeId=4` 过滤为机泵类型设备。`maxSelect=5` 限制最多选 5 台，避免 InS 深度采样 token 失控。
+> **参数说明**：`typeId=4`、`filterDeviceType=4` 过滤为机泵类型设备。`maxSelect=5` 限制最多选 5 台，避免 InS 深度采样 token 失控。
 
 渲染后只回复一句"请在左侧组织树中选择设备后提交。"并立即停止。**严禁在此轮渲染后续表单或调用任何脚本**。
 

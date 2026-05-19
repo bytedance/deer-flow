@@ -29,6 +29,7 @@ from app.gateway.routers import (
     genui_telemetry,
     ins_base_auth,
     knowledge_bases,
+    machine,
     mcp,
     memory,
     models,
@@ -700,6 +701,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Organize tree API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
+    app.include_router(machine.router)
 
     # Closed-loop tickets API
     app.include_router(closure_tickets.router)
