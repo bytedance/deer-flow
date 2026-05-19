@@ -62,6 +62,61 @@ def test_scan_file_detects_async_thread_and_tool_boundaries(tmp_path):
     assert "ASYNC_ONLY_TOOL_FACTORY" in categories
 
 
+def test_scan_file_ignores_unqualified_threads_and_generic_method_names(tmp_path):
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Thread:
+            pass
+
+        class Timer:
+            pass
+
+        async def handler(form, runner):
+            form.submit()
+            runner.invoke("not a langchain model")
+
+        def sync_entry(runner):
+            Thread()
+            Timer()
+            runner.ainvoke("not a langchain model")
+        """,
+    )
+
+    findings = detector.scan_file(source_file, repo_root=tmp_path)
+    categories = {finding.category for finding in findings}
+
+    assert "RAW_THREAD" not in categories
+    assert "RAW_TIMER_THREAD" not in categories
+    assert "EXECUTOR_SUBMIT" not in categories
+    assert "SYNC_INVOKE_IN_ASYNC" not in categories
+    assert "ASYNC_INVOKE_IN_SYNC" not in categories
+
+
+def test_scan_file_uses_import_evidence_for_thread_and_executor_aliases(tmp_path):
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        from concurrent.futures import ThreadPoolExecutor as Pool
+        from threading import Thread as WorkerThread, Timer
+
+        def sync_entry():
+            pool = Pool(max_workers=1)
+            pool.submit(str, "x")
+            WorkerThread(target=sync_entry).start()
+            Timer(1, sync_entry).start()
+        """,
+    )
+
+    findings = detector.scan_file(source_file, repo_root=tmp_path)
+    categories = {finding.category for finding in findings}
+
+    assert "THREAD_POOL" in categories
+    assert "EXECUTOR_SUBMIT" in categories
+    assert "RAW_THREAD" in categories
+    assert "RAW_TIMER_THREAD" in categories
+
+
 def test_scan_paths_ignores_virtualenv_like_directories(tmp_path):
     scanned_file = _write_python(
         tmp_path / "app.py",

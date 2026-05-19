@@ -90,27 +90,12 @@ EXACT_CALL_RULES: dict[str, _CallRule] = {
         "THREAD_POOL",
         "Creates a thread pool boundary.",
     ),
-    "ThreadPoolExecutor": _CallRule(
-        "INFO",
-        "THREAD_POOL",
-        "Creates a thread pool boundary.",
-    ),
     "threading.Thread": _CallRule(
         "INFO",
         "RAW_THREAD",
         "Creates a raw thread; ContextVar values do not propagate automatically.",
     ),
-    "Thread": _CallRule(
-        "INFO",
-        "RAW_THREAD",
-        "Creates a raw thread; ContextVar values do not propagate automatically.",
-    ),
     "threading.Timer": _CallRule(
-        "INFO",
-        "RAW_TIMER_THREAD",
-        "Creates a timer-backed raw thread; ContextVar values do not propagate automatically.",
-    ),
-    "Timer": _CallRule(
         "INFO",
         "RAW_TIMER_THREAD",
         "Creates a timer-backed raw thread; ContextVar values do not propagate automatically.",
@@ -121,6 +106,29 @@ EXACT_CALL_RULES: dict[str, _CallRule] = {
         "Adapts an async tool coroutine for synchronous tool invocation.",
     ),
 }
+THREAD_POOL_CONSTRUCTORS = {"concurrent.futures.ThreadPoolExecutor"}
+ASYNC_TOOL_FACTORY_CALLS = {
+    "StructuredTool.from_function",
+    "langchain.tools.StructuredTool.from_function",
+    "langchain_core.tools.StructuredTool.from_function",
+}
+LANGCHAIN_INVOKE_RECEIVER_NAMES = {
+    "agent",
+    "chain",
+    "chat_model",
+    "graph",
+    "llm",
+    "model",
+    "runnable",
+}
+LANGCHAIN_INVOKE_RECEIVER_SUFFIXES = (
+    "_agent",
+    "_chain",
+    "_graph",
+    "_llm",
+    "_model",
+    "_runnable",
+)
 
 ASYNC_BLOCKING_CALL_RULES: dict[str, _CallRule] = {
     "time.sleep": _CallRule(
@@ -162,6 +170,12 @@ def dotted_name(node: ast.AST | None) -> str | None:
     return None
 
 
+def call_receiver_name(node: ast.Call) -> str | None:
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    return dotted_name(node.func.value)
+
+
 def is_none_node(node: ast.AST | None) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
@@ -173,6 +187,8 @@ class BoundaryVisitor(ast.NodeVisitor):
         self.source_lines = source_lines
         self.findings: list[BoundaryFinding] = []
         self.function_stack: list[_FunctionContext] = []
+        self.import_aliases: dict[str, str] = {}
+        self.executor_names: set[str] = set()
 
     @property
     def current_function(self) -> str:
@@ -183,6 +199,34 @@ class BoundaryVisitor(ast.NodeVisitor):
     @property
     def in_async_context(self) -> bool:
         return bool(self.function_stack and self.function_stack[-1].is_async)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            local_name = alias.asname or alias.name.split(".", 1)[0]
+            canonical_name = alias.name if alias.asname else local_name
+            self.import_aliases[local_name] = canonical_name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None:
+            return
+        for alias in node.names:
+            local_name = alias.asname or alias.name
+            self.import_aliases[local_name] = f"{node.module}.{alias.name}"
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self._record_executor_targets(node.value, node.targets)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._record_executor_targets(node.value, [node.target])
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._record_executor_targets(item.context_expr, [item.optional_vars])
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self.function_stack.append(_FunctionContext(node.name, is_async=False))
@@ -198,7 +242,7 @@ class BoundaryVisitor(ast.NodeVisitor):
             self.function_stack.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
-        call_name = dotted_name(node.func)
+        call_name = self._canonical_name(dotted_name(node.func))
         if call_name:
             self._check_call(node, call_name)
         self.generic_visit(node)
@@ -206,8 +250,8 @@ class BoundaryVisitor(ast.NodeVisitor):
     def _check_async_tool_definition(self, node: ast.AsyncFunctionDef) -> None:
         for decorator in node.decorator_list:
             decorator_call = decorator.func if isinstance(decorator, ast.Call) else decorator
-            decorator_name = dotted_name(decorator_call)
-            if decorator_name in {"tool", "langchain.tools.tool", "langchain_core.tools.tool"}:
+            decorator_name = self._canonical_name(dotted_name(decorator_call))
+            if decorator_name in {"langchain.tools.tool", "langchain_core.tools.tool"}:
                 self._emit(
                     node,
                     severity="INFO",
@@ -231,7 +275,7 @@ class BoundaryVisitor(ast.NodeVisitor):
                 message="Drives an event loop from synchronous code; review nested-loop behavior.",
             )
 
-        if call_name.endswith(".submit"):
+        if self._is_executor_submit(node, call_name):
             self._emit(
                 node,
                 severity="INFO",
@@ -240,7 +284,7 @@ class BoundaryVisitor(ast.NodeVisitor):
                 message="Submits work to an executor; review context propagation and cancellation.",
             )
 
-        if call_name == "StructuredTool.from_function":
+        if call_name in ASYNC_TOOL_FACTORY_CALLS:
             if any(keyword.arg == "coroutine" and not is_none_node(keyword.value) for keyword in node.keywords):
                 self._emit(
                     node,
@@ -253,7 +297,7 @@ class BoundaryVisitor(ast.NodeVisitor):
         if self.in_async_context and call_name in ASYNC_BLOCKING_CALL_RULES:
             self._emit_rule(node, call_name, ASYNC_BLOCKING_CALL_RULES[call_name])
 
-        if self.in_async_context and call_name.endswith(".invoke"):
+        if self.in_async_context and self._is_langchain_invoke(node, call_name, method_name="invoke"):
             self._emit(
                 node,
                 severity="WARN",
@@ -262,7 +306,7 @@ class BoundaryVisitor(ast.NodeVisitor):
                 message="Calls a synchronous invoke() from async code; review event-loop blocking.",
             )
 
-        if not self.in_async_context and call_name.endswith(".ainvoke"):
+        if not self.in_async_context and self._is_langchain_invoke(node, call_name, method_name="ainvoke"):
             self._emit(
                 node,
                 severity="WARN",
@@ -270,6 +314,46 @@ class BoundaryVisitor(ast.NodeVisitor):
                 symbol=call_name,
                 message="Calls async ainvoke() from sync code; review how the coroutine is awaited.",
             )
+
+    def _canonical_name(self, name: str | None) -> str | None:
+        if name is None:
+            return None
+        parts = name.split(".")
+        if parts and parts[0] in self.import_aliases:
+            return ".".join((self.import_aliases[parts[0]], *parts[1:]))
+        return name
+
+    def _record_executor_targets(self, value: ast.AST, targets: Sequence[ast.AST]) -> None:
+        if not isinstance(value, ast.Call):
+            return
+        call_name = self._canonical_name(dotted_name(value.func))
+        if call_name not in THREAD_POOL_CONSTRUCTORS:
+            return
+        for target in targets:
+            for name in self._target_names(target):
+                self.executor_names.add(name)
+
+    def _target_names(self, target: ast.AST) -> Iterable[str]:
+        if isinstance(target, ast.Name):
+            yield target.id
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                yield from self._target_names(element)
+
+    def _is_executor_submit(self, node: ast.Call, call_name: str) -> bool:
+        if not call_name.endswith(".submit"):
+            return False
+        receiver_name = call_receiver_name(node)
+        return receiver_name in self.executor_names
+
+    def _is_langchain_invoke(self, node: ast.Call, call_name: str, *, method_name: str) -> bool:
+        if not call_name.endswith(f".{method_name}"):
+            return False
+        receiver_name = call_receiver_name(node)
+        if receiver_name is None:
+            return False
+        receiver_leaf = receiver_name.rsplit(".", 1)[-1]
+        return receiver_leaf in LANGCHAIN_INVOKE_RECEIVER_NAMES or receiver_leaf.endswith(LANGCHAIN_INVOKE_RECEIVER_SUFFIXES)
 
     def _emit_rule(self, node: ast.AST, symbol: str, rule: _CallRule) -> None:
         self._emit(
