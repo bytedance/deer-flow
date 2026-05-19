@@ -149,6 +149,29 @@ class ExtensionsConfig(BaseModel):
             raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
 
     @classmethod
+    def _resolve_value(cls, value: Any) -> Any:
+        """Resolve a single config value, recursing into dicts and lists.
+
+        - ``str`` starting with ``$`` → resolved via :func:`os.getenv`; unknown
+          variables become the empty string (same policy as the top-level loop).
+        - ``dict`` → recursed via :meth:`resolve_env_variables`.
+        - ``list`` → each element resolved recursively via this method.
+        - All other types are returned unchanged.
+        """
+        if isinstance(value, str):
+            if value.startswith("$"):
+                env_value = os.getenv(value[1:])
+                # Unresolved placeholder → empty string so downstream consumers
+                # (e.g. MCP servers) don't receive the literal "$VAR" token.
+                return env_value if env_value is not None else ""
+            return value
+        if isinstance(value, dict):
+            return cls.resolve_env_variables(value)
+        if isinstance(value, list):
+            return [cls._resolve_value(item) for item in value]
+        return value
+
+    @classmethod
     def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
         """Recursively resolve environment variables in the config.
 
@@ -161,22 +184,7 @@ class ExtensionsConfig(BaseModel):
             The config with environment variables resolved.
         """
         for key, value in config.items():
-            if isinstance(value, str):
-                if value.startswith("$"):
-                    env_value = os.getenv(value[1:])
-                    if env_value is None:
-                        # Unresolved placeholder — store empty string so downstream
-                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
-                        # token as an actual environment value.
-                        config[key] = ""
-                    else:
-                        config[key] = env_value
-                else:
-                    config[key] = value
-            elif isinstance(value, dict):
-                config[key] = cls.resolve_env_variables(value)
-            elif isinstance(value, list):
-                config[key] = [cls.resolve_env_variables(item) if isinstance(item, dict) else item for item in value]
+            config[key] = cls._resolve_value(value)
         return config
 
     def get_enabled_mcp_servers(self) -> dict[str, McpServerConfig]:
