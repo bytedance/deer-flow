@@ -381,9 +381,17 @@ class LocalSandbox(Sandbox):
 
     def download_file(self, path: str) -> bytes:
         resolved_path = self._resolve_path(path)
+        max_download_size = 100 * 1024 * 1024
+        chunk_size = 1024 * 1024
         try:
+            file_size = os.path.getsize(resolved_path)
+            if file_size > max_download_size:
+                raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            content = bytearray()
             with open(resolved_path, "rb") as f:
-                return f.read()
+                while chunk := f.read(chunk_size):
+                    content.extend(chunk)
+            return bytes(content)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None

@@ -44,10 +44,15 @@ class Sandbox(ABC):
         """Download the binary content of a file.
 
         Args:
-            path: The absolute path of the file to read.
+            path: The absolute path of the file to download.
 
         Returns:
             Raw file bytes.
+
+        Raises:
+            OSError: If the file cannot be read or does not exist.  Both local
+                and remote implementations must raise ``OSError`` so callers
+                have a single exception type to handle.
         """
         pass
 

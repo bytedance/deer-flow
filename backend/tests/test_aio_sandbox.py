@@ -269,11 +269,18 @@ class TestDownloadFile:
 
         assert lock_was_held == [True], "download_file must hold the lock during client call"
 
-    def test_raises_on_client_error(self, sandbox):
-        """download_file should propagate exceptions from the client."""
+    def test_raises_oserror_on_client_error(self, sandbox):
+        """download_file should wrap client exceptions as OSError."""
         sandbox._client.file.download_file = MagicMock(side_effect=RuntimeError("network error"))
 
-        with pytest.raises(RuntimeError, match="network error"):
+        with pytest.raises(OSError, match="network error"):
+            sandbox.download_file("/tmp/file.bin")
+
+    def test_preserves_oserror_from_client(self, sandbox):
+        """OSError raised by the client should propagate without re-wrapping."""
+        sandbox._client.file.download_file = MagicMock(side_effect=OSError("disk error"))
+
+        with pytest.raises(OSError, match="disk error"):
             sandbox.download_file("/tmp/file.bin")
 
     def test_single_chunk(self, sandbox):
