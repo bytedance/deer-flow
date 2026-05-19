@@ -41,12 +41,12 @@ SCRIPT_PATH = (
 )
 
 # ---------------------------------------------------------------------------
-# 在模块加载时立即检查 KEY，缺失则 ERROR（而非 skip）
+# 在模块加载时立即检查 KEY，缺失则 skip
 # ---------------------------------------------------------------------------
 if not os.environ.get("GEMINI_API_KEY"):
-    pytest.fail(
-        "GEMINI_API_KEY is not set. Set it in .env or export GEMINI_API_KEY=...",
-        pytrace=False,
+    pytest.skip(
+        "GEMINI_API_KEY is required for this test. Set it in the environment or in tests/unit_test/.env.test.", 
+        allow_module_level=True
     )
 
 
