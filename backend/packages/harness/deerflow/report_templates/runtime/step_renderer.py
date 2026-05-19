@@ -1,13 +1,16 @@
-"""Form step renderer — turn a DSL ``form_step`` into a GenUI ``form`` block.
+"""Form step renderer — turn a DSL ``form_step`` into a GenUI block.
 
 For each form_step the runtime tool ``report_template_render_step`` calls
-``render_form_step(...)`` to:
+the appropriate builder:
 
-  1. Run the optional ``before_step`` script (if not yet cached in step_outputs).
-  2. Materialise dynamic ``options_source`` references into a static ``options``
+  - ``build_form_props`` — standard ``component="form"`` block.
+  - ``build_device_selector_props`` — ``component="device-selector-multi"`` block
+    (browser-side org-tree device picker, same as fault-diagnosis agents).
+
+For form steps the renderer also:
+  1. Runs the optional ``before_step`` script (if not yet cached in step_outputs).
+  2. Materialises dynamic ``options_source`` references into a static ``options``
      list using the freshly produced step output.
-  3. Build the props dict for a ``component="form"`` block and push it via
-     ``push_block_to_sse``.
 
 The block stays interactive (``form`` → ``render_ui_tool``), but in this
 runtime path we **do not** use ``push_block_to_sse`` (that helper is for
@@ -122,6 +125,60 @@ def build_context(state: RuntimeState) -> dict[str, Any]:
             "tenant_id": get_current_tenant_id(),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Device selector rendering (device-selector-multi component)
+# ---------------------------------------------------------------------------
+
+# Maps DSL equipment_type values → organize tree typeId query parameter.
+# "all" means no filter — the frontend shows all device types.
+_EQUIPMENT_TYPE_TO_TYPE_ID: dict[str, int] = {
+    "static_equipment": 6,
+    "rotating_machinery": 1,
+    "pump": 4,
+    "reciprocating_machinery": 9,
+}
+
+
+def build_device_selector_props(
+    *,
+    step: dict[str, Any],
+    state: RuntimeState,
+    callback_id: str,
+) -> dict[str, Any]:
+    """Build the props dict for a ``component="device-selector-multi"`` GenUI block.
+
+    Resolves ``device_filter.type_id_from`` against the current form state to
+    set the ``typeId`` query parameter so the browser-side component only shows
+    devices of the selected equipment type.
+    """
+    query_params: dict[str, Any] = {"orgId": 0, "treeType": 1}
+
+    device_filter = (step.get("device_filter") or {})
+    type_id_from: str | None = device_filter.get("type_id_from")
+    if type_id_from:
+        parts = type_id_from.split(".")
+        value: Any = state.form_state
+        for part in parts:
+            if isinstance(value, dict):
+                value = value.get(part)
+            else:
+                value = None
+                break
+        if value and value != "all":
+            type_id = _EQUIPMENT_TYPE_TO_TYPE_ID.get(value)
+            if type_id is not None:
+                query_params["typeId"] = type_id
+
+    props: dict[str, Any] = {
+        "title": step.get("title", step["id"]),
+        "queryParams": query_params,
+        "maxSelect": step.get("max_select", 100),
+    }
+    if step.get("description"):
+        props["description"] = step["description"]
+    return props
 
 
 # ---------------------------------------------------------------------------

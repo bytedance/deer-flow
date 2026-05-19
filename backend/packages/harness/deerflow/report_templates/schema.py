@@ -139,6 +139,20 @@ class DataStepRef(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+class DeviceSelectorConfig(BaseModel):
+    """Configuration for a ``device-selector-multi`` component step.
+
+    When ``component: device-selector-multi``, the step renders a browser-side
+    org-tree device picker instead of a traditional form. The ``type_id_from``
+    field references a prior form field (e.g. ``scope.equipment_type``) whose
+    value is mapped to an organize-tree ``typeId`` query parameter at render time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type_id_from: str | None = None
+
+
 class FormStep(BaseModel):
     """One step of the multi-step parameter wizard."""
 
@@ -147,9 +161,30 @@ class FormStep(BaseModel):
     id: str
     title: str
     description: str | None = None
+    component: Literal["form", "device-selector-multi"] = "form"
     before_step: DataStepRef | None = None
-    fields: list[FormField] = Field(min_length=1)
+    fields: list[FormField] = Field(default_factory=list)
     next: str
+    device_filter: DeviceSelectorConfig | None = None
+    max_select: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _check_fields_for_component(self) -> "FormStep":
+        if self.component == "device-selector-multi":
+            if self.fields:
+                raise ValueError(
+                    f"step {self.id!r}: device-selector-multi must not declare 'fields'"
+                )
+            if self.before_step is not None:
+                raise ValueError(
+                    f"step {self.id!r}: device-selector-multi must not declare 'before_step'"
+                )
+        else:
+            if not self.fields:
+                raise ValueError(
+                    f"step {self.id!r}: form component requires at least one field"
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_unique_field_names(self) -> "FormStep":

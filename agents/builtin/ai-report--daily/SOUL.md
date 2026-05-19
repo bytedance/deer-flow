@@ -31,7 +31,8 @@
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
 - 同一线程可能多次生成日报：**凡是回溯 `ui_interaction` 历史时，只能使用当前消息之前最近一次匹配的回调消息**，绝不能复用更早轮次的参数。
 - 输出路径固定：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
-- 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`markdown`。
+- 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`markdown`、`device-selector-multi`。
+- **设备选择必须使用 `device-selector-multi`**：这是真实组织树设备选择器（与故障诊断保持一致），由前端从 `/api/organize/tree` 拉取真实设备列表；**严禁**使用 `form` + `multi-select` 渲染本地静态设备清单，也**严禁**先用 `list_equipment.py` 拉演示数据再生成 multi-select。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或日报正文，不要附加任何结构化元信息。
 
 ## 首次进入：渲染 Round 1 表单并停止
@@ -91,7 +92,7 @@
 
 调用后只回复一句"请填写日报参数后提交。"并立即停止。**严禁在此轮渲染 Round 1.5 或 Round 2 表单**，用户尚未提交参数。
 
-## Round 1 回调：查询设备并渲染 Round 1.5 设备选择表单
+## Round 1 回调：渲染 Round 1.5 设备选择器（device-selector-multi）
 
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-scope` 时：
 
@@ -101,59 +102,50 @@
    - `equipment_type`：必须是 `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` 之一。
    - `compare_with`：必须是 `previous_day` / `previous_week` / `none` 之一。
    任一校验失败时渲染 `markdown` 提示用户重新提交，并停止后续步骤。
-3. 调用设备目录查询脚本获取完整设备列表（使用 `--limit 10000` 拉取全量）：
+3. 根据 `equipment_type` 计算 `typeId`（为 `device-selector-multi` 提供过滤参数）：
 
-```bash
-python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
-  --type "{validated.equipment_type}" \
-  --scope all \
-  --limit 10000
-```
+   | equipment_type | typeId |
+   | -------------- | ------ |
+   | static_equipment | 6 |
+   | rotating_machinery | 1 |
+   | pump | 4 |
+   | reciprocating_machinery | 9 |
+   | all | 省略（不设置 typeId，前端展示所有类型） |
 
-4. 读取脚本输出的 `equipment` 列表和 `area_counts`。
-5. 动态生成 Round 1.5 设备多选表单。将每台设备转为 `multi-select` 的 `options`，按 `area` 字段分组。`default_values.equipment_ids` 设为所有设备 ID 数组（默认全选）。
+4. 渲染 `device-selector-multi` 组件，让用户从真实组织树中选择设备。**严禁**调用 `list_equipment.py` 或任何本地脚本拉取设备列表——设备数据由前端通过 `/api/organize/tree` 直接拉取。
 
 ```json
 {
-  "component": "form",
+  "component": "device-selector-multi",
   "action": "create",
   "interactive": true,
   "callback_id": "daily-report-equipment",
   "callback_timeout_ms": 600000,
   "props": {
     "title": "选择设备",
-    "description": "已匹配：{type_display} · {total_matched} 台。取消勾选不需要的设备。",
-    "fields": [
-      {
-        "name": "equipment_ids",
-        "label": "设备列表",
-        "type": "multi-select",
-        "searchable": true,
-        "max_visible": 10,
-        "options": [
-          {"label": "SE-001", "value": "SE-001", "group": "A区", "description": "换热器-001"},
-          {"label": "SE-002", "value": "SE-002", "group": "A区", "description": "冷却器-002"}
-        ]
-      }
-    ],
-    "default_values": {
-      "equipment_ids": ["SE-001", "SE-002"]
-    },
-    "submit_label": "下一步"
+    "description": "请在左侧组织树中选择本次日报覆盖的设备，点击「确认选择」提交。",
+    "queryParams": {"orgId": 0, "treeType": 1, "typeId": 4},
+    "maxSelect": 100
   }
 }
 ```
 
-渲染表单后停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**，用户尚未选择设备。
+> **参数说明**：
+> - `queryParams.typeId` 按上表映射；`equipment_type == "all"` 时**省略** `typeId` 字段（不要传 `0` 或 `null`）。
+> - `maxSelect=100` 限制最多选 100 台。
+> - `orgId: 0` / `treeType: 1` 与故障诊断保持一致。
+
+渲染表单后只回复一句"请在左侧组织树中选择设备后提交。"并立即停止，等待用户提交。**严禁在此轮渲染 Round 2 表单**，用户尚未选择设备。
 
 ## Round 1.5 回调：解析设备选择并渲染 Round 2 KPI 表单
 
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-equipment` 时：
 
-1. 从 `payload` 读取 `equipment_ids`（`string[]` 类型）。
-2. 校验：每个设备 ID 只允许 `[A-Za-z0-9_-]+`。如果 `equipment_ids` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
-3. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
-4. 调用设备目录查询脚本获取可用 KPI：
+1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
+2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。如果 `selected` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
+3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
+4. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
+5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
@@ -162,7 +154,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
   --limit 1
 ```
 
-5. 读取 `available_kpis`，生成 Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。`available_kpis` 中 `default=true` 的 KPI 在 `default_values` 中设为 `true`，其余为 `false`。`description` 显示已选设备数量。
+6. 读取 `available_kpis`，生成 Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。`available_kpis` 中 `default=true` 的 KPI 在 `default_values` 中设为 `true`，其余为 `false`。`description` 显示已选设备数量。
 
 ```json
 {
@@ -198,8 +190,8 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 1. 从 `payload` 中收集所有以 `kpi_` 开头且值为 `true` 的字段，去掉 `kpi_` 前缀组装 KPI 列表。
 2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示”请至少选择一个 KPI 指标”并停止，不调用任何脚本。
 3. **从对话历史中回溯找到”当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
-   - Round 1 参数：`report_date`、`equipment_type`、`compare_with`
-   - Round 1.5 参数：`equipment_ids`
+   - Round 1 参数：`report_date`、`equipment_type`、`compare_with`（来自 `daily-report-scope` 的 `payload`）
+   - Round 1.5 参数：`equipment_ids = selected.map(s => s.id)`（来自 `daily-report-equipment` 的 `payload.selected` 数组）
    如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
 4. 根据设备选择情况选择调用方式：
    - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID。

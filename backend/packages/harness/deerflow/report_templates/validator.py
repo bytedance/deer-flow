@@ -145,6 +145,12 @@ def validate_dsl(
     form_field_names: dict[str, set[str]] = {
         fs.id: {f.name for f in fs.fields} for fs in dsl.form_steps
     }
+    # device-selector-multi steps implicitly expose equipment_ids + equipment_labels.
+    for fs in dsl.form_steps:
+        if fs.component == "device-selector-multi":
+            implicit = form_field_names.setdefault(fs.id, set())
+            implicit.add("equipment_ids")
+            implicit.add("equipment_labels")
     form_ids = list(form_field_names.keys())
 
     # ── Pass 1: Static cross-references ────────────────────────────────

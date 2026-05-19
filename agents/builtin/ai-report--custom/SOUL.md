@@ -115,15 +115,15 @@ report_template_prepare_run(
 
 对每个 form_step：
 
-1. 调 `report_template_render_step(report_run_id, step_id=<当前 step_id>)` → 拿到 `form_props`。
-2. **用 `render_ui` 推 GenUI form block**，`callback_id` 用工具返回的 `callback_id`，`props` 用 `form_props`：
+1. 调 `report_template_render_step(report_run_id, step_id=<当前 step_id>)` → 拿到 `props` 和 `component`。
+2. **用 `render_ui` 推 GenUI block**，`component` 用工具返回的 `component`（`"form"` 或 `"device-selector-multi"`），`callback_id` 用工具返回的 `callback_id`，`props` 用工具返回的 `props`：
    ```python
    render_ui(
-       component="form",
+       component="<工具返回的 component>",
        action="create",
        interactive=True,
        callback_id="<工具返回>",
-       props=<form_props>,
+       props=<工具返回的 props>,
    )
    ```
 3. **回复一句简短引导**（如"请填写后提交"）并立即停止，等待 `ui_interaction` 消息。

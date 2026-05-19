@@ -11,3 +11,10 @@ mcp_servers: null
 tags:
   - report
   - custom
+nav_items:
+  - path: /workspace/report-templates
+    label: "报告模板"
+    icon: FileText
+  - path: /workspace/report-runs
+    label: "报告历史"
+    icon: History

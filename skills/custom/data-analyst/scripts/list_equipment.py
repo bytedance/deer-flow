@@ -143,6 +143,8 @@ def _collect_devices(node: dict, parent_area: str) -> list[dict]:
 
 def _fetch_org_tree(user_id: str) -> list[dict] | None:
     """Fetch the organize device tree from Gateway for the given user."""
+    global _last_org_api_error
+    _last_org_api_error = None
     url = f"{_get_gateway_url()}/api/organize/tree?userId={user_id}&orgId=0&treeType=1"
     try:
         req = urllib.request.Request(url, method="GET")
@@ -155,7 +157,8 @@ def _fetch_org_tree(user_id: str) -> list[dict] | None:
             data = json.loads(raw.decode("utf-8"))
             if isinstance(data, list):
                 return data
-            print(f"[list_equipment] Organize API returned non-list: {type(data).__name__}", file=sys.stderr)
+            _last_org_api_error = f"Organize API returned non-list: {type(data).__name__}"
+            print(f"[list_equipment] {_last_org_api_error}", file=sys.stderr)
             return None
     except urllib.error.HTTPError as e:
         body = ""
@@ -163,14 +166,20 @@ def _fetch_org_tree(user_id: str) -> list[dict] | None:
             body = e.read(4096).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-        print(f"[list_equipment] Organize API HTTP {e.code}: {body}", file=sys.stderr)
+        _last_org_api_error = f"Organize API HTTP {e.code}: {body}"
+        print(f"[list_equipment] {_last_org_api_error}", file=sys.stderr)
         return None
     except urllib.error.URLError as e:
-        print(f"[list_equipment] Organize API unreachable: {e.reason}", file=sys.stderr)
+        _last_org_api_error = f"Organize API unreachable: {e.reason}"
+        print(f"[list_equipment] {_last_org_api_error}", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"[list_equipment] Organize API error: {type(e).__name__}: {e}", file=sys.stderr)
+        _last_org_api_error = f"Organize API error: {type(e).__name__}: {e}"
+        print(f"[list_equipment] {_last_org_api_error}", file=sys.stderr)
         return None
+
+
+_last_org_api_error: str | None = None
 
 
 def _query_from_org_tree(
@@ -375,6 +384,18 @@ def query_equipment(
         area = e.get("area", "")
         area_counts[area] = area_counts.get(area, 0) + 1
 
+    # Build informative warning.
+    reasons: list[str] = []
+    if not os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID"):
+        reasons.append("DEER_FLOW_EFFECTIVE_USER_ID 未设置")
+    elif not os.environ.get("DEER_FLOW_INTERNAL_AUTH_VALUE"):
+        reasons.append("DEER_FLOW_INTERNAL_AUTH_VALUE 未设置（Gateway 未重启？）")
+    elif _last_org_api_error:
+        reasons.append(_last_org_api_error)
+    else:
+        reasons.append("组织树 API 不可达")
+    warning = "使用演示数据 → " + "；".join(reasons) if reasons else "使用演示数据"
+
     return {
         "equipment_type": eq_type,
         "type_display": TYPE_DISPLAY.get(eq_type, eq_type),
@@ -388,7 +409,7 @@ def query_equipment(
         "equipment_truncated": truncated,
         "available_kpis": _build_available_kpis(eq_type),
         "data_source": "demo_fallback",
-        "warning": "未设置 DEER_FLOW_EFFECTIVE_USER_ID 或组织树 API 不可达，使用演示数据",
+        "warning": warning,
     }
 
 

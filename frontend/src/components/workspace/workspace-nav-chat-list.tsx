@@ -3,7 +3,7 @@
 import { BookOpenIcon, BotIcon, BugIcon, ChevronDownIcon, FileTextIcon, HistoryIcon, MessagesSquare } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { type ComponentType, useEffect, useMemo, useState } from "react";
 
 import {
   Collapsible,
@@ -16,13 +16,20 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { type Agent, useAgentChildren, useAgents } from "@/core/agents";
+import { type Agent, type NavItem, useAgentChildren, useAgents } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { AgentChildSelector } from "./agent-child-selector";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
+
+const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
+  FileText: FileTextIcon,
+  History: HistoryIcon,
+  BookOpen: BookOpenIcon,
+  Bug: BugIcon,
+};
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
@@ -39,6 +46,18 @@ export function WorkspaceNavChatList() {
 
   const [activeGroup, setActiveGroup] = useState<Agent | null>(null);
   const childAgents = useAgentChildren(activeGroup?.name);
+
+  const dynamicNavItems = useMemo(() => {
+    const items: (NavItem & { key: string })[] = [];
+    for (const agent of agents) {
+      if (agent.enabled && agent.nav_items?.length) {
+        for (const item of agent.nav_items) {
+          items.push({ ...item, key: `${agent.name}:${item.path}` });
+        }
+      }
+    }
+    return items;
+  }, [agents]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, agentsOpen ? "false" : "true");
@@ -128,35 +147,22 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
 
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/report-templates")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/report-templates"
-            >
-              <FileTextIcon />
-              <span>报告模板</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/report-runs")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/report-runs"
-            >
-              <HistoryIcon />
-              <span>报告历史</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
+        {dynamicNavItems.map((item) => {
+          const Icon = NAV_ICON_MAP[item.icon] ?? FileTextIcon;
+          return (
+            <SidebarMenuItem key={item.key}>
+              <SidebarMenuButton
+                isActive={pathname.startsWith(item.path)}
+                asChild
+              >
+                <Link className="text-muted-foreground" href={item.path}>
+                  <Icon className="size-4" />
+                  <span>{item.label}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          );
+        })}
 
         <SidebarMenuItem>
           <SidebarMenuButton

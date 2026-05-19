@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 
-from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge, get_tenant_store
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import (
     END_SENTINEL,
@@ -33,6 +33,9 @@ from deerflow.runtime import (
 )
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.cost.storage import UsageStorage
+from deerflow.cost.budget import BudgetChecker
+from deerflow.config.cost_config import get_cost_config
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +263,51 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    # Check quota before creating the run
+    tenant_id = get_current_tenant_id()
+    cost_config = get_cost_config()
+
+    if cost_config.enabled and cost_config.budget.action_on_exceed == "block":
+        try:
+            tenant_store = get_tenant_store(request)
+            tenant_config = await tenant_store.get(tenant_id)
+
+            if tenant_config is not None:
+                storage = UsageStorage()
+                daily_cost = storage.get_today_total()
+                monthly_cost = storage.get_current_month_total()
+
+                # Check daily quota
+                if daily_cost >= tenant_config.daily_quota_usd:
+                    logger.warning(
+                        "Daily quota exceeded for tenant %s: %.4f >= %.4f USD",
+                        tenant_id,
+                        daily_cost,
+                        tenant_config.daily_quota_usd,
+                    )
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Daily quota exceeded. Used: ${daily_cost:.2f}, Limit: ${tenant_config.daily_quota_usd:.2f}",
+                    )
+
+                # Check monthly quota
+                if monthly_cost >= tenant_config.monthly_quota_usd:
+                    logger.warning(
+                        "Monthly quota exceeded for tenant %s: %.4f >= %.4f USD",
+                        tenant_id,
+                        monthly_cost,
+                        tenant_config.monthly_quota_usd,
+                    )
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Monthly quota exceeded. Used: ${monthly_cost:.2f}, Limit: ${tenant_config.monthly_quota_usd:.2f}",
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Failed to check quota for tenant %s: %s", tenant_id, e)
+            # Don't block the request if quota check fails
+
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)

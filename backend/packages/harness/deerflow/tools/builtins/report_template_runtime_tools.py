@@ -70,6 +70,7 @@ from deerflow.report_templates.runtime.state import (
 from deerflow.report_templates.runtime.step_renderer import (
     StepRenderError,
     build_context,
+    build_device_selector_props,
     build_form_props,
     find_step,
     maybe_run_before_step,
@@ -332,8 +333,12 @@ def report_template_render_step_tool(report_run_id: str, step_id: str) -> str:
             state.step_outputs[before_result.step_id] = before_result.outputs
 
         callback_id = f"custom-report:{state.template_id}:{state.report_run_id}:{step_id}"
+        component = step.get("component", "form")
         try:
-            form_props = build_form_props(step=step, state=state, callback_id=callback_id)
+            if component == "device-selector-multi":
+                props = build_device_selector_props(step=step, state=state, callback_id=callback_id)
+            else:
+                props = build_form_props(step=step, state=state, callback_id=callback_id)
         except StepRenderError as e:
             mark_failed(state, code="RENDER_FAILED", message=str(e))
             write_state(run_dir, state)
@@ -347,7 +352,8 @@ def report_template_render_step_tool(report_run_id: str, step_id: str) -> str:
         return _ok(
             {
                 "callback_id": callback_id,
-                "form_props": form_props,
+                "component": component,
+                "props": props,
                 "completed_steps": list(state.completed_steps),
                 "status": state.status,
             }

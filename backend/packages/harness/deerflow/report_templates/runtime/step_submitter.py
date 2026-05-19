@@ -58,10 +58,13 @@ def submit_step(
 
     step = _find_step(dsl, submitted_step_id)
 
+    # Normalise device-selector-multi payload before validation.
+    normalized_payload = _normalize_payload(step, payload)
+
     # Validate required fields.
     missing: list[str] = []
     for f in step.get("fields", []) or []:
-        if f.get("required") and not _has_value(payload.get(f["name"])):
+        if f.get("required") and not _has_value(normalized_payload.get(f["name"])):
             missing.append(f["name"])
     if missing:
         raise SubmitStepError(
@@ -69,7 +72,7 @@ def submit_step(
         )
 
     # Merge submission into form_state and mark completed.
-    state.form_state[submitted_step_id] = dict(payload)
+    state.form_state[submitted_step_id] = dict(normalized_payload)
     if submitted_step_id not in state.completed_steps:
         state.completed_steps.append(submitted_step_id)
 
@@ -86,6 +89,45 @@ def submit_step(
     else:
         transition(state, "awaiting_step")  # idempotent re-arm
     return next_id
+
+
+def _normalize_payload(step: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Transform GenUI callback payload into the canonical form_state format.
+
+    For ``device-selector-multi`` steps the frontend sends
+    ``{selected: [{id, label, type, path}]}``. We map it to the field names
+    expected by downstream data_steps (``equipment_ids`` / ``equipment_labels``).
+    """
+    if step.get("component") != "device-selector-multi":
+        return dict(payload)
+
+    selected = payload.get("selected")
+    if not isinstance(selected, list) or len(selected) == 0:
+        raise SubmitStepError(
+            f"device-selector-multi step {step['id']!r}: payload.selected must be a non-empty array"
+        )
+
+    equipment_ids: list[str] = []
+    equipment_labels: list[str] = []
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        eid = item.get("id")
+        if eid is not None:
+            equipment_ids.append(str(eid))
+        label = item.get("label")
+        if label is not None:
+            equipment_labels.append(str(label))
+
+    if not equipment_ids:
+        raise SubmitStepError(
+            f"device-selector-multi step {step['id']!r}: no valid device IDs in payload.selected"
+        )
+
+    return {
+        "equipment_ids": equipment_ids,
+        "equipment_labels": equipment_labels,
+    }
 
 
 def _find_step(dsl: dict[str, Any], step_id: str) -> dict[str, Any]:

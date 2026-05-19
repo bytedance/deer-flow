@@ -42,6 +42,7 @@ class AgentResponse(BaseModel):
     order: int | None = Field(default=None, description="Display order for child agents within a group")
     soul: str | None = Field(default=None, description="SOUL.md content")
     starters: list[dict] | None = Field(default=None, description="Starter prompts for agent welcome page")
+    nav_items: list[dict] | None = Field(default=None, description="Sidebar navigation items declared by the agent")
 
 
 class AgentsListResponse(BaseModel):
@@ -129,6 +130,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         order=agent_cfg.order,
         soul=soul,
         starters=[s.model_dump() for s in agent_cfg.starters] if agent_cfg.starters else None,
+        nav_items=[n.model_dump() for n in agent_cfg.nav_items] if agent_cfg.nav_items else None,
     )
 
 

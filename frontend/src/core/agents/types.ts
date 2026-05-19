@@ -1,5 +1,11 @@
 export type AgentSource = "builtin" | "tenant" | "user";
 
+export interface NavItem {
+  path: string;
+  label: string;
+  icon: string;
+}
+
 export interface StarterConfig {
   label: string;
   prompt: string;
@@ -25,6 +31,7 @@ export interface Agent {
   parent?: string | null;
   order?: number | null;
   starters?: StarterConfig[] | null;
+  nav_items?: NavItem[] | null;
 }
 
 export interface CreateAgentRequest {

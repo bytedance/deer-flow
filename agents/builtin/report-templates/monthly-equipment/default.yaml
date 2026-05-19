@@ -39,9 +39,18 @@ form_steps:
 
   - id: equipment
     title: 选择设备
-    description: 请勾选本月报告覆盖的设备。
+    description: 请在左侧组织树中选择本月报告覆盖的设备，点击"确认选择"提交。
+    component: device-selector-multi
+    device_filter:
+      type_id_from: scope.equipment_type
+    max_select: 100
+    next: kpis
+
+  - id: kpis
+    title: 选择 KPI
+    description: 请选择月度关注的指标（建议包含 runtime_rate / MTBF / MTTR）。
     before_step:
-      id: equipment_catalog
+      id: kpi_catalog
       kind: script
       name: data-analyst/list_equipment
       args:
@@ -49,30 +58,12 @@ form_steps:
         scope: all
         limit: 10000
     fields:
-      - name: equipment_ids
-        label: 设备列表
-        type: multi-select
-        required: true
-        searchable: true
-        options_source:
-          step: equipment_catalog
-          path: equipment
-          label: id
-          value: id
-          group: area
-          description: name
-    next: kpis
-
-  - id: kpis
-    title: 选择 KPI
-    description: 请选择月度关注的指标（建议包含 runtime_rate / MTBF / MTTR）。
-    fields:
       - name: kpi_keys
         label: KPI 指标
         type: multi-select
         required: true
         options_source:
-          step: equipment_catalog
+          step: kpi_catalog
           path: available_kpis
           label: label
           value: key

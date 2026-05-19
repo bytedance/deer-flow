@@ -45,6 +45,14 @@ class StarterConfig(BaseModel):
     auto_start: bool = False
 
 
+class NavItem(BaseModel):
+    """A sidebar navigation item declared by an agent."""
+
+    path: str
+    label: str
+    icon: str
+
+
 class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
@@ -59,14 +67,11 @@ class AgentConfig(BaseModel):
     order: int | None = None
     tool_groups: list[str] | None = None
     exclude_tools: list[str] | None = None
-    # skills controls which skills are loaded into the agent's prompt:
-    # - None (or omitted): load all enabled skills (default fallback behavior)
-    # - [] (explicit empty list): disable all skills
-    # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
     tags: list[str] | None = None
     starters: list[StarterConfig] | None = None
+    nav_items: list[NavItem] | None = None
     advanced: dict[str, Any] | None = None
 
 
@@ -89,6 +94,7 @@ class AgentInfo(BaseModel):
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
     starters: list[StarterConfig] | None = None
+    nav_items: list[NavItem] | None = None
 
 
 def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool = True, enabled: bool = True, tenant_id: str | None = None) -> AgentInfo:
@@ -110,6 +116,7 @@ def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool =
         skills=config.skills,
         mcp_servers=config.mcp_servers,
         starters=config.starters,
+        nav_items=config.nav_items,
     )
 
 
