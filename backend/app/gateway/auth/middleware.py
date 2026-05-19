@@ -25,6 +25,7 @@ _AUTH_WHITELIST = {
     "/openapi.json",
     "/api/auth/login",
     "/api/auth/refresh",
+    "/api/v1/auth/refresh",
     "/api/v1/auth/ins-base/login",
     "/api/v1/auth/ins-base/refresh",
     "/api/v1/auth/ins-base/authenticate",

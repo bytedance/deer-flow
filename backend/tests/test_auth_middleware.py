@@ -18,6 +18,7 @@ from deerflow.config.auth_config import load_auth_config_from_dict, reset_auth_c
         "/docs/",
         "/redoc",
         "/openapi.json",
+        "/api/v1/auth/refresh",
         "/api/v1/auth/ins-base/login",
         "/api/v1/auth/ins-base/refresh",
         "/api/v1/auth/ins-base/authenticate",
@@ -55,6 +56,7 @@ def test_protected_paths(path: str):
 @pytest.mark.parametrize(
     "path",
     [
+        "/api/v1/auth/refresh/",
         "/api/v1/auth/ins-base/login/",
         "/api/v1/auth/ins-base/refresh/",
         "/api/v1/auth/ins-base/authenticate/",

@@ -59,6 +59,7 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
 # /api/v1/auth/me, /api/v1/auth/change-password etc. are NOT public.
 _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
     {
+        "/api/v1/auth/refresh",
         "/api/v1/auth/ins-base/login",
         "/api/v1/auth/ins-base/refresh",
         "/api/v1/auth/ins-base/authenticate",

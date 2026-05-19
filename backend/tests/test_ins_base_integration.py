@@ -103,6 +103,33 @@ async def test_ins_base_refresh_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_cookie_refresh_endpoint_allows_refresh_without_access_token():
+    """POST /api/v1/auth/refresh reaches the handler with only refresh+CSRF cookies."""
+    _setup_config()
+    client = _make_client()
+
+    class _DummyInsBaseProvider:
+        refresh_token = AsyncMock(return_value="new-ins-base-token")
+
+    with (
+        patch("app.gateway.routers.auth.InsBaseAuthProvider", _DummyInsBaseProvider),
+        patch("app.gateway.deps.get_ins_base_provider", return_value=_DummyInsBaseProvider()),
+    ):
+        response = client.post(
+            "/api/v1/auth/refresh",
+            cookies={
+                "refresh_token": "valid-refresh-token",
+                "csrf_token": "csrf-test-token",
+            },
+            headers={"X-CSRF-Token": "csrf-test-token"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Token refreshed"
+
+
+@pytest.mark.asyncio
 async def test_ins_base_refresh_failure():
     """Failed refresh returns 401."""
     _setup_config()
