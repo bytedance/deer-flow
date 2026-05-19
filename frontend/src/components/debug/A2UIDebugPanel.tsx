@@ -122,6 +122,7 @@ const DEFAULT_PROPS: Record<string, string> = {
     {
       title: "选择设备",
       queryParams: { userId: 1, orgId: 0, treeType: 1 },
+      filterDeviceType: 4,
     },
     null,
     2,
@@ -131,6 +132,7 @@ const DEFAULT_PROPS: Record<string, string> = {
       title: "选择设备（可多选）",
       maxSelect: 5,
       queryParams: { userId: 1, orgId: 0, treeType: 1 },
+      filterDeviceType: 1,
     },
     null,
     2,

@@ -239,12 +239,14 @@ const deviceQueryParamsSchema = z.object({
 const deviceSelectorPropsSchema = z.object({
   title: z.string().max(200).optional(),
   queryParams: deviceQueryParamsSchema.optional(),
+  filterDeviceType: z.number().optional(),
 });
 
 const deviceSelectorMultiPropsSchema = z.object({
   title: z.string().max(200).optional(),
   queryParams: deviceQueryParamsSchema.optional(),
   maxSelect: z.number().min(1).optional(),
+  filterDeviceType: z.number().optional(),
 });
 
 const propsSchemas: Record<string, z.ZodType> = {

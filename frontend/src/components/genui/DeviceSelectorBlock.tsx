@@ -14,6 +14,7 @@ interface DeviceSelectorBlockProps {
     props: {
       title?: string;
       queryParams?: DeviceQueryParams;
+      filterDeviceType?: number;
     };
     callback_id?: string;
     interactionState?: InteractionState;
@@ -25,15 +26,17 @@ interface DeviceSelectorBlockProps {
   };
 }
 
-function collectDevices(node: OrgTreeNode): OrgTreeNode[] {
+function collectDevices(node: OrgTreeNode, filterDeviceType?: number): OrgTreeNode[] {
   const devices: OrgTreeNode[] = [];
   if (node.children) {
     for (const child of node.children) {
       if (child.type < 10) {
-        devices.push(child);
+        if (filterDeviceType == null || child.type === filterDeviceType) {
+          devices.push(child);
+        }
       }
       if (child.children) {
-        devices.push(...collectDevices(child));
+        devices.push(...collectDevices(child, filterDeviceType));
       }
     }
   }
@@ -57,7 +60,7 @@ function getBaseUrl(): string {
 
 export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps) {
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
-  const { title, queryParams } = props;
+  const { title, queryParams, filterDeviceType } = props;
   const { user } = useAuth();
 
   const [treeData, setTreeData] = useState<OrgTreeNode[]>([]);
@@ -104,8 +107,8 @@ export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps)
 
   const devices = useMemo(() => {
     if (!selectedOrgNode) return [];
-    return collectDevices(selectedOrgNode);
-  }, [selectedOrgNode]);
+    return collectDevices(selectedOrgNode, filterDeviceType);
+  }, [selectedOrgNode, filterDeviceType]);
 
   const handleDeviceClick = (device: OrgTreeNode) => {
     if (isDisabled) return;

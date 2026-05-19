@@ -15,6 +15,7 @@ interface DeviceSelectorMultiBlockProps {
       title?: string;
       queryParams?: DeviceQueryParams;
       maxSelect?: number;
+      filterDeviceType?: number;
     };
     callback_id?: string;
     interactionState?: InteractionState;
@@ -26,15 +27,17 @@ interface DeviceSelectorMultiBlockProps {
   };
 }
 
-function collectDevices(node: OrgTreeNode): OrgTreeNode[] {
+function collectDevices(node: OrgTreeNode, filterDeviceType?: number): OrgTreeNode[] {
   const devices: OrgTreeNode[] = [];
   if (node.children) {
     for (const child of node.children) {
       if (child.type < 10) {
-        devices.push(child);
+        if (filterDeviceType == null || child.type === filterDeviceType) {
+          devices.push(child);
+        }
       }
       if (child.children) {
-        devices.push(...collectDevices(child));
+        devices.push(...collectDevices(child, filterDeviceType));
       }
     }
   }
@@ -58,7 +61,7 @@ function getBaseUrl(): string {
 
 export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiBlockProps) {
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
-  const { title, queryParams, maxSelect } = props;
+  const { title, queryParams, maxSelect, filterDeviceType } = props;
   const { user } = useAuth();
 
   const [treeData, setTreeData] = useState<OrgTreeNode[]>([]);
@@ -105,8 +108,8 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
 
   const devices = useMemo(() => {
     if (!selectedOrgNode) return [];
-    return collectDevices(selectedOrgNode);
-  }, [selectedOrgNode]);
+    return collectDevices(selectedOrgNode, filterDeviceType);
+  }, [selectedOrgNode, filterDeviceType]);
 
   const selectedList = useMemo(() => Array.from(selectedDevices.values()), [selectedDevices]);
 

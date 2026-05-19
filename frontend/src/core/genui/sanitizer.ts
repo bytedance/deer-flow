@@ -49,10 +49,10 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
     "status", "tag", "label",
   ]),
   "device-selector": new Set([
-    "title", "queryParams",
+    "title", "queryParams", "filterDeviceType",
   ]),
   "device-selector-multi": new Set([
-    "title", "queryParams", "maxSelect",
+    "title", "queryParams", "maxSelect", "filterDeviceType",
   ]),
 };
 
