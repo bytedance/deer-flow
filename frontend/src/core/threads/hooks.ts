@@ -371,8 +371,8 @@ export function useThreadStream({
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
-  // from "messages-tuple" events arrive before the input human message from
-  // "values" events).
+  // from "messages-tuple" events arrive before the input human message in the
+  // same stream).
   const prevHumanMsgCountRef = useRef(humanMessageCount);
 
   latestMessageCountsRef.current = { humanMessageCount };
@@ -411,8 +411,8 @@ export function useThreadStream({
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
   // human message has arrived to avoid clearing before the input message
-  // appears in the stream (the input message may arrive via "values" events
-  // after individual "messages-tuple" events for AI messages).
+  // appears in the stream (AI messages-tuple events can arrive before the
+  // human messages-tuple event).
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {

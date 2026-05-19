@@ -262,7 +262,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
 /**
  * Build a minimal SSE stream that the LangGraph SDK can parse.
- * The stream returns a single AI message: "Hello from DeerFlow!".
+ * The stream emits a human echo and a single AI message: "Hello from DeerFlow!".
  */
 export function handleRunStream(route: Route) {
   const events = [
@@ -273,7 +273,11 @@ export function handleRunStream(route: Route) {
     {
       event: "messages",
       data: [
-        { type: "human", id: "msg-human-1", content: [{ type: "text", text: "Hello" }] },
+        {
+          type: "human",
+          id: "msg-human-1",
+          content: [{ type: "text", text: "Hello" }],
+        },
         { langgraph_node: "lead_agent" },
       ],
     },
