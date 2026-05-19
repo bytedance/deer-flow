@@ -63,7 +63,15 @@ class _RunController:
 
 
 class _ScriptedAgent:
-    """Minimal graph-like object driven by ``run_agent`` in production mode."""
+    """Deterministic runtime double for lifecycle-only tests.
+
+    This is intentionally not a full LangGraph graph. Tests that need
+    controllable blocking, cancellation, and rollback checkpoints use the small
+    ``run_agent`` surface they exercise: ``astream()``, checkpointer/store
+    attachment, metadata, and interrupt node attributes. The real lead-agent
+    graph/tool dispatch path is covered separately by
+    ``test_stream_run_executes_real_lead_agent_setup_agent_business_path``.
+    """
 
     def __init__(
         self,
@@ -160,6 +168,23 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear runtime singletons that depend on this test's temporary config.
+
+    The Gateway app/lifespan path reads process-wide caches before wiring
+    request-scoped dependencies. These E2E tests stage a temporary
+    ``config.yaml``/``extensions_config.json`` and ``DEER_FLOW_HOME``, so the
+    caches below must be reset before app creation:
+
+    - app_config / extensions_config: parsed config file caches.
+    - paths: ``DEER_FLOW_HOME``-derived filesystem paths.
+    - persistence.engine: SQLAlchemy engine/session factory for the sqlite dir.
+    - app.gateway.deps: cached local auth provider/repository.
+
+    A shared public reset helper would be cleaner long-term; this test keeps
+    the reset boundary explicit because the PR is focused on runtime lifecycle
+    coverage rather than config-cache API cleanup.
+    """
+
     from app.gateway import deps as deps_module
     from deerflow.config import app_config as app_config_module
     from deerflow.config import extensions_config as extensions_config_module
@@ -183,6 +208,15 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _preserve_process_config_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore config singletons mutated as a side effect of AppConfig loading.
+
+    ``AppConfig.from_file()`` calls ``_apply_singleton_configs()``, which pushes
+    nested config sections into module-level caches used by middlewares, tool
+    selection, and runtime providers. Snapshotting those attributes with
+    ``monkeypatch`` lets pytest restore the pre-test values during teardown, so
+    loading the isolated test config does not leak into later tests.
+    """
+
     from deerflow.config import (
         acp_config,
         agents_api_config,
