@@ -76,6 +76,7 @@ data_steps:
       date: "{{ $.form.scope.report_date }}"
       type: "{{ $.form.scope.equipment_type }}"
       equipment: "{{ $.form.equipment.equipment_ids }}"
+      equipment_names: "{{ $.form.equipment.equipment_labels }}"
       kpis: "{{ $.form.kpis.kpi_keys }}"
       compare: "{{ $.form.scope.compare_with }}"
     outputs:

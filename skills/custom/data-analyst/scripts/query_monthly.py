@@ -368,6 +368,7 @@ def fetch_month(
     kpi_keys: list[str],
     eq_type: str = "all",
     aggregate: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     """Return one-month payload using query_daily.fetch_day per-day demo data.
 
@@ -393,7 +394,7 @@ def fetch_month(
             kpi_keys,
             eq_type,
             include_per_equipment=False,
-            equipment_meta=None,
+            equipment_meta=equipment_meta,
         )
         daily_entries.append(
             {
@@ -437,12 +438,13 @@ def fetch_month(
     critical_events = [
         {
             "time": a.get("time", ""),
+            "equipment_id": a.get("equipment_id", a.get("equipment", "")),
             "equipment": a.get("equipment", ""),
             "level": a.get("level", "critical"),
             "message": a.get("message", ""),
             # Demo defaults; real CMMS will overwrite both.
             "duration_minutes": _deterministic_int(
-                f"crit|{a.get('time', '')}|{a.get('equipment', '')}", 30, 180
+                f"crit|{a.get('time', '')}|{a.get('equipment_id', a.get('equipment', ''))}", 30, 180
             ),
             "resolved": True,
         }
@@ -513,6 +515,7 @@ def build_result(
     eq_type: str = "all",
     aggregate: bool = False,
     is_scope_mode: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     """Build the full payload matching design doc §6.1."""
     year, month = _parse_report_month(report_month)
@@ -520,7 +523,7 @@ def build_result(
     week_buckets = _build_week_buckets(month_start, day_count)
 
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
-    current = fetch_month(report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate)
+    current = fetch_month(report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
 
     # Resolve comparison periods and per-basis payloads.
     effective_bases = [b for b in compare_bases if b != "none"]
@@ -542,6 +545,7 @@ def build_result(
             kpi_keys,
             eq_type,
             auto_aggregate,
+            equipment_meta,
         )
         # compare blocks strip the per-bucket alarm streams + critical_events +
         # improvement_tracking to keep the JSON small — only mean / maintenance
@@ -553,6 +557,10 @@ def build_result(
             "alarms": [],
         }
 
+    equipment_names: dict[str, str] = {}
+    if equipment_meta:
+        equipment_names = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
+
     result: dict = {
         "report_period": {
             "report_month": report_month,
@@ -562,6 +570,7 @@ def build_result(
             "week_buckets": week_buckets,
         },
         "equipment_ids": equipment_ids,
+        "equipment_names": equipment_names,
         "kpi_keys": kpi_keys,
         "compare_types": effective_bases,
         "compare_periods": compare_periods,
@@ -632,6 +641,12 @@ def main() -> int:
     parser.add_argument("--report-month", required=True, help="Report month YYYY-MM")
     parser.add_argument("--equipment", default="", help="Comma-separated equipment ids")
     parser.add_argument(
+        "--equipment-names",
+        dest="equipment_names",
+        default="",
+        help="Comma-separated equipment names aligned with --equipment (optional)",
+    )
+    parser.add_argument(
         "--kpis",
         default=",".join(DEFAULT_KPIS),
         help="Comma-separated KPI keys",
@@ -675,12 +690,20 @@ def main() -> int:
             if not equipment_records:
                 return _error("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
+            equipment_meta = {e["id"]: e for e in equipment_records}
             is_scope_mode = True
         else:
             equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
             equipment_error = _validate_equipment_ids(equipment_ids)
             if equipment_error:
                 return _error(equipment_error)
+            equipment_names = _parse_csv(args.equipment_names)
+            equipment_meta = None
+            if equipment_names:
+                equipment_meta = {
+                    eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
+                    for i, eid in enumerate(equipment_ids)
+                }
             is_scope_mode = False
 
         kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or list(DEFAULT_KPIS))
@@ -699,6 +722,7 @@ def main() -> int:
             eq_type=eq_type,
             aggregate=args.aggregate,
             is_scope_mode=is_scope_mode,
+            equipment_meta=equipment_meta,
         )
         # Echo the user-requested kpi_keys (including special) so monthly_kpi
         # knows to derive mtbf/mttr/target_rate even though the query layer

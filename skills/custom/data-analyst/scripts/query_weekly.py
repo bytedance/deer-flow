@@ -123,6 +123,7 @@ def fetch_week(
     kpi_keys: list[str],
     eq_type: str = "all",
     aggregate: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     """Return one-week payload (7 daily entries + aggregated stats + flat alarms).
 
@@ -142,7 +143,7 @@ def fetch_week(
             kpi_keys,
             eq_type,
             include_per_equipment=False,
-            equipment_meta=None,
+            equipment_meta=equipment_meta,
         )
         entry = {
             "date": date_str,
@@ -215,6 +216,7 @@ def build_result(
     eq_type: str = "all",
     aggregate: bool = False,
     is_scope_mode: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     """Build the full payload matching design doc §6.1."""
     compare = compare or "none"
@@ -223,7 +225,7 @@ def build_result(
 
     week_end = _week_range(week_start)[1]
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
-    current = fetch_week(week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate)
+    current = fetch_week(week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
 
     compare_period: dict | None = None
     compare_block: dict | None = None
@@ -234,7 +236,11 @@ def build_result(
             compare_warning = "去年同期数据不可用，已跳过同比"
         else:
             compare_period = {"start": prev_range[0], "end": prev_range[1]}
-            compare_block = fetch_week(prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate)
+            compare_block = fetch_week(prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
+
+    equipment_names: dict[str, str] = {}
+    if equipment_meta:
+        equipment_names = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
 
     result: dict = {
         "report_period": {
@@ -243,6 +249,7 @@ def build_result(
             "day_count": DAY_COUNT,
         },
         "equipment_ids": equipment_ids,
+        "equipment_names": equipment_names,
         "kpi_keys": kpi_keys,
         "compare_type": compare,
         "compare_period": compare_period,
@@ -320,6 +327,12 @@ def main() -> int:
     parser.add_argument("--week-start", required=True, help="Week start date YYYY-MM-DD (recommended Monday)")
     parser.add_argument("--equipment", default="", help="Comma-separated equipment ids")
     parser.add_argument(
+        "--equipment-names",
+        dest="equipment_names",
+        default="",
+        help="Comma-separated equipment names aligned with --equipment (optional)",
+    )
+    parser.add_argument(
         "--kpis",
         default=",".join(DEFAULT_KPIS),
         help="Comma-separated KPI keys",
@@ -354,12 +367,20 @@ def main() -> int:
             if not equipment_records:
                 return _error("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
+            equipment_meta = {e["id"]: e for e in equipment_records}
             is_scope_mode = True
         else:
             equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
             equipment_error = _validate_equipment_ids(equipment_ids)
             if equipment_error:
                 return _error(equipment_error)
+            equipment_names = _parse_csv(args.equipment_names)
+            equipment_meta = None
+            if equipment_names:
+                equipment_meta = {
+                    eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
+                    for i, eid in enumerate(equipment_ids)
+                }
             is_scope_mode = False
 
         kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or list(DEFAULT_KPIS))
@@ -375,6 +396,7 @@ def main() -> int:
             eq_type=eq_type,
             aggregate=args.aggregate,
             is_scope_mode=is_scope_mode,
+            equipment_meta=equipment_meta,
         )
         out_path = write_payload(result)
         print(

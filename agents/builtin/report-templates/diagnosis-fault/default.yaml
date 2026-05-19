@@ -16,6 +16,13 @@ form_steps:
         placeholder: "例如 P-001"
         validation:
           pattern: "^[A-Za-z0-9_-]+$"
+      - name: equipment_name
+        label: 故障对象名称
+        type: text
+        required: false
+        placeholder: "可选；填写后报告显示设备名而非编号"
+        validation:
+          max_length: 200
       - name: fault_time
         label: 故障发生日
         type: date
@@ -39,6 +46,7 @@ data_steps:
     args:
       fault_time: "{{ $.form.scope.fault_time }}"
       equipment_id: "{{ $.form.scope.equipment_id }}"
+      equipment_name: "{{ $.form.scope.equipment_name }}"
       symptom: "{{ $.form.scope.symptom }}"
       include_related_equipment: "{{ $.form.scope.include_related }}"
     outputs:

@@ -16,6 +16,13 @@ form_steps:
         placeholder: "例如 P-001"
         validation:
           pattern: "^[A-Za-z0-9_-]+$"
+      - name: asset_name
+        label: 失效对象名称
+        type: text
+        required: false
+        placeholder: "可选；填写后报告显示设备名而非编号"
+        validation:
+          max_length: 200
       - name: failure_mode
         label: 失效模式
         type: text
@@ -44,6 +51,7 @@ data_steps:
     name: data-analyst/query_failure_data
     args:
       asset_id: "{{ $.form.scope.asset_id }}"
+      asset_name: "{{ $.form.scope.asset_name }}"
       failure_mode: "{{ $.form.scope.failure_mode }}"
       analysis_method: "{{ $.form.scope.analysis_method }}"
       evidence_range: "{{ $.form.scope.evidence_range }}"

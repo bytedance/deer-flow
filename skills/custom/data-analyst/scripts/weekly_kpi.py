@@ -183,13 +183,15 @@ def _build_anomaly_top_n(alarms: list[dict]) -> list[dict]:
     grouped: dict[tuple[str, str], dict] = {}
     for alarm in alarms:
         equipment = alarm.get("equipment", "unknown")
+        equipment_id = alarm.get("equipment_id", equipment)
         level = alarm.get("level", "info")
         time = alarm.get("time", "")
         message = alarm.get("message", "")
         bucket = grouped.setdefault(
-            (equipment, level),
+            (equipment_id, level),
             {
                 "equipment": equipment,
+                "equipment_id": equipment_id,
                 "level": level,
                 "count": 0,
                 "latest_time": time,
@@ -218,6 +220,7 @@ def _build_alarm_table(alarms: list[dict]) -> list[dict]:
     return [
         {
             "time": a.get("time", ""),
+            "equipment_id": a.get("equipment_id", a.get("equipment", "")),
             "equipment": a.get("equipment", ""),
             "level": a.get("level", "info"),
             "message": a.get("message", ""),
@@ -291,6 +294,8 @@ def compute(payload: dict) -> dict:
 
     return {
         "report_period": period,
+        "equipment_ids": payload.get("equipment_ids", []),
+        "equipment_names": payload.get("equipment_names", {}),
         "compare_type": payload.get("compare_type", "none"),
         "compare_period": payload.get("compare_period"),
         "overall_status": overall,

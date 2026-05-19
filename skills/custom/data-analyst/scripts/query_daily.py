@@ -137,10 +137,16 @@ def _demo_hourly_single(date_str: str, equipment_id: str) -> list[float]:
     return [_deterministic_float(f"hourly|{date_str}|{equipment_id}|{h}", 0.6, 1.0) for h in range(24)]
 
 
-def _demo_alarms(date_str: str, equipment_ids: list[str], eq_type: str = "all") -> list[dict]:
+def _demo_alarms(
+    date_str: str,
+    equipment_ids: list[str],
+    eq_type: str = "all",
+    equipment_names: dict[str, str] | None = None,
+) -> list[dict]:
     alarm_count = _deterministic_int(f"alarms|{date_str}|{','.join(sorted(equipment_ids))}", 0, 3)
     levels = ["info", "warning", "high"]
     messages = TYPE_ALARM_MESSAGES.get(eq_type, TYPE_ALARM_MESSAGES["all"])
+    name_map = equipment_names or {}
     alarms = []
     for i in range(alarm_count):
         seed = f"alarm|{date_str}|{i}"
@@ -148,11 +154,12 @@ def _demo_alarms(date_str: str, equipment_ids: list[str], eq_type: str = "all") 
         level_idx = _deterministic_int(seed + "|l", 0, len(levels) - 1)
         msg_idx = _deterministic_int(seed + "|m", 0, len(messages) - 1)
         eq_idx = _deterministic_int(seed + "|e", 0, len(equipment_ids) - 1) if equipment_ids else 0
-        equipment = equipment_ids[eq_idx] if equipment_ids else "unknown"
+        eid = equipment_ids[eq_idx] if equipment_ids else "unknown"
         alarms.append(
             {
                 "time": f"{date_str} {hour:02d}:00",
-                "equipment": equipment,
+                "equipment_id": eid,
+                "equipment": name_map.get(eid, eid),
                 "level": levels[level_idx],
                 "message": messages[msg_idx],
             }
@@ -181,11 +188,14 @@ def _demo_day(
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     kpis = _demo_kpis(date_str, equipment_ids, kpi_keys)
+    name_map: dict[str, str] = {}
+    if equipment_meta:
+        name_map = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items()}
     result: dict = {
         "kpis": kpis,
         "kpi_units": {k: KPI_UNITS.get(k, "") for k in kpi_keys},
         "hourly_runtime_rate": _demo_hourly(date_str, equipment_ids),
-        "alarms": _demo_alarms(date_str, equipment_ids, eq_type),
+        "alarms": _demo_alarms(date_str, equipment_ids, eq_type, name_map),
     }
     if include_per_equipment:
         meta = equipment_meta or {}
@@ -243,9 +253,13 @@ def build_result(
     current = fetch_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
     compare_date_str = _compare_date(date_str, compare)
     compare_block = fetch_day(compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta) if compare_date_str else None
+    equipment_names: dict[str, str] = {}
+    if equipment_meta:
+        equipment_names = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
     result: dict = {
         "report_date": date_str,
         "equipment_ids": equipment_ids,
+        "equipment_names": equipment_names,
         "kpi_keys": kpi_keys,
         "compare_type": compare,
         "compare_date": compare_date_str,
@@ -313,6 +327,12 @@ def main() -> int:
     parser.add_argument("--date", required=True, help="Report date YYYY-MM-DD")
     parser.add_argument("--equipment", default="", help="Comma-separated equipment ids")
     parser.add_argument(
+        "--equipment-names",
+        dest="equipment_names",
+        default="",
+        help="Comma-separated equipment names aligned with --equipment (optional)",
+    )
+    parser.add_argument(
         "--kpis",
         default="runtime_rate,downtime_count,alarm_count",
         help="Comma-separated KPI keys",
@@ -354,7 +374,13 @@ def main() -> int:
             equipment_error = _validate_equipment_ids(equipment_ids)
             if equipment_error:
                 return _error(equipment_error)
+            equipment_names = _parse_csv(args.equipment_names)
             equipment_meta = None
+            if equipment_names:
+                equipment_meta = {
+                    eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
+                    for i, eid in enumerate(equipment_ids)
+                }
             include_per_equipment = False
             is_scope_mode = False
 

@@ -255,7 +255,7 @@
 **从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-pump-scope`、`callback_id=fd-pump-device` 和 `callback_id=fd-pump-target` 的 `ui_interaction` 消息**，分别提取参数：
 
 - Round 1 参数：`start_date`、`start_hour`、`end_date`、`end_hour`、`equipment_kind`、`mode`、`compare_with`
-- Round 1.5a 参数：`selected`（`Array<{id, label, type, path}>`，提取 `equipment_ids = selected.map(s => s.id)`）
+- Round 1.5a 参数：`selected`（`Array<{id, label, type, path}>`，提取 `equipment_ids = selected.map(s => s.id)`、`equipment_labels = selected.map(s => s.label)`，**两者必须按 `selected` 原顺序、一一对应**，后续 `--equipment-names` 透传依赖该顺序）
 - Round 1.5b 参数：`key_points`
 
 如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
@@ -276,11 +276,14 @@
 python /mnt/skills/custom/data-analyst/scripts/query_diagnosis.py \
   --kind "{validated.equipment_kind}" \
   --equipment "{validated.equipment_ids_csv}" \
+  --equipment-names "{validated.equipment_labels_csv}" \
   --start "{validated.start_iso}" \
   --end "{validated.end_iso}" \
   --mode "{validated.mode}" \
   --compare "{validated.compare_with}"
 ```
+
+> `equipment_labels_csv` 必须与 `equipment_ids_csv` 一一对应（顺序、长度一致）；脚本会把名称写入输出 JSON 的 `equipment_names` 映射，渲染器据此显示设备名而非编号。
 
 读取脚本 stdout，确认存在 `output` 字段（成功）或 `error` 字段（失败，需要中止并以 `markdown` 报告错误）。读取 `/mnt/user-data/outputs/query_diagnosis.json`：
 

@@ -144,7 +144,7 @@
 
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。如果 `selected` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
-3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
+3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。**注意 `equipment_labels` 必须按 `selected` 原顺序，与 `equipment_ids` 一一对应**——后续调用 `query_daily.py` 时通过 `--equipment-names` 透传，使报告中所有"设备"列显示真实名称而非编号。
 4. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
 5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
 
@@ -192,33 +192,34 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示”请至少选择一个 KPI 指标”并停止，不调用任何脚本。
 3. **从对话历史中回溯找到”当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
    - Round 1 参数：`report_date`、`equipment_type`、`compare_with`（来自 `daily-report-scope` 的 `payload`）
-   - Round 1.5 参数：`equipment_ids = selected.map(s => s.id)`（来自 `daily-report-equipment` 的 `payload.selected` 数组）
+   - Round 1.5 参数：`equipment_ids = selected.map(s => s.id)` 与 `equipment_labels = selected.map(s => s.label)`（来自 `daily-report-equipment` 的 `payload.selected` 数组，保持原顺序一一对应）
    如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
 4. 根据设备选择情况选择调用方式：
-   - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID。
-   - **选中设备数量 > 10 且等于某区域全量**：使用 `--type`/`--scope area`/`--scope-filter` 参数。
-   - **选中设备数量 > 10 但为跨区域混选**：使用 `--equipment` 并加上 `--aggregate` 标志。
+   - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID，**同时使用 `--equipment-names` 传递设备名称**（顺序与 `--equipment` 保持一致）。
+   - **选中设备数量 > 10 且等于某区域全量**：使用 `--type`/`--scope area`/`--scope-filter` 参数（脚本会自行从设备目录读取名称）。
+   - **选中设备数量 > 10 但为跨区域混选**：使用 `--equipment` 并加上 `--aggregate` 标志（同样需要 `--equipment-names`）。
 
 按区域或全部场景：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
-  --date “{validated.report_date}” \
-  --type “{validated.equipment_type}” \
-  --scope “{validated.equipment_scope}” \
-  --scope-filter “{validated.scope_filter}” \
-  --kpis “{validated.kpis}” \
-  --compare “{validated.compare_with}”
+  --date "{validated.report_date}" \
+  --type "{validated.equipment_type}" \
+  --scope "{validated.equipment_scope}" \
+  --scope-filter "{validated.scope_filter}" \
+  --kpis "{validated.kpis}" \
+  --compare "{validated.compare_with}"
 ```
 
 指定设备场景：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
-  --date “{validated.report_date}” \
-  --equipment “{validated.equipment_ids}” \
-  --kpis “{validated.kpis}” \
-  --compare “{validated.compare_with}”
+  --date "{validated.report_date}" \
+  --equipment "{validated.equipment_ids}" \
+  --equipment-names "{validated.equipment_labels}" \
+  --kpis "{validated.kpis}" \
+  --compare "{validated.compare_with}"
 ```
 
 5. 调用 KPI 计算脚本：

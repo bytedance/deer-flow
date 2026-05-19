@@ -39,7 +39,8 @@ SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 # Demo records anchored to mid-day so timestamps fall inside a reasonable shift.
 DEMO_RECORDS = [
     {
-        "equipment": "P-001",
+        "equipment_id": "P-001",
+        "equipment": "1#给水泵",
         "inspector": "张三",
         "status": "normal",
         "severity": "low",
@@ -47,7 +48,8 @@ DEMO_RECORDS = [
         "attachment_refs": [],
     },
     {
-        "equipment": "P-002",
+        "equipment_id": "P-002",
+        "equipment": "2#给水泵",
         "inspector": "李四",
         "status": "warning",
         "severity": "medium",
@@ -55,7 +57,8 @@ DEMO_RECORDS = [
         "attachment_refs": ["ATT-002"],
     },
     {
-        "equipment": "P-003",
+        "equipment_id": "P-003",
+        "equipment": "3#给水泵",
         "inspector": "王五",
         "status": "warning",
         "severity": "high",
@@ -63,7 +66,8 @@ DEMO_RECORDS = [
         "attachment_refs": ["ATT-003", "ATT-004"],
     },
     {
-        "equipment": "RM-101",
+        "equipment_id": "RM-101",
+        "equipment": "1#压缩机",
         "inspector": "赵六",
         "status": "critical",
         "severity": "critical",
@@ -71,7 +75,8 @@ DEMO_RECORDS = [
         "attachment_refs": ["ATT-005"],
     },
     {
-        "equipment": "RM-102",
+        "equipment_id": "RM-102",
+        "equipment": "2#压缩机",
         "inspector": "张三",
         "status": "normal",
         "severity": "low",
@@ -79,7 +84,8 @@ DEMO_RECORDS = [
         "attachment_refs": [],
     },
     {
-        "equipment": "HE-201",
+        "equipment_id": "HE-201",
+        "equipment": "201#换热器",
         "inspector": "孙七",
         "status": "warning",
         "severity": "medium",
@@ -89,12 +95,12 @@ DEMO_RECORDS = [
 ]
 
 DEMO_ATTACHMENTS = [
-    {"id": "ATT-001", "type": "photo", "ref": "/attachments/insp-001.jpg", "summary": "P-001 前轴承端外观"},
-    {"id": "ATT-002", "type": "photo", "ref": "/attachments/insp-002.jpg", "summary": "P-002 出口压力表读数"},
-    {"id": "ATT-003", "type": "photo", "ref": "/attachments/insp-003.jpg", "summary": "P-003 振动测点照片"},
-    {"id": "ATT-004", "type": "note", "ref": "", "summary": "P-003 持续 30 分钟超阈值，已通知值班长"},
-    {"id": "ATT-005", "type": "note", "ref": "", "summary": "RM-101 联轴器异响明显，建议立即停机"},
-    {"id": "ATT-006", "type": "photo", "ref": "/attachments/insp-006.jpg", "summary": "HE-201 保温层照片"},
+    {"id": "ATT-001", "type": "photo", "ref": "/attachments/insp-001.jpg", "summary": "1#给水泵 前轴承端外观"},
+    {"id": "ATT-002", "type": "photo", "ref": "/attachments/insp-002.jpg", "summary": "2#给水泵 出口压力表读数"},
+    {"id": "ATT-003", "type": "photo", "ref": "/attachments/insp-003.jpg", "summary": "3#给水泵 振动测点照片"},
+    {"id": "ATT-004", "type": "note", "ref": "", "summary": "3#给水泵 持续 30 分钟超阈值，已通知值班长"},
+    {"id": "ATT-005", "type": "note", "ref": "", "summary": "1#压缩机 联轴器异响明显，建议立即停机"},
+    {"id": "ATT-006", "type": "photo", "ref": "/attachments/insp-006.jpg", "summary": "201#换热器 保温层照片"},
 ]
 
 

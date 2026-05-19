@@ -128,12 +128,15 @@
 
 **确定 `--kind`**：调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，从返回的 `typeId` / `typeName` 推断设备种类（如汽轮机 → `steam_turbine`、离心压缩机 → `centrifugal_compressor`、轴流压缩机 → `axial_compressor`、齿轮箱 → `gearbox` 等）；若无法确定则默认使用 `centrifugal_compressor`。
 
+**捕获 `--equipment-name`**：从 `machine_service.get_machine_info_by_ids` 返回的设备详情中读取 `name`（或 `machineName` / `displayName`，按实际接口字段为准），作为 `<equipment_name>` 透传给脚本，保证后续渲染显示设备名而非编号。
+
 调用 `query_diagnosis.py`（**只此一次**，本阶段不调用任何 ins-* skill）：
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_diagnosis.py \
   --kind "<derived_kind>" \
   --equipment "{componentId}" \
+  --equipment-names "<equipment_name>" \
   --start "{start_iso}" \
   --end "{end_iso}" \
   --mode oneoff \

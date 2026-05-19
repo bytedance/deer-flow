@@ -77,6 +77,7 @@ data_steps:
       week_start: "{{ $.form.scope.week_start }}"
       type: "{{ $.form.scope.equipment_type }}"
       equipment: "{{ $.form.equipment.equipment_ids }}"
+      equipment_names: "{{ $.form.equipment.equipment_labels }}"
       kpis: "{{ $.form.kpis.kpi_keys }}"
       compare: "{{ $.form.scope.compare_with }}"
     outputs:

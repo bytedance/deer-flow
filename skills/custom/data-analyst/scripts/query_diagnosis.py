@@ -442,6 +442,7 @@ def build_result(
     mode: str,
     compare: str,
     point_specs_by_equipment: dict[str, list[dict]] | None = None,
+    equipment_names: dict[str, str] | None = None,
 ) -> dict:
     """Build the full payload contracted in design doc §7.1."""
     warnings: list[str] = []
@@ -459,15 +460,28 @@ def build_result(
             kind, equipment_ids, compare_window, mode, warnings, point_specs_by_equipment
         )
 
+    name_map = equipment_names or {}
+    points = current_block["points"]
+    for p in points:
+        eid = p.get("equipment_id")
+        if eid and eid in name_map:
+            p["equipment_name"] = name_map[eid]
+    if compare_block is not None:
+        for p in compare_block.get("points", []):
+            eid = p.get("equipment_id")
+            if eid and eid in name_map:
+                p["equipment_name"] = name_map[eid]
+
     return {
         "kind": kind,
         "equipment_ids": equipment_ids,
+        "equipment_names": name_map,
         "time_window": window,
         "compare_window": compare_window,
         "mode": mode,
         "data_source": current_source,
         "warnings": warnings,
-        "points": current_block["points"],
+        "points": points,
         "process_signals": current_block["process_signals"],
         "compare": compare_block,
     }
@@ -535,6 +549,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Query diagnosis data (stage 1: aggregate trend features)")
     parser.add_argument("--kind", required=True, help=f"Equipment kind, one of {sorted(VALID_KINDS)}")
     parser.add_argument("--equipment", required=True, help="Comma-separated equipment ids")
+    parser.add_argument(
+        "--equipment-names",
+        default="",
+        help="Comma-separated equipment names aligned with --equipment (optional, for display)",
+    )
     parser.add_argument("--start", required=True, help="Window start ISO YYYY-MM-DDTHH:MM[:SS]")
     parser.add_argument("--end", required=True, help="Window end ISO YYYY-MM-DDTHH:MM[:SS]")
     parser.add_argument("--mode", default="oneoff", choices=sorted(VALID_MODES))
@@ -551,6 +570,12 @@ def main() -> int:
         if eq_error:
             return _error(eq_error)
 
+        equipment_labels = _parse_csv(args.equipment_names)
+        name_map: dict[str, str] = {}
+        for eid, label in zip(equipment_ids, equipment_labels):
+            if label:
+                name_map[eid] = label
+
         window_error = _validate_window(args.start, args.end)
         if window_error:
             return _error(window_error)
@@ -562,6 +587,7 @@ def main() -> int:
             end=args.end,
             mode=args.mode,
             compare=args.compare,
+            equipment_names=name_map or None,
         )
 
         if args.output:

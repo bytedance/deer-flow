@@ -333,8 +333,10 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
         lines.append(f"- 设备：共 {equipment_count} 台")
     else:
         equipment = payload.get("equipment_ids") or []
+        equipment_names = payload.get("equipment_names") or {}
         if equipment:
-            lines.append(f"- 设备：{', '.join(equipment)}")
+            labels = [equipment_names.get(eid, eid) for eid in equipment]
+            lines.append(f"- 设备：{', '.join(labels)}")
 
     compare_type = payload.get("compare_type", "none")
     compare_label = {
@@ -418,13 +420,12 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
     if top_anomalies:
         lines.append("## 异常设备排行")
         lines.append("")
-        lines.append("| 排名 | 设备ID | 名称 | 区域 | 异常描述 | 严重性 |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        lines.append("| 排名 | 设备名称 | 区域 | 异常描述 | 严重性 |")
+        lines.append("| --- | --- | --- | --- | --- |")
         for item in top_anomalies:
             lines.append(
-                "| {rank} | {equipment_id} | {name} | {area} | {issue} | {severity} |".format(
+                "| {rank} | {name} | {area} | {issue} | {severity} |".format(
                     rank=_table_cell(item.get("rank", "")),
-                    equipment_id=_table_cell(item.get("equipment_id", "")),
                     name=_table_cell(item.get("name", "")),
                     area=_table_cell(item.get("area", "")),
                     issue=_table_cell(item.get("issue", "")),

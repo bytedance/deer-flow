@@ -278,7 +278,8 @@ def _recommendations(kpi_summary: list[dict], alarms: list[dict]) -> list[str]:
     recs: list[str] = []
     for alarm in alarms:
         if alarm.get("level") == "high":
-            recs.append(f"关注 {alarm.get('equipment', 'unknown')} 的高级告警：{alarm.get('message', '')}")
+            label = alarm.get("equipment") or alarm.get("equipment_id") or "unknown"
+            recs.append(f"关注 {label} 的高级告警：{alarm.get('message', '')}")
     for item in kpi_summary:
         if item["key"] == "runtime_rate" and isinstance(item["current"], (int, float)) and item["current"] < 0.85:
             recs.append("运行率低于 85%，建议排查停机原因。")
@@ -343,6 +344,7 @@ def compute(payload: dict) -> dict:
     result: dict = {
         "report_date": payload.get("report_date"),
         "equipment_ids": payload.get("equipment_ids", []),
+        "equipment_names": payload.get("equipment_names", {}),
         "compare_type": payload.get("compare_type", "none"),
         "compare_date": payload.get("compare_date"),
         "overall_status": overall,

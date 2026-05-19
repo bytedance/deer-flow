@@ -98,57 +98,65 @@ def _operations(fault_day: date, equipment_id: str) -> list[dict]:
     return operations
 
 
-def _alarms(fault_day: date, equipment_id: str) -> list[dict]:
+def _alarms(fault_day: date, equipment_id: str, equipment_name: str | None = None) -> list[dict]:
     """Pre/post-event 6h alarm flow with escalating severity."""
     base = datetime.combine(fault_day, time.min)
     fault_dt = base + timedelta(hours=8)
+    label = equipment_name or equipment_id
     return [
         {
             "id": "ALM-0001",
             "time": (fault_dt - timedelta(hours=2)).isoformat(timespec="seconds"),
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "level": "info",
             "message": "振动达到提示阈值",
         },
         {
             "id": "ALM-0002",
             "time": (fault_dt - timedelta(minutes=45)).isoformat(timespec="seconds"),
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "level": "warning",
             "message": "振动超过预警阈值",
         },
         {
             "id": "ALM-0003",
             "time": (fault_dt - timedelta(minutes=5)).isoformat(timespec="seconds"),
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "level": "warning",
             "message": "轴承温度异常上升",
         },
         {
             "id": "ALM-0004",
             "time": fault_dt.isoformat(timespec="seconds"),
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "level": "critical",
             "message": "停机保护触发",
         },
         {
             "id": "ALM-0005",
             "time": (fault_dt + timedelta(minutes=30)).isoformat(timespec="seconds"),
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "level": "info",
             "message": "已切换至备用回路",
         },
     ]
 
 
-def _work_orders(fault_day: date, equipment_id: str) -> list[dict]:
+def _work_orders(fault_day: date, equipment_id: str, equipment_name: str | None = None) -> list[dict]:
+    label = equipment_name or equipment_id
     return [
         {
             "id": "WO-2026-0512",
             "title": "轴承点检（季度）",
             "status": "closed",
             "owner": "张三",
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "created_at": (fault_day - timedelta(days=7)).isoformat(),
             "closed_at": (fault_day - timedelta(days=5)).isoformat(),
             "note": "点检完成，未发现异常磨损",
@@ -158,7 +166,8 @@ def _work_orders(fault_day: date, equipment_id: str) -> list[dict]:
             "title": "振动传感器复测",
             "status": "in_progress",
             "owner": "李四",
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "created_at": (fault_day - timedelta(days=2)).isoformat(),
             "closed_at": None,
             "note": "复测进行中，下一次报告 24h 内提交",
@@ -168,7 +177,8 @@ def _work_orders(fault_day: date, equipment_id: str) -> list[dict]:
             "title": "故障应急响应",
             "status": "open",
             "owner": "王五",
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "created_at": fault_day.isoformat(),
             "closed_at": None,
             "note": "停机保护触发后开 work order，等待诊断结论",
@@ -176,12 +186,14 @@ def _work_orders(fault_day: date, equipment_id: str) -> list[dict]:
     ]
 
 
-def _maintenance_records(fault_day: date, equipment_id: str) -> list[dict]:
+def _maintenance_records(fault_day: date, equipment_id: str, equipment_name: str | None = None) -> list[dict]:
+    label = equipment_name or equipment_id
     return [
         {
             "id": "MR-2026-0418",
             "type": "oil_change",
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "at": (fault_day - timedelta(days=30)).isoformat(),
             "owner": "赵六",
             "note": "按 6 个月周期换油",
@@ -189,7 +201,8 @@ def _maintenance_records(fault_day: date, equipment_id: str) -> list[dict]:
         {
             "id": "MR-2026-0501",
             "type": "vibration_calibration",
-            "equipment": equipment_id,
+            "equipment_id": equipment_id,
+            "equipment": label,
             "at": (fault_day - timedelta(days=17)).isoformat(),
             "owner": "李四",
             "note": "振动传感器零点漂移校正",
@@ -201,6 +214,7 @@ def main() -> int:
     parser = base_parser("Fault-context demo data")
     parser.add_argument("--fault-time", required=True, help="YYYY-MM-DD")
     parser.add_argument("--equipment-id", required=True)
+    parser.add_argument("--equipment-name", default="", help="Equipment name (falls back to ID when empty)")
     parser.add_argument("--symptom", default="")
     parser.add_argument("--include-related-equipment", action="store_true")
     args = parser.parse_args()
@@ -213,12 +227,14 @@ def main() -> int:
     eq_id = args.equipment_id.strip()
     if not eq_id:
         return emit_error("INVALID_EQUIPMENT_ID", "--equipment-id must be non-empty")
+    eq_name = (args.equipment_name or "").strip() or None
 
     result = fetch_with_fallback(
         source="fault_context",
         fetch_args={
             "fault_time": args.fault_time,
             "equipment_id": eq_id,
+            "equipment_name": eq_name,
             "symptom": args.symptom,
             "include_related_equipment": bool(args.include_related_equipment),
         },
@@ -229,6 +245,7 @@ def main() -> int:
         "schema_version": SCHEMA_VERSION,
         "fault_time": args.fault_time,
         "equipment_id": eq_id,
+        "equipment_name": eq_name or eq_id,
         "symptom": args.symptom,
         "include_related": bool(args.include_related_equipment),
         "data_source": result.data_source,

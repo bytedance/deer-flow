@@ -258,6 +258,7 @@ def _fmea_seed(failure_mode: str) -> dict:
 def main() -> int:
     parser = base_parser("Failure-analysis demo data")
     parser.add_argument("--asset-id", required=True)
+    parser.add_argument("--asset-name", default="", help="Asset name (falls back to ID when empty)")
     parser.add_argument("--failure-mode", required=True)
     parser.add_argument("--analysis-method", default="five_why")
     parser.add_argument("--evidence-range", default="")
@@ -273,6 +274,7 @@ def main() -> int:
     asset_id = args.asset_id.strip()
     if not asset_id:
         return emit_error("INVALID_ASSET_ID", "--asset-id must be non-empty")
+    asset_name = (args.asset_name or "").strip() or None
     failure_mode = args.failure_mode.strip()
     if not failure_mode:
         return emit_error("INVALID_FAILURE_MODE", "--failure-mode must be non-empty")
@@ -291,6 +293,7 @@ def main() -> int:
     output = {
         "schema_version": SCHEMA_VERSION,
         "asset_id": asset_id,
+        "asset_name": asset_name or asset_id,
         "failure_mode": failure_mode,
         "analysis_method": method,
         "evidence_range_raw": args.evidence_range,

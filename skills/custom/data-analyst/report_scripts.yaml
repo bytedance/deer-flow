@@ -40,6 +40,11 @@ scripts:
         items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
         max_items: 10000
         description: "设备 ID 列表（逗号分隔，与 --scope 二选一）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 10000
+        description: "设备名称列表（与 --equipment 一一对应；缺省时按 ID 渲染）"
       scope:
         type: enum
         values: [all, area, specific]
@@ -145,6 +150,11 @@ scripts:
         items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
         max_items: 1000
         description: "设备 ID 列表（与 scope 二选一）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 1000
+        description: "设备名称列表（与 --equipment 一一对应；缺省时按 ID 渲染）"
       scope:
         type: enum
         values: [all, area, specific]
@@ -221,6 +231,11 @@ scripts:
         items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
         max_items: 10000
         description: "设备 ID 列表（与 scope 二选一）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 10000
+        description: "设备名称列表（与 --equipment 一一对应；缺省时按 ID 渲染）"
       scope:
         type: enum
         values: [all, area, specific]
@@ -345,6 +360,10 @@ scripts:
         max_length: 64
         pattern: "^[A-Za-z0-9_-]+$"
         description: "故障对象 ID"
+      equipment_name:
+        type: string
+        max_length: 200
+        description: "故障对象名称（缺省时按 ID 渲染）"
       symptom:
         type: string
         max_length: 200
@@ -404,6 +423,10 @@ scripts:
         required: true
         max_length: 64
         pattern: "^[A-Za-z0-9_-]+$"
+      asset_name:
+        type: string
+        max_length: 200
+        description: "失效对象名称（缺省时按 ID 渲染）"
       failure_mode:
         type: string
         required: true

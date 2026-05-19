@@ -30,6 +30,17 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
+def _equipment_label(item: dict) -> str:
+    """Return human-readable label for an equipment-bearing row.
+
+    Prefers ``equipment_name`` (or ``name``); falls back to ``equipment_id``.
+    """
+    if not isinstance(item, dict):
+        return "—"
+    label = item.get("equipment_name") or item.get("name") or item.get("equipment") or item.get("equipment_id")
+    return str(label) if label else "—"
+
+
 def _verdict_label(verdict: str) -> str:
     return {
         "exceed": "超阈值",
@@ -55,7 +66,7 @@ def _section_machine_and_task(payload: dict) -> str:
     machine_lines: list[str] = []
     if summary_list:
         for s in summary_list:
-            machine_lines.append(f"- 设备：{s.get('equipment_id', '—')}（运行阶段：{s.get('operation_phase', '—')}，告警状态：{s.get('alarm_status', '—')}）")
+            machine_lines.append(f"- 设备：{_equipment_label(s)}（运行阶段：{s.get('operation_phase', '—')}，告警状态：{s.get('alarm_status', '—')}）")
     else:
         machine_lines.append("- 设备：—")
     return (
@@ -76,12 +87,13 @@ def _section_key_findings(payload: dict) -> str:
     lines = ["## 2. 异常发现", ""]
     for s in summary_list:
         max_value = s.get("max_value") or {}
+        label = _equipment_label(s)
         if max_value:
             lines.append(
-                f"- {s.get('equipment_id', '—')} · {max_value.get('point', '—')} · {max_value.get('feature', '—')} 最大值：{_format_value(max_value.get('value'))} {max_value.get('unit', '')}（告警：{s.get('alarm_status', '—')}）"
+                f"- {label} · {max_value.get('point', '—')} · {max_value.get('feature', '—')} 最大值：{_format_value(max_value.get('value'))} {max_value.get('unit', '')}（告警：{s.get('alarm_status', '—')}）"
             )
         else:
-            lines.append(f"- {s.get('equipment_id', '—')}（告警：{s.get('alarm_status', '—')}）")
+            lines.append(f"- {label}（告警：{s.get('alarm_status', '—')}）")
     return "\n".join(lines) + "\n"
 
 
@@ -96,8 +108,9 @@ def _section_evidence_chain(payload: dict) -> str:
         "| - | ---- | ---- | ---- | ---- | ---- | ---- | ---- |",
     ]
     for idx, row in enumerate(chain):
+        label = _equipment_label(row)
         lines.append(
-            f"| {idx} | {row.get('category', '—')} | {row.get('equipment_id', '—') or '—'} | {row.get('point', '—')} | "
+            f"| {idx} | {row.get('category', '—')} | {label} | {row.get('point', '—')} | "
             f"{row.get('feature', '—')} | {_format_value(row.get('value'))} | {_format_value(row.get('threshold'))} | "
             f"{_verdict_label(row.get('verdict', '—'))} |"
         )
@@ -115,7 +128,7 @@ def _section_diagnosis(payload: dict) -> str:
         + (f"（subtype: {primary.get('fault_subtype')}）" if primary.get("fault_subtype") else "")
     )
     lines.append("")
-    lines.append(f"- 设备：{primary.get('equipment_id', '—')}")
+    lines.append(f"- 设备：{_equipment_label(primary)}")
     lines.append(f"- 置信度：{_confidence_label(primary.get('confidence', '—'))}")
     lines.append(f"- 命中规则节：{primary.get('rule_section', '—')}")
     supporting = primary.get("supporting_evidence_indices", []) or []
@@ -162,7 +175,7 @@ def _section_historical_cases(payload: dict) -> str:
     for case in cases:
         prefix = "演示 · " if case.get("data_source") == "demo_fallback" else ""
         lines.append(
-            f"- {prefix}{case.get('equipment_id', '—')}（{case.get('fault_family', '—')}，{case.get('occurred_at', '—')}）：{case.get('summary', '—')}"
+            f"- {prefix}{_equipment_label(case)}（{case.get('fault_family', '—')}，{case.get('occurred_at', '—')}）：{case.get('summary', '—')}"
         )
     return "\n".join(lines) + "\n"
 

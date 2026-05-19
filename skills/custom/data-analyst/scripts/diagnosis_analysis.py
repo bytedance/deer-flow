@@ -312,10 +312,11 @@ def main() -> int:
     primary = next((f for f in findings if f.get("is_primary")), None)
     primary_label = primary["label"] if primary else "未确定"
 
+    eq_label = ctx.get("equipment_name") or ctx.get("equipment_id")
     overall_status = {
         "level": "critical" if impact["critical_alarm_count"] >= 1 else "warning",
         "summary": (
-            f"针对 {ctx.get('equipment_id')} 于 {ctx.get('fault_time')} 的故障，"
+            f"针对 {eq_label} 于 {ctx.get('fault_time')} 的故障，"
             f"候选根因 {len(findings)} 项；优先排查【{primary_label}】。"
         )[:80],
     }
@@ -325,6 +326,7 @@ def main() -> int:
         "metadata": {
             "fault_time": ctx.get("fault_time"),
             "equipment_id": ctx.get("equipment_id"),
+            "equipment_name": ctx.get("equipment_name") or ctx.get("equipment_id"),
             "symptom": ctx.get("symptom"),
             "include_related": ctx.get("include_related", False),
             "data_source": ctx.get("data_source"),

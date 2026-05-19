@@ -453,10 +453,11 @@ def main() -> int:
     primary = next((f for f in findings if f.get("is_primary")), None)
     primary_label = primary["label"] if primary else "未确定"
 
+    asset_label = raw.get("asset_name") or raw.get("asset_id")
     overall_status = {
         "level": "critical" if any(f.get("severity") == "high" for f in findings) else "warning",
         "summary": (
-            f"针对 {raw.get('asset_id')} 的 {raw.get('failure_mode')} 失效，采用 "
+            f"针对 {asset_label} 的 {raw.get('failure_mode')} 失效，采用 "
             f"{_METHOD_LABEL.get(method, method)} 方法分析；优先排查【{primary_label}】。"
         )[:80],
     }
@@ -471,6 +472,7 @@ def main() -> int:
         "schema_version": SCHEMA_VERSION,
         "metadata": {
             "asset_id": raw.get("asset_id"),
+            "asset_name": asset_label,
             "failure_mode": raw.get("failure_mode"),
             "analysis_method": method,
             "analysis_method_label": _METHOD_LABEL.get(method, method),

@@ -167,6 +167,7 @@ class DemoFaultContextProvider:
         equipment_id: str,
         symptom: str,
         include_related_equipment: bool,
+        equipment_name: str | None = None,
     ) -> ProviderResult:
         qf = _load_script("query_fault_context")
         from datetime import date as _date
@@ -175,9 +176,9 @@ class DemoFaultContextProvider:
         return ProviderResult(
             data={
                 "operations": qf._operations(fault_day, equipment_id),
-                "alarms": qf._alarms(fault_day, equipment_id),
-                "work_orders": qf._work_orders(fault_day, equipment_id),
-                "maintenance_records": qf._maintenance_records(fault_day, equipment_id),
+                "alarms": qf._alarms(fault_day, equipment_id, equipment_name),
+                "work_orders": qf._work_orders(fault_day, equipment_id, equipment_name),
+                "maintenance_records": qf._maintenance_records(fault_day, equipment_id, equipment_name),
                 "related_equipment": (
                     [f"{equipment_id}-aux", f"{equipment_id}-spare"]
                     if include_related_equipment
@@ -218,6 +219,7 @@ class HttpFaultContextProvider:
         equipment_id: str,
         symptom: str,
         include_related_equipment: bool,
+        equipment_name: str | None = None,
     ) -> ProviderResult:
         endpoint = HttpEndpoint.from_env("DEERFLOW_FAULT_CONTEXT")
         if endpoint is None:
@@ -225,6 +227,7 @@ class HttpFaultContextProvider:
         body = {
             "fault_time": fault_time,
             "equipment_id": equipment_id,
+            "equipment_name": equipment_name or "",
             "symptom": symptom,
             "include_related_equipment": include_related_equipment,
         }
@@ -445,6 +448,7 @@ class DemoInspectionProvider:
                     "time": record_dt.isoformat(timespec="seconds"),
                     "route": route,
                     "area": area,
+                    "equipment_id": template.get("equipment_id") or template["equipment"],
                     "equipment": template["equipment"],
                     "inspector": template["inspector"],
                     "status": template["status"],
