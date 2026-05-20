@@ -16,12 +16,21 @@ No FastAPI or HTTP dependencies — pure utility functions.
 
 import asyncio
 import logging
+import platform
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
 
 logger = logging.getLogger(__name__)
+
+
+class LegacyDocConversionError(RuntimeError):
+    """Raised when a legacy ``.doc`` file cannot be converted safely."""
+
 
 # File extensions that should be converted to markdown
 CONVERTIBLE_EXTENSIONS = {
@@ -45,6 +54,7 @@ _ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 # yield close to 0. 50 chars/page gives a wide safety margin.
 # Falls back to absolute 200-char check when page count is unavailable.
 _MIN_CHARS_PER_PAGE = 50
+_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS = 60
 
 
 def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
@@ -149,6 +159,17 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         Path to the generated .md file, or None if conversion failed.
     """
     try:
+        if file_path.suffix.lower() == ".doc":
+            with tempfile.TemporaryDirectory(prefix="deerflow-doc-") as tmp_dir:
+                converted_docx = _convert_legacy_doc_to_docx(file_path, Path(tmp_dir))
+                text = _convert_with_markitdown(converted_docx)
+
+                md_path = file_path.with_suffix(".md")
+                md_path.write_text(text, encoding="utf-8")
+
+                logger.info("Converted %s to markdown via %s", file_path.name, converted_docx.name)
+                return md_path
+
         pdf_converter = _get_pdf_converter()
         file_size = file_path.stat().st_size
 
@@ -162,9 +183,89 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path
+    except LegacyDocConversionError:
+        raise
     except Exception as e:
         logger.error("Failed to convert %s to markdown: %s", file_path.name, e)
         return None
+
+
+def ensure_legacy_doc_conversion_supported() -> None:
+    """Raise a clear error when legacy ``.doc`` conversion is unavailable."""
+    if _find_legacy_doc_converter() is None:
+        raise LegacyDocConversionError("Legacy .doc uploads require LibreOffice (`soffice`) or macOS `textutil` to convert them to .docx before Markdown extraction.")
+
+
+def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
+    converter = _find_legacy_doc_converter()
+    if converter is None:
+        raise LegacyDocConversionError(f"Legacy Word file '{file_path.name}' is not supported in this environment. Install LibreOffice (`soffice`) or use macOS `textutil`.")
+
+    tool, executable = converter
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{file_path.stem}.docx"
+
+    try:
+        if tool == "soffice":
+            subprocess.run(
+                [
+                    executable,
+                    "--headless",
+                    "--convert-to",
+                    "docx",
+                    "--outdir",
+                    str(output_dir),
+                    str(file_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS,
+            )
+        else:
+            subprocess.run(
+                [
+                    executable,
+                    "-convert",
+                    "docx",
+                    "-output",
+                    str(output_path),
+                    str(file_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise LegacyDocConversionError(f"Timed out converting legacy Word file '{file_path.name}' to .docx.") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or exc.stdout or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise LegacyDocConversionError(f"Failed to convert legacy Word file '{file_path.name}' to .docx{detail}") from exc
+
+    if not output_path.exists():
+        raise LegacyDocConversionError(f"Legacy Word file '{file_path.name}' did not produce a .docx output.")
+
+    return output_path
+
+
+def _find_legacy_doc_converter() -> tuple[str, str] | None:
+    if platform.system() == "Windows":
+        soffice_exe = shutil.which("soffice.exe")
+        if soffice_exe:
+            return ("soffice", soffice_exe)
+
+    soffice = shutil.which("soffice")
+    if soffice:
+        return ("soffice", soffice)
+
+    if platform.system() == "Darwin":
+        textutil = shutil.which("textutil")
+        if textutil:
+            return ("textutil", textutil)
+
+    return None
 
 
 # Regex for bold-only lines that look like section headings.
