@@ -134,9 +134,36 @@ def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
+    Also closes all persistent MCP sessions so they are recreated on
+    the next tool load.
     """
     global _mcp_tools_cache, _cache_initialized, _config_mtime
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+
+    # Close persistent sessions – they will be recreated by the next
+    # get_mcp_tools() call with the (possibly updated) connection config.
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
+
+        pool = get_session_pool()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, pool.close_all())
+                    future.result()
+            else:
+                loop.run_until_complete(pool.close_all())
+        except RuntimeError:
+            asyncio.run(pool.close_all())
+    except Exception:
+        logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
+
+    from deerflow.mcp.session_pool import reset_session_pool
+
+    reset_session_pool()
     logger.info("MCP tools cache reset")
