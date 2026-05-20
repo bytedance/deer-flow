@@ -2,12 +2,15 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.runtime_paths import existing_project_file
+
+_ENV_VAR_INLINE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class McpOAuthConfig(BaseModel):
@@ -163,16 +166,13 @@ class ExtensionsConfig(BaseModel):
         for key, value in config.items():
             if isinstance(value, str):
                 if value.startswith("$"):
+                    # Whole-string $VAR reference — existing behaviour: empty string when unset.
                     env_value = os.getenv(value[1:])
-                    if env_value is None:
-                        # Unresolved placeholder — store empty string so downstream
-                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
-                        # token as an actual environment value.
-                        config[key] = ""
-                    else:
-                        config[key] = env_value
-                else:
-                    config[key] = value
+                    config[key] = env_value if env_value is not None else ""
+                elif "$" in value:
+                    # Inline interpolation: "Bearer $TOKEN" → "Bearer <value>".
+                    # Unresolved tokens are left as-is so users get a visible hint.
+                    config[key] = _ENV_VAR_INLINE_RE.sub(lambda m: os.getenv(m.group(1), m.group(0)), value)
             elif isinstance(value, dict):
                 config[key] = cls.resolve_env_variables(value)
             elif isinstance(value, list):
