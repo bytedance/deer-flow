@@ -382,5 +382,39 @@ def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_f
             return kwargs
 
     monkeypatch.setattr("deerflow.runtime.runs.worker.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
-
     assert _agent_factory_supports_app_config(BrokenCallable()) is False
+
+
+@pytest.mark.anyio
+async def test_run_agent_injects_langfuse_session_and_user_into_config_metadata():
+    """run_agent must set langfuse_session_id=thread_id and langfuse_user_id in metadata."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-langfuse")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["metadata"] = dict(config.get("metadata") or {})
+            yield {"messages": []}
+
+    def factory(config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"context": {"user_id": "user-99"}},
+    )
+    await asyncio.sleep(0)
+
+    assert captured["metadata"]["langfuse_session_id"] == "thread-langfuse"
+    assert captured["metadata"]["langfuse_user_id"] == "user-99"
