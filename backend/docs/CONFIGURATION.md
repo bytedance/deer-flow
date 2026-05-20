@@ -166,6 +166,35 @@ models:
 
 For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
 
+MiMo reasoning models need the same kind of provider-specific care. MiMo returns
+assistant-side `reasoning_content` and expects that field to be sent back in
+later turns when thinking is enabled. Use
+`deerflow.models.patched_mimo:PatchedMimoChatModel` so multi-turn agent runs
+preserve that field:
+
+```yaml
+models:
+  - name: mimo-v2-5-pro
+    display_name: MiMo V2.5 Pro
+    use: deerflow.models.patched_mimo:PatchedMimoChatModel
+    model: mimo-v2.5-pro
+    api_key: $MIMO_API_KEY
+    base_url: $MIMO_BASE_URL
+    max_tokens: 4096
+    supports_thinking: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+
+At the moment, only thinking on/off has been validated for MiMo. DeerFlow does
+not enable `supports_reasoning_effort` for MiMo by default.
+
 ### Tool Groups
 
 Organize tools into logical groups:
