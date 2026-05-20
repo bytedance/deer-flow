@@ -37,18 +37,27 @@ export default function SetupPage() {
     } else if (!isAuthenticated) {
       // Check if the system has no users yet
       void fetch("/api/v1/auth/setup-status")
-        .then((r) => r.json())
-        .then((data: { needs_setup?: boolean }) => {
+        .then((r) => {
+          // Only treat a successful 200 response as authoritative.
+          // A non-2xx response must not be interpreted as "setup already
+          // done" — return null to stay on the loading screen so the user
+          // can reload and retry.
+          if (!r.ok) return null;
+          return r.json() as Promise<{ needs_setup?: boolean }>;
+        })
+        .then((data) => {
           if (cancelled) return;
-          if (data.needs_setup) {
+          if (data?.needs_setup) {
             setMode("init_admin");
-          } else {
-            // System already set up and user is not logged in — go to login
+          } else if (data != null) {
+            // Explicit 200 with needs_setup: false — system is initialized
             router.push("/login");
           }
+          // data === null means the check returned a non-2xx status;
+          // stay on the loading screen so the user can reload and retry.
         })
         .catch(() => {
-          if (!cancelled) router.push("/login");
+          // Network error — do not redirect to /login; the user can reload.
         });
     } else {
       // Authenticated but needs_setup is false — already set up
