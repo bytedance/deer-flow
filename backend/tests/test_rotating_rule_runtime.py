@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import importlib.util
 import json
 import sys
@@ -11,10 +13,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "rotating-fault-diagnosis" / "scripts"
 FEATURES_TOOL_DIR = REPO_ROOT / "docker" / "sandbox" / "features-tool"
+FEATURES_TOOL_TOOLS_DIR = FEATURES_TOOL_DIR / "tools"
+FEATURES_TOOL_RULE_DIR = FEATURES_TOOL_DIR / "diagnosis_rule"
 
 
 def _load_module(filename: str, module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, SCRIPT_DIR / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_local_module(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -292,6 +304,130 @@ def test_build_device_context_artifact_contains_target_info(monkeypatch):
     assert artifact["target_info"]["bearing_ids"] == ["BRG-1"]
     assert artifact["target_info"]["target_device_type"] == "离心式&轴流式压缩机"
     assert artifact["resolved_context"]["rotor_device_ids"] == ["ROT-1"]
+
+
+def test_device_analysis_script_returns_llm_standard_json(monkeypatch):
+    monkeypatch.syspath_prepend(str(FEATURES_TOOL_DIR))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    module = _load_local_module(FEATURES_TOOL_TOOLS_DIR / "device_analysis.py", "device_analysis_script")
+
+    async def _fake_tree(_device_id: str):
+        return {
+            "device_id": "MAC-1",
+            "child_device_list": [
+                {
+                    "id": "ROT-1",
+                    "name": "离心压缩机转子",
+                    "unit_type": 2,
+                    "type_num": 80,
+                    "children": [
+                        {
+                            "id": "BRG-1",
+                            "name": "联端轴承",
+                            "unit_type": 2,
+                            "type_num": 70,
+                            "children": [
+                                {
+                                    "id": "P-101",
+                                    "name": "联端X轴振",
+                                    "unit_type": 3,
+                                    "type_num": 83,
+                                    "h_alarm": 20,
+                                    "hh_alarm": 30,
+                                    "belongShaftId": "S-1",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    async def _fake_llm(_system: str, _user: str) -> str:
+        return json.dumps(
+            {
+                "device_id": "MAC-1",
+                "child_device_summary": ["离心压缩机转子下挂联端轴承与轴振测点"],
+                "device_type": {"value": "离心式&轴流式压缩机", "confidence": "high", "reason": "名称包含离心压缩机"},
+                "process_type": {"value": "压缩机工艺", "confidence": "medium", "reason": "结构上属于压缩机组"},
+                "device_structure": {"value": "单转子-多轴承支撑结构", "confidence": "medium", "reason": "识别到转子和轴承层"},
+                "child_device_list": (await _fake_tree("MAC-1"))["child_device_list"],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(module, "get_device_children", _fake_tree)
+    monkeypatch.setattr(module, "_chat_completion_content", _fake_llm)
+
+    parsed = asyncio.run(module.analyze_device("MAC-1"))
+    built = asyncio.run(module.build_device_context("MAC-1", sub_device_id="P-101"))
+
+    assert parsed["device_type"]["value"] == "离心式&轴流式压缩机"
+    assert parsed["child_device_summary"]
+    assert built["target_info"]["target_kind"] == "probe"
+    assert built["target_info"]["probe_ids"] == ["P-101"]
+
+
+def test_rule_context_reuses_existing_device_context_artifact(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(FEATURES_TOOL_DIR))
+    monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
+
+    sys.modules.pop("diagnosis_rule.context", None)
+    module = importlib.import_module("diagnosis_rule.context")
+    artifact_path = tmp_path / "device_context.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "device_id": "MAC-1",
+                "child_device_summary": ["离心压缩机转子下挂联端轴承与轴振测点"],
+                "device_type": {"value": "离心式&轴流式压缩机", "confidence": "high", "reason": "名称匹配"},
+                "process_type": {"value": "压缩机工艺", "confidence": "medium", "reason": "工艺测点"},
+                "device_structure": {"value": "单转子-多轴承支撑结构", "confidence": "medium", "reason": "层级完整"},
+                "child_device_list": [
+                    {
+                        "id": "ROT-1",
+                        "name": "离心压缩机转子",
+                        "unit_type": 2,
+                        "type_num": 80,
+                        "type": "离心式&轴流式压缩机",
+                        "children": [
+                            {
+                                "id": "BRG-1",
+                                "name": "联端轴承",
+                                "unit_type": 2,
+                                "type_num": 70,
+                                "direction": "联端",
+                                "bearing_type": ["支撑轴承"],
+                                "children": [
+                                    {
+                                        "id": "P-101",
+                                        "name": "联端X轴振",
+                                        "unit_type": 3,
+                                        "type_num": 83,
+                                        "type": "轴振",
+                                        "h_alarm": 20,
+                                        "hh_alarm": 30,
+                                        "belongShaftId": "S-1",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def _unexpected(_device_id: str):
+        raise AssertionError("analyze_device should not be called when device_context.json already exists")
+
+    monkeypatch.setattr(module, "analyze_device", _unexpected)
+    context = asyncio.run(module.build_rule_device_context("MAC-1", sub_device_id="P-101"))
+    assert context.device_id == "MAC-1"
+    assert "P-101" in context.probe_index
 
 
 def test_run_rotating_rule_diagnosis_main_records_device_context_artifact(tmp_path, monkeypatch):

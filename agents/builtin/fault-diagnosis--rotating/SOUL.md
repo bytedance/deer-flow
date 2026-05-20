@@ -124,11 +124,11 @@
 - `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
 - `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
 
-### 步骤 2：获取设备上下文并在 Agent 内完成设备树语义推理
+### 步骤 2：生成标准设备上下文 JSON，并做一致性校验
 
 调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，并读取 `name` / `typeName` / `typeId` 作为当前设备上下文。
 
-随后调用底层设备上下文产物脚本（**只做受管结构化整理，不在脚本内再起模型**）：
+随后调用底层设备上下文脚本。该脚本会先拉取原始子设备树，再通过 LLM 推理出标准 JSON：
 
 ```bash
 python /opt/features-tool/tools/device_analysis.py "{macId}" "{componentId}" --output /mnt/user-data/outputs/device_context.json
@@ -141,7 +141,7 @@ python /opt/features-tool/tools/device_analysis.py "{macId}" "{componentId}" --o
 - `child_device_list`
 - `target_info`
 
-使用当前 Agent 的同一模型上下文对这个结构化结果做一致性校验，不要在脚本内再起独立模型：
+脚本负责生成标准 JSON；当前 Agent 只对这个结构化结果做一致性校验：
 
 - 当前 `componentId` 是轴承、测点还是转子子设备
 - 是否存在 X/Y 双探头配对与轴承归属
