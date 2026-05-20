@@ -433,6 +433,7 @@ class RunJournal(BaseCallbackHandler):
                 continue
 
             self._counted_external_source_ids.add(source_id)
+            self._llm_call_count += 1
             self._total_input_tokens += record.get("input_tokens", 0) or 0
             self._total_output_tokens += record.get("output_tokens", 0) or 0
             self._total_tokens += total_tk
