@@ -1,16 +1,18 @@
 """Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
 
-These tests verify that _restore_tool_call_signatures correctly re-injects
-``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
+These tests verify that the helper functions correctly re-inject provider-
+specific assistant metadata from ``AIMessage.additional_kwargs`` back into the
+serialized payload used for multi-turn conversations.
 """
 
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import (
+    _restore_reasoning_content,
+    _restore_tool_call_signatures,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,3 +176,26 @@ def test_tool_call_multiple_sequential_signatures():
 
 # Integration behavior for PatchedChatOpenAI is validated indirectly via
 # _restore_tool_call_signatures unit coverage above.
+
+
+def test_reasoning_content_restored_to_payload_message():
+    """reasoning_content is copied from additional_kwargs to the payload."""
+    payload_msg = {"role": "assistant", "content": "answer"}
+    orig = AIMessage(
+        content="answer",
+        additional_kwargs={"reasoning_content": "step-by-step thinking"},
+    )
+
+    _restore_reasoning_content(payload_msg, orig)
+
+    assert payload_msg["reasoning_content"] == "step-by-step thinking"
+
+
+def test_reasoning_content_missing_is_noop():
+    """No change when additional_kwargs does not contain reasoning_content."""
+    payload_msg = {"role": "assistant", "content": "answer"}
+    orig = AIMessage(content="answer", additional_kwargs={})
+
+    _restore_reasoning_content(payload_msg, orig)
+
+    assert "reasoning_content" not in payload_msg

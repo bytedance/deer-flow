@@ -194,11 +194,13 @@ models:
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
-  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   # Kimi's official API is OpenAI-compatible. Use PatchedChatOpenAI so
+  #   # multi-turn chats preserve reasoning_content across turns.
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
   #   model: kimi-k2.5
-  #   api_base: https://api.moonshot.cn/v1
+  #   base_url: https://api.moonshot.cn/v1
   #   api_key: $MOONSHOT_API_KEY
-  #   timeout: 600.0
+  #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 32768
   #   supports_thinking: true
