@@ -13,7 +13,6 @@ from app.channels.base import Channel
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -302,15 +301,15 @@ class FeishuChannel(Channel):
         text = msg.text
         for file in files:
             if file.get("image_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, msg.user_id)
                 text = text.replace("[image]", virtual_path, 1)
             elif file.get("file_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, msg.user_id)
                 text = text.replace("[file]", virtual_path, 1)
         msg.text = text
         return msg
 
-    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str, user_id: str) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
 
         def inner():
@@ -349,7 +348,6 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         paths = get_paths()
-        user_id = get_effective_user_id()
         paths.ensure_thread_dirs(thread_id, user_id=user_id)
         uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve()
 

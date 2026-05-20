@@ -37,15 +37,22 @@ def validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
-def get_uploads_dir(thread_id: str) -> Path:
-    """Return the uploads directory path for a thread (no side effects)."""
+def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
+    """Return the uploads directory path for a thread (no side effects).
+
+    When ``user_id`` is omitted, falls back to the ContextVar via
+    ``get_effective_user_id()``. Callers that run outside an authenticated
+    request context (e.g. IM channel workers) must pass ``user_id``
+    explicitly to avoid the directory collapsing into ``DEFAULT_USER_ID``.
+    """
     validate_thread_id(thread_id)
-    return get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    effective_user = user_id or get_effective_user_id()
+    return get_paths().sandbox_uploads_dir(thread_id, user_id=effective_user)
 
 
-def ensure_uploads_dir(thread_id: str) -> Path:
+def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
-    base = get_uploads_dir(thread_id)
+    base = get_uploads_dir(thread_id, user_id=user_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
 

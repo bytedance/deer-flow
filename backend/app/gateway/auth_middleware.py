@@ -18,7 +18,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
-from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
+from app.gateway.internal_auth import ACTING_USER_HEADER_NAME, INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token, make_acting_internal_user
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -78,7 +78,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
-            internal_user = get_internal_user()
+            # Trusted internal caller. May optionally forward an end-user
+            # identity (e.g. Feishu ``open_id``) via the acting-user header,
+            # in which case downstream code sees that real user instead of
+            # the synthetic ``DEFAULT_USER_ID``. The acting-user header is
+            # only honoured here because the internal token already proved
+            # the caller is same-process trusted code.
+            acting_user_id = request.headers.get(ACTING_USER_HEADER_NAME)
+            if acting_user_id:
+                internal_user = make_acting_internal_user(acting_user_id)
+            else:
+                internal_user = get_internal_user()
 
         # Non-public path: require session cookie
         if internal_user is None and not request.cookies.get("access_token"):

@@ -455,7 +455,7 @@ class TestChannelManager:
         with patch("langgraph_sdk.get_client") as get_client:
             get_client.return_value = object()
 
-            manager._get_client()
+            manager._get_client("ou_alice")
 
         get_client.assert_called_once()
         kwargs = get_client.call_args.kwargs
@@ -465,6 +465,7 @@ class TestChannelManager:
         assert csrf_token
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
+        assert headers["X-DeerFlow-Acting-User"] == "ou_alice"
 
     def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
         from app.channels.manager import ChannelManager
@@ -523,7 +524,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             modified_msg = InboundMessage(
                 channel_name="test",
@@ -580,7 +581,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -625,7 +626,7 @@ class TestChannelManager:
 
             bus.subscribe_outbound(capture_outbound)
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
             await manager.start()
 
             meta = {
@@ -664,7 +665,7 @@ class TestChannelManager:
 
             bus.subscribe_outbound(capture_outbound)
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
             await manager.start()
 
             meta = {
@@ -722,7 +723,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -828,7 +829,7 @@ class TestChannelManager:
             mock_client.threads.create = AsyncMock(return_value={"thread_id": "clarify-thread-1"})
             mock_client.threads.get = AsyncMock(return_value={"thread_id": "clarify-thread-1"})
             mock_client.runs.wait = AsyncMock(side_effect=_runs_wait)
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -904,7 +905,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -948,7 +949,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1008,7 +1009,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1060,7 +1061,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.runs.stream = MagicMock(return_value=_failing_stream())
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1114,7 +1115,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.runs.stream = MagicMock(return_value=_conflict_stream())
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1180,7 +1181,7 @@ class TestChannelManager:
             store.set_thread_id("test", "chat1", "old-thread")
 
             mock_client = _make_mock_langgraph_client(thread_id="new-thread-456")
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
 
@@ -1228,7 +1229,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.threads.create = AsyncMock(side_effect=create_thread)
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
 
@@ -1273,7 +1274,7 @@ class TestChannelManager:
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="topic-thread-1")
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
 
@@ -1317,7 +1318,7 @@ class TestChannelManager:
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="private-thread-1")
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
 
@@ -1367,7 +1368,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.threads.create = AsyncMock(side_effect=create_thread)
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             bus.subscribe_outbound(lambda msg: None)
             await manager.start()
@@ -1412,7 +1413,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1462,7 +1463,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client()
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1519,7 +1520,7 @@ class TestChannelManager:
 
             mock_client = _make_mock_langgraph_client()
             mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1568,7 +1569,7 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client(thread_id="bootstrap-thread")
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             await manager.start()
 
@@ -1749,7 +1750,7 @@ class TestHandleChatWithArtifacts:
                 ],
             }
             mock_client = _make_mock_langgraph_client(run_result=run_result)
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
@@ -1796,7 +1797,7 @@ class TestHandleChatWithArtifacts:
                 ],
             }
             mock_client = _make_mock_langgraph_client(run_result=run_result)
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
@@ -1870,7 +1871,7 @@ class TestHandleChatWithArtifacts:
 
             mock_client = _make_mock_langgraph_client(thread_id="thread-dup-test")
             mock_client.runs.wait = AsyncMock(side_effect=[turn1_result, turn2_result])
-            manager._client = mock_client
+            manager._get_client = lambda *_a, **_k: mock_client
 
             outbound_received = []
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))

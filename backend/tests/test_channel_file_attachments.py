@@ -117,7 +117,7 @@ class TestResolveAttachments:
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/report.pdf"])
+            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/report.pdf"], "test-user")
 
         assert len(result) == 1
         assert result[0].filename == "report.pdf"
@@ -140,7 +140,7 @@ class TestResolveAttachments:
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/chart.png"])
+            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/chart.png"], "test-user")
 
         assert len(result) == 1
         assert result[0].is_image is True
@@ -158,7 +158,7 @@ class TestResolveAttachments:
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments("t1", ["/mnt/user-data/outputs/nonexistent.txt"])
+            result = _resolve_attachments("t1", ["/mnt/user-data/outputs/nonexistent.txt"], "test-user")
 
         assert result == []
 
@@ -170,7 +170,7 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.side_effect = ValueError("bad path")
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments("t1", ["/invalid/path"])
+            result = _resolve_attachments("t1", ["/invalid/path"], "test-user")
 
         assert result == []
 
@@ -181,7 +181,7 @@ class TestResolveAttachments:
         mock_paths = MagicMock()
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments("t1", ["/mnt/user-data/uploads/secret.pdf"])
+            result = _resolve_attachments("t1", ["/mnt/user-data/uploads/secret.pdf"], "test-user")
 
         assert result == []
         mock_paths.resolve_virtual_path.assert_not_called()
@@ -193,7 +193,7 @@ class TestResolveAttachments:
         mock_paths = MagicMock()
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments("t1", ["/mnt/user-data/workspace/config.py"])
+            result = _resolve_attachments("t1", ["/mnt/user-data/workspace/config.py"], "test-user")
 
         assert result == []
         mock_paths.resolve_virtual_path.assert_not_called()
@@ -215,7 +215,7 @@ class TestResolveAttachments:
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/../uploads/stolen.txt"])
+            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/../uploads/stolen.txt"], "test-user")
 
         assert result == []
 
@@ -240,10 +240,7 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.side_effect = resolve_side_effect
 
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments(
-                thread_id,
-                ["/mnt/user-data/outputs/data.csv", "/mnt/user-data/outputs/missing.txt"],
-            )
+            result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/data.csv", "/mnt/user-data/outputs/missing.txt"], "test-user")
 
         assert len(result) == 1
         assert result[0].filename == "data.csv"
@@ -551,7 +548,7 @@ class TestManagerArtifactResolution:
         # Basic smoke test: empty artifacts returns empty list
         mock_paths = MagicMock()
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
-            result = _resolve_attachments("t1", [])
+            result = _resolve_attachments("t1", [], "test-user")
         assert result == []
 
     def test_format_artifact_text_for_unresolved(self):
