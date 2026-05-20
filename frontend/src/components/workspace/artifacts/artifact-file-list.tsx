@@ -20,6 +20,8 @@ import {
 } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
+import { useThread } from "../messages/context";
+
 import { useArtifacts } from "./context";
 
 export function ArtifactFileList({
@@ -33,6 +35,7 @@ export function ArtifactFileList({
 }) {
   const { t } = useI18n();
   const { select: selectArtifact, setOpen } = useArtifacts();
+  const { isMock } = useThread();
   const [installingFile, setInstallingFile] = useState<string | null>(null);
 
   const handleClick = useCallback(
@@ -110,6 +113,7 @@ export function ArtifactFileList({
                     filepath: file,
                     threadId: threadId,
                     download: true,
+                    isMock,
                   })}
                   target="_blank"
                   rel="noopener noreferrer"
