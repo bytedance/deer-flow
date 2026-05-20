@@ -607,3 +607,139 @@ class TestDeferredToolExecutionGate:
         assert result.tool_call_id == "call-1"
         assert "tool_search" in result.content
         assert "github_create_issue" in result.content
+
+
+# ── Issue #2968: Re-deferral of promoted tools after model call ──
+
+
+class TestPromotedToolReDeferral:
+    """Regression tests for issue #2968.
+
+    Once a tool is promoted via tool_search, its schema should only stay
+    visible for the turn immediately following the promotion.  After that
+    turn's model call completes, the middleware re-defers the tool so it
+    stops consuming context tokens in subsequent turns.
+    """
+
+    def test_promote_tracks_promoted_entries(self, registry):
+        """promote() should move entries to _promoted, not discard them."""
+        registry.promote({"github_create_issue"})
+        assert registry.contains("github_create_issue") is False
+        assert "github_create_issue" not in registry.deferred_names
+        assert "github_create_issue" in registry.promoted_names
+        assert len(registry) == 5  # 6 - 1 promoted
+
+    def test_reset_promoted_moves_all_back_to_deferred(self, registry):
+        """reset_promoted() should re-defer all promoted tools."""
+        registry.promote({"github_create_issue", "slack_send_message"})
+        assert len(registry) == 4
+        assert len(registry.promoted_names) == 2
+
+        registry.reset_promoted()
+
+        assert len(registry) == 6  # all back
+        assert registry.contains("github_create_issue") is True
+        assert registry.contains("slack_send_message") is True
+        assert len(registry.promoted_names) == 0
+
+    def test_reset_promoted_empty_is_noop(self, registry):
+        """reset_promoted() with no promoted tools is a no-op."""
+        registry.reset_promoted()  # should not raise
+        assert len(registry) == 6
+
+    def test_search_finds_re_deferred_tools(self, registry):
+        """After reset_promoted(), re-deferred tools are searchable again."""
+        registry.promote({"github_create_issue"})
+        assert registry.search("select:github_create_issue") == []
+
+        registry.reset_promoted()
+        results = registry.search("select:github_create_issue")
+        assert len(results) == 1
+        assert results[0].name == "github_create_issue"
+
+    def test_filter_strips_re_deferred_tools(self, registry):
+        """After reset_promoted(), re-deferred tools are filtered again."""
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        tool_github = _make_mock_tool("github_create_issue", "Create issue")
+        tool_slack = _make_mock_tool("slack_send_message", "Send msg")
+        tool_builtin = _make_mock_tool("tool_search", "Search tools")
+
+        class FakeRequest:
+            def __init__(self, tools):
+                self.tools = tools
+            def override(self, **kwargs):
+                return FakeRequest(kwargs.get("tools", self.tools))
+
+        set_deferred_registry(registry)
+        middleware = DeferredToolFilterMiddleware()
+
+        # Promote github tool
+        registry.promote({"github_create_issue"})
+
+        # Filter: only github is promoted, slack is deferred
+        request = FakeRequest(tools=[tool_github, tool_slack, tool_builtin])
+        filtered = middleware._filter_tools(request)
+        names = {t.name for t in filtered.tools}
+        assert "github_create_issue" in names  # promoted, passes through
+        assert "slack_send_message" not in names  # deferred, stripped
+        assert "tool_search" in names  # not deferred
+
+        # Re-defer
+        registry.reset_promoted()
+
+        # Filter: github is now deferred again
+        request2 = FakeRequest(tools=[tool_github, tool_slack, tool_builtin])
+        filtered2 = middleware._filter_tools(request2)
+        names2 = {t.name for t in filtered2.tools}
+        assert "github_create_issue" not in names2  # re-deferred, stripped
+        assert "slack_send_message" not in names2
+        assert "tool_search" in names2
+
+    def test_promote_after_reset_preserves_entries(self, registry):
+        """Promoting after a reset still works correctly."""
+        registry.promote({"github_create_issue"})
+        registry.reset_promoted()
+        registry.promote({"slack_send_message"})
+
+        assert registry.contains("github_create_issue") is True  # re-deferred
+        assert registry.contains("slack_send_message") is False  # just promoted
+        assert len(registry) == 5
+        assert registry.promoted_names == {"slack_send_message"}
+
+    def test_wrap_model_call_resets_promoted_after_handler(self, registry):
+        """wrap_model_call should re-defer promoted tools after the handler returns."""
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        tool_github = _make_mock_tool("github_create_issue", "Create issue")
+        tool_builtin = _make_mock_tool("tool_search", "Search tools")
+
+        class FakeRequest:
+            def __init__(self, tools):
+                self.tools = tools
+            def override(self, **kwargs):
+                return FakeRequest(kwargs.get("tools", self.tools))
+
+        set_deferred_registry(registry)
+        middleware = DeferredToolFilterMiddleware()
+
+        # Simulate: tool_search already promoted github_create_issue
+        registry.promote({"github_create_issue"})
+        assert "github_create_issue" in registry.promoted_names
+
+        # Model call: the handler runs (model sees github_create_issue),
+        # then _reset_promoted() fires.
+        request = FakeRequest(tools=[tool_github, tool_builtin])
+        handler_calls = 0
+
+        def handler(req):
+            nonlocal handler_calls
+            handler_calls += 1
+            return SimpleNamespace(content="model response")
+
+        middleware.wrap_model_call(request, handler)
+
+        # After wrap_model_call returns, promoted tools should be re-deferred
+        assert handler_calls == 1
+        assert "github_create_issue" not in registry.promoted_names
+        assert registry.contains("github_create_issue") is True

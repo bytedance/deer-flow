@@ -37,10 +37,19 @@ class DeferredToolEntry:
 
 
 class DeferredToolRegistry:
-    """Registry of deferred tools, searchable by regex pattern."""
+    """Registry of deferred tools, searchable by regex pattern.
+
+    Tools that have been promoted (via tool_search) are moved from
+    ``_entries`` to ``_promoted`` so that the middleware stops filtering
+    them from model binding.  ``reset_promoted()`` moves all promoted
+    tools back to deferred — called by the middleware after each model
+    turn so that unused promoted tools don't stay visible forever
+    (issue #2968).
+    """
 
     def __init__(self):
         self._entries: list[DeferredToolEntry] = []
+        self._promoted: list[DeferredToolEntry] = []
 
     def register(self, tool: BaseTool) -> None:
         self._entries.append(
@@ -52,19 +61,26 @@ class DeferredToolRegistry:
         )
 
     def promote(self, names: set[str]) -> None:
-        """Remove tools from the deferred registry so they pass through the filter.
+        """Move tools from deferred to promoted so they pass through the filter.
 
         Called after tool_search returns a tool's schema — the LLM now knows
         the full definition, so the DeferredToolFilterMiddleware should stop
-        stripping it from bind_tools on subsequent calls.
+        stripping it from bind_tools on subsequent model calls.
+
+        Promoted tools are tracked in ``_promoted`` (not discarded) so that
+        ``reset_promoted()`` can move them back to deferred after the model
+        turn that uses them.
         """
         if not names:
             return
-        before = len(self._entries)
-        self._entries = [e for e in self._entries if e.name not in names]
-        promoted = before - len(self._entries)
-        if promoted:
-            logger.debug(f"Promoted {promoted} tool(s) from deferred to active: {names}")
+        promoted_entries: list[DeferredToolEntry] = []
+        remaining: list[DeferredToolEntry] = []
+        for e in self._entries:
+            (promoted_entries if e.name in names else remaining).append(e)
+        self._entries = remaining
+        self._promoted.extend(promoted_entries)
+        if promoted_entries:
+            logger.debug(f"Promoted {len(promoted_entries)} tool(s) from deferred to active: {names}")
 
     def search(self, query: str) -> list[BaseTool]:
         """Search deferred tools by regex pattern against name + description.
@@ -107,6 +123,25 @@ class DeferredToolRegistry:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [entry.tool for _, entry in scored][:MAX_RESULTS]
+
+    def reset_promoted(self) -> None:
+        """Move all promoted tools back to deferred.
+
+        Called by ``DeferredToolFilterMiddleware`` after each model call so
+        that promoted tools are only visible for one turn.  If the agent
+        needs them again it must call ``tool_search`` once more.
+        """
+        if not self._promoted:
+            return
+        count = len(self._promoted)
+        self._entries.extend(self._promoted)
+        self._promoted.clear()
+        logger.debug(f"Re-deferred {count} previously promoted tool(s)")
+
+    @property
+    def promoted_names(self) -> set[str]:
+        """Names of tools that have been promoted (not deferred, not hidden)."""
+        return {e.name for e in self._promoted}
 
     @property
     def entries(self) -> list[DeferredToolEntry]:
