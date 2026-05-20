@@ -509,3 +509,65 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+# ---------------------------------------------------------------------------
+# Rollback on store failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_create_rolls_back_in_memory_record_on_store_failure():
+    """create() must roll back the in-memory record when the store raises."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.put = AsyncMock(side_effect=RuntimeError("db down"))
+    mgr = RunManager(store=store)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await mgr.create("thread-1")
+
+    assert await mgr.get("thread-1") is None
+    assert len(mgr._runs) == 0
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_rolls_back_in_memory_record_on_store_failure():
+    """create_or_reject() must roll back the in-memory record when the store raises."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.put = AsyncMock(side_effect=RuntimeError("db down"))
+    mgr = RunManager(store=store)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await mgr.create_or_reject("thread-1")
+
+    assert len(mgr._runs) == 0
+
+
+@pytest.mark.anyio
+async def test_create_succeeds_and_persists_when_store_is_healthy():
+    """create() must register the run both in memory and in the store on success."""
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create("thread-1")
+
+    assert await mgr.get(record.run_id) is not None
+    store_rows = await store.list_by_thread("thread-1")
+    assert any(r["run_id"] == record.run_id for r in store_rows)
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_succeeds_and_persists_when_store_is_healthy():
+    """create_or_reject() must register the run both in memory and in the store."""
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject("thread-1")
+
+    assert await mgr.get(record.run_id) is not None
+    store_rows = await store.list_by_thread("thread-1")
+    assert any(r["run_id"] == record.run_id for r in store_rows)
