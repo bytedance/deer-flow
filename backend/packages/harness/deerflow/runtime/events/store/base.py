@@ -55,6 +55,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
@@ -62,6 +63,11 @@ class RunEventStore(abc.ABC):
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        ``user_id`` is an optional ownership filter.  Implementations that
+        support per-user isolation (e.g. the DB backend) SHOULD filter by it.
+        Lightweight backends (memory, JSONL) accept the parameter for interface
+        consistency but rely on thread-scoped isolation instead.
         """
 
     @abc.abstractmethod
