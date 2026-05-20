@@ -1,4 +1,4 @@
-"""Tests for AioSandbox concurrent command serialization (#1433)."""
+"""Tests for AioSandbox concurrent command serialization (#1433) and teardown (#2872)."""
 
 import threading
 from types import SimpleNamespace
@@ -9,8 +9,9 @@ import pytest
 
 @pytest.fixture()
 def sandbox():
-    """Create an AioSandbox with a mocked client."""
-    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+    """Create an AioSandbox with a mocked AioSandboxClient and httpx.Client."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"), patch("deerflow.community.aio_sandbox.aio_sandbox.httpx") as mock_httpx:
+        mock_httpx.Client.return_value = MagicMock()
         from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
         sb = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
@@ -233,3 +234,58 @@ class TestConcurrentFileWrites:
             thread.join()
 
         assert storage["content"] in {"seed\nA\nB\n", "seed\nB\nA\n"}
+
+
+class TestClientTeardown:
+    """AioSandbox.close() must close the owned httpx.Client (issue #2872)."""
+
+    def test_close_calls_http_client_close(self, sandbox):
+        sandbox.close()
+        sandbox._http_client.close.assert_called_once()
+
+    def test_close_is_idempotent_when_client_raises(self, sandbox):
+        sandbox._http_client.close.side_effect = RuntimeError("already closed")
+        sandbox.close()  # must not propagate
+
+    def test_provider_release_closes_sandbox_client(self):
+        """release() must close the AioSandbox client before moving to warm pool."""
+        import importlib
+        from unittest.mock import MagicMock, patch
+
+        aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+        mock_sandbox = MagicMock()
+        provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+        provider._lock = __import__("threading").Lock()
+        provider._sandboxes = {"sid-1": mock_sandbox}
+        provider._sandbox_infos = {"sid-1": MagicMock()}
+        provider._thread_sandboxes = {"t-1": "sid-1"}
+        provider._last_activity = {"sid-1": 0.0}
+        provider._warm_pool = {}
+
+        provider.release("sid-1")
+
+        mock_sandbox.close.assert_called_once()
+
+    def test_provider_destroy_closes_sandbox_client(self):
+        """destroy() must close the AioSandbox client before tearing down the container."""
+        import importlib
+        from unittest.mock import MagicMock
+
+        aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+        mock_sandbox = MagicMock()
+        mock_backend = MagicMock()
+        provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+        provider._lock = __import__("threading").Lock()
+        provider._sandboxes = {"sid-2": mock_sandbox}
+        provider._sandbox_infos = {"sid-2": MagicMock()}
+        provider._thread_sandboxes = {}
+        provider._last_activity = {"sid-2": 0.0}
+        provider._warm_pool = {}
+        provider._backend = mock_backend
+
+        provider.destroy("sid-2")
+
+        mock_sandbox.close.assert_called_once()
+        mock_backend.destroy.assert_called_once()

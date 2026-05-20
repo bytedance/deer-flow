@@ -633,8 +633,9 @@ class AioSandboxProvider(SandboxProvider):
         info = None
         thread_ids_to_remove: list[str] = []
 
+        sandbox = None
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -643,6 +644,12 @@ class AioSandboxProvider(SandboxProvider):
             # Park in warm pool — container keeps running
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
+
+        if sandbox is not None:
+            try:
+                sandbox.close()
+            except Exception:
+                logger.warning("Error closing AioSandbox client for %s during release", sandbox_id, exc_info=True)
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
@@ -655,11 +662,12 @@ class AioSandboxProvider(SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to destroy.
         """
+        sandbox = None
         info = None
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -670,6 +678,12 @@ class AioSandboxProvider(SandboxProvider):
                 info, _ = self._warm_pool.pop(sandbox_id)
             else:
                 self._warm_pool.pop(sandbox_id, None)
+
+        if sandbox is not None:
+            try:
+                sandbox.close()
+            except Exception:
+                logger.warning("Error closing AioSandbox client for %s during destroy", sandbox_id, exc_info=True)
 
         if info:
             self._backend.destroy(info)

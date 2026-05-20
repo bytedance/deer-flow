@@ -4,6 +4,7 @@ import shlex
 import threading
 import uuid
 
+import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 
 from deerflow.sandbox.sandbox import Sandbox
@@ -32,9 +33,18 @@ class AioSandbox(Sandbox):
         """
         super().__init__(id)
         self._base_url = base_url
-        self._client = AioSandboxClient(base_url=base_url, timeout=600)
+        # Own the httpx client so we can close it explicitly on teardown.
+        self._http_client = httpx.Client(timeout=600)
+        self._client = AioSandboxClient(base_url=base_url, timeout=600, httpx_client=self._http_client)
         self._home_dir = home_dir
         self._lock = threading.Lock()
+
+    def close(self) -> None:
+        """Close the underlying HTTP client and release its connection-pool resources."""
+        try:
+            self._http_client.close()
+        except Exception:
+            logger.debug("Error closing AioSandbox HTTP client for %s", self.id, exc_info=True)
 
     @property
     def base_url(self) -> str:
