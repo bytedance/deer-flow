@@ -14,6 +14,7 @@ from deerflow.utils.file_conversion import (
     _do_convert,
     _get_pdf_converter,
     _pymupdf_output_too_sparse,
+    _try_convert_doc_to_docx,
     convert_file_to_markdown,
     extract_outline,
 )
@@ -90,6 +91,85 @@ class TestPymupdfOutputTooSparse:
 
 
 # ---------------------------------------------------------------------------
+# _try_convert_doc_to_docx
+# ---------------------------------------------------------------------------
+
+
+class TestTryConvertDocToDocx:
+    """Tests for the LibreOffice .doc → .docx conversion helper."""
+
+    def test_returns_none_when_soffice_not_found(self, tmp_path):
+        """When soffice/libreoffice is not on PATH, return None immediately."""
+        doc = tmp_path / "file.doc"
+        doc.write_bytes(b"fake doc content")
+
+        with patch("deerflow.utils.file_conversion.shutil.which", return_value=None):
+            result = _try_convert_doc_to_docx(doc)
+
+        assert result is None
+
+    def test_returns_docx_path_on_success(self, tmp_path):
+        """When soffice succeeds, return the path to the converted .docx."""
+        doc = tmp_path / "report.doc"
+        doc.write_bytes(b"fake doc content")
+
+        def fake_run(cmd, **kwargs):
+            # Simulate soffice creating a .docx in the output directory
+            from pathlib import Path as _Path
+            out_dir = _Path(cmd[cmd.index("--outdir") + 1])
+            docx = out_dir / "report.docx"
+            docx.write_bytes(b"PK fake docx")
+            mock = MagicMock()
+            mock.returncode = 0
+            return mock
+
+        with (
+            patch("deerflow.utils.file_conversion.shutil.which", return_value="/usr/bin/soffice"),
+            patch("deerflow.utils.file_conversion.subprocess.run", side_effect=fake_run),
+        ):
+            result = _try_convert_doc_to_docx(doc)
+
+        assert result is not None
+        assert result.suffix == ".docx"
+        assert result.exists()
+        # Clean up temp dir created by the function
+        import shutil as _shutil
+        _shutil.rmtree(str(result.parent), ignore_errors=True)
+
+    def test_returns_none_on_nonzero_exit(self, tmp_path):
+        """When soffice exits with non-zero code, return None."""
+        doc = tmp_path / "broken.doc"
+        doc.write_bytes(b"fake doc content")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = b"conversion error"
+
+        with (
+            patch("deerflow.utils.file_conversion.shutil.which", return_value="/usr/bin/soffice"),
+            patch("deerflow.utils.file_conversion.subprocess.run", return_value=mock_result),
+        ):
+            result = _try_convert_doc_to_docx(doc)
+
+        assert result is None
+
+    def test_returns_none_on_timeout(self, tmp_path):
+        """When soffice times out, return None."""
+        import subprocess as _subprocess
+
+        doc = tmp_path / "huge.doc"
+        doc.write_bytes(b"fake doc content")
+
+        with (
+            patch("deerflow.utils.file_conversion.shutil.which", return_value="/usr/bin/soffice"),
+            patch("deerflow.utils.file_conversion.subprocess.run", side_effect=_subprocess.TimeoutExpired("soffice", 60)),
+        ):
+            result = _try_convert_doc_to_docx(doc)
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
 # _do_convert — routing logic
 # ---------------------------------------------------------------------------
 
@@ -110,6 +190,60 @@ class TestDoConvert:
 
         mock_md.assert_called_once_with(docx)
         assert result == "# Markdown from MarkItDown"
+
+    def test_doc_uses_soffice_when_available(self, tmp_path):
+        """When soffice is available, .doc is converted via soffice → MarkItDown."""
+        doc = tmp_path / "legacy.doc"
+        doc.write_bytes(b"fake doc content")
+        fake_docx = tmp_path / "fake_tmp" / "legacy.docx"
+        fake_docx.parent.mkdir()
+        fake_docx.write_bytes(b"PK fake docx")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._try_convert_doc_to_docx",
+                return_value=fake_docx,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="# Converted via soffice",
+            ) as mock_md,
+        ):
+            result = _do_convert(doc, "auto")
+
+        mock_md.assert_called_once_with(fake_docx)
+        assert result == "# Converted via soffice"
+
+    def test_doc_falls_back_to_markitdown_when_soffice_unavailable(self, tmp_path):
+        """When soffice is not available, .doc falls back to MarkItDown."""
+        doc = tmp_path / "legacy.doc"
+        doc.write_bytes(b"fake doc content")
+
+        with (
+            patch("deerflow.utils.file_conversion._try_convert_doc_to_docx", return_value=None),
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="some extracted text",
+            ) as mock_md,
+        ):
+            result = _do_convert(doc, "auto")
+
+        mock_md.assert_called_once_with(doc)
+        assert result == "some extracted text"
+
+    def test_doc_raises_when_soffice_unavailable_and_markitdown_empty(self, tmp_path):
+        """When soffice is absent and MarkItDown returns empty output, raise RuntimeError."""
+        import pytest
+
+        doc = tmp_path / "legacy.doc"
+        doc.write_bytes(b"fake doc content")
+
+        with (
+            patch("deerflow.utils.file_conversion._try_convert_doc_to_docx", return_value=None),
+            patch("deerflow.utils.file_conversion._convert_with_markitdown", return_value="   "),
+        ):
+            with pytest.raises(RuntimeError, match="Install LibreOffice"):
+                _do_convert(doc, "auto")
 
     def test_pdf_auto_uses_pymupdf4llm_when_dense(self, tmp_path):
         """auto mode: use pymupdf4llm output when it's dense enough."""
