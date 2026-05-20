@@ -1257,6 +1257,61 @@ def test_subagent_usage_cache_is_skipped_when_token_usage_is_disabled(monkeypatc
     assert task_tool_module.pop_cached_subagent_usage("tc-disabled-cache") is None
 
 
+def test_poll_timeout_cancels_background_task(monkeypatch):
+    """poll_count > max_poll_count must cancel the background task and schedule cleanup."""
+    from deerflow.subagents.config import SubagentConfig
+
+    # timeout_seconds=0 → max_poll_count=0 → poll_count=1 immediately exceeds it.
+    config = SubagentConfig(
+        name="general-purpose",
+        description="General helper",
+        system_prompt="Base prompt",
+        max_turns=50,
+        timeout_seconds=0,
+    )
+    runtime = _make_runtime()
+    events = []
+    cancel_calls = []
+    cleanup_calls = []
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    always_running = _make_result(FakeSubagentStatus.RUNNING)
+
+    fake_app_config = MagicMock()
+    fake_app_config.token_usage.enabled = False
+
+    monkeypatch.setattr(task_tool_module, "get_app_config", lambda: fake_app_config)
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config=None: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config=None: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: always_running)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda task_id: cancel_calls.append(task_id))
+    monkeypatch.setattr(task_tool_module, "_schedule_deferred_subagent_cleanup", lambda task_id, trace_id, max_polls: cleanup_calls.append(task_id))
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="stuck task",
+        prompt="run forever",
+        subagent_type="general-purpose",
+        tool_call_id="tc-timeout",
+    )
+
+    assert "timed out" in output.lower()
+    assert cancel_calls, "request_cancel_background_task must be called on poll timeout"
+    assert cleanup_calls, "_schedule_deferred_subagent_cleanup must be called on poll timeout"
+    assert "task_timed_out" in [e["type"] for e in events]
+
+
 def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
     config = _make_subagent_config()
     app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=True))

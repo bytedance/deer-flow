@@ -383,12 +383,14 @@ async def task_tool(
             # Polling timeout as a safety net (in case thread pool timeout doesn't work)
             # Set to execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
-            # Note: We don't call cleanup_background_task here because the task may
-            # still be running in the background. The cleanup will happen when the
-            # executor completes and sets a terminal status.
             if poll_count > max_poll_count:
                 timeout_minutes = config.timeout_seconds // 60
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
+                # Signal the executor to stop and schedule deferred cleanup so the
+                # background thread eventually reaches a terminal state and is removed
+                # from the global registry rather than leaking indefinitely.
+                request_cancel_background_task(task_id)
+                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
