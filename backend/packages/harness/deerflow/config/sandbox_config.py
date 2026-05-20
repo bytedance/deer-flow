@@ -64,6 +64,15 @@ class SandboxConfig(BaseModel):
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
 
+    exec_no_change_timeout: int | None = Field(
+        default=None,
+        description=(
+            "Seconds of no output change after which exec_command is interrupted. "
+            "Defaults to 600 when not set. Increase for long-running builds that "
+            "produce no output for extended periods."
+        ),
+    )
+
     bash_output_max_chars: int = Field(
         default=20000,
         ge=0,

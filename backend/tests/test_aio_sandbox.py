@@ -149,7 +149,7 @@ class TestNoChangeTimeout:
         sandbox.execute_command("echo hello")
 
         assert len(calls) == 1
-        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0].get("no_change_timeout") == sandbox._no_change_timeout
 
     def test_retry_passes_no_change_timeout(self, sandbox):
         """The ErrorObservation retry path should also pass no_change_timeout."""
@@ -166,8 +166,8 @@ class TestNoChangeTimeout:
         sandbox.execute_command("echo hello")
 
         assert len(calls) == 2
-        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
-        assert calls[1].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0].get("no_change_timeout") == sandbox._no_change_timeout
+        assert calls[1].get("no_change_timeout") == sandbox._no_change_timeout
 
     def test_list_dir_passes_no_change_timeout(self, sandbox):
         """list_dir should pass no_change_timeout to exec_command."""
@@ -182,7 +182,29 @@ class TestNoChangeTimeout:
         sandbox.list_dir("/test")
 
         assert len(calls) == 1
-        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0].get("no_change_timeout") == sandbox._no_change_timeout
+
+    def test_custom_no_change_timeout_stored_and_forwarded(self):
+        """Regression for #2735: AioSandbox must accept and use a caller-supplied
+        no_change_timeout value instead of only the hardcoded default."""
+        with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as MockClient:
+            MockClient.return_value = MagicMock()
+            from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+            sb = AioSandbox(id="cfg-sandbox", base_url="http://localhost:8080", no_change_timeout=1800)
+
+        assert sb._no_change_timeout == 1800
+
+        calls = []
+
+        def mock_exec(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(output="done"))
+
+        sb._client.shell.exec_command = mock_exec
+        sb.execute_command("sleep 300")
+
+        assert calls[0].get("no_change_timeout") == 1800
 
 
 class TestConcurrentFileWrites:
