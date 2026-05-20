@@ -3,13 +3,12 @@
  * for Docker builds.
  */
 import "./src/env.js";
+import { resolveInternalGatewayUrl } from "./src/core/auth/gateway-url.js";
 
-function getInternalServiceURL(envKey, fallbackURL) {
-  const configured = process.env[envKey]?.trim();
-  return configured && configured.length > 0
-    ? configured.replace(/\/+$/, "")
-    : fallbackURL;
+function hasConfiguredEnvValue(envKey) {
+  return Boolean(process.env[envKey]?.trim());
 }
+
 import nextra from "nextra";
 
 const withNextra = nextra({});
@@ -23,23 +22,21 @@ const config = {
   devIndicators: false,
   async rewrites() {
     const rewrites = [];
-    const gatewayURL = getInternalServiceURL(
-      "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
-      "http://127.0.0.1:8001",
-    );
+    const fallback = [];
+    const gatewayURL = resolveInternalGatewayUrl();
 
-    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
-      rewrites.push({
+    if (!hasConfiguredEnvValue("NEXT_PUBLIC_LANGGRAPH_BASE_URL")) {
+      fallback.push({
         source: "/api/langgraph",
         destination: `${gatewayURL}/api`,
       });
-      rewrites.push({
+      fallback.push({
         source: "/api/langgraph/:path*",
         destination: `${gatewayURL}/api/:path*`,
       });
     }
 
-    if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
+    if (!hasConfiguredEnvValue("NEXT_PUBLIC_BACKEND_BASE_URL")) {
       rewrites.push({
         source: "/api/agents",
         destination: `${gatewayURL}/api/agents`,
@@ -57,20 +54,16 @@ const config = {
         destination: `${gatewayURL}/api/skills/:path*`,
       });
 
-      // Catch-all for remaining gateway API routes (models, threads, memory,
-      // mcp, artifacts, uploads, suggestions, runs, etc.) that don't have
-      // their own NEXT_PUBLIC_* env var toggle.
-      //
-      // NOTE: this must come AFTER the /api/langgraph rewrite above so that
-      // LangGraph-compatible routes keep their public prefix while Gateway
-      // receives its native /api/* paths.
-      rewrites.push({
+      fallback.push({
         source: "/api/:path*",
         destination: `${gatewayURL}/api/:path*`,
       });
     }
 
-    return rewrites;
+    return {
+      beforeFiles: rewrites,
+      fallback,
+    };
   },
 };
 
