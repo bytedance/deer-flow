@@ -110,7 +110,7 @@ def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
     assert prepared is not None
     _, prompt = prepared
     assert "Deer-flow是一个非常好的框架。" in prompt
-    assert "\\u7528\\u6237" not in prompt
+    assert "\\u" not in prompt
 
 
 def test_apply_updates_skips_same_batch_duplicates_and_keeps_source_metadata() -> None:
