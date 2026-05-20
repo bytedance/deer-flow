@@ -403,6 +403,60 @@ class TestExtractResponseText:
         }
         assert _extract_response_text(result) == "Here is the report."
 
+    def test_strips_forced_stop_sentinel_from_final_ai_message(self):
+        """[FORCED STOP] middleware text must not leak to IM users."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "do something"},
+                {
+                    "type": "ai",
+                    "content": "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far.\n\nHere is what I found.",
+                },
+            ]
+        }
+        assert _extract_response_text(result) == "Here is what I found."
+
+    def test_strips_forced_stop_only_message(self):
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "loop task"},
+                {
+                    "type": "ai",
+                    "content": "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far.",
+                },
+            ]
+        }
+        assert _extract_response_text(result) == ""
+
+    def test_strip_loop_warning_text_direct(self):
+        from app.channels.manager import _strip_loop_warning_text
+
+        assert _strip_loop_warning_text("[FORCED STOP] Safety limit exceeded.") == ""
+        assert _strip_loop_warning_text("Result.\n[FORCED STOP] Safety limit exceeded.") == "Result."
+        assert _strip_loop_warning_text("No sentinels here.") == "No sentinels here."
+        assert _strip_loop_warning_text("[LOOP DETECTED] looping.\n[FORCED STOP] stopped.") == ""
+
+    def test_strips_forced_stop_from_content_block_list(self):
+        """[FORCED STOP] must be stripped even when content is a list of blocks."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "do something"},
+                {
+                    "type": "ai",
+                    "content": [
+                        {"type": "text", "text": "[FORCED STOP] Safety limit exceeded.\n\nHere is the summary."},
+                    ],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == "Here is the summary."
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests

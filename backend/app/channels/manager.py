@@ -146,11 +146,14 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     return normalized
 
 
+_LOOP_SENTINELS = ("[LOOP DETECTED]", "[FORCED STOP]")
+
+
 def _strip_loop_warning_text(text: str) -> str:
-    """Remove middleware-authored loop warning lines from display text."""
-    if "[LOOP DETECTED]" not in text:
+    """Remove middleware-authored loop/forced-stop warning lines from display text."""
+    if not any(s in text for s in _LOOP_SENTINELS):
         return text
-    return "\n".join(line for line in text.splitlines() if "[LOOP DETECTED]" not in line).strip()
+    return "\n".join(line for line in text.splitlines() if not any(s in line for s in _LOOP_SENTINELS)).strip()
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -192,12 +195,10 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
-            has_tool_calls = bool(msg.get("tool_calls"))
             if isinstance(content, str) and content:
-                if has_tool_calls:
-                    content = _strip_loop_warning_text(content)
-                    if not content:
-                        continue
+                content = _strip_loop_warning_text(content)
+                if not content:
+                    continue
                 return content
             # content can be a list of content blocks
             if isinstance(content, list):
@@ -207,9 +208,7 @@ def _extract_response_text(result: dict | list) -> str:
                         parts.append(block.get("text", ""))
                     elif isinstance(block, str):
                         parts.append(block)
-                text = "".join(parts)
-                if has_tool_calls:
-                    text = _strip_loop_warning_text(text)
+                text = _strip_loop_warning_text("".join(parts))
                 if text:
                     return text
     return ""
