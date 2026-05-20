@@ -2078,6 +2078,128 @@ class TestFeishuChannel:
         _run(go())
 
 
+# ---------------------------------------------------------------------------
+# Feishu chat_type / topic_id context tests
+# ---------------------------------------------------------------------------
+
+
+def _make_feishu_event(chat_type: str | None, msg_id: str, *, root_id: str | None = None, text: str = "hello"):
+    """Build a minimal mock lark-oapi event for testing _on_message."""
+    event = MagicMock()
+    message = event.event.message
+    message.chat_id = "chat-1"
+    message.message_id = msg_id
+    message.content = json.dumps({"text": text})
+    if chat_type is not None:
+        message.chat_type = chat_type
+    else:
+        del message.chat_type
+    if root_id is not None:
+        message.root_id = root_id
+    else:
+        del message.root_id
+    event.event.sender.sender_id.open_id = "user-1"
+    return event
+
+
+class TestFeishuChatTypeThread:
+    """Verify that P2P chats use topic_id=None and group chats use root_id/msg_id."""
+
+    def test_p2p_chat_uses_none_topic(self):
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus, config={})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._add_reaction = AsyncMock()
+            ch._reply_card = AsyncMock(return_value=None)
+
+            event = _make_feishu_event("p2p", msg_id="msg-10")
+            ch._on_message(event)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_group_chat_no_reply_uses_msg_id_as_topic(self):
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus, config={})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._add_reaction = AsyncMock()
+            ch._reply_card = AsyncMock(return_value=None)
+
+            event = _make_feishu_event("group", msg_id="msg-20")
+            ch._on_message(event)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "msg-20"
+
+        _run(go())
+
+    def test_group_chat_reply_uses_root_id_as_topic(self):
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus, config={})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._add_reaction = AsyncMock()
+            ch._reply_card = AsyncMock(return_value=None)
+
+            event = _make_feishu_event("group", msg_id="msg-21", root_id="msg-15")
+            ch._on_message(event)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "msg-15"
+
+        _run(go())
+
+    def test_missing_chat_type_falls_back_to_per_message_topic(self):
+        """When chat_type is absent, treat as non-P2P to avoid merging group threads."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus, config={})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._add_reaction = AsyncMock()
+            ch._reply_card = AsyncMock(return_value=None)
+
+            event = _make_feishu_event(None, msg_id="msg-30")
+            ch._on_message(event)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "msg-30"
+
+        _run(go())
+
+    def test_p2p_chat_multiple_messages_share_topic(self):
+        """Multiple P2P messages should all have topic_id=None (same thread)."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = FeishuChannel(bus, config={})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._add_reaction = AsyncMock()
+            ch._reply_card = AsyncMock(return_value=None)
+
+            for i in range(3):
+                event = _make_feishu_event("p2p", msg_id=f"msg-4{i}", text=f"msg {i}")
+                ch._on_message(event)
+
+            for _ in range(3):
+                msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+                assert msg.topic_id is None
+
+        _run(go())
+
+
 class TestWeComChannel:
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
