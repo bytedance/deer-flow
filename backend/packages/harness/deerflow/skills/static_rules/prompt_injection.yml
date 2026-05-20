@@ -1,0 +1,19 @@
+rules:
+  - id: prompt-injection-override
+    languages:
+      - generic
+    severity: WARNING
+    message: Skill text contains a known prompt-injection override phrase.
+    metadata:
+      deerflow_severity: HIGH
+      remediation: Rephrase examples so they describe unsafe text instead of instructing the agent to follow it.
+    paths:
+      include:
+        - "*.md"
+        - "**/*.md"
+        - "*.markdown"
+        - "**/*.markdown"
+    pattern-either:
+      - pattern-regex: '(?i)\bignore\s+(all\s+)?(previous|prior)\s+instructions\b'
+      - pattern-regex: '(?i)\bdisregard\s+(all\s+)?(previous|prior)\s+instructions\b'
+      - pattern-regex: '(?i)\boverride\s+(the\s+)?(system|developer)\s+instructions\b'

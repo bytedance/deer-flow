@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import anyio
 import pytest
 
+from deerflow.skills.security_static_scanner import StaticScannerError
+
 skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
 
 
@@ -176,3 +178,82 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
             "malicious overwrite",
             "references/../SKILL.md",
         )
+
+
+def test_skill_manage_static_critical_blocks_create_before_llm(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    refresh_calls = []
+    llm_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    async def _scan(*args, **kwargs):
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_result("allow", "ok")
+
+    monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+
+    runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
+    content = _skill_content("blocked-skill") + "\n-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"
+
+    with pytest.raises(ValueError) as excinfo:
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "create",
+            "blocked-skill",
+            content,
+        )
+
+    assert "Static security scan blocked" in str(excinfo.value)
+    assert "secret-private-key" in str(excinfo.value)
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert not (skills_root / "custom" / "blocked-skill" / "SKILL.md").exists()
+
+
+def test_skill_manage_static_scan_failure_blocks_create_before_llm(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    refresh_calls = []
+    llm_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    async def _scan(*args, **kwargs):
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_result("allow", "ok")
+
+    def _broken_static_scan(skill_dir, *, skill_name=None):
+        raise StaticScannerError("semgrep unavailable")
+
+    monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+    monkeypatch.setattr(skill_manage_module, "enforce_static_scan", _broken_static_scan)
+
+    runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
+
+    with pytest.raises(ValueError, match="Static security scan failed.*semgrep unavailable"):
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "create",
+            "scanner-failure-skill",
+            _skill_content("scanner-failure-skill"),
+        )
+
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert not (skills_root / "custom" / "scanner-failure-skill" / "SKILL.md").exists()
