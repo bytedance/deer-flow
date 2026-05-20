@@ -13,7 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   ChainOfThought,
@@ -32,6 +32,7 @@ import {
   findToolCallResult,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { useLocalSettings } from "@/core/settings";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -56,6 +57,7 @@ export function MessageGroup({
   showTokenDebugSummaries?: boolean;
 }) {
   const { t } = useI18n();
+  const [localSettings] = useLocalSettings();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
@@ -224,6 +226,14 @@ export function MessageGroup({
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
+  const collapsedThinkingSummary = useMemo(
+    () => summarizeCollapsedThinkingStep(lastReasoningStep?.reasoning),
+    [lastReasoningStep?.reasoning],
+  );
+  const showCollapsedThinkingSummary =
+    localSettings.appearance.showCollapsedThinkingStep &&
+    !showLastThinking &&
+    collapsedThinkingSummary;
 
   return (
     <ChainOfThought
@@ -310,7 +320,16 @@ export function MessageGroup({
                 className="font-normal"
                 label={
                   <DebugStepLabel
-                    label={t.common.thinking}
+                    label={
+                      <ThinkingStepLabel
+                        label={t.common.thinking}
+                        summary={
+                          showCollapsedThinkingSummary
+                            ? collapsedThinkingSummary
+                            : undefined
+                        }
+                      />
+                    }
                     token={shouldInlineThinkingToken({
                       debugStep: lastReasoningDebugStep,
                       toolCallCount: lastReasoningStep.messageId
@@ -395,7 +414,7 @@ function DebugStepLabel({
   label,
   token,
 }: {
-  label: React.ReactNode;
+  label: ReactNode;
   token?: string | null;
 }) {
   return (
@@ -408,6 +427,40 @@ function DebugStepLabel({
       ) : null}
     </div>
   );
+}
+
+function ThinkingStepLabel({
+  label,
+  summary,
+}: {
+  label: ReactNode;
+  summary?: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-2">
+      <span className="shrink-0">{label}</span>
+      {summary ? (
+        <span className="text-primary min-w-0 flex-1 truncate text-xs">
+          {summary}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function summarizeCollapsedThinkingStep(reasoning?: string | null): string {
+  if (!reasoning) {
+    return "";
+  }
+
+  return reasoning
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[#>*_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function ToolCall({
