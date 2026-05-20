@@ -1,4 +1,5 @@
 import errno
+import logging
 import ntpath
 import os
 import shutil
@@ -7,9 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -375,6 +379,28 @@ class LocalSandbox(Sandbox):
             if resolved_path in self._agent_written_paths:
                 content = self._reverse_resolve_paths_in_output(content)
             return content
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None
+
+    def download_file(self, path: str) -> bytes:
+        normalised = path.replace("\\", "/")
+        stripped_path = normalised.lstrip("/")
+        allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+        if stripped_path != allowed_prefix and not stripped_path.startswith(f"{allowed_prefix}/"):
+            logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
+            raise PermissionError(errno.EACCES, f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}'", path)
+
+        resolved_path = self._resolve_path(path)
+        max_download_size = 100 * 1024 * 1024
+        try:
+            file_size = os.path.getsize(resolved_path)
+            if file_size > max_download_size:
+                raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            # TOCTOU note: the file could grow between getsize() and read(); accepted
+            # tradeoff since this is a controlled sandbox environment.
+            with open(resolved_path, "rb") as f:
+                return f.read()
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
