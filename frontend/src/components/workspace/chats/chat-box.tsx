@@ -10,6 +10,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -160,13 +161,13 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
                   <header className="shrink-0">
                     <h2 className="text-lg font-medium">Artifacts</h2>
                   </header>
-                  <main className="min-h-0 grow">
+                  <ScrollArea className="min-h-0 grow">
                     <ArtifactFileList
                       className="max-w-(--container-width-sm) p-4 pt-12"
                       files={thread.values.artifacts ?? []}
                       threadId={threadId}
                     />
-                  </main>
+                  </ScrollArea>
                 </div>
               )}
             </div>
