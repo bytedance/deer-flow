@@ -1,11 +1,6 @@
 import type { NextRequest } from "next/server";
 
-const BACKEND_BASE_URL =
-  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "http://127.0.0.1:8001";
-
-function buildBackendUrl(pathname: string) {
-  return new URL(pathname, BACKEND_BASE_URL);
-}
+import { buildBackendUrl } from "../_proxy";
 
 async function proxyRequest(request: NextRequest, pathname: string) {
   const headers = new Headers(request.headers);
@@ -14,7 +9,7 @@ async function proxyRequest(request: NextRequest, pathname: string) {
   headers.delete("content-length");
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
-  const response = await fetch(buildBackendUrl(pathname), {
+  const response = await fetch(buildBackendUrl(pathname, request.url), {
     method: request.method,
     headers,
     body: hasBody ? await request.arrayBuffer() : undefined,
