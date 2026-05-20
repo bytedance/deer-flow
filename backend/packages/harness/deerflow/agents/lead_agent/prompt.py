@@ -616,6 +616,11 @@ You have access to skills that provide optimized workflows for specific tasks. E
 4. Load referenced resources only when needed during execution
 5. Follow the skill's instructions precisely
 
+**Explicit Slash Skill Activation:**
+- If the user starts a request with `/<skill-name>`, that skill was explicitly requested for the current turn.
+- Follow the activated skill before choosing a general workflow.
+- The system may inject the activated skill content directly; if it does not, load the matching skill file with `read_file` before acting.
+
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}
 {skills_list}
