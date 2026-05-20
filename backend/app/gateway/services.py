@@ -235,6 +235,12 @@ def build_run_config(
             target = config.setdefault("configurable", {})
         if target is not None and "agent_name" not in target:
             target["agent_name"] = normalized
+        effective_agent_name = normalized
+        if isinstance(target, Mapping):
+            target_agent_name = target.get("agent_name")
+            if isinstance(target_agent_name, str) and target_agent_name.strip():
+                effective_agent_name = target_agent_name
+        config.setdefault("run_name", effective_agent_name)
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
