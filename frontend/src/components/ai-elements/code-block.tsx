@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { highlightInWorker } from "@/core/shiki/client";
 import { cn } from "@/lib/utils";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import {
@@ -12,7 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
+import { type BundledLanguage } from "shiki";
 
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
@@ -28,50 +29,6 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
   code: "",
 });
 
-const lineNumberTransformer: ShikiTransformer = {
-  name: "line-numbers",
-  line(node, line) {
-    node.children.unshift({
-      type: "element",
-      tagName: "span",
-      properties: {
-        className: [
-          "inline-block",
-          "min-w-10",
-          "mr-4",
-          "text-right",
-          "select-none",
-          "text-muted-foreground",
-        ],
-      },
-      children: [{ type: "text", value: String(line) }],
-    });
-  },
-};
-
-export async function highlightCode(
-  code: string,
-  language: BundledLanguage,
-  showLineNumbers = false,
-) {
-  const transformers: ShikiTransformer[] = showLineNumbers
-    ? [lineNumberTransformer]
-    : [];
-
-  return await Promise.all([
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-light",
-      transformers,
-    }),
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-dark-pro",
-      transformers,
-    }),
-  ]);
-}
-
 export const CodeBlock = ({
   code,
   language,
@@ -82,19 +39,37 @@ export const CodeBlock = ({
 }: CodeBlockProps) => {
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
-  const mounted = useRef(false);
+  // Monotonic counter of highlight requests dispatched from this block.
+  // When streaming updates `code` every token, only the most recent request
+  // is allowed to write state — older in-flight responses from the worker
+  // are ignored so the final HTML always reflects the latest code value.
+  const latestGeneration = useRef(0);
 
   useEffect(() => {
-    highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (!mounted.current) {
+    const generation = ++latestGeneration.current;
+    let cancelled = false;
+
+    highlightInWorker(code, language, showLineNumbers)
+      .then(([light, dark]) => {
+        if (cancelled || generation !== latestGeneration.current) {
+          return;
+        }
         setHtml(light);
         setDarkHtml(dark);
-        mounted.current = true;
-      }
-    });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        // A highlight failure must not blank the code block — keep whatever
+        // HTML we already rendered and surface the error in the console so
+        // it's discoverable without breaking the conversation view.
+        // eslint-disable-next-line no-console
+        console.error("Shiki highlight failed:", err);
+      });
 
     return () => {
-      mounted.current = false;
+      cancelled = true;
     };
   }, [code, language, showLineNumbers]);
 
