@@ -23,6 +23,9 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
+    context_length: int | None = Field(default=None, description="Model context window size, when known")
+    modalities: list[str] = Field(default_factory=list, description="Model input/output modalities, when known")
+    system_prompt: str | None = Field(default=None, description="Optional UI-managed system prompt override")
     when_thinking_enabled: dict | None = Field(
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",
