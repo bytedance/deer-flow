@@ -716,16 +716,7 @@ def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) ->
 
 def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
     """Build the ACP agent prompt section, only if ACP agents are configured."""
-    if app_config is None:
-        try:
-            from deerflow.config.acp_config import get_acp_agents
-
-            agents = get_acp_agents()
-        except Exception:
-            return ""
-    else:
-        agents = getattr(app_config, "acp_agents", {}) or {}
-
+    agents = getattr(app_config, "acp_agents", {}) if app_config is not None else {}
     if not agents:
         return ""
 

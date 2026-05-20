@@ -178,11 +178,6 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(acp_agents={"codex": object()})
 
-    def fail_get_acp_agents():
-        raise AssertionError("ambient get_acp_agents() must not be used when app_config is explicit")
-
-    monkeypatch.setattr("deerflow.config.acp_config.get_acp_agents", fail_get_acp_agents)
-
     section = prompt_module._build_acp_section(app_config=explicit_config)
 
     assert "ACP Agent Tasks" in section
