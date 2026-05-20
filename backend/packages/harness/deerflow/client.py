@@ -924,10 +924,9 @@ class DeerFlowClient:
 
         current_config = get_extensions_config()
 
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
+        config_data = dict(current_config.model_extra or {})
+        config_data["mcpServers"] = mcp_servers
+        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
 
         self._atomic_write_json(config_path, config_data)
 
@@ -990,10 +989,9 @@ class DeerFlowClient:
         extensions_config = get_extensions_config()
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-        config_data = {
-            "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-            "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-        }
+        config_data = dict(extensions_config.model_extra or {})
+        config_data["mcpServers"] = {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()}
+        config_data["skills"] = {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()}
 
         self._atomic_write_json(config_path, config_data)
 

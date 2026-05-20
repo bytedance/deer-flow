@@ -324,10 +324,9 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         extensions_config = get_extensions_config()
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
 
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
+        config_data = dict(extensions_config.model_extra or {})
+        config_data["mcpServers"] = {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()}
+        config_data["skills"] = {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()}
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
