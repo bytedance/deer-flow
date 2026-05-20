@@ -372,36 +372,53 @@ class SubagentExecutor:
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
         return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
 
-    async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
+    def _build_skill_section(self, skills: list[Skill]) -> str:
+        """Build a progressive-loading ``<skill_system>`` section for the subagent prompt.
 
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
-        - None: load all enabled skills
-        - []: no skills
-        - ["skill-a", "skill-b"]: only these skills
+        Only injects skill metadata (name, description, file path) rather than
+        full SKILL.md content.  The subagent loads the complete skill body on
+        demand via ``read_file`` — matching the lead agent's progressive
+        loading behaviour.
 
         Returns:
-            List of SystemMessages containing skill content.
+            Formatted ``<skill_system>`` string, or an empty string when skills
+            is empty.
         """
         if not skills:
-            return []
+            return ""
 
-        # Read each skill's SKILL.md content and create conversation items
-        messages = []
-        for skill in skills:
+        # Resolve container path from app_config, falling back to default
+        container_path = "/mnt/skills"
+        if self.app_config is not None:
             try:
-                content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
-                content = content.strip()
-                if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
+                container_path = self.app_config.skills.container_path
             except Exception:
-                logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
+                pass
 
-        return messages
+        skill_items: list[str] = []
+        for skill in skills:
+            location = skill.get_container_file_path(container_path)
+            category_label = "[custom, editable]" if skill.category == "custom" else "[built-in]"
+            skill_items.append(f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description} {category_label}</description>\n        <location>{location}</location>\n    </skill>")
+
+        skills_list = "\n".join(skill_items)
+        return f"""<skill_system>
+You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
+
+**Progressive Loading Pattern:**
+1. When a task matches a skill's use case, immediately call `read_file` on the skill's main file using the path provided in the skill tag below
+2. Read and understand the skill's workflow and instructions
+3. The skill file contains references to external resources under the same folder
+4. Load referenced resources only when needed during execution
+5. Follow the skill's instructions precisely
+
+**Skills are located at:** {container_path}
+
+<available_skills>
+{skills_list}
+</available_skills>
+
+</skill_system>"""
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
         """Build the initial state for agent execution.
@@ -413,19 +430,21 @@ class SubagentExecutor:
             Initial state dictionary and tools filtered by loaded skill metadata.
         """
 
-        # Load skills as conversation items (Codex pattern)
+        # Load skills metadata for tool filtering and progressive loading.
+        # Skill content is NOT loaded into the prompt — the subagent uses
+        # read_file to load SKILL.md on demand (progressive loading pattern).
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
-        skill_messages = await self._load_skill_messages(skills)
+        skill_section = self._build_skill_section(skills)
 
-        # Combine system_prompt and skills into a single SystemMessage.
+        # Combine system_prompt and skills section into a single SystemMessage.
         # Some LLM APIs reject multiple SystemMessages with
         # "System message must be at the beginning."
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
-        for skill_msg in skill_messages:
-            system_parts.append(skill_msg.content)
+        if skill_section:
+            system_parts.append(skill_section)
 
         messages: list[Any] = []
         if system_parts:
