@@ -198,3 +198,13 @@ def test_duplicate_triggers_warning(mock_bash, mock_cfg, caplog):
             get_available_tools(include_mcp=False)
 
     assert any("Duplicate tool name" in r.message for r in caplog.records), "Expected a duplicate-tool warning in log output"
+
+
+@patch("deerflow.tools.tools.get_app_config")
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+def test_skill_load_is_available_as_builtin_tool(mock_bash, mock_cfg):
+    mock_cfg.return_value = _make_minimal_config([])
+
+    result = get_available_tools(include_mcp=False)
+
+    assert "skill_load" in [tool.name for tool in result]

@@ -67,7 +67,7 @@ class SummarizationConfig(BaseModel):
         description="Per-skill token cap when preserving skill files across summarization. Skill reads above this size are not rescued.",
     )
     skill_file_read_tool_names: list[str] = Field(
-        default_factory=lambda: ["read_file", "read", "view", "cat"],
+        default_factory=lambda: ["skill_load", "read_file", "read", "view", "cat"],
         description="Tool names treated as skill file reads when preserving recently-loaded skills across summarization.",
     )
 

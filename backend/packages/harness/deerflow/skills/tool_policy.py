@@ -36,9 +36,15 @@ def allowed_tool_names_for_skills(skills: list[Skill]) -> set[str] | None:
     return allowed
 
 
-def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](tools: list[ToolT], skills: list[Skill]) -> list[ToolT]:
+def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](
+    tools: list[ToolT],
+    skills: list[Skill],
+    *,
+    always_allowed_tool_names: set[str] | None = None,
+) -> list[ToolT]:
     allowed = allowed_tool_names_for_skills(skills)
     if allowed is None:
         return tools
 
-    return [tool for tool in tools if tool.name in allowed]
+    effective_allowed = allowed | (always_allowed_tool_names or set())
+    return [tool for tool in tools if tool.name in effective_allowed]
