@@ -75,6 +75,17 @@ class PatchedChatOpenAI(ChatOpenAI):
         # Obtain the base payload from the parent implementation.
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
+        # Sanitize tool schemas: some providers (Gemini via OpenAI-compat) reject
+        # array schemas that are missing the required ``items`` field, or that
+        # contain non-string enum values (Gemini requires all enum values to be
+        # strings, so integer Literal types like Literal[1, 2, 4] must have their
+        # enum constraint converted to a description note instead).
+        for tool_entry in payload.get("tools", []):
+            params = tool_entry.get("function", {}).get("parameters")
+            if params:
+                _fix_array_schemas(params)
+                _fix_integer_enum_schemas(params)
+
         payload_messages = payload.get("messages", [])
 
         if len(payload_messages) == len(original_messages):
@@ -130,3 +141,83 @@ def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> Non
         sig = raw_tc.get("thought_signature") or raw_tc.get("thoughtSignature")
         if sig:
             payload_tc["thought_signature"] = sig
+
+
+def _fix_array_schemas(schema: Any) -> None:
+    """Recursively ensure every ``"type": "array"`` node has an ``"items"`` field.
+
+    Some providers (e.g. Gemini via OpenAI-compatible gateway) reject tool
+    parameter schemas where an array type is missing the ``items`` property.
+    This function adds ``"items": {}`` in-place wherever that situation is
+    detected, making the schema valid without changing the tool's semantics.
+    """
+    if not isinstance(schema, dict):
+        return
+
+    # Fix the current node if it is an array without items.
+    schema_types = schema.get("type")
+    if schema_types == "array" or (isinstance(schema_types, list) and "array" in schema_types):
+        if "items" not in schema:
+            schema["items"] = {"type": "string"}
+
+    # Recursively fix all sub-schemas in every standard location:
+    # 1. properties and patternProperties (object sub-schemas)
+    for key in ("properties", "patternProperties"):
+        for child in (schema.get(key) or {}).values():
+            _fix_array_schemas(child)
+
+    # 2. Single schema keys
+    for key in ("items", "additionalProperties", "unevaluatedProperties",
+                "not", "if", "then", "else", "propertyNames", "contains"):
+        child = schema.get(key)
+        if child is not None:
+            _fix_array_schemas(child)
+
+    # 3. Array of schemas (combinations and variants)
+    for key in ("anyOf", "allOf", "oneOf", "prefixItems"):
+        for child in (schema.get(key) or []):
+            _fix_array_schemas(child)
+
+
+def _fix_integer_enum_schemas(schema: Any) -> None:
+    """Recursively convert non-string enum values to description text.
+
+    Gemini's function-calling API requires all ``enum`` values to be strings.
+    Python tools that use ``Literal[1, 2, 4]`` or other integer/number Literal
+    types produce ``{"type": "integer", "enum": [1, 2, 4]}`` in their JSON
+    schema, which Gemini rejects with ``INVALID_ARGUMENT``.
+
+    This function detects such cases and replaces the ``enum`` list with a
+    note appended to the field's ``description``, keeping the original type
+    intact so the LLM still returns the correct numeric type.
+    """
+    if not isinstance(schema, dict):
+        return
+
+    # Fix the current node if it has a non-string enum.
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and any(not isinstance(v, str) for v in enum_values):
+        # Build a human-readable list and append to existing description.
+        valid_str = ", ".join(str(v) for v in enum_values)
+        existing_desc = schema.get("description", "")
+        if existing_desc:
+            schema["description"] = f"{existing_desc} (valid values: {valid_str})"
+        else:
+            schema["description"] = f"Valid values: {valid_str}"
+        del schema["enum"]
+
+    # Recurse into all standard sub-schema locations.
+    for key in ("properties", "patternProperties"):
+        for child in (schema.get(key) or {}).values():
+            _fix_integer_enum_schemas(child)
+
+    for key in ("items", "additionalProperties", "unevaluatedProperties",
+                "not", "if", "then", "else", "propertyNames", "contains"):
+        child = schema.get(key)
+        if child is not None:
+            _fix_integer_enum_schemas(child)
+
+    for key in ("anyOf", "allOf", "oneOf", "prefixItems"):
+        for child in (schema.get(key) or []):
+            _fix_integer_enum_schemas(child)
+
