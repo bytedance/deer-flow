@@ -25,8 +25,8 @@ Key contracts (sprint plan M2):
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import math
 import os
 import sys
 from pathlib import Path
@@ -34,6 +34,26 @@ from pathlib import Path
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "monthly_data.json"
 OUTPUT_FILENAME = "monthly_kpi.json"
+
+
+def _load_data_banner():
+    """Lazy-load the sibling _data_banner module (no package layout)."""
+    module = sys.modules.get("_data_banner")
+    if module is not None:
+        return module
+    script_dir = Path(__file__).parent
+    spec = importlib.util.spec_from_file_location("_data_banner", script_dir / "_data_banner.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("failed to load _data_banner module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_data_banner"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("_data_banner") is module:
+            del sys.modules["_data_banner"]
+        raise
+    return module
 
 KPI_DISPLAY_NAMES = {
     "runtime_rate": "运行率",
@@ -639,6 +659,10 @@ def compute(payload: dict) -> dict:
         "day_count": period.get("day_count"),
     }
 
+    data_source = payload.get("data_source", "demo_fallback")
+    data_notes = list(payload.get("data_notes") or [])
+    data_source_banner = _load_data_banner().format_banner(data_source, data_notes)
+
     return {
         "report_period": report_period,
         "equipment_ids": payload.get("equipment_ids", []),
@@ -653,7 +677,9 @@ def compute(payload: dict) -> dict:
         "improvement_tracking": improvement_tracking,
         "monthly_review": monthly_review,
         "next_month_plan": next_month_plan,
-        "data_source": payload.get("data_source"),
+        "data_source": data_source,
+        "data_notes": data_notes,
+        "data_source_banner": data_source_banner,
         "compare_warning": payload.get("compare_warning"),
     }
 

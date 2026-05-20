@@ -1,4 +1,17 @@
-from .client import InsApiClient, slim_component
+from .client import (
+    InsApiClient,
+    parse_trend_response,
+    parse_trend_response_multi,
+    slim_component,
+)
 from .config import InsSettings, load_dotenv_file, load_ins_settings
 
-__all__ = ["InsApiClient", "InsSettings", "load_dotenv_file", "load_ins_settings", "slim_component"]
+__all__ = [
+    "InsApiClient",
+    "InsSettings",
+    "load_dotenv_file",
+    "load_ins_settings",
+    "parse_trend_response",
+    "parse_trend_response_multi",
+    "slim_component",
+]

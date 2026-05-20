@@ -56,6 +56,21 @@ models:
     extra_body:
       thinking:
         type: disabled
+
+# Qwen3 推理模型 - 支持 thinking 开关
+- name: qwen3-32b
+  display_name: Qwen3-32B
+  use: langchain_openai:ChatOpenAI
+  model: qwen3-32b
+  api_key: $OPENAI_API_KEY
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 4096
+  temperature: 0.7
+  supports_vision: true
+  base_url: https://aiapi.shenguyun.com/v1
+
+
 tool_groups:
 - name: web
 - name: file:read
@@ -113,6 +128,8 @@ sandbox:
     INS_PASSWORD: $INS_PASSWORD
     INS_BASE_URL: http://182.92.187.198
     FEATURES_TOOL_ROOT: /opt/features-tool
+    # 设备日/周/月报数据源开关（未设置 = demo）；切真数据时取消下一行注释
+    DEER_FLOW_DATA_PROVIDER: ins
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000

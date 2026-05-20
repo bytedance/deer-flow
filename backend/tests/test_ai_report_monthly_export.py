@@ -13,8 +13,6 @@ Covers sprint plan M3/M7 acceptance items:
 from __future__ import annotations
 
 import importlib.util
-import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -161,7 +159,7 @@ def test_demo_banner_present_for_demo_fallback(export_report):
 
 def test_demo_banner_absent_for_real_data(export_report):
     payload = _monthly_payload()
-    payload["data_source"] = "real"
+    payload["data_source"] = "ins"
     md = export_report.render_monthly_markdown(payload)
     assert "演示数据" not in md
 

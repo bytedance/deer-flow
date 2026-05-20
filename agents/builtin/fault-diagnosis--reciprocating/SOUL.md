@@ -138,13 +138,15 @@
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。校验失败时渲染 `markdown` 提示用户重试。
 3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
-4. 对每个设备调用 `ins-device-analysis` 获取子设备/测点树：
+4. 对每个设备调用 `ins-device-analysis-9k` 获取子设备/测点树（往复 / 高端旋转机组 RC 走 9K 系列：`positionType` 91..99，由 client.py 自动注入 `density=high` / `includeFilter=history` / `typeList=<features>`）：
 
    ```bash
-   bash /mnt/skills/custom/ins-device-analysis/scripts/run.sh {device_id}
+   bash /mnt/skills/custom/ins-device-analysis-9k/scripts/run.sh {device_id}
    ```
 
    如果调用失败（脚本返回非 0 退出码或无 JSON 输出），记录到 warnings 但不中止流程——回退到标准往复机全量测点列表。
+
+   **数据获取层固定走 `ins-*-9k` 系列**（`ins-device-analysis-9k` / `ins-get-trend-data-9k` / `ins-extract-trend-features-9k`），严禁回退到 8K 默认 skill。
 
 5. 从每个设备的 `child_device_list` 中提取测点名称，按以下标准往复机测点映射去重合并：
 
@@ -159,7 +161,7 @@
    | 阀盖温度 | `valve_cover_temperature` |
    | 电机电流 | `motor_current` |
 
-   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis` 全部失败，回退到全量 8 项标准列表。
+   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis-9k` 全部失败，回退到全量 8 项标准列表。
 
    > **特别注意**：如果 `crank_angle` 在所有设备的 `child_device_list` 中均未匹配到，必须在后续 Round 1.5b 表单的 `description` 中显式警告"未检测到曲轴角参考测点，诊断将退化为基于时域趋势的初判"。
 

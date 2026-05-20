@@ -136,13 +136,15 @@
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。校验失败时渲染 `markdown` 提示用户重试。
 3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。
-4. 对每个设备调用 `ins-device-analysis` 获取子设备/测点树：
+4. 对每个设备调用 `ins-device-analysis-2k` 获取子设备/测点树（机泵 PUMP 走 2K 系列：`positionType` 22..30，含多 feature 振动 + B/C/D 三级阈值）：
 
    ```bash
-   bash /mnt/skills/custom/ins-device-analysis/scripts/run.sh {device_id}
+   bash /mnt/skills/custom/ins-device-analysis-2k/scripts/run.sh {device_id}
    ```
 
    如果调用失败（脚本返回非 0 退出码或无 JSON 输出），记录到 warnings 但不中止流程——回退到标准机泵全量测点列表。
+
+   **数据获取层固定走 `ins-*-2k` 系列**（`ins-device-analysis-2k` / `ins-get-trend-data-2k` / `ins-extract-trend-features-2k`），严禁回退到 8K 默认 skill。
 
 5. 从每个设备的 `child_device_list` 中提取测点名称，按以下标准机泵测点映射去重合并：
 
@@ -158,7 +160,7 @@
    | 电机电流 | `motor_current` |
    | 轴承温度 | `bearing_temperature` |
 
-   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis` 全部失败，回退到全量 9 项标准列表。
+   **仅保留在任一设备 `child_device_list` 中实际匹配到的测点**。如果 `ins-device-analysis-2k` 全部失败，回退到全量 9 项标准列表。
 
 6. 动态生成测点选择表单（默认全选所有可用测点）：
 

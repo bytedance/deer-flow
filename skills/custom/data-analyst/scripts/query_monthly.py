@@ -46,6 +46,20 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Ensure sibling helper modules resolve when this file is imported via
+# importlib.util (e.g., by query_diagnosis.py) where sys.path[0] may not be
+# this script's parent directory.
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _query_monthly_demo import (  # noqa: E402  — must follow sys.path bootstrap
+    _demo_improvement_tracking,
+    _demo_maintenance,
+    _demo_targets,
+    _deterministic_int,
+)
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 OUTPUT_FILENAME = "monthly_data.json"
 EQUIPMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -77,6 +91,9 @@ def _output_dir() -> Path:
 
 
 def _load_query_daily():
+    module = sys.modules.get("query_daily")
+    if module is not None:
+        return module
     script_dir = Path(__file__).parent
     qd_path = script_dir / "query_daily.py"
     if not qd_path.exists():
@@ -85,11 +102,20 @@ def _load_query_daily():
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to build spec for query_daily")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules["query_daily"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("query_daily") is module:
+            del sys.modules["query_daily"]
+        raise
     return module
 
 
 def _load_list_equipment():
+    module = sys.modules.get("list_equipment")
+    if module is not None:
+        return module
     script_dir = Path(__file__).parent
     le_path = script_dir / "list_equipment.py"
     if not le_path.exists():
@@ -98,7 +124,13 @@ def _load_list_equipment():
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules["list_equipment"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("list_equipment") is module:
+            del sys.modules["list_equipment"]
+        raise
     return module
 
 
@@ -285,83 +317,6 @@ def _kpis_target_rate(daily_entries: list[dict], kpi_keys: list[str], targets: d
     return result
 
 
-def _demo_targets() -> dict[str, dict]:
-    """Stable demo target ranges used when running without a real KPI catalog."""
-    return {
-        "runtime_rate": {"min": 0.85},
-        "vibration_level": {"max": 4.0},
-        "outlet_pressure": {"min": 0.7, "max": 1.5},
-        "bearing_temp": {"max": 75.0},
-    }
-
-
-def _deterministic_int(seed: str, low: int, high: int) -> int:
-    """Stable demo int derived from a seed string (mirror query_daily helper)."""
-    digest = abs(hash(seed))
-    span = high - low + 1
-    if span <= 0:
-        return low
-    return low + (digest % span)
-
-
-def _demo_maintenance(report_month: str, day_count: int, equipment_ids: list[str]) -> dict:
-    seed_base = f"maint|{report_month}|{','.join(sorted(equipment_ids))}"
-    failures = _deterministic_int(seed_base + "|f", 0, max(1, len(equipment_ids))) + (day_count // 10)
-    if failures == 0:
-        # Zero-failure path is a documented edge case; emit explicit zeros.
-        downtime_minutes = 0
-        repair_minutes = 0
-    else:
-        downtime_minutes = failures * _deterministic_int(seed_base + "|d", 30, 120)
-        repair_minutes = failures * _deterministic_int(seed_base + "|r", 20, 90)
-    total_uptime_hours = round(day_count * 24 - downtime_minutes / 60.0, 2)
-    mtbf_hours: float | None = round(total_uptime_hours / failures, 2) if failures > 0 else None
-    mttr_hours: float | None = round(repair_minutes / failures / 60.0, 2) if failures > 0 else None
-    return {
-        "total_failures": failures,
-        "total_uptime_hours": total_uptime_hours,
-        "total_downtime_minutes": downtime_minutes,
-        "total_repair_minutes": repair_minutes,
-        "mtbf_hours": mtbf_hours,
-        "mttr_hours": mttr_hours,
-    }
-
-
-def _demo_improvement_tracking(report_month: str, equipment_ids: list[str]) -> list[dict]:
-    """Demo data MUST cover done / in_progress / delayed states (sprint plan M1)."""
-    primary = equipment_ids[0] if equipment_ids else "RM-001"
-    secondary = equipment_ids[1] if len(equipment_ids) > 1 else "P-101"
-    year, month = report_month.split("-")
-    py, pm = (int(year), int(month) - 1) if month != "01" else (int(year) - 1, 12)
-    prev_tag = f"{py:04d}-{pm:02d}"
-    return [
-        {
-            "id": f"IMP-{prev_tag}-01",
-            "owner": "张三",
-            "plan": f"{primary} 轴承温度联合诊断",
-            "due_date": f"{year}-{month}-15",
-            "status": "done",
-            "note": "已完成，温度告警下降 60%",
-        },
-        {
-            "id": f"IMP-{prev_tag}-02",
-            "owner": "李四",
-            "plan": f"{primary} 振动传感器更换",
-            "due_date": f"{year}-{month}-28",
-            "status": "in_progress",
-            "note": "备件到货延期，预计下月初完成",
-        },
-        {
-            "id": f"IMP-{py - (1 if pm == 1 else 0):04d}-{((pm - 1) or 12):02d}-07",
-            "owner": "王五",
-            "plan": f"{secondary} 冷却水泵密封件更换",
-            "due_date": f"{year}-{month}-10",
-            "status": "delayed",
-            "note": "因供应商交期延误，重新调度至下月上旬",
-        },
-    ]
-
-
 def fetch_month(
     report_month: str,
     equipment_ids: list[str],
@@ -370,32 +325,62 @@ def fetch_month(
     aggregate: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
-    """Return one-month payload using query_daily.fetch_day per-day demo data.
+    """Return one-month payload (backward-compatible flat dict).
 
-    - ``weekly[]`` is a list of month-anchored 7-day buckets (NOT ISO weeks);
-    - ``aggregated`` is the month-level mean/max/min/std weighted by bucket day_count;
-    - ``maintenance`` derives MTBF/MTTR with the canonical ``max(failures, 1)`` guard;
-    - ``alarms`` is the full month flat list (sorted by time);
-    - ``critical_events`` is the subset where level == "critical".
+    Calls :func:`fetch_month_with_provenance` and discards the data_source /
+    notes tuple so existing callers and tests keep working unchanged.
+    """
+    data, _, _ = fetch_month_with_provenance(
+        report_month, equipment_ids, kpi_keys, eq_type, aggregate, equipment_meta
+    )
+    return data
+
+
+def fetch_month_with_provenance(
+    report_month: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    aggregate: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+    provider_mode: str | None = None,
+) -> tuple[dict, str, list[str]]:
+    """Provider-aware variant of :func:`fetch_month`.
+
+    Composes the month from per-day calls to
+    :func:`query_daily.fetch_day_with_provenance` so the existing weekly
+    bucketing + aggregation logic keeps owning the rich monthly shape
+    (``weekly[]`` / ``aggregated`` / ``maintenance`` / ``critical_events``)
+    while data_source/notes propagate up unchanged. If any day falls back
+    to demo, the entire month is reported as ``demo_fallback`` to keep
+    the report internally consistent.
     """
     query_daily = _load_query_daily()
     year, month = _parse_report_month(report_month)
     month_start, month_end, day_count = _month_bounds(year, month)
     week_buckets = _build_week_buckets(month_start, day_count)
 
-    # Generate daily series first (deterministic via query_daily.fetch_day).
+    # Generate daily series first (provider-aware via fetch_day_with_provenance).
     start_dt = datetime.strptime(month_start, "%Y-%m-%d")
     daily_entries: list[dict] = []
+    sources: set[str] = set()
+    notes: list[str] = []
     for offset in range(day_count):
         date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-        day_payload = query_daily.fetch_day(
+        day_payload, day_src, day_notes = query_daily.fetch_day_with_provenance(
             date_str,
             equipment_ids,
             kpi_keys,
             eq_type,
-            include_per_equipment=False,
-            equipment_meta=equipment_meta,
+            False,
+            equipment_meta,
+            provider_mode,
         )
+        sources.add(day_src)
+        for note in day_notes:
+            tagged = f"[{date_str}] {note}"
+            if tagged not in notes:
+                notes.append(tagged)
         daily_entries.append(
             {
                 "date": date_str,
@@ -473,7 +458,16 @@ def fetch_month(
     # Preserve the canonical kpi_units map so monthly_kpi can render units
     # without re-scanning daily list.
     current["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
-    return current
+
+    if len(sources) == 1:
+        data_source = next(iter(sources))
+    else:
+        notes.append(
+            f"per-day data_source mismatch ({sorted(sources)}); "
+            "downgraded month to demo_fallback for consistency"
+        )
+        data_source = "demo_fallback"
+    return current, data_source, notes
 
 
 def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
@@ -523,13 +517,17 @@ def build_result(
     week_buckets = _build_week_buckets(month_start, day_count)
 
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
-    current = fetch_month(report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
+    current, current_src, current_notes = fetch_month_with_provenance(
+        report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
+    )
 
     # Resolve comparison periods and per-basis payloads.
     effective_bases = [b for b in compare_bases if b != "none"]
     compare_periods: dict[str, dict] = {}
     compare_block: dict[str, dict | None] = {}
     compare_warnings: list[str] = []
+    compare_sources: dict[str, str] = {}
+    compare_notes_all: list[str] = []
 
     for basis in effective_bases:
         py, pm = _compare_month_bounds(year, month, basis)
@@ -539,7 +537,7 @@ def build_result(
             compare_block[basis] = None
             compare_warnings.append("去年同期数据不可用，已跳过同比")
             continue
-        prev_payload = fetch_month(
+        prev_payload, prev_src, prev_notes = fetch_month_with_provenance(
             f"{py:04d}-{pm:02d}",
             equipment_ids,
             kpi_keys,
@@ -547,6 +545,11 @@ def build_result(
             auto_aggregate,
             equipment_meta,
         )
+        compare_sources[basis] = prev_src
+        for note in prev_notes:
+            tagged = f"[compare:{basis}] {note}"
+            if tagged not in compare_notes_all:
+                compare_notes_all.append(tagged)
         # compare blocks strip the per-bucket alarm streams + critical_events +
         # improvement_tracking to keep the JSON small — only mean / maintenance
         # baseline is what monthly_kpi.py actually consumes for delta math.
@@ -556,6 +559,39 @@ def build_result(
             "maintenance": prev_payload.get("maintenance", {}),
             "alarms": [],
         }
+
+    notes: list[str] = list(current_notes) + compare_notes_all
+    data_source = current_src
+    all_sources = {current_src, *compare_sources.values()}
+    if len(all_sources) > 1:
+        notes.append(
+            f"data_source mismatch (current={current_src}, compare={compare_sources}); "
+            "downgraded all blocks to demo_fallback for consistency"
+        )
+        if current_src != "demo_fallback":
+            current, _, _ = fetch_month_with_provenance(
+                report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
+            )
+        for basis in list(compare_block.keys()):
+            if compare_block[basis] is None or compare_sources.get(basis) == "demo_fallback":
+                continue
+            py, pm = _compare_month_bounds(year, month, basis)
+            prev_payload, _, _ = fetch_month_with_provenance(
+                f"{py:04d}-{pm:02d}",
+                equipment_ids,
+                kpi_keys,
+                eq_type,
+                auto_aggregate,
+                equipment_meta,
+                "demo",
+            )
+            compare_block[basis] = {
+                "weekly": [],
+                "aggregated": prev_payload.get("aggregated", {}),
+                "maintenance": prev_payload.get("maintenance", {}),
+                "alarms": [],
+            }
+        data_source = "demo_fallback"
 
     equipment_names: dict[str, str] = {}
     if equipment_meta:
@@ -576,7 +612,8 @@ def build_result(
         "compare_periods": compare_periods,
         "current": current,
         "compare": compare_block,
-        "data_source": "demo_fallback",
+        "data_source": data_source,
+        "data_notes": notes,
         "compare_warning": "；".join(compare_warnings) if compare_warnings else None,
     }
     if is_scope_mode:

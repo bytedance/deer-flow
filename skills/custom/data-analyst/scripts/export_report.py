@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib.util
 import json
 import math
 import os
@@ -32,6 +33,41 @@ MONTHLY_INPUT_FILENAME = "monthly_kpi.json"
 DIAGNOSIS_INPUT_FILENAME = "diagnosis_features.json"
 SUPPORTED_FORMATS = {"md", "pdf"}
 SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "diagnosis"}
+
+
+def _load_data_banner():
+    """Lazy-load the sibling _data_banner module (no package layout)."""
+    module = sys.modules.get("_data_banner")
+    if module is not None:
+        return module
+    script_dir = Path(__file__).parent
+    spec = importlib.util.spec_from_file_location("_data_banner", script_dir / "_data_banner.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("failed to load _data_banner module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_data_banner"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("_data_banner") is module:
+            del sys.modules["_data_banner"]
+        raise
+    return module
+
+
+def _prepend_banner(lines: list[str], payload: dict) -> list[str]:
+    """Inject the data_source banner as the very first line.
+
+    Idempotent: if ``lines[0]`` already starts with the banner prefix
+    (``> ✅ `` / ``> ⚠️ ``) we replace it instead of stacking another banner
+    on top. Mirrors the spec's Repeated-render scenario.
+    """
+    banner_mod = _load_data_banner()
+    banner = banner_mod.format_banner(payload.get("data_source"), payload.get("data_notes"))
+    if lines and banner_mod.is_banner_line(lines[0]):
+        lines[0] = banner
+        return lines
+    return [banner, "", *lines]
 
 TYPE_DISPLAY = {
     "static_equipment": "静设备",
@@ -458,7 +494,7 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
     for rec in payload.get("recommendations") or []:
         lines.append(f"- {rec}")
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(_prepend_banner(lines, payload))
 
 
 def render_html(payload: dict, chart_images: list[str] | None = None) -> str:
@@ -512,9 +548,6 @@ def render_weekly_markdown(payload: dict, thread_id: str | None = None) -> str:
     lines: list[str] = []
     lines.append("# 设备运行周报")
     lines.append("")
-    if payload.get("data_source") == "demo_fallback":
-        lines.append("> ⚠ 当前为演示数据，请勿用于生产决策。")
-        lines.append("")
     if payload.get("week_start_warning"):
         lines.append(f"> ⚠ {payload['week_start_warning']}。")
         lines.append("")
@@ -608,7 +641,7 @@ def render_weekly_markdown(payload: dict, thread_id: str | None = None) -> str:
     for focus in payload.get("next_week_focus") or []:
         lines.append(f"- {focus}")
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(_prepend_banner(lines, payload))
 
 
 def render_weekly_html(payload: dict) -> str:
@@ -675,9 +708,6 @@ def render_monthly_markdown(payload: dict, thread_id: str | None = None) -> str:
     lines: list[str] = []
     lines.append(f"# 设备运行月报：{month_label}")
     lines.append("")
-    if payload.get("data_source") == "demo_fallback":
-        lines.append("> ⚠ 当前为演示数据，请勿用于生产决策。")
-        lines.append("")
     if payload.get("compare_warning"):
         lines.append(f"> ⚠ {payload['compare_warning']}。")
         lines.append("")
@@ -737,11 +767,16 @@ def render_monthly_markdown(payload: dict, thread_id: str | None = None) -> str:
                 dyr=_table_cell(_format_monthly_pct(item.get("delta_yoy_pct"))),
             )
         )
-    lines.append("")
-    lines.append(
-        "> 口径说明：月均值按 7 日桶 ``day_count`` 加权平均（区别于周报 7 日简单平均、日报单日值）；MTBF=`total_uptime_hours / max(total_failures, 1)`；MTTR=`total_repair_minutes / max(total_failures, 1) / 60`；零故障月 MTBF/MTTR 输出 `—`。"
+    lines.extend(
+        [
+            "",
+            "> 口径说明：月均值按 7 日桶 ``day_count`` 加权平均（区别于周报 7 日简单平均、日报单日值）；"
+            "MTBF=`total_uptime_hours / max(total_failures, 1)`；"
+            "MTTR=`total_repair_minutes / max(total_failures, 1) / 60`；"
+            "零故障月 MTBF/MTTR 输出 `—`。",
+            "",
+        ]
     )
-    lines.append("")
 
     # Section 3: 周维度趋势
     trend_chart = payload.get("weekly_trend_chart")
@@ -856,7 +891,7 @@ def render_monthly_markdown(payload: dict, thread_id: str | None = None) -> str:
         lines.append(monthly_review)
         lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(_prepend_banner(lines, payload))
 
 
 def render_monthly_html(payload: dict) -> str:

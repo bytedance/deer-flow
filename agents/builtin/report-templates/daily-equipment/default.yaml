@@ -91,6 +91,11 @@ transforms:
       daily_kpi: daily_kpi.json
 
 sections:
+  - id: data_source_banner
+    title: ""
+    component: markdown
+    source: $.steps.daily_kpi.daily_kpi.data_source_banner
+
   - id: overview
     title: 总览
     component: markdown

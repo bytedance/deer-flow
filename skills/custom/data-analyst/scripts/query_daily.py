@@ -175,8 +175,74 @@ def fetch_day(
     include_per_equipment: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
-    """Return one-day payload. Falls back to deterministic demo data."""
-    return _demo_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+    """Return one-day payload via the active provider with demo fallback.
+
+    Backward-compatible signature: weekly/monthly aggregators and existing
+    tests call this and treat the return value as a flat dict. To capture
+    ``data_source`` / ``data_notes`` for the report banner use
+    :func:`fetch_day_with_provenance` instead.
+    """
+    data, _, _ = fetch_day_with_provenance(
+        date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
+    )
+    return data
+
+
+def fetch_day_with_provenance(
+    date_str: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    include_per_equipment: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+    provider_mode: str | None = None,
+) -> tuple[dict, str, list[str]]:
+    """Provider-aware variant of :func:`fetch_day`.
+
+    Routes through the registered ``daily`` provider (``demo`` or ``ins``)
+    via ``fetch_with_fallback``. Returns ``(payload, data_source, notes)``
+    so :func:`build_result` can stamp the banner.
+    """
+    # Lazy import to avoid pulling provider impls when the script is exec'd
+    # purely for its demo helpers (e.g. weekly/monthly aggregation paths).
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    def _load_script_module(name: str):
+        module = _sys.modules.get(name)
+        if module is not None:
+            return module
+        spec = _ilu.spec_from_file_location(name, script_dir / f"{name}.py")
+        if spec is None or spec.loader is None:
+            raise ImportError(f"failed to load local script module: {name}")
+        module = _ilu.module_from_spec(spec)
+        _sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            if _sys.modules.get(name) is module:
+                del _sys.modules[name]
+            raise
+        return module
+
+    script_dir = _Path(__file__).parent
+    dp = _load_script_module("_data_providers")
+    _load_script_module("_data_provider_impls")
+
+    result = dp.fetch_with_fallback(
+        source="daily",
+        fetch_args=dict(
+            date_str=date_str,
+            equipment_ids=equipment_ids,
+            kpi_keys=kpi_keys,
+            eq_type=eq_type,
+            include_per_equipment=include_per_equipment,
+            equipment_meta=equipment_meta,
+        ),
+        mode=provider_mode,
+    )
+    return result.data, result.data_source, list(result.notes)
 
 
 def _demo_day(
@@ -229,14 +295,24 @@ def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> 
     """
     script_dir = Path(__file__).parent
     list_eq_path = script_dir / "list_equipment.py"
-    if list_eq_path.exists():
+    if not list_eq_path.exists():
+        return []
+    module = sys.modules.get("list_equipment")
+    if module is None:
         import importlib.util
         spec = importlib.util.spec_from_file_location("list_equipment", list_eq_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        result = mod.query_equipment(eq_type, scope, scope_filter, limit=10000)
-        return result.get("equipment", [])
-    return []
+        if spec is None or spec.loader is None:
+            raise ImportError("failed to load list_equipment module")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["list_equipment"] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            if sys.modules.get("list_equipment") is module:
+                del sys.modules["list_equipment"]
+            raise
+    result = module.query_equipment(eq_type, scope, scope_filter, limit=10000)
+    return result.get("equipment", [])
 
 
 def build_result(
@@ -250,9 +326,34 @@ def build_result(
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     compare = compare or "none"
-    current = fetch_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+    current, current_src, current_notes = fetch_day_with_provenance(
+        date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
+    )
     compare_date_str = _compare_date(date_str, compare)
-    compare_block = fetch_day(compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta) if compare_date_str else None
+    if compare_date_str:
+        compare_block, compare_src, compare_notes = fetch_day_with_provenance(
+            compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
+        )
+    else:
+        compare_block, compare_src, compare_notes = None, None, []
+
+    # If the two blocks ended up with different sources (e.g. current=ins,
+    # compare=demo_fallback after a transient backend hiccup), downgrade the
+    # whole payload to demo to keep the report internally consistent.
+    notes: list[str] = list(current_notes)
+    if compare_src is not None:
+        notes.extend(compare_notes)
+    data_source = current_src
+    if compare_src is not None and current_src != compare_src:
+        notes.append(
+            f"data_source mismatch (current={current_src}, compare={compare_src}); "
+            "downgraded both blocks to demo_fallback for consistency"
+        )
+        # Re-call demo for both blocks deterministically.
+        current = _demo_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+        compare_block = _demo_day(compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
+        data_source = "demo_fallback"
+
     equipment_names: dict[str, str] = {}
     if equipment_meta:
         equipment_names = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
@@ -265,6 +366,8 @@ def build_result(
         "compare_date": compare_date_str,
         "current": current,
         "compare": compare_block,
+        "data_source": data_source,
+        "data_notes": notes,
     }
     if is_scope_mode:
         result["equipment_type"] = eq_type

@@ -59,6 +59,9 @@ def _output_dir() -> Path:
 
 def _load_query_daily():
     """Load the sibling query_daily module to reuse its demo data generator."""
+    module = sys.modules.get("query_daily")
+    if module is not None:
+        return module
     script_dir = Path(__file__).parent
     qd_path = script_dir / "query_daily.py"
     if not qd_path.exists():
@@ -67,11 +70,20 @@ def _load_query_daily():
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to build spec for query_daily")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules["query_daily"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("query_daily") is module:
+            del sys.modules["query_daily"]
+        raise
     return module
 
 
 def _load_list_equipment():
+    module = sys.modules.get("list_equipment")
+    if module is not None:
+        return module
     script_dir = Path(__file__).parent
     le_path = script_dir / "list_equipment.py"
     if not le_path.exists():
@@ -80,7 +92,13 @@ def _load_list_equipment():
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules["list_equipment"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("list_equipment") is module:
+            del sys.modules["list_equipment"]
+        raise
     return module
 
 
@@ -125,26 +143,59 @@ def fetch_week(
     aggregate: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
-    """Return one-week payload (7 daily entries + aggregated stats + flat alarms).
+    """Return one-week payload (backward-compatible flat dict).
 
-    Falls back to deterministic demo data via query_daily.fetch_day so the
-    daily/weekly KPI definitions stay consistent.
+    Calls :func:`fetch_week_with_provenance` and discards the data_source /
+    notes tuple so existing tests and callers that only need the payload
+    keep working unchanged.
+    """
+    data, _, _ = fetch_week_with_provenance(
+        week_start, equipment_ids, kpi_keys, eq_type, aggregate, equipment_meta
+    )
+    return data
+
+
+def fetch_week_with_provenance(
+    week_start: str,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    aggregate: bool = False,
+    equipment_meta: dict[str, dict] | None = None,
+    provider_mode: str | None = None,
+) -> tuple[dict, str, list[str]]:
+    """Provider-aware variant of :func:`fetch_week`.
+
+    Composes the 7-day window from per-day calls to
+    :func:`query_daily.fetch_day_with_provenance` so the existing weekly
+    aggregation logic keeps owning the shape (``daily[]`` + ``aggregated``)
+    while data_source/notes propagate up unchanged. If any of the 7 days
+    falls back to demo, the entire week is reported as ``demo_fallback``
+    to keep the report internally consistent.
     """
     query_daily = _load_query_daily()
     start_dt = datetime.strptime(week_start, "%Y-%m-%d")
 
     daily_entries: list[dict] = []
     union_alarms: list[dict] = []
+    sources: set[str] = set()
+    notes: list[str] = []
     for offset in range(DAY_COUNT):
         date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-        day_payload = query_daily.fetch_day(
+        day_payload, day_src, day_notes = query_daily.fetch_day_with_provenance(
             date_str,
             equipment_ids,
             kpi_keys,
             eq_type,
-            include_per_equipment=False,
-            equipment_meta=equipment_meta,
+            False,
+            equipment_meta,
+            provider_mode,
         )
+        sources.add(day_src)
+        for note in day_notes:
+            tagged = f"[{date_str}] {note}"
+            if tagged not in notes:
+                notes.append(tagged)
         entry = {
             "date": date_str,
             "kpis": day_payload.get("kpis", {}),
@@ -164,7 +215,16 @@ def fetch_week(
         # Even in aggregate mode keep one canonical kpi_units map so weekly_kpi
         # can render units without re-scanning daily list.
         result["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
-    return result
+
+    if len(sources) == 1:
+        data_source = next(iter(sources))
+    else:
+        notes.append(
+            f"per-day data_source mismatch ({sorted(sources)}); "
+            "downgraded week to demo_fallback for consistency"
+        )
+        data_source = "demo_fallback"
+    return result, data_source, notes
 
 
 def _aggregate_daily(daily_entries: list[dict], kpi_keys: list[str]) -> dict:
@@ -225,18 +285,47 @@ def build_result(
 
     week_end = _week_range(week_start)[1]
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
-    current = fetch_week(week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
+    current, current_src, current_notes = fetch_week_with_provenance(
+        week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
+    )
 
     compare_period: dict | None = None
     compare_block: dict | None = None
     compare_warning: str | None = None
+    compare_src: str | None = None
+    compare_notes: list[str] = []
     prev_range = _previous_period(week_start, compare)
     if prev_range:
         if compare == "previous_year" and not _has_previous_year_data(week_start):
             compare_warning = "去年同期数据不可用，已跳过同比"
         else:
             compare_period = {"start": prev_range[0], "end": prev_range[1]}
-            compare_block = fetch_week(prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta)
+            compare_block, compare_src, compare_notes = fetch_week_with_provenance(
+                prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
+            )
+
+    notes: list[str] = list(current_notes)
+    if compare_src is not None:
+        notes.extend(f"[compare] {note}" for note in compare_notes)
+    data_source = current_src
+    if compare_src is not None and current_src != compare_src:
+        notes.append(
+            f"data_source mismatch (current={current_src}, compare={compare_src}); "
+            "downgraded both blocks to demo_fallback for consistency"
+        )
+        if prev_range is None:
+            raise RuntimeError(
+                "prev_range must be set when compare_src is not None; this is a programming bug"
+            )
+        if current_src != "demo_fallback":
+            current, _, _ = fetch_week_with_provenance(
+                week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
+            )
+        if compare_src != "demo_fallback":
+            compare_block, _, _ = fetch_week_with_provenance(
+                prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
+            )
+        data_source = "demo_fallback"
 
     equipment_names: dict[str, str] = {}
     if equipment_meta:
@@ -255,7 +344,8 @@ def build_result(
         "compare_period": compare_period,
         "current": current,
         "compare": compare_block,
-        "data_source": "demo_fallback",
+        "data_source": data_source,
+        "data_notes": notes,
     }
     if not _is_monday(week_start):
         result["week_start_warning"] = "未对齐自然周一,已按所选日期为锚取 7 天窗口"

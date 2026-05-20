@@ -5,10 +5,15 @@ from typing import Any
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from google.protobuf.json_format import MessageToDict
+
+try:
+    from google.protobuf.json_format import MessageToDict
+    from proto import wave_pb2
+except Exception:  # pragma: no cover - environment-only fallback
+    MessageToDict = None  # type: ignore[assignment]
+    wave_pb2 = None  # type: ignore[assignment]
 
 from .spectrum_to_wave import extract_time_domain_wave, get_orbit_points, spectrum_to_wave
-from proto import wave_pb2
 
 from .config import InsSettings
 
@@ -34,23 +39,128 @@ def coerce_type_num(value: Any) -> int | None:
     return None
 
 
-def slim_component(node: dict[str, Any]) -> dict[str, Any]:
-    children = [slim_component(child) for child in node.get("children") or []]
-    points = [slim_component(point) for point in node.get("points") or []]
+_MACHINE_TYPE_TO_SERIES: dict[int, str] = {1: "8k", 4: "2k", 6: "6k", 9: "9k"}
 
+_ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
+    "2k": "ins-os-view/data/getTrendDataHis",
+    "6k": "ins-os-view/sg6kData/getTrendDataHis",
+    "8k": "ins-os-view/sg8kData/getTrendDataHis",
+    "9k": "ins-os-view/sg9kData/getTrendDataHis",
+}
+
+_TWO_K_NAME_KEY_MAP: dict[str, str] = {
+    "速度有效值": "v_rms",
+    "加速度峰值": "a_peak",
+    "加速度有效值": "a_rms",
+    "位移峰峰值": "pp_value",
+    "包络谱峰值": "envelope_peak",
+    "峭度": "kurtosis",
+    "裕度": "margin",
+    "脉冲指标": "pulse",
+    "波形指标": "wave",
+}
+
+_TWO_K_ALARM_FIELD_MAP: dict[str, tuple[str | None, str | None, str | None]] = {
+    "v_rms": ("vRmsBValue", "vRmsCValue", "vRmsDValue"),
+    "a_peak": ("aPeakBValue", "aPeakCValue", "aPeakDValue"),
+    "a_rms": ("gBValue", "gCValue", "gDValue"),
+    "kurtosis": ("kurtosisBValue", "kurtosisCValue", "kurtosisDValue"),
+    "margin": ("marginBValue", "marginCValue", None),
+    "pulse": ("pulseBValue", "pulseCValue", "pulseDValue"),
+    "wave": ("waveBValue", "waveCValue", "waveDValue"),
+}
+
+
+def _resolve_endpoint_series(
+    position_type: int | None,
+    parent_machine_type: int | None,
+) -> str:
+    if position_type is not None:
+        if 22 <= position_type <= 30:
+            return "2k"
+        if 61 <= position_type <= 64:
+            return "6k"
+        if 81 <= position_type <= 83:
+            return "8k"
+        if 91 <= position_type <= 99:
+            return "9k"
+    if parent_machine_type is not None:
+        return _MACHINE_TYPE_TO_SERIES.get(parent_machine_type, "8k")
+    return "8k"
+
+
+def _extract_2k_alarm_thresholds(
+    node: dict[str, Any],
+    config_info: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    thresholds: dict[str, dict[str, Any]] = {}
+    for feature, (b_key, c_key, d_key) in _TWO_K_ALARM_FIELD_MAP.items():
+        tier: dict[str, Any] = {}
+        for label, key in (("B", b_key), ("C", c_key), ("D", d_key)):
+            if not key:
+                continue
+            value = config_info.get(key)
+            if value is None:
+                value = node.get(key)
+            if value is not None:
+                tier[label] = value
+        if tier:
+            thresholds[feature] = tier
+    return thresholds
+
+
+def slim_component(
+    node: dict[str, Any],
+    parent_machine_type: int | None = None,
+) -> dict[str, Any]:
     config_info = node.get("configInfo") or {}
+    own_type = coerce_type_num(node.get("type"))
+
+    next_parent_type = parent_machine_type
+    if own_type in _MACHINE_TYPE_TO_SERIES:
+        next_parent_type = own_type
+
+    children = [
+        slim_component(child, next_parent_type)
+        for child in node.get("children") or []
+    ]
+    points = [
+        slim_component(point, next_parent_type)
+        for point in node.get("points") or []
+    ]
+
     result: dict[str, Any] = {
         "id": coerce_id(node.get("id")),
         "name": node.get("name") or "(无名称)",
         "unit_type": node.get("unitType"),
-        "type_num": coerce_type_num(node.get("type")),
+        "type_num": own_type,
     }
+
+    position_type_raw = node.get("positionType")
+    if position_type_raw is None:
+        position_type_raw = config_info.get("positionType")
+    position_type = coerce_type_num(position_type_raw)
+
+    is_point_like = node.get("unitType") == 3 or position_type is not None
+    if is_point_like:
+        series = _resolve_endpoint_series(position_type, parent_machine_type)
+        result["endpoint_series"] = series
+        if series == "2k":
+            thresholds = _extract_2k_alarm_thresholds(node, config_info)
+            if thresholds:
+                result["alarm_thresholds"] = thresholds
+            index_field = node.get("index")
+            if index_field is None:
+                index_field = config_info.get("index")
+            if index_field is not None:
+                result["index"] = index_field
+
     if "h_alarm" in config_info:
         result["h_alarm"] = config_info["h_alarm"]
     if "hh_alarm" in config_info:
         result["hh_alarm"] = config_info["hh_alarm"]
     if "belongShaftId" in config_info:
-        result["belongShaftId"]=config_info["belongShaftId"]
+        result["belongShaftId"] = config_info["belongShaftId"]
     if children:
         result["children"] = children
     if points:
@@ -165,22 +275,53 @@ class InsApiClient:
         start_ms: str,
         end_ms: str,
         features: list[str],
+        endpoint_series: str | None = "8k",
+        factory_id: str | None = None,
+        density: str | int | None = None,
+        include_filter: str | None = None,
+        type_list: str | None = None,
     ) -> list[dict[str, Any]]:
         normalized_component_id = ",".join(
             part.strip() for part in component_id.split(",") if part.strip()
         )
-        body = await self._get_json(
-            "ins-os-view/sg8kData/getTrendDataHis",
-            {
-                "gpids": normalized_component_id,
-                "startTime": start_ms,
-                "endTime": end_ms,
-                "density": "high",
-                "includeFilter": "history,startstop,blackbox,alarm",
-                "typeList": ",".join(features),
-            },
-        )
-        return parse_trend_response_multi(body, features)
+        series = (endpoint_series or "8k").lower()
+        path = _ENDPOINT_PATH_BY_SERIES.get(series)
+        if path is None:
+            raise ValueError(f"Unsupported endpoint_series: {endpoint_series!r}")
+
+        params: dict[str, str] = {
+            "gpids": normalized_component_id,
+            "startTime": start_ms,
+            "endTime": end_ms,
+        }
+
+        if series == "8k":
+            params["density"] = "high" if density is None else str(density)
+            params["includeFilter"] = (
+                "history,startstop,blackbox,alarm" if include_filter is None else include_filter
+            )
+            params["typeList"] = type_list if type_list is not None else ",".join(features)
+        elif series == "9k":
+            params["density"] = "high" if density is None else str(density)
+            params["includeFilter"] = "history" if include_filter is None else include_filter
+            params["typeList"] = type_list if type_list is not None else ",".join(features)
+        else:
+            params["density"] = "1" if density is None else str(density)
+            if include_filter is not None:
+                params["includeFilter"] = include_filter
+            if type_list is not None:
+                params["typeList"] = type_list
+
+        if factory_id is not None:
+            params["factoryId"] = factory_id
+
+        body = await self._get_json(path, params)
+
+        if series in {"8k", "9k"}:
+            return parse_trend_response_multi(body, features)
+
+        rows = _extract_trend_rows(body)
+        return parse_trend_response(rows, series)
 
     async def get_waveform_data(self, component_id: str, time_ms: str) -> dict[str, Any]:
         items = await self._fetch_wave_items(component_id, time_ms)
@@ -428,6 +569,10 @@ def format_ms_timestamp(value: str) -> str:
 
 
 def parse_wave_str(wave_str: str) -> dict[str, Any]:
+    if wave_pb2 is None or MessageToDict is None:
+        raise RuntimeError(
+            "protobuf or proto.wave_pb2 not available; waveform decoding requires the docker sandbox image"
+        )
     wave = wave_pb2.WaveStream()
     wave.ParseFromString(base64.b64decode(wave_str))
     return MessageToDict(wave, preserving_proto_field_name=False)
@@ -477,3 +622,81 @@ def resolve_spectrum_block(wave_data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(spectrum, dict):
             return spectrum
     return {"index": [], "amp": [], "ph": []}
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
+    data = body.get("data")
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("dataArr", "list", "trendData", "trend_data", "data"):
+            block = data.get(key)
+            if isinstance(block, list):
+                return [item for item in block if isinstance(item, dict)]
+        return [data]
+    return []
+
+
+def parse_trend_response(rows: list[dict[str, Any]], series: str) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    series = (series or "").lower()
+    if series in {"8k", "9k"}:
+        return [row for row in rows if isinstance(row, dict)]
+
+    if series not in {"2k", "6k"}:
+        return [row for row in rows if isinstance(row, dict)]
+
+    flat_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value_block = row.get("value")
+        if not isinstance(value_block, list):
+            continue
+
+        flat: dict[str, Any] = {}
+        for k in ("datatime", "time", "ts", "timestamp", "collectTime"):
+            if k in row:
+                flat[k] = row[k]
+        for k, v in row.items():
+            if k in {"value"}:
+                continue
+            if k not in flat:
+                flat[k] = v
+
+        for entry in value_block:
+            if not isinstance(entry, dict):
+                continue
+            if series == "6k":
+                key = entry.get("key")
+                if not isinstance(key, str) or not key:
+                    continue
+            else:
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                key = _TWO_K_NAME_KEY_MAP.get(name, name)
+            flat[key] = _coerce_float(entry.get("value"))
+
+        flat_rows.append(flat)
+    return flat_rows

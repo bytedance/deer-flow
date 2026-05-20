@@ -202,6 +202,7 @@ def test_data_source_marker_present(query_weekly):
         compare="none",
     )
     assert result["data_source"] == "demo_fallback"
+    assert result["data_notes"] == []
 
 
 def test_main_rejects_bad_week_start(query_weekly, capsys, monkeypatch):

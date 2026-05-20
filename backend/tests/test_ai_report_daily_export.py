@@ -60,7 +60,9 @@ def test_write_markdown_report(export_report, kpi_payload, tmp_path):
     out_path = export_report.write_report(kpi_payload, "md")
     assert out_path.parent == tmp_path
     assert out_path.name == "daily_report.md"
-    assert out_path.read_text(encoding="utf-8").startswith("# 设备运行日报")
+    body = out_path.read_text(encoding="utf-8")
+    assert body.startswith("> ⚠️ 当前使用演示数据（fallback）。原因：未配置真实数据源（DEER_FLOW_DATA_PROVIDER 未设置为 ins）")
+    assert "\n\n# 设备运行日报\n" in body
 
 
 def test_export_result_contract(export_report, kpi_payload, tmp_path):

@@ -85,6 +85,8 @@ def test_build_result_no_compare(query_daily):
     )
     assert result["compare"] is None
     assert result["compare_type"] == "none"
+    assert result["data_source"] == "demo_fallback"
+    assert result["data_notes"] == []
 
 
 def test_writes_to_output_dir(query_daily, tmp_path):
@@ -286,3 +288,113 @@ def test_type_specific_alarms(query_daily):
     static_messages = set(query_daily.TYPE_ALARM_MESSAGES["static_equipment"])
     pump_messages = set(query_daily.TYPE_ALARM_MESSAGES["pump"])
     assert static_messages != pump_messages
+
+
+# ---------------------------------------------------------------------------
+# Regression: build_result mismatch-downgrade — when fetch_day_with_provenance
+# returns different data_source values for current vs compare blocks, the
+# whole payload must drop to demo_fallback with a mismatch note, AND both
+# blocks must be re-rendered from the demo helper for internal consistency.
+# Covered design contract: query_daily.py:347-355.
+# ---------------------------------------------------------------------------
+
+
+def test_build_result_downgrades_when_current_ins_but_compare_demo(query_daily, monkeypatch):
+    calls: list[str] = []
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        calls.append(date_str)
+        if date_str == "2026-05-13":
+            # current — real InS
+            return ({"kpis": {"runtime_rate": 0.93}, "marker": "ins_real"}, "ins", [])
+        # compare day — degraded to demo
+        return ({"kpis": {"runtime_rate": 0.5}, "marker": "demo_real"}, "demo_fallback",
+                ["InS unreachable for compare day"])
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+
+    demo_marker = {"call_count": 0}
+
+    def fake_demo(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta):
+        demo_marker["call_count"] += 1
+        return {"kpis": {"runtime_rate": 0.42}, "marker": f"demo_rerendered_{date_str}"}
+
+    monkeypatch.setattr(query_daily, "_demo_day", fake_demo)
+
+    result = query_daily.build_result(
+        date_str="2026-05-13",
+        equipment_ids=["E001"],
+        kpi_keys=["runtime_rate"],
+        compare="previous_day",
+    )
+
+    assert result["data_source"] == "demo_fallback", (
+        "mismatch must downgrade the whole payload to demo_fallback"
+    )
+    # Both blocks must have been re-rendered from demo (NOT the original mixed payloads).
+    assert result["current"]["marker"] == "demo_rerendered_2026-05-13"
+    assert result["compare"]["marker"] == "demo_rerendered_2026-05-12"
+    assert demo_marker["call_count"] == 2
+    # data_notes must include the mismatch explanation + carried compare notes.
+    joined = "\n".join(result["data_notes"])
+    assert "data_source mismatch" in joined
+    assert "current=ins" in joined
+    assert "compare=demo_fallback" in joined
+    assert "InS unreachable for compare day" in joined
+
+
+def test_build_result_no_downgrade_when_sources_match(query_daily, monkeypatch):
+    """If current and compare share a data_source, downgrade must NOT fire and
+    _demo_day must NOT be called as a re-render. data_source is preserved."""
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        return ({"kpis": {"runtime_rate": 0.91}, "marker": f"ins_{date_str}"}, "ins", [])
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+
+    demo_called = {"n": 0}
+
+    def fake_demo(*a, **kw):
+        demo_called["n"] += 1
+        return {"kpis": {"runtime_rate": 0.0}, "marker": "should_not_be_used"}
+
+    monkeypatch.setattr(query_daily, "_demo_day", fake_demo)
+
+    result = query_daily.build_result(
+        date_str="2026-05-13",
+        equipment_ids=["E001"],
+        kpi_keys=["runtime_rate"],
+        compare="previous_day",
+    )
+
+    assert result["data_source"] == "ins"
+    assert result["current"]["marker"] == "ins_2026-05-13"
+    assert result["compare"]["marker"] == "ins_2026-05-12"
+    assert demo_called["n"] == 0
+    assert not any("mismatch" in n for n in result["data_notes"])
+
+
+def test_build_result_no_compare_keeps_current_source(query_daily, monkeypatch):
+    """When compare='none' there is no compare_src to mismatch against —
+    data_source stays whatever current returned. Regression guard against
+    accidental downgrade when compare_src is None."""
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        return ({"kpis": {"runtime_rate": 0.88}, "marker": "ins_only"}, "ins", ["note-a"])
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+
+    result = query_daily.build_result(
+        date_str="2026-05-13",
+        equipment_ids=["E001"],
+        kpi_keys=["runtime_rate"],
+        compare="none",
+    )
+    assert result["data_source"] == "ins"
+    assert result["compare"] is None
+    # compare_notes path must not extend notes when compare_src is None.
+    assert result["data_notes"] == ["note-a"]
+

@@ -31,8 +31,9 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 # ---------------------------------------------------------------------------
 # Result envelope
@@ -40,6 +41,7 @@ from typing import Any, Callable, Protocol
 
 DEMO_FALLBACK = "demo_fallback"
 HTTP_SUCCESS = "http"
+INS_SUCCESS = "ins"
 
 
 @dataclass(frozen=True)
@@ -53,7 +55,7 @@ class ProviderResult:
 
 
 # ---------------------------------------------------------------------------
-# 5 Protocols — one per query script
+# Protocols — one per query script
 # ---------------------------------------------------------------------------
 
 
@@ -123,6 +125,51 @@ class InspectionProvider(Protocol):
     ) -> ProviderResult: ...
 
 
+class DailyDataProvider(Protocol):
+    """Provides one-day ``current``/``compare`` block payload for query_daily."""
+
+    def fetch(
+        self,
+        *,
+        date_str: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str,
+        include_per_equipment: bool,
+        equipment_meta: dict[str, dict] | None,
+    ) -> ProviderResult: ...
+
+
+class WeeklyDataProvider(Protocol):
+    """Provides one-week aggregated payload for query_weekly."""
+
+    def fetch(
+        self,
+        *,
+        week_start: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str,
+        aggregate: bool,
+        equipment_meta: dict[str, dict] | None,
+    ) -> ProviderResult: ...
+
+
+class MonthlyDataProvider(Protocol):
+    """Provides one-month aggregated payload for query_monthly."""
+
+    def fetch(
+        self,
+        *,
+        report_month: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str,
+        aggregate: bool,
+        equipment_meta: dict[str, dict] | None,
+    ) -> ProviderResult: ...
+
+
 # ---------------------------------------------------------------------------
 # HttpProvider — generic helper that posts JSON to a configured HTTP endpoint
 # ---------------------------------------------------------------------------
@@ -150,7 +197,7 @@ class HttpEndpoint:
     timeout_seconds: int = 30
 
     @classmethod
-    def from_env(cls, prefix: str) -> "HttpEndpoint | None":
+    def from_env(cls, prefix: str) -> HttpEndpoint | None:
         """Build endpoint from env vars: ``{prefix}_URL`` (+ ``_METHOD``,
         ``_TOKEN``, ``_TIMEOUT``). Returns None if the URL is missing."""
         url = os.environ.get(f"{prefix}_URL")
@@ -208,15 +255,19 @@ def call_http_endpoint(
 # ---------------------------------------------------------------------------
 
 
-# Maps a *source kind* (one of trend/fault_context/failure_data/closure_items/
-# inspection) to the function the caller should invoke. Providers register
-# themselves here at module load time.
+# Maps a *source kind* to the function the caller should invoke. Providers
+# register themselves here at module load time. Sources include the original
+# 5 (trend / fault_context / failure_data / closure_items / inspection) plus
+# 3 added for equipment reports (daily / weekly / monthly).
 _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
     "trend": {},
     "fault_context": {},
     "failure_data": {},
     "closure_items": {},
     "inspection": {},
+    "daily": {},
+    "weekly": {},
+    "monthly": {},
 }
 
 
@@ -226,6 +277,7 @@ def register_provider(source: str, mode: str, factory: Callable[[], Any]) -> Non
     Modes used by ``get_provider``:
         ``demo`` — always-available deterministic synthetic data
         ``http`` — calls the configured HTTP endpoint
+        ``ins``  — calls the InS (神固云) features-tool adapter (daily/weekly/monthly only)
     """
     if source not in _PROVIDER_FACTORIES:
         raise ValueError(f"unknown data source: {source!r}")
@@ -237,7 +289,7 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
 
     Mode resolution order:
         1. Explicit ``mode`` argument.
-        2. ``DEER_FLOW_DATA_PROVIDER`` env var (``demo`` / ``http``).
+        2. ``DEER_FLOW_DATA_PROVIDER`` env var (``demo`` / ``http`` / ``ins``).
         3. Default ``demo``.
 
     Raises ``KeyError`` if the requested mode has no registered provider.
@@ -268,6 +320,7 @@ def fetch_with_fallback(
     *,
     source: str,
     fetch_args: dict,
+    mode: str | None = None,
 ) -> ProviderResult:
     """Try the active provider; on ``HttpProviderError`` fall back to demo.
 
@@ -275,7 +328,7 @@ def fetch_with_fallback(
     The result's ``data_source`` tag is forwarded to the script's JSON output
     so downstream consumers can tell which path produced the data.
     """
-    primary = get_provider(source)
+    primary = get_provider(source, mode=mode)
     try:
         result = primary.fetch(**fetch_args)
         if not isinstance(result, ProviderResult):

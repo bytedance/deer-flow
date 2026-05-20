@@ -51,7 +51,7 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 - **Middleware chain** for cross-cutting concerns (9 middlewares)
 - **Tool system** with sandbox, MCP, community, and built-in tools
 - **Subagent delegation** for parallel task execution
-- **System prompt** with skills injection, memory context, and working directory guidance
+- **System prompt** with skills injection, memory context, working directory guidance, and the default runtime identity `EHM AI 工作台`
 
 ### Middleware Chain
 
@@ -312,6 +312,18 @@ MCP servers and skill states in a single file:
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Override extensions_config.json location
 - Model API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, etc.
 - Tool API keys: `TAVILY_API_KEY`, `GITHUB_TOKEN`, etc.
+
+### InS-backed equipment reports
+
+The data-analyst daily / weekly / monthly equipment report scripts can switch from deterministic demo data to InS real data.
+
+- Set `DEER_FLOW_DATA_PROVIDER=ins` to enable the InS provider for report queries.
+- Set `INS_FACTORY_ID` only when the downstream InS deployment requires a factory-scoped `factoryId` parameter.
+- Report payloads now carry top-level provenance fields: `data_source` (`ins` or `demo_fallback`) and `data_notes[]`.
+- The InS adapter handles four endpoint series: `2k` (legacy vibration, nested name-based rows), `6k` (corrosion monitoring, nested key-based rows), `8k` (default rotating machinery, flat rows), and `9k` (high-end rotating / reciprocating machinery, flat rows).
+- When the InS path is unavailable or partially inconsistent, query scripts fall back to demo data and preserve the reason in `data_notes[]` so KPI/export layers can render the warning banner.
+
+See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for the detailed enablement, fallback, and threshold mapping notes.
 
 ### LangSmith Tracing
 

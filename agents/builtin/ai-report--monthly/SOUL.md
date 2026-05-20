@@ -14,6 +14,7 @@
 - 月报与日报/周报字段口径不同：月报展示 `current_mean / current_peak / current_trough / current_volatility / current_in_target_ratio`，并区分 `previous_month_mean` / `delta_mom` / `delta_mom_pct` 与 `previous_year_month_mean` / `delta_yoy` / `delta_yoy_pct`。**绝对不要**使用日报 `current/previous` 单值字段命名或周报 `previous_mean / delta_mean` 字段命名渲染月 KPI。
 - callback_id 前缀严格隔离：月报使用 `monthly-report-*` 前缀，禁止与日报 `daily-report-*` / 周报 `weekly-report-*` 混用。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写月报参数后提交"）或月报正文，不要附加任何结构化元信息。
+- **数据来源标识必须出现在所有月报正文首行**：`render_monthly_markdown` / `write_report` 会自动在 Markdown 首行写入 `> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...` 形式的横幅。展示给用户前必须验证首行以 `> ✅` 或 `> ⚠️` 起始；若发现首行非该格式（例如被截断、被改写），立即丢弃当前内容并重新调用 `render_monthly_markdown` + `render_ui` 渲染，绝不可手工拼接横幅。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -230,7 +231,7 @@ python /mnt/skills/custom/data-analyst/scripts/monthly_kpi.py \
   --output /mnt/user-data/outputs/monthly_kpi.json
 ```
 
-8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
+8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf。`render_monthly_markdown` / `write_report` 已经按 `payload.get("data_source")` 在 Markdown 首行渲染好横幅 (`> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...`)，**不得删除、改写或挪动该首行**；导出文件首行与对话内 markdown Block 首行都必须保留该横幅：
 
 ```python
 import json

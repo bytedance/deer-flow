@@ -32,6 +32,7 @@ from typing import Any
 from _data_providers import (
     DEMO_FALLBACK,
     HTTP_SUCCESS,
+    INS_SUCCESS,
     HttpEndpoint,
     HttpProviderError,
     ProviderResult,
@@ -49,14 +50,21 @@ from _data_providers import (
 
 def _load_script(name: str) -> Any:
     """Load a sibling script module by file path, bypassing import-side-effects."""
-    if name in sys.modules:
-        return sys.modules[name]
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
     path = Path(__file__).parent / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise ImportError(f"failed to load local script module: {name}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        raise
     return module
 
 
@@ -427,7 +435,8 @@ class DemoInspectionProvider:
         severity_min: str,
     ) -> ProviderResult:
         qi = _load_script("query_inspection")
-        from datetime import date as _date, datetime, timedelta
+        from datetime import date as _date
+        from datetime import datetime, timedelta
 
         inspection_day = _date.fromisoformat(inspection_date)
         min_rank = qi.SEVERITY_RANK[severity_min]
@@ -524,3 +533,224 @@ class HttpInspectionProvider:
 
 register_provider("inspection", "demo", DemoInspectionProvider)
 register_provider("inspection", "http", HttpInspectionProvider)
+
+
+# ============================================================================
+# daily / query_daily.py — InS-backed equipment daily report
+# ============================================================================
+
+
+class DemoDailyProvider:
+    """Wraps ``query_daily._demo_day`` so the registry produces the same
+    deterministic md5-seeded payload the script has always shipped."""
+
+    def fetch(
+        self,
+        *,
+        date_str: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        include_per_equipment: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        qd = _load_script("query_daily")
+        return ProviderResult(
+            data=qd._demo_day(
+                date_str,
+                equipment_ids,
+                kpi_keys,
+                eq_type,
+                include_per_equipment,
+                equipment_meta,
+            ),
+            data_source=DEMO_FALLBACK,
+        )
+
+
+class InsDailyProvider:
+    """Calls ``_ins_provider.fetch_daily_payload`` against the InS platform.
+
+    On success returns a ``current``-block-shaped dict tagged ``data_source="ins"``.
+    Any exception is re-raised as ``HttpProviderError`` so ``fetch_with_fallback``
+    transparently falls back to ``DemoDailyProvider``.
+    """
+
+    def fetch(
+        self,
+        *,
+        date_str: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        include_per_equipment: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        ins = _load_script("_ins_provider")
+        try:
+            data = ins.fetch_daily_payload(
+                date_str=date_str,
+                equipment_ids=equipment_ids,
+                kpi_keys=kpi_keys,
+                eq_type=eq_type,
+                include_per_equipment=include_per_equipment,
+                equipment_meta=equipment_meta,
+            )
+        except ins.HttpProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any failure → fallback trigger
+            raise HttpProviderError(
+                f"InS daily provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+
+register_provider("daily", "demo", DemoDailyProvider)
+register_provider("daily", "ins", InsDailyProvider)
+
+
+# ============================================================================
+# weekly / query_weekly.py — InS-backed equipment weekly report
+# ============================================================================
+
+
+class DemoWeeklyProvider:
+    """Wraps ``query_weekly.fetch_week_with_provenance`` with explicit
+    ``provider_mode="demo"`` so this provider never re-enters the InS path
+    through the per-day fallback chain."""
+
+    def fetch(
+        self,
+        *,
+        week_start: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        aggregate: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        qw = _load_script("query_weekly")
+        data, _, _ = qw.fetch_week_with_provenance(
+            week_start,
+            equipment_ids,
+            kpi_keys,
+            eq_type,
+            aggregate,
+            equipment_meta,
+            "demo",
+        )
+        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
+
+
+class InsWeeklyProvider:
+    """Calls ``_ins_provider.fetch_weekly_payload`` for a 7-day window."""
+
+    def fetch(
+        self,
+        *,
+        week_start: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        aggregate: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        from datetime import datetime, timedelta
+
+        ins = _load_script("_ins_provider")
+        start_dt = datetime.strptime(week_start, "%Y-%m-%d")
+        week_end = (start_dt + timedelta(days=6)).strftime("%Y-%m-%d")
+        try:
+            data = ins.fetch_weekly_payload(
+                week_start=week_start,
+                week_end=week_end,
+                equipment_ids=equipment_ids,
+                kpi_keys=kpi_keys,
+                eq_type=eq_type,
+                aggregate=aggregate,
+                equipment_meta=equipment_meta,
+            )
+        except ins.HttpProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HttpProviderError(
+                f"InS weekly provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+
+register_provider("weekly", "demo", DemoWeeklyProvider)
+register_provider("weekly", "ins", InsWeeklyProvider)
+
+
+# ============================================================================
+# monthly / query_monthly.py — InS-backed equipment monthly report
+# ============================================================================
+
+
+class DemoMonthlyProvider:
+    """Wraps ``query_monthly.fetch_month_with_provenance`` with explicit
+    ``provider_mode="demo"`` so this provider never re-enters the InS path
+    through the per-day fallback chain."""
+
+    def fetch(
+        self,
+        *,
+        report_month: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        aggregate: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        qm = _load_script("query_monthly")
+        data, _, _ = qm.fetch_month_with_provenance(
+            report_month,
+            equipment_ids,
+            kpi_keys,
+            eq_type,
+            aggregate,
+            equipment_meta,
+            "demo",
+        )
+        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
+
+
+class InsMonthlyProvider:
+    """Calls ``_ins_provider.fetch_monthly_payload`` for a calendar month window."""
+
+    def fetch(
+        self,
+        *,
+        report_month: str,
+        equipment_ids: list[str],
+        kpi_keys: list[str],
+        eq_type: str = "all",
+        aggregate: bool = False,
+        equipment_meta: dict[str, dict] | None = None,
+    ) -> ProviderResult:
+        ins = _load_script("_ins_provider")
+        qm = _load_script("query_monthly")
+        year, month = qm._parse_report_month(report_month)
+        month_start, month_end, _ = qm._month_bounds(year, month)
+        try:
+            data = ins.fetch_monthly_payload(
+                month_start=month_start,
+                month_end=month_end,
+                equipment_ids=equipment_ids,
+                kpi_keys=kpi_keys,
+                eq_type=eq_type,
+                aggregate=aggregate,
+                equipment_meta=equipment_meta,
+            )
+        except ins.HttpProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HttpProviderError(
+                f"InS monthly provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+
+register_provider("monthly", "demo", DemoMonthlyProvider)
+register_provider("monthly", "ins", InsMonthlyProvider)

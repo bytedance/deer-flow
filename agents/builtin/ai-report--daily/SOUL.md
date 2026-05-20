@@ -34,6 +34,7 @@
 - 无后端路由、无前端组件变更：只使用已注册 GenUI 组件 `form`、`markdown`、`device-selector-multi`。
 - **设备选择必须使用 `device-selector-multi`**：这是真实组织树设备选择器（与故障诊断保持一致），由前端从 `/api/organize/tree` 拉取真实设备列表；**严禁**使用 `form` + `multi-select` 渲染本地静态设备清单，也**严禁**先用 `list_equipment.py` 拉演示数据再生成 multi-select。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或日报正文，不要附加任何结构化元信息。
+- **数据来源标识必须出现在所有日报正文首行**：`render_markdown` 会自动在 Markdown 首行写入 `> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...` 形式的横幅。展示给用户前必须验证首行以 `> ✅` 或 `> ⚠️` 起始；若发现首行非该格式（例如被截断、被改写），立即丢弃当前内容并重新调用 `render_markdown` + `render_ui` 渲染，绝不可手工拼接横幅。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -230,7 +231,7 @@ python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
   --output /mnt/user-data/outputs/daily_kpi.json
 ```
 
-6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
+6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件。读取后必须保留 `data_source` / `data_notes` 字段并通过 `render_markdown` 透传——`render_markdown` 已经按 `payload.get("data_source")` 渲染好首行横幅 (`> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...`)，**不得删除、改写或挪动该首行**；任何后续追加内容（如下载链接、闭环跟踪段）只能拼接在 `report_md` 末尾：
 
 ```python
 import json

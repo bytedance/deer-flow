@@ -76,7 +76,7 @@ def _weekly_payload(*, with_alarms: bool = True, demo: bool = True, compare: boo
             {"time": "2026-05-13 14:02", "equipment": "RM-002", "level": "critical", "message": "轴承温度超限"},
         ] if with_alarms else [],
         "next_week_focus": ["RM-002 轴承温度持续异常,建议安排诊断"],
-        "data_source": "demo_fallback" if demo else "real",
+        "data_source": "demo_fallback" if demo else "ins",
         "week_start_warning": None,
         "compare_warning": None,
     }
@@ -124,7 +124,8 @@ def test_write_report_weekly_writes_correct_filename(export_report, tmp_path):
     assert out.name == "weekly_report.md"
     assert out.parent == tmp_path
     body = out.read_text(encoding="utf-8")
-    assert body.startswith("# 设备运行周报")
+    assert body.startswith("> ⚠️ 当前使用演示数据（fallback）。原因：未配置真实数据源（DEER_FLOW_DATA_PROVIDER 未设置为 ins）")
+    assert "\n\n# 设备运行周报\n" in body
 
 
 def test_write_report_daily_default_unchanged(export_report, tmp_path):

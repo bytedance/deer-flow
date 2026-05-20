@@ -216,6 +216,7 @@ def test_data_source_demo_fallback(query_monthly):
         compare_bases=["previous_month"],
     )
     assert result["data_source"] == "demo_fallback"
+    assert result["data_notes"] == []
 
 
 def test_report_month_validation(query_monthly):
