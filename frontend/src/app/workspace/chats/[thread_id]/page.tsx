@@ -9,6 +9,12 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import {
+  ContextActions,
+  ContextEventContext,
+  ContextEventDivider,
+} from "@/components/workspace/context-actions";
+import type { ContextEvent } from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -24,7 +30,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import { useThreadStream, useThreadTokenUsage, useContextUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -48,6 +54,10 @@ export default function ChatPage() {
     { enabled: tokenUsageEnabled && !isMock },
   );
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
+  const contextUsageQuery = useContextUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: !isMock },
+  );
   const mountedRef = useRef(false);
   useSpecificChatMode();
 
@@ -125,9 +135,11 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const [contextEvent, setContextEvent] = useState<ContextEvent | null>(null);
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
+    <ContextEventContext.Provider value={{ event: contextEvent, setEvent: setContextEvent }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
@@ -145,6 +157,7 @@ export default function ChatPage() {
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
+                contextUsage={contextUsageQuery.data ?? null}
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}
@@ -153,6 +166,7 @@ export default function ChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
+              <ContextActions threadId={threadId} />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -169,6 +183,7 @@ export default function ChatPage() {
                 isHistoryLoading={isHistoryLoading}
                 tokenUsageInlineMode={tokenUsageInlineMode}
               />
+              <ContextEventDivider />
             </div>
             <div
               className={cn(
@@ -254,7 +269,8 @@ export default function ChatPage() {
             </div>
           </main>
         </div>
-      </ChatBox>
+       </ChatBox>
+    </ContextEventContext.Provider>
     </ThreadContext.Provider>
   );
 }

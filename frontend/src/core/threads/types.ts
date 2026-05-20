@@ -2,6 +2,8 @@ import type { Message, Thread } from "@langchain/langgraph-sdk";
 
 import type { Todo } from "../todos";
 
+import type { ContextUsage } from "./api";
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
@@ -44,4 +46,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage: ContextUsage | null;
 }

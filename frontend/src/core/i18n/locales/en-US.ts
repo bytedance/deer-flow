@@ -246,6 +246,15 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    clearContext: "Clear Context",
+    clearContextConfirmTitle: "Clear conversation context?",
+    clearContextConfirmDescription:
+      "The AI will forget all previous context. Chat history will remain visible for reference, but new messages will start fresh.",
+    clearContextSuccess: "Context cleared",
+    compact: "Compact",
+    compactSuccess: "Context compressed",
+    compactFail: "Failed to compress context",
+    compactSummary: "Context Summary",
   },
 
   // Chats
@@ -311,6 +320,7 @@ export const enUS: Translations = {
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
     note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    contextUsed: "Context used",
     presets: {
       off: "Off",
       summary: "Summary",

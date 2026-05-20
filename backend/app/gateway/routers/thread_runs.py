@@ -20,7 +20,8 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_config, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.routers.threads import ContextUsage
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
@@ -87,6 +88,7 @@ class ThreadTokenUsageResponse(BaseModel):
     total_runs: int = 0
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+    context_usage: ContextUsage | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -406,4 +408,19 @@ async def thread_token_usage(thread_id: str, request: Request) -> ThreadTokenUsa
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
     agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    return ThreadTokenUsageResponse(thread_id=thread_id, **agg)
+
+    context_usage = None
+    try:
+        app_config = get_config(request)
+        checkpointer = get_checkpointer(request)
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+        if checkpoint_tuple and checkpoint_tuple.checkpoint:
+            channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
+            if channel_values:
+                from app.gateway.routers.threads import _compute_context_usage
+                context_usage = _compute_context_usage(channel_values, app_config)
+    except Exception:
+        logger.debug("Failed to compute context usage for token-usage endpoint", exc_info=True)
+
+    return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)

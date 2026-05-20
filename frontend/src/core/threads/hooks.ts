@@ -17,8 +17,9 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import { fetchThreadTokenUsage, fetchContextUsage, clearThreadContext, compactThreadContext } from "./api";
+import type { ClearContextResponse, CompactContextResponse, ContextUsage } from "./api";
+import { contextUsageQueryKey, threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
@@ -341,6 +342,9 @@ export function useThreadStream({
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
         });
+        void queryClient.invalidateQueries({
+          queryKey: contextUsageQueryKey(threadIdRef.current),
+        });
       }
     },
     onFinish(state) {
@@ -354,6 +358,9 @@ export function useThreadStream({
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: contextUsageQueryKey(threadIdRef.current),
         });
       }
     },
@@ -884,6 +891,22 @@ export function useThreadTokenUsage(
   });
 }
 
+export function useContextUsage(
+  threadId?: string | null,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery<ContextUsage | null>({
+    queryKey: contextUsageQueryKey(threadId),
+    queryFn: async () => {
+      if (!threadId) return null;
+      return fetchContextUsage(threadId);
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useRunDetail(threadId: string, runId: string) {
   const apiClient = getAPIClient();
   return useQuery<Run>({
@@ -973,6 +996,50 @@ export function useRenameThread() {
           });
         },
       );
+    },
+  });
+}
+
+export function useClearContext() {
+  const queryClient = useQueryClient();
+  const { t } = useI18n();
+  return useMutation({
+    mutationFn: async ({ threadId }: { threadId: string }): Promise<ClearContextResponse> => {
+      return clearThreadContext(threadId);
+    },
+    onSuccess(_, { threadId }) {
+      toast.success(t.conversation.clearContextSuccess);
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId, "messages"],
+      });
+    },
+    onError() {
+      toast.error(t.conversation.compactFail);
+    },
+  });
+}
+
+export function useCompactContext() {
+  const queryClient = useQueryClient();
+  const { t } = useI18n();
+  return useMutation({
+    mutationFn: async ({ threadId }: { threadId: string }): Promise<CompactContextResponse> => {
+      return compactThreadContext(threadId);
+    },
+    onSuccess(data, { threadId }) {
+      toast.success(t.conversation.compactSuccess);
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId, "messages"],
+      });
+    },
+    onError() {
+      toast.error(t.conversation.compactFail);
     },
   });
 }

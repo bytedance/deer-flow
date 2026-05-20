@@ -177,6 +177,14 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    clearContext: string;
+    clearContextConfirmTitle: string;
+    clearContextConfirmDescription: string;
+    clearContextSuccess: string;
+    compact: string;
+    compactSuccess: string;
+    compactFail: string;
+    compactSummary: string;
   };
 
   // Chats
@@ -240,6 +248,7 @@ export interface Translations {
     unavailable: string;
     unavailableShort: string;
     note: string;
+    contextUsed: string;
     presets: {
       off: string;
       summary: string;
