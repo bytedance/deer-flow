@@ -17,7 +17,8 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
+import { fetchThreadTokenUsage, clearThreadContext, compactThreadContext } from "./api";
+import type { CompactContextResponse } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -973,6 +974,50 @@ export function useRenameThread() {
           });
         },
       );
+    },
+  });
+}
+
+export function useClearContext() {
+  const queryClient = useQueryClient();
+  const { t } = useI18n();
+  return useMutation({
+    mutationFn: async ({ threadId }: { threadId: string }) => {
+      return clearThreadContext(threadId);
+    },
+    onSuccess(_, { threadId }) {
+      toast.success(t.conversation.clearContextSuccess);
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId, "messages"],
+      });
+    },
+    onError() {
+      toast.error(t.conversation.compactFail);
+    },
+  });
+}
+
+export function useCompactContext() {
+  const queryClient = useQueryClient();
+  const { t } = useI18n();
+  return useMutation({
+    mutationFn: async ({ threadId }: { threadId: string }): Promise<CompactContextResponse> => {
+      return compactThreadContext(threadId);
+    },
+    onSuccess(data, { threadId }) {
+      toast.success(t.conversation.compactSuccess);
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", threadId, "messages"],
+      });
+    },
+    onError() {
+      toast.error(t.conversation.compactFail);
     },
   });
 }

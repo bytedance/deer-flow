@@ -9,6 +9,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { ContextActions } from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -153,6 +154,7 @@ export default function ChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
+              <ContextActions threadId={threadId} />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>

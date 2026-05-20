@@ -21,8 +21,9 @@ from langgraph.checkpoint.base import empty_checkpoint
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_config
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
 from deerflow.runtime.user_context import get_effective_user_id
@@ -141,6 +142,23 @@ class ThreadStateUpdateRequest(BaseModel):
     checkpoint_id: str | None = Field(default=None, description="Checkpoint to branch from")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
     as_node: str | None = Field(default=None, description="Node identity for the update")
+
+
+class ClearContextResponse(BaseModel):
+    """Response model for clear-context endpoint."""
+
+    success: bool
+    message: str
+    checkpoint_id: str | None = None
+
+
+class CompactContextResponse(BaseModel):
+    """Response model for compact endpoint."""
+
+    success: bool
+    message: str
+    summary: str | None = None
+    checkpoint_id: str | None = None
 
 
 class HistoryEntry(BaseModel):
@@ -646,3 +664,162 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
         raise HTTPException(status_code=500, detail="Failed to get thread history")
 
     return entries
+
+
+@router.post("/{thread_id}/clear-context", response_model=ClearContextResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def clear_thread_context(thread_id: str, request: Request) -> ClearContextResponse:
+    """Clear the conversation context for a thread.
+
+    Removes all messages from the checkpoint state so subsequent turns
+    start with a blank context.  Historical messages remain in run_events
+    so the frontend can still display them, but the AI will no longer see
+    them.
+    """
+    checkpointer = get_checkpointer(request)
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to get thread state")
+
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
+    metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+    channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}))
+
+    channel_values["messages"] = []
+    checkpoint["channel_values"] = channel_values
+    metadata["updated_at"] = now_iso()
+    metadata["source"] = "clear_context"
+    metadata["step"] = metadata.get("step", 0) + 1
+
+    write_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
+    except Exception:
+        logger.exception("Failed to clear context for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to clear context")
+
+    new_checkpoint_id: str | None = None
+    if isinstance(new_config, dict):
+        new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+
+    logger.info("Cleared context for thread %s", sanitize_log_param(thread_id))
+    return ClearContextResponse(
+        success=True,
+        message="Context cleared",
+        checkpoint_id=new_checkpoint_id,
+    )
+
+
+@router.post("/{thread_id}/compact", response_model=CompactContextResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def compact_thread_context(thread_id: str, request: Request) -> CompactContextResponse:
+    """Manually compact the conversation context for a thread.
+
+    Uses an LLM to generate a summary of all messages, then replaces the
+    checkpoint messages with the summary.  The AI will only see the
+    summary on subsequent turns.
+    """
+    from deerflow.models import create_chat_model
+
+    checkpointer = get_checkpointer(request)
+    app_config = get_config(request)
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to get thread state")
+
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
+    metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+    channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}))
+
+    raw_messages = channel_values.get("messages", [])
+    if not raw_messages:
+        raise HTTPException(status_code=400, detail="No messages to compact")
+
+    messages = list(raw_messages)
+    summarizable = [m for m in messages if getattr(m, "name", None) != "summary" and not is_dynamic_context_reminder(m)]
+    if not summarizable:
+        raise HTTPException(status_code=400, detail="No messages to compact")
+
+    try:
+        summarization_config = app_config.summarization
+        if summarization_config and summarization_config.model_name:
+            model = create_chat_model(name=summarization_config.model_name, thinking_enabled=False, app_config=app_config)
+        else:
+            model = create_chat_model(thinking_enabled=False, app_config=app_config)
+    except Exception:
+        logger.exception("Failed to create model for compaction of thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to initialize model for compaction")
+
+    from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
+    from langchain_core.messages import get_buffer_string, trim_messages
+
+    summary_prompt = DEFAULT_SUMMARY_PROMPT
+    if summarization_config and summarization_config.summary_prompt:
+        summary_prompt = summarization_config.summary_prompt
+
+    try:
+        max_tokens = 4000
+        if summarization_config and summarization_config.trim_tokens_to_summarize is not None:
+            max_tokens = summarization_config.trim_tokens_to_summarize
+
+        trimmed = trim_messages(summarizable, max_tokens=max_tokens, strategy="last", token_counter=len)
+        formatted = get_buffer_string(trimmed)
+
+        response = await model.ainvoke(
+            summary_prompt.format(messages=formatted).rstrip(),
+            config={"metadata": {"lc_source": "compact"}},
+        )
+        summary_text = response.text.strip()
+    except Exception:
+        logger.exception("Failed to generate summary for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to generate summary")
+
+    from langchain_core.messages import HumanMessage, RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    summary_message = HumanMessage(
+        content=f"Here is a summary of the conversation to date:\n\n{summary_text}",
+        name="summary",
+    )
+
+    channel_values["messages"] = [
+        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+        summary_message,
+    ]
+    checkpoint["channel_values"] = channel_values
+    metadata["updated_at"] = now_iso()
+    metadata["source"] = "compact"
+    metadata["step"] = metadata.get("step", 0) + 1
+
+    write_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
+    except Exception:
+        logger.exception("Failed to compact context for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to compact context")
+
+    new_checkpoint_id: str | None = None
+    if isinstance(new_config, dict):
+        new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+
+    logger.info("Compacted context for thread %s", sanitize_log_param(thread_id))
+    return CompactContextResponse(
+        success=True,
+        message="Context compacted",
+        summary=summary_text,
+        checkpoint_id=new_checkpoint_id,
+    )

@@ -246,6 +246,15 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    clearContext: "Clear Context",
+    clearContextConfirmTitle: "Clear conversation context?",
+    clearContextConfirmDescription:
+      "The AI will forget all previous context. Chat history will remain visible for reference, but new messages will start fresh.",
+    clearContextSuccess: "Context cleared",
+    compact: "Compact",
+    compactSuccess: "Context compressed",
+    compactFail: "Failed to compress context",
+    compactSummary: "Context Summary",
   },
 
   // Chats

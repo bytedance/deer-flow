@@ -177,6 +177,14 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    clearContext: string;
+    clearContextConfirmTitle: string;
+    clearContextConfirmDescription: string;
+    clearContextSuccess: string;
+    compact: string;
+    compactSuccess: string;
+    compactFail: string;
+    compactSummary: string;
   };
 
   // Chats
