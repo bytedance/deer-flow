@@ -1,9 +1,14 @@
 "use client";
 
 import { Eraser, Loader2Icon, Minimize2 } from "lucide-react";
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
+import type { ContextUsage } from "@/core/threads/api";
 import {
   useClearContext,
   useCompactContext,
@@ -21,10 +27,35 @@ import {
 import { useThread } from "./messages/context";
 import { Tooltip } from "./tooltip";
 
+export interface ContextEvent {
+  type: "clear" | "compact";
+  summary?: string;
+  timestamp: number;
+  contextUsage?: ContextUsage | null;
+}
+
+export const ContextEventContext = createContext<{
+  event: ContextEvent | null;
+  setEvent: (event: ContextEvent | null) => void;
+}>({
+  event: null,
+  setEvent: (_event: ContextEvent | null) => void _event,
+});
+
+export function useContextEvent() {
+  return useContext(ContextEventContext);
+}
+
+function formatPercentage(percentage: number | null | undefined): string {
+  if (percentage == null) return "";
+  return `${percentage}%`;
+}
+
 export function ContextActions({ threadId }: { threadId: string }) {
   const { t } = useI18n();
   const { thread } = useThread();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const { setEvent } = useContextEvent();
 
   const messages = thread.messages;
   const hasMessages = messages.length > 0;
@@ -38,7 +69,13 @@ export function ContextActions({ threadId }: { threadId: string }) {
 
   return (
     <>
-      <Tooltip content={t.conversation.clearContext}>
+      <Tooltip
+        content={
+          compactMutation.data?.context_usage?.percentage != null
+            ? `${t.conversation.clearContext} (${formatPercentage(compactMutation.data.context_usage.percentage)} used)`
+            : t.conversation.clearContext
+        }
+      >
         <Button
           className="text-muted-foreground hover:text-foreground"
           variant="ghost"
@@ -58,7 +95,21 @@ export function ContextActions({ threadId }: { threadId: string }) {
           className="text-muted-foreground hover:text-foreground"
           variant="ghost"
           size="icon"
-          onClick={() => compactMutation.mutate({ threadId })}
+          onClick={() =>
+            compactMutation.mutate(
+              { threadId },
+              {
+                onSuccess: (data) => {
+                  setEvent({
+                    type: "compact",
+                    summary: data.summary ?? undefined,
+                    timestamp: Date.now(),
+                    contextUsage: data.context_usage,
+                  });
+                },
+              },
+            )
+          }
           disabled={clearMutation.isPending || compactMutation.isPending}
         >
           {compactMutation.isPending ? (
@@ -93,8 +144,13 @@ export function ContextActions({ threadId }: { threadId: string }) {
                 clearMutation.mutate(
                   { threadId },
                   {
-                    onSuccess: () => {
+                    onSuccess: (data) => {
                       setClearDialogOpen(false);
+                      setEvent({
+                        type: "clear",
+                        timestamp: Date.now(),
+                        contextUsage: data.context_usage,
+                      });
                     },
                   },
                 );
@@ -108,5 +164,49 @@ export function ContextActions({ threadId }: { threadId: string }) {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+export function ContextEventDivider() {
+  const { t } = useI18n();
+  const { event, setEvent } = useContextEvent();
+
+  if (!event) return null;
+
+  const usage = event.contextUsage;
+  const percentageStr = usage?.percentage != null
+    ? ` · ${usage.percentage}% context`
+    : "";
+
+  return (
+    <div className="flex flex-col items-center gap-2 py-4">
+      <div className="bg-muted flex w-full items-center gap-2 rounded-lg px-4 py-2 text-xs">
+        <div className="bg-border h-px flex-1" />
+        <span className="text-muted-foreground shrink-0">
+          {event.type === "clear"
+            ? `✂ ${t.conversation.clearContextSuccess}${percentageStr}`
+            : `📦 ${t.conversation.compactSuccess}${percentageStr}`}
+        </span>
+        <div className="bg-border h-px flex-1" />
+        <button
+          className="text-muted-foreground hover:text-foreground ml-1 shrink-0 cursor-pointer"
+          onClick={() => setEvent(null)}
+        >
+          ✕
+        </button>
+      </div>
+      {event.type === "compact" && event.summary && (
+        <Collapsible className="w-full">
+          <CollapsibleTrigger className="text-muted-foreground hover:text-foreground w-full text-center text-xs cursor-pointer">
+            {t.conversation.compactSummary} ▾
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="bg-muted/50 mt-1 rounded-lg p-3 text-sm whitespace-pre-wrap">
+              {event.summary}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+    </div>
   );
 }

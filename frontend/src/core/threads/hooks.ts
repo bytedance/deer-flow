@@ -18,7 +18,7 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage, clearThreadContext, compactThreadContext } from "./api";
-import type { CompactContextResponse } from "./api";
+import type { ClearContextResponse, CompactContextResponse } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -982,7 +982,7 @@ export function useClearContext() {
   const queryClient = useQueryClient();
   const { t } = useI18n();
   return useMutation({
-    mutationFn: async ({ threadId }: { threadId: string }) => {
+    mutationFn: async ({ threadId }: { threadId: string }): Promise<ClearContextResponse> => {
       return clearThreadContext(threadId);
     },
     onSuccess(_, { threadId }) {

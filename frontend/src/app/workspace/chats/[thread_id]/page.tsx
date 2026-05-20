@@ -9,7 +9,12 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
-import { ContextActions } from "@/components/workspace/context-actions";
+import {
+  ContextActions,
+  ContextEventContext,
+  ContextEventDivider,
+} from "@/components/workspace/context-actions";
+import type { ContextEvent } from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -126,9 +131,11 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const [contextEvent, setContextEvent] = useState<ContextEvent | null>(null);
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
+    <ContextEventContext.Provider value={{ event: contextEvent, setEvent: setContextEvent }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
@@ -171,6 +178,7 @@ export default function ChatPage() {
                 isHistoryLoading={isHistoryLoading}
                 tokenUsageInlineMode={tokenUsageInlineMode}
               />
+              <ContextEventDivider />
             </div>
             <div
               className={cn(
@@ -256,7 +264,8 @@ export default function ChatPage() {
             </div>
           </main>
         </div>
-      </ChatBox>
+       </ChatBox>
+    </ContextEventContext.Provider>
     </ThreadContext.Provider>
   );
 }

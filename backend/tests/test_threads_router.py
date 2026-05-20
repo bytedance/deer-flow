@@ -516,6 +516,11 @@ def test_clear_context_returns_success() -> None:
     thread_id = "clear-test"
     _seed_thread_with_messages(app, thread_id)
 
+    mock_config = MagicMock()
+    mock_config.summarization = MagicMock()
+    mock_config.models = []
+    app.state.config = mock_config
+
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/clear-context")
 
@@ -524,6 +529,8 @@ def test_clear_context_returns_success() -> None:
     assert body["success"] is True
     assert body["message"] == "Context cleared"
     assert body["checkpoint_id"] is not None
+    assert body["context_usage"] is not None
+    assert body["context_usage"]["token_count"] == 0
 
 
 def test_clear_context_empties_messages() -> None:

@@ -23,10 +23,17 @@ export async function fetchThreadTokenUsage(
   return (await response.json()) as ThreadTokenUsageResponse;
 }
 
+export interface ContextUsage {
+  token_count: number;
+  max_context_tokens: number | null;
+  percentage: number | null;
+}
+
 export interface ClearContextResponse {
   success: boolean;
   message: string;
   checkpoint_id: string | null;
+  context_usage: ContextUsage | null;
 }
 
 export interface CompactContextResponse {
@@ -34,6 +41,7 @@ export interface CompactContextResponse {
   message: string;
   summary: string | null;
   checkpoint_id: string | null;
+  context_usage: ContextUsage | null;
 }
 
 export async function clearThreadContext(

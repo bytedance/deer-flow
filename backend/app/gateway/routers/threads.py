@@ -144,12 +144,21 @@ class ThreadStateUpdateRequest(BaseModel):
     as_node: str | None = Field(default=None, description="Node identity for the update")
 
 
+class ContextUsage(BaseModel):
+    """Context window usage info."""
+
+    token_count: int = Field(description="Approximate token count of current messages")
+    max_context_tokens: int | None = Field(default=None, description="Max context tokens from model config")
+    percentage: float | None = Field(default=None, description="Percentage of context window used (0-100)")
+
+
 class ClearContextResponse(BaseModel):
     """Response model for clear-context endpoint."""
 
     success: bool
     message: str
     checkpoint_id: str | None = None
+    context_usage: ContextUsage | None = None
 
 
 class CompactContextResponse(BaseModel):
@@ -159,6 +168,7 @@ class CompactContextResponse(BaseModel):
     message: str
     summary: str | None = None
     checkpoint_id: str | None = None
+    context_usage: ContextUsage | None = None
 
 
 class HistoryEntry(BaseModel):
@@ -666,6 +676,39 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
     return entries
 
 
+def _compute_context_usage(
+    channel_values: dict[str, Any],
+    app_config: Any | None = None,
+) -> ContextUsage | None:
+    """Compute approximate context window usage from channel_values."""
+    try:
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        raw_messages = channel_values.get("messages", [])
+        if not raw_messages:
+            return ContextUsage(token_count=0, max_context_tokens=None, percentage=0.0)
+
+        token_count = count_tokens_approximately(raw_messages)
+
+        max_context_tokens = None
+        percentage = None
+        if app_config and app_config.models:
+            model_config = app_config.models[0]
+            mt = getattr(model_config, "max_tokens", None)
+            if mt and isinstance(mt, int) and mt > 0:
+                max_context_tokens = mt
+                percentage = round(token_count / mt * 100, 1)
+
+        return ContextUsage(
+            token_count=token_count,
+            max_context_tokens=max_context_tokens,
+            percentage=percentage,
+        )
+    except Exception:
+        logger.debug("Failed to compute context usage", exc_info=True)
+        return None
+
+
 @router.post("/{thread_id}/clear-context", response_model=ClearContextResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def clear_thread_context(thread_id: str, request: Request) -> ClearContextResponse:
@@ -676,6 +719,7 @@ async def clear_thread_context(thread_id: str, request: Request) -> ClearContext
     so the frontend can still display them, but the AI will no longer see
     them.
     """
+    app_config = get_config(request)
     checkpointer = get_checkpointer(request)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -709,11 +753,14 @@ async def clear_thread_context(thread_id: str, request: Request) -> ClearContext
     if isinstance(new_config, dict):
         new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
 
+    context_usage = _compute_context_usage(channel_values, app_config)
+
     logger.info("Cleared context for thread %s", sanitize_log_param(thread_id))
     return ClearContextResponse(
         success=True,
         message="Context cleared",
         checkpoint_id=new_checkpoint_id,
+        context_usage=context_usage,
     )
 
 
@@ -817,9 +864,13 @@ async def compact_thread_context(thread_id: str, request: Request) -> CompactCon
         new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
 
     logger.info("Compacted context for thread %s", sanitize_log_param(thread_id))
+
+    context_usage = _compute_context_usage({"messages": [summary_message]}, app_config)
+
     return CompactContextResponse(
         success=True,
         message="Context compacted",
         summary=summary_text,
         checkpoint_id=new_checkpoint_id,
+        context_usage=context_usage,
     )
