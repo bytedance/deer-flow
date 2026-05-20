@@ -138,12 +138,13 @@ def test_pump_subagent_skill_chain_complete():
 
 
 def test_rotating_subagent_skill_chain_complete():
-    """Rotating subagent must mount vibration-fault-diagnosis + full ins toolchain (incl. orbit)."""
+    """Rotating subagent must mount device-context + rule skill + full ins toolchain."""
     from deerflow.config.agents_config import load_agent_config
 
     cfg = load_agent_config("fault-diagnosis--rotating")
     assert cfg is not None
     skills = set(cfg.skills or [])
+    assert "rotating-device-context" in skills
     assert "vibration-fault-diagnosis" in skills
     assert "ins-get-orbit-data" in skills
     assert "ins-extract-orbit-centerline-features" in skills

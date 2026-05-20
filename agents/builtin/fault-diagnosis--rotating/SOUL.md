@@ -124,30 +124,38 @@
 - `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
 - `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
 
-### 步骤 2：生成标准设备上下文 JSON，并做一致性校验
+### 步骤 2：获取原始树，由当前 Agent 生成标准设备上下文 JSON
 
 调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，并读取 `name` / `typeName` / `typeId` 作为当前设备上下文。
 
-随后调用底层设备上下文脚本。该脚本会先拉取原始子设备树，再通过 LLM 推理出标准 JSON：
+随后调用底层原始设备树脚本（**只取树，不在脚本内再起模型**）：
 
 ```bash
-python /opt/features-tool/tools/device_analysis.py "{macId}" "{componentId}" --output /mnt/user-data/outputs/device_context.json
+python /opt/features-tool/tools/device_analysis.py "{macId}" --output /mnt/user-data/outputs/device_tree_raw.json
 ```
 
-读取 `/mnt/user-data/outputs/device_context.json`，将其作为本轮诊断的设备结构参考。该文件至少包含：
+然后使用独立 skill `rotating-device-context` 的约束与模板，由当前 Agent 使用同一模型上下文，基于 `machine_service` 设备详情 + `/mnt/user-data/outputs/device_tree_raw.json` 原始树，推理并写出 `/mnt/user-data/outputs/device_context.json`。该文件至少包含：
 
 - `child_device_summary`
 - `device_type` / `process_type` / `device_structure`
 - `child_device_list`
 - `target_info`
 
-脚本负责生成标准 JSON；当前 Agent 只对这个结构化结果做一致性校验：
+推理要求（以 `rotating-device-context` skill 为准）：
 
 - 当前 `componentId` 是轴承、测点还是转子子设备
 - 是否存在 X/Y 双探头配对与轴承归属
 - 设备类型补位（汽轮机 / 离心压缩机 / 轴流压缩机 / 螺杆压缩机 / 齿轮箱等）
+- 当 `type_num=82` 的测点未挂在合适的 `80/70` 节点下时，根据名称补挂到合适位置；推力轴承一般优先联端；如无法判断或属于整机，再挂到机组根节点
+- 当 `type_num=82` 且名称包含轴振/转速时，忽略该测点
 
-如果 `device_context.json` 不存在、`target_info.target_kind == "unknown"`，或原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
+写文件要求：
+
+- 必须写出合法 JSON，不要写 markdown
+- `child_device_list` 必须保留所有有效测点，不允许丢点
+- `device_type` / `process_type` / `device_structure` 必须包含 `value` / `confidence` / `reason`
+
+如果 `device_tree_raw.json` 或 `device_context.json` 不存在、`target_info.target_kind == "unknown"`，或原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
 
 ### 步骤 3：执行真实旋转机组规则运行时
 
@@ -165,7 +173,7 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_dia
 
 - 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**在脚本里使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
 - 真实规则运行时会自行完成趋势采集、异常时刻选择、波形频谱提取、轨迹提取和候选故障竞争。
-- 运行时会额外落盘 `/mnt/user-data/outputs/device_context.json`，供排查和后续链路复用；该文件属于中间产物，不对用户暴露。
+- 规则运行时会直接复用前一步已经生成的 `/mnt/user-data/outputs/device_context.json`；如果该文件缺失或 `target_info` 无法解析，本轮诊断应直接失败，不要在 Python 规则侧再起独立模型兜底。
 - 作图所需原始趋势 / 频谱 / 轨迹数据会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段只能读取这些缓存，**禁止重新取数**。
 
 读取脚本 stdout，并检查 `/mnt/user-data/outputs/rotating_rule_result.json`：
