@@ -1,3 +1,4 @@
 from .factory import build_tracing_callbacks
+from .metadata import build_langfuse_trace_metadata
 
-__all__ = ["build_tracing_callbacks"]
+__all__ = ["build_langfuse_trace_metadata", "build_tracing_callbacks"]

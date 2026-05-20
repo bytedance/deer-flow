@@ -19,6 +19,7 @@ import asyncio
 import copy
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing import build_langfuse_trace_metadata
 
 from .manager import RunManager, RunRecord
 from .schemas import RunStatus
@@ -223,6 +226,23 @@ async def run_agent(
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
+
+        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
+        # can lift session_id / user_id / trace_name / tags onto the root trace.
+        # Caller-provided metadata wins via setdefault so external overrides
+        # (e.g. a frontend-supplied session_id) are preserved.
+        langfuse_metadata = build_langfuse_trace_metadata(
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=record.assistant_id,
+            model_name=record.model_name,
+            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+        if langfuse_metadata:
+            merged_metadata = dict(config.get("metadata") or {})
+            for key, value in langfuse_metadata.items():
+                merged_metadata.setdefault(key, value)
+            config["metadata"] = merged_metadata
 
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
