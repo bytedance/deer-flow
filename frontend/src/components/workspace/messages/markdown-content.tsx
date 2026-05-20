@@ -7,6 +7,10 @@ import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
+import {
+  isArtifactVirtualPath,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +27,7 @@ export type MarkdownContentProps = {
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
+  threadId?: string;
 };
 
 /** Renders markdown content. */
@@ -32,6 +37,7 @@ export function MarkdownContent({
   className,
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
+  threadId,
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
@@ -44,10 +50,15 @@ export function MarkdownContent({
           }
         }
         const { className, target, rel, ...rest } = props;
-        const external = isExternalUrl(props.href);
+        const artifactHref =
+          threadId && props.href && isArtifactVirtualPath(props.href)
+            ? resolveArtifactURL(props.href, threadId)
+            : props.href;
+        const external = isExternalUrl(artifactHref);
         return (
           <a
             {...rest}
+            href={artifactHref}
             className={cn(
               "text-primary decoration-primary/30 hover:decoration-primary/60 underline underline-offset-2 transition-colors",
               className,
@@ -59,7 +70,7 @@ export function MarkdownContent({
       },
       ...componentsFromProps,
     };
-  }, [componentsFromProps]);
+  }, [componentsFromProps, threadId]);
 
   if (!content) return null;
 

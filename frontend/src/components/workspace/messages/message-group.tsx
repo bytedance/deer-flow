@@ -46,12 +46,14 @@ export function MessageGroup({
   className,
   messages,
   isLoading = false,
+  threadId,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  threadId?: string;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
@@ -271,6 +273,7 @@ export function MessageGroup({
                         content={step.reasoning ?? ""}
                         isLoading={isLoading}
                         rehypePlugins={rehypePlugins}
+                        threadId={threadId}
                       />
                     }
                   ></ChainOfThoughtStep>,
@@ -345,6 +348,7 @@ export function MessageGroup({
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
                     rehypePlugins={rehypePlugins}
+                    threadId={threadId}
                   />
                 }
               ></ChainOfThoughtStep>

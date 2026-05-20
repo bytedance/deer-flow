@@ -331,6 +331,7 @@ function MessageContent_({
         rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"
         components={components}
+        threadId={threadId}
       />
     </AIElementMessageContent>
   );
