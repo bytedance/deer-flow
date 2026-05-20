@@ -190,12 +190,17 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
                 try:
-                    from acp.schema import TextContentBlock
+                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart
 
                     if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
-                        self._chunks.append(update.content.text)
+                        if isinstance(update, AgentMessageChunk):
+                            self._chunks.append(update.content.text)
+                        elif isinstance(update, AgentThoughtChunk):
+                            logger.debug("ACP agent thought [session=%s]: %s", session_id, update.content.text)
+                    elif isinstance(update, ToolCallStart):
+                        logger.debug("ACP agent tool call [session=%s, id=%s, kind=%s]: %s", session_id, update.tool_call_id, update.kind, update.title)
                 except Exception:
-                    pass
+                    logger.warning("ACP session_update failed [session=%s]", session_id, exc_info=True)
 
             async def request_permission(self, options, session_id: str, tool_call, **kwargs):  # type: ignore[override]
                 response = _build_permission_response(options, auto_approve=agent_config.auto_approve_permissions)
