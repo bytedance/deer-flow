@@ -393,16 +393,14 @@ class LocalSandbox(Sandbox):
 
         resolved_path = self._resolve_path(path)
         max_download_size = 100 * 1024 * 1024
-        chunk_size = 1024 * 1024
         try:
             file_size = os.path.getsize(resolved_path)
             if file_size > max_download_size:
                 raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
-            content = bytearray()
+            # TOCTOU note: the file could grow between getsize() and read(); accepted
+            # tradeoff since this is a controlled sandbox environment.
             with open(resolved_path, "rb") as f:
-                while chunk := f.read(chunk_size):
-                    content.extend(chunk)
-            return bytes(content)
+                return f.read()
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None

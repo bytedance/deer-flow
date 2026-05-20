@@ -1,4 +1,5 @@
 import base64
+import errno
 import logging
 import shlex
 import threading
@@ -11,6 +12,8 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
+
+_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -112,7 +115,7 @@ class AioSandbox(Sandbox):
             OSError: If the file cannot be retrieved from the sandbox.
         """
         # Reject path traversal before sending to the container API.
-        # LocalSandbox gets this implicitly via _resolve_path_with_mapping;
+        # LocalSandbox gets this implicitly via _resolve_path;
         # here the path is forwarded verbatim so we must check explicitly.
         normalised = path.replace("\\", "/")
         for segment in normalised.split("/"):
@@ -128,7 +131,18 @@ class AioSandbox(Sandbox):
 
         with self._lock:
             try:
-                return b"".join(self._client.file.download_file(path=path))
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in self._client.file.download_file(path=path):
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_SIZE:
+                        raise OSError(
+                            errno.EFBIG,
+                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                            path,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
             except OSError:
                 raise
             except Exception as e:
