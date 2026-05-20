@@ -76,7 +76,15 @@ async def get_mcp_tools() -> list[BaseTool]:
             except Exception as e:
                 logger.warning(f"Failed to load MCP interceptor {interceptor_path}: {e}", exc_info=True)
 
-        client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
+        use_tool_name_prefix = len(servers_config) > 1
+        if use_tool_name_prefix:
+            logger.info("Multiple MCP servers configured; enabling tool name prefixing to avoid cross-server name collisions")
+
+        client = MultiServerMCPClient(
+            servers_config,
+            tool_interceptors=tool_interceptors,
+            tool_name_prefix=use_tool_name_prefix,
+        )
 
         # Get all tools from all servers
         tools = await client.get_tools()
