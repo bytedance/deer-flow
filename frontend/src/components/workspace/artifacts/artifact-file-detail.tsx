@@ -34,6 +34,7 @@ import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
+import { withSafeParagraph } from "@/core/streamdown/components";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -305,7 +306,7 @@ export function ArtifactFilePreview({
         <Streamdown
           className="size-full"
           {...streamdownPlugins}
-          components={{ a: ArtifactLink }}
+          components={withSafeParagraph({ a: ArtifactLink })}
         >
           {content ?? ""}
         </Streamdown>

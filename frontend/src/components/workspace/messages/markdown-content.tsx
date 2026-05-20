@@ -1,13 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
-import type { AnchorHTMLAttributes } from "react";
+import { type AnchorHTMLAttributes } from "react";
 
 import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
 import { streamdownPlugins } from "@/core/streamdown";
+import { withSafeParagraph } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -34,7 +35,7 @@ export function MarkdownContent({
   components: componentsFromProps,
 }: MarkdownContentProps) {
   const components = useMemo(() => {
-    return {
+    return withSafeParagraph({
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
         if (typeof props.children === "string") {
           const match = /^citation:(.+)$/.exec(props.children);
@@ -58,7 +59,7 @@ export function MarkdownContent({
         );
       },
       ...componentsFromProps,
-    };
+    });
   }, [componentsFromProps]);
 
   if (!content) return null;

@@ -39,6 +39,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import { withSafeParagraph } from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -631,6 +632,7 @@ export function MemorySettingsPage() {
                 <Streamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
+                  components={withSafeParagraph()}
                 >
                   {summariesToMarkdown(memory, filteredSectionGroups, t)}
                 </Streamdown>

@@ -20,6 +20,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
+import { withSafeParagraph } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
@@ -128,7 +129,7 @@ export function SubtaskCard({
               label={
                 <Streamdown
                   {...streamdownPluginsWithWordAnimation}
-                  components={{ a: CitationLink }}
+                  components={withSafeParagraph({ a: CitationLink })}
                 >
                   {task.prompt}
                 </Streamdown>
