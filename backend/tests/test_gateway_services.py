@@ -114,6 +114,7 @@ def test_build_run_config_custom_agent_injects_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
     assert config["configurable"]["agent_name"] == "finalis"
+    assert config["run_name"] == "finalis"
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -143,6 +144,7 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["run_name"] == "other-agent"
 
 
 def test_build_run_config_context_custom_agent_injects_agent_name():
