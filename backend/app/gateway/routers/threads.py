@@ -231,6 +231,13 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
                 await checkpointer.adelete_thread(thread_id)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+        else:
+            try:
+                from app.gateway.checkpoint_maintenance import compact_sqlite_checkpointer
+
+                await compact_sqlite_checkpointer(checkpointer)
+            except Exception:
+                logger.debug("Could not compact checkpoint storage after deleting thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
