@@ -320,6 +320,7 @@ export const enUS: Translations = {
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
     note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    contextUsed: "Context used",
     presets: {
       off: "Off",
       summary: "Summary",

@@ -248,6 +248,7 @@ export interface Translations {
     unavailable: string;
     unavailableShort: string;
     note: string;
+    contextUsed: string;
     presets: {
       off: string;
       summary: string;

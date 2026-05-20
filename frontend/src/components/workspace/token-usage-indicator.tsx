@@ -26,6 +26,7 @@ import {
   type TokenUsagePreferences,
   type TokenUsageViewPreset,
 } from "@/core/messages/usage-model";
+import type { ContextUsage } from "@/core/threads/api";
 import { cn } from "@/lib/utils";
 
 interface TokenUsageIndicatorProps {
@@ -33,6 +34,7 @@ interface TokenUsageIndicatorProps {
   messages: Message[];
   pendingMessages?: Message[];
   backendUsage?: TokenUsage | null;
+  contextUsage?: ContextUsage | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -44,6 +46,7 @@ export function TokenUsageIndicator({
   messages,
   pendingMessages,
   backendUsage,
+  contextUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -114,6 +117,16 @@ export function TokenUsageIndicator({
                   </span>
                 </div>
               </div>
+              {contextUsage?.percentage != null && (
+                <div className="border-t pt-1">
+                  <div className="flex justify-between gap-4">
+                    <span>{t.tokenUsage.contextUsed}</span>
+                    <span className="font-mono font-medium">
+                      {contextUsage.percentage}%
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="text-muted-foreground">
