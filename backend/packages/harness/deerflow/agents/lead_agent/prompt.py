@@ -6,6 +6,8 @@ import threading
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from langgraph.config import get_config
+
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
@@ -551,11 +553,27 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_runtime_memory_context() -> str | None:
+    """Read an optional current-context hint from the active runtime config."""
+    try:
+        config = get_config()
+    except Exception:
+        return None
+
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    memory_context = configurable.get("memory_context")
+    if isinstance(memory_context, str):
+        stripped = memory_context.strip()
+        return stripped or None
+    return None
+
+
+def _get_memory_context(agent_name: str | None = None, current_context: str | None = None, *, app_config: AppConfig | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        current_context: Optional caller-supplied context used to rank memory facts.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
 
@@ -576,8 +594,15 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         if not config.enabled or not config.injection_enabled:
             return ""
 
+        context_hint = current_context if current_context is not None else _get_runtime_memory_context()
         memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+        memory_content = format_memory_for_injection(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            current_context=context_hint,
+            similarity_weight=config.similarity_weight,
+            confidence_weight=config.confidence_weight,
+        )
 
         if not memory_content.strip():
             return ""

@@ -17,7 +17,9 @@ def test_format_memory_includes_facts_section() -> None:
 
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
-    assert "Facts:" in result
+    assert "Layered Memory:" in result
+    assert "Semantic Memory:" in result
+    assert "Preference Memory:" in result
     assert "User uses PostgreSQL" in result
     assert "User prefers SQLAlchemy" in result
 
@@ -27,14 +29,36 @@ def test_format_memory_sorts_facts_by_confidence_desc() -> None:
         "user": {},
         "history": {},
         "facts": [
-            {"content": "Low confidence fact", "category": "context", "confidence": 0.4},
+            {"content": "Low confidence fact", "category": "knowledge", "confidence": 0.4},
             {"content": "High confidence fact", "category": "knowledge", "confidence": 0.95},
         ],
     }
 
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
+    assert "Layered Memory:" in result
     assert result.index("High confidence fact") < result.index("Low confidence fact")
+
+
+def test_format_memory_prefers_context_relevant_facts_when_context_is_provided() -> None:
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "User likes photography", "category": "preference", "confidence": 0.98},
+            {"content": "User is working on DeerFlow memory architecture", "category": "context", "confidence": 0.82},
+            {"content": "User prefers concise reviews", "category": "preference", "confidence": 0.9},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        current_context="Let's improve the DeerFlow memory architecture and retrieval flow.",
+    )
+
+    assert "Layered Memory:" in result
+    assert result.index("User is working on DeerFlow memory architecture") < result.index("User likes photography")
 
 
 def test_format_memory_respects_budget_when_adding_facts(monkeypatch) -> None:
