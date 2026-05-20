@@ -24,7 +24,6 @@ import {
   hasPresentFiles,
   hasReasoning,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import type { AgentThreadState } from "@/core/threads";
@@ -173,7 +172,6 @@ export function MessageList({
   isHistoryLoading?: boolean;
 }) {
   const { t } = useI18n();
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
@@ -304,7 +302,12 @@ export function MessageList({
                   <MarkdownContent
                     content={extractContentFromMessage(message)}
                     isLoading={thread.isLoading}
-                    rehypePlugins={rehypePlugins}
+                    animated={{
+                      animation: "fadeIn",
+                      duration: 200,
+                      sep: "word",
+                    }}
+                    isAnimating={thread.isLoading}
                   />
                   {renderTokenUsage({
                     messages: group.messages,
@@ -328,7 +331,12 @@ export function MessageList({
                   <MarkdownContent
                     content={extractContentFromMessage(group.messages[0])}
                     isLoading={thread.isLoading}
-                    rehypePlugins={rehypePlugins}
+                    animated={{
+                      animation: "fadeIn",
+                      duration: 200,
+                      sep: "word",
+                    }}
+                    isAnimating={thread.isLoading}
                     className="mb-4"
                   />
                 )}
@@ -430,7 +438,6 @@ export function MessageList({
                   <SubtaskCard
                     key={"task-group-" + taskId}
                     taskId={taskId!}
-                    isLoading={thread.isLoading}
                   />,
                 );
               }

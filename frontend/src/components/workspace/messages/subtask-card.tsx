@@ -18,8 +18,7 @@ import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
-import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
+import { streamdownPlugins } from "@/core/streamdown";
 import { useSubtask } from "@/core/tasks/context";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
@@ -32,15 +31,12 @@ import { MarkdownContent } from "./markdown-content";
 export function SubtaskCard({
   className,
   taskId,
-  isLoading,
 }: {
   className?: string;
   taskId: string;
-  isLoading: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const task = useSubtask(taskId)!;
   const icon = useMemo(() => {
     if (task.status === "completed") {
@@ -127,8 +123,10 @@ export function SubtaskCard({
             <ChainOfThoughtStep
               label={
                 <Streamdown
-                  {...streamdownPluginsWithWordAnimation}
-                  components={{ a: CitationLink }}
+                  {...streamdownPlugins}
+                  components={{ a: CitationLink as never }}
+                  animated={{ animation: "fadeIn", duration: 200, sep: "word" }}
+                  isAnimating={task.status === "in_progress"}
                 >
                   {task.prompt}
                 </Streamdown>
@@ -157,7 +155,6 @@ export function SubtaskCard({
                     <MarkdownContent
                       content={task.result}
                       isLoading={false}
-                      rehypePlugins={rehypePlugins}
                     />
                   ) : null
                 }

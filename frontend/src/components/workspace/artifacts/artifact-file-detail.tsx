@@ -305,7 +305,7 @@ export function ArtifactFilePreview({
         <Streamdown
           className="size-full"
           {...streamdownPlugins}
-          components={{ a: ArtifactLink }}
+          components={{ a: ArtifactLink as never }}
         >
           {content ?? ""}
         </Streamdown>

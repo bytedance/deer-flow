@@ -4,8 +4,6 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { StreamdownProps } from "streamdown";
 
-import { rehypeSplitWordsIntoSpans } from "../rehype";
-
 export const streamdownPlugins = {
   remarkPlugins: [
     remarkGfm,
@@ -14,17 +12,6 @@ export const streamdownPlugins = {
   rehypePlugins: [
     rehypeRaw,
     [rehypeKatex, { output: "html" }],
-  ] as StreamdownProps["rehypePlugins"],
-};
-
-export const streamdownPluginsWithWordAnimation = {
-  remarkPlugins: [
-    remarkGfm,
-    [remarkMath, { singleDollarTextMath: true }],
-  ] as StreamdownProps["remarkPlugins"],
-  rehypePlugins: [
-    [rehypeKatex, { output: "html" }],
-    rehypeSplitWordsIntoSpans,
   ] as StreamdownProps["rehypePlugins"],
 };
 

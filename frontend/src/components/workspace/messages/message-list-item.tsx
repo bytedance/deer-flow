@@ -13,7 +13,6 @@ import {
   type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
-import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -43,7 +42,6 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
@@ -219,7 +217,6 @@ function MessageContent_({
   isLoading?: boolean;
   threadId: string;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
   const components = useMemo(
     () => ({
@@ -328,7 +325,8 @@ function MessageContent_({
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+        animated={{ animation: "fadeIn", duration: 200, sep: "word" }}
+        isAnimating={isLoading}
         className="my-3"
         components={components}
       />

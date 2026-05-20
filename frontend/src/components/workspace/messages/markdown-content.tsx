@@ -19,19 +19,25 @@ function isExternalUrl(href: string | undefined): boolean {
 export type MarkdownContentProps = {
   content: string;
   isLoading: boolean;
-  rehypePlugins: MessageResponseProps["rehypePlugins"];
+  rehypePlugins?: MessageResponseProps["rehypePlugins"];
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
+  /** Pass-through to <Streamdown animated={...}>. Set to false to disable. */
+  animated?: MessageResponseProps["animated"];
+  /** Whether streaming animation is currently active. */
+  isAnimating?: MessageResponseProps["isAnimating"];
 };
 
 /** Renders markdown content. */
 export function MarkdownContent({
   content,
-  rehypePlugins,
+  rehypePlugins = streamdownPlugins.rehypePlugins,
   className,
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
+  animated,
+  isAnimating,
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
@@ -69,6 +75,8 @@ export function MarkdownContent({
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
       components={components}
+      animated={animated}
+      isAnimating={isAnimating}
     >
       {content}
     </MessageResponse>

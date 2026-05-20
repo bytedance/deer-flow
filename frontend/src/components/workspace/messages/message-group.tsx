@@ -31,7 +31,7 @@ import {
   extractReasoningContentFromMessage,
   findToolCallResult,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { reasoningPlugins } from "@/core/streamdown";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -105,7 +105,6 @@ export function MessageGroup({
       return filteredSteps[filteredSteps.length - 1];
     }
   }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -270,7 +269,13 @@ export function MessageGroup({
                       <MarkdownContent
                         content={step.reasoning ?? ""}
                         isLoading={isLoading}
-                        rehypePlugins={rehypePlugins}
+                        rehypePlugins={reasoningPlugins.rehypePlugins}
+                        animated={{
+                          animation: "fadeIn",
+                          duration: 200,
+                          sep: "word",
+                        }}
+                        isAnimating={isLoading}
                       />
                     }
                   ></ChainOfThoughtStep>,
@@ -344,7 +349,13 @@ export function MessageGroup({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
+                    rehypePlugins={reasoningPlugins.rehypePlugins}
+                    animated={{
+                      animation: "fadeIn",
+                      duration: 200,
+                      sep: "word",
+                    }}
+                    isAnimating={isLoading}
                   />
                 }
               ></ChainOfThoughtStep>

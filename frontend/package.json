@@ -83,7 +83,7 @@
     "remark-math": "^6.0.0",
     "shiki": "3.15.0",
     "sonner": "^2.0.7",
-    "streamdown": "1.4.0",
+    "streamdown": "^2.5.0",
     "tailwind-merge": "^3.4.0",
     "tokenlens": "^1.3.1",
     "unist-util-visit": "^5.0.0",
