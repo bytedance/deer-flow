@@ -301,6 +301,7 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+Run inputs sent with a `messages` list preserve standard LangChain-compatible roles such as `user`, `system`, `assistant`, and `tool` when Gateway builds agent state.
 
 #### Docker Production Deployment
 

@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
@@ -83,13 +83,10 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
         converted = []
         for msg in messages:
             if isinstance(msg, dict):
-                role = msg.get("role", msg.get("type", "user"))
-                content = msg.get("content", "")
-                if role in ("user", "human"):
-                    converted.append(HumanMessage(content=content))
-                else:
-                    # TODO: handle other message types (system, ai, tool)
-                    converted.append(HumanMessage(content=content))
+                try:
+                    converted.append(convert_to_messages([msg])[0])
+                except (NotImplementedError, TypeError, ValueError):
+                    converted.append(HumanMessage(content=msg.get("content", "")))
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
