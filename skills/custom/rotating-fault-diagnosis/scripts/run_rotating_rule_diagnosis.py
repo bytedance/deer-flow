@@ -37,6 +37,10 @@ def _cache_dir() -> Path:
     return Path(os.environ.get("DIAGNOSIS_OUTPUT_DIR", "/mnt/user-data/outputs")) / "rotating_rule_cache"
 
 
+def _device_context_path() -> Path:
+    return Path(os.environ.get("DIAGNOSIS_OUTPUT_DIR", "/mnt/user-data/outputs")) / "device_context.json"
+
+
 def _list_cache_files(cache_dir: Path) -> list[str]:
     if not cache_dir.exists():
         return []
@@ -80,6 +84,7 @@ async def _run(device_id: str, sub_device_id: str, diagnosis_time: str) -> dict[
             "artifacts": {
                 "cache_dir": str(cache_dir),
                 "cache_files": cache_files,
+                "device_context_path": str(_device_context_path()) if _device_context_path().exists() else None,
             },
             "warnings": warnings,
             "result": result.model_dump(),
@@ -117,6 +122,7 @@ def main() -> int:
             "artifacts": {
                 "cache_dir": str(_cache_dir()),
                 "cache_files": _list_cache_files(_cache_dir()),
+                "device_context_path": str(_device_context_path()) if _device_context_path().exists() else None,
             },
             "warnings": [],
         }

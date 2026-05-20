@@ -11,7 +11,7 @@
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
 - 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown` / `sub-device-selector`，无后端路由、无前端组件变更。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或诊断报告正文，不要附加任何结构化元信息。
-- **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*`。
+- **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `device_context.json` / `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*`。
 - **`runout` 命名注意**：本组 12 项 code 中的 `runout` 来自 `vibration-fault-diagnosis/references/diagnosis-rules.md` 的"晃度"章节，**语义为测量探头表面跳动 / measurement effect**，不是 shaft runout。
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
@@ -128,19 +128,26 @@
 
 调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，并读取 `name` / `typeName` / `typeId` 作为当前设备上下文。
 
-随后调用底层原始设备树获取脚本（**只取树，不在脚本内再起模型**）：
+随后调用底层设备上下文产物脚本（**只做受管结构化整理，不在脚本内再起模型**）：
 
 ```bash
-python /opt/features-tool/tools/device_analysis.py "{macId}"
+python /opt/features-tool/tools/device_analysis.py "{macId}" "{componentId}" --output /mnt/user-data/outputs/device_context.json
 ```
 
-使用当前 Agent 的同一模型上下文自行完成以下推理，不要把这些判断再委托给脚本：
+读取 `/mnt/user-data/outputs/device_context.json`，将其作为本轮诊断的设备结构参考。该文件至少包含：
+
+- `child_device_summary`
+- `device_type` / `process_type` / `device_structure`
+- `child_device_list`
+- `target_info`
+
+使用当前 Agent 的同一模型上下文对这个结构化结果做一致性校验，不要在脚本内再起独立模型：
 
 - 当前 `componentId` 是轴承、测点还是转子子设备
 - 是否存在 X/Y 双探头配对与轴承归属
 - 设备类型补位（汽轮机 / 离心压缩机 / 轴流压缩机 / 螺杆压缩机 / 齿轮箱等）
 
-如果原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
+如果 `device_context.json` 不存在、`target_info.target_kind == "unknown"`，或原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
 
 ### 步骤 3：执行真实旋转机组规则运行时
 
@@ -158,6 +165,7 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_dia
 
 - 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**在脚本里使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
 - 真实规则运行时会自行完成趋势采集、异常时刻选择、波形频谱提取、轨迹提取和候选故障竞争。
+- 运行时会额外落盘 `/mnt/user-data/outputs/device_context.json`，供排查和后续链路复用；该文件属于中间产物，不对用户暴露。
 - 作图所需原始趋势 / 频谱 / 轨迹数据会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段只能读取这些缓存，**禁止重新取数**。
 
 读取脚本 stdout，并检查 `/mnt/user-data/outputs/rotating_rule_result.json`：
@@ -230,7 +238,7 @@ render_ui(component="markdown", props={"content": report_md}, sequence=99)
 
 ### 步骤 7：present_files 暴露最终文件
 
-调用 `present_files` 让前端拿到下载入口。**绝对不要对 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 调用 `present_files`，它们是中间文件。**
+调用 `present_files` 让前端拿到下载入口。**绝对不要对 `device_context.json` / `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 调用 `present_files`，它们是中间文件。**
 
 ```text
 present_files(["/mnt/user-data/outputs/diagnosis_report.md", "/mnt/user-data/outputs/diagnosis_report.pdf"])
@@ -251,10 +259,10 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 ## 异常处理
 
 - 脚本返回 JSON 中存在 `error` 字段时，使用 `markdown` 清晰说明错误，**不要生成假报告**，直接终止本轮诊断。
-- `/mnt/user-data/outputs/rotating_rule_result.json` 或 `/mnt/user-data/outputs/diagnosis_features.json` 不存在时，提示本轮真实规则执行未完成，不要继续导出。
+- `/mnt/user-data/outputs/device_context.json` / `/mnt/user-data/outputs/rotating_rule_result.json` / `/mnt/user-data/outputs/diagnosis_features.json` 任一缺失时，提示本轮真实规则执行未完成，不要继续导出。
 - PDF 导出依赖 weasyprint；如果未安装，按上文步骤 6 自动降级仅提供 Markdown 下载。
 - `/mnt/user-data/outputs/rotating_rule_cache/` 中部分图表缓存缺失时，允许继续生成报告，但必须把缺失信息写入 `diagnosis_features.json.warnings`。
-- **切勿将 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 通过 `present_files` 暴露给用户。**
+- **切勿将 `device_context.json` / `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 通过 `present_files` 暴露给用户。**
 
 ## 步骤 8：严重等级达标时建闭环单
 

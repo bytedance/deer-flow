@@ -3197,7 +3197,7 @@ def _build_rule_optimization_conclusion(
 async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> DiagnosisResult:
     config = load_config()
     time_ms = datetime_input_to_ms(str(time))
-    context = await build_rule_device_context(device_id)
+    context = await build_rule_device_context(device_id, sub_device_id=sub_device_id)
     diagnosis_target = _resolve_target(context, sub_device_id, device_id, config)
     target_info = diagnosis_target.target_info
 

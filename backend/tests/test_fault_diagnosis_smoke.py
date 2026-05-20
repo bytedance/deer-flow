@@ -215,6 +215,7 @@ def test_subagent_contract_blocks_present(name):
     assert expected_skill in soul, f"{name} missing --rules-skill {expected_skill}"
     if name == "fault-diagnosis--rotating":
         assert "sub-device-selector" in soul
+        assert "device_context.json" in soul
         assert "run_rotating_rule_diagnosis.py" in soul
         assert "build_rotating_report_payload.py" in soul
         assert "rotating_rule_cache" in soul
@@ -286,6 +287,7 @@ def test_rotating_soul_uses_two_step_real_rule_flow():
     assert "focus_" not in soul
     assert "run_rotating_rule_diagnosis.py" in soul
     assert "build_rotating_report_payload.py" in soul
+    assert "device_context.json" in soul
     assert "rotating_rule_result.json" in soul
     assert "diagnosis_features.json" in soul
     assert "INS_ACCESS_TOKEN" in soul

@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "rotating-fault-diagnosis" / "scripts"
+FEATURES_TOOL_DIR = REPO_ROOT / "docker" / "sandbox" / "features-tool"
 
 
 def _load_module(filename: str, module_name: str):
@@ -228,6 +229,115 @@ def test_build_rotating_report_payload_keeps_engine_fallback_semantics(tmp_path,
     assert len(built["rule_matches"]) == 1
     assert built["rule_matches"][0]["fault_family"] == "no_specific_fault"
     assert built["rule_matches"][0]["confidence"] == "low"
+
+
+def test_build_device_context_artifact_contains_target_info(monkeypatch):
+    monkeypatch.syspath_prepend(str(FEATURES_TOOL_DIR))
+
+    from diagnosis.device_context_artifact import build_device_context_artifact
+    from diagnosis_rule.config import load_config
+
+    analysis = {
+        "device_id": "MAC-1",
+        "child_device_list": [
+            {
+                "id": "ROT-1",
+                "name": "离心压缩机转子",
+                "unit_type": 2,
+                "type_num": 80,
+                "children": [
+                    {
+                        "id": "BRG-1",
+                        "name": "联端轴承",
+                        "unit_type": 2,
+                        "type_num": 70,
+                        "children": [
+                            {
+                                "id": "P-101",
+                                "name": "联端X轴振",
+                                "unit_type": 3,
+                                "type_num": 83,
+                                "h_alarm": 20,
+                                "hh_alarm": 30,
+                                "belongShaftId": "S-1",
+                            },
+                            {
+                                "id": "P-102",
+                                "name": "联端Y轴振",
+                                "unit_type": 3,
+                                "type_num": 83,
+                                "h_alarm": 20,
+                                "hh_alarm": 30,
+                                "belongShaftId": "S-1",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "PT-1",
+                        "name": "入口流量",
+                        "unit_type": 3,
+                        "type_num": 82,
+                    },
+                ],
+            }
+        ],
+    }
+
+    artifact = build_device_context_artifact(analysis, load_config(), sub_device_id="P-101")
+
+    assert artifact["device_type"]["value"] == "离心式&轴流式压缩机"
+    assert artifact["process_type"]["value"] == "压缩机工艺"
+    assert artifact["target_info"]["target_kind"] == "probe"
+    assert artifact["target_info"]["probe_ids"] == ["P-101", "P-102"]
+    assert artifact["target_info"]["bearing_ids"] == ["BRG-1"]
+    assert artifact["target_info"]["target_device_type"] == "离心式&轴流式压缩机"
+    assert artifact["resolved_context"]["rotor_device_ids"] == ["ROT-1"]
+
+
+def test_run_rotating_rule_diagnosis_main_records_device_context_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
+    module = _load_module("run_rotating_rule_diagnosis.py", "run_rotating_rule_diagnosis_success")
+
+    device_context_path = tmp_path / "device_context.json"
+    device_context_path.write_text("{}", encoding="utf-8")
+
+    def _ok(_coro):
+        _coro.close()
+        return {
+            "ok": True,
+            "device_id": "MAC-1",
+            "sub_device_id": "BRG-1",
+            "diagnosis_time": "2026-05-20T08:00:00",
+            "runtime": {"entrypoint": "diagnosis_rule.run_diagnosis"},
+            "artifacts": {
+                "cache_dir": str(tmp_path / "rotating_rule_cache"),
+                "cache_files": [],
+                "device_context_path": str(device_context_path),
+            },
+            "warnings": [],
+            "result": {"fault_type": "unbalance"},
+        }
+
+    monkeypatch.setattr(module.asyncio, "run", _ok)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_rotating_rule_diagnosis.py",
+            "--device-id",
+            "MAC-1",
+            "--sub-device-id",
+            "BRG-1",
+            "--diagnosis-time",
+            "2026-05-20T08:00:00",
+            "--output",
+            str(tmp_path / "rotating_rule_result.json"),
+        ],
+    )
+
+    assert module.main() == 0
+    written = json.loads((tmp_path / "rotating_rule_result.json").read_text(encoding="utf-8"))
+    assert written["artifacts"]["device_context_path"] == str(device_context_path)
 
 
 def test_run_rotating_rule_diagnosis_main_serializes_error(tmp_path, monkeypatch):
