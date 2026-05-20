@@ -29,6 +29,7 @@ from deerflow.runtime.checkpointer.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_INSTALL,
     SQLITE_INSTALL,
+    warn_legacy_checkpointer_precedence,
 )
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
@@ -143,6 +144,7 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
 
     # Legacy: standalone checkpointer config takes precedence
     if app_config.checkpointer is not None:
+        warn_legacy_checkpointer_precedence(app_config)
         async with _async_checkpointer(app_config.checkpointer) as saver:
             yield saver
             return
