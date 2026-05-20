@@ -79,9 +79,16 @@ stop_all() {
     pkill -f "next-server" 2>/dev/null || true
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
+    # On macOS nginx changes its process title to "nginx: master pr …", which
+    # can prevent exact-name matches.  Kill by full command line first so our
+    # specific instance is found on both Linux and macOS, then fall back to
+    # name-based kill for any remaining nginx processes.
+    pkill -f "nginx.local.conf" 2>/dev/null || true
     pkill -9 nginx 2>/dev/null || true
-    # Force-kill any survivors still holding the service ports
+    # Force-kill any survivors still holding the service ports, including
+    # nginx's unified proxy port :2026 which was previously omitted.
     _kill_port 8001
+    _kill_port 2026
     _kill_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
