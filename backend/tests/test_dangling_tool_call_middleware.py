@@ -269,8 +269,26 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].tool_call_id == "write_file:36"
         assert patched[1].name == "write_file"
         assert patched[1].status == "error"
+        assert "write_file failed before execution" in patched[1].content
+        assert "no file was written" in patched[1].content
+        assert "large Markdown `content` payload" in patched[1].content
+        assert "Do not call `write_file` again" in patched[1].content
+        assert "normal assistant text" in patched[1].content
+        assert "Failed to parse tool arguments" in patched[1].content
+        assert 'bad {"json"}' not in patched[1].content
+
+    def test_non_write_file_invalid_tool_call_uses_generic_recovery_message(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_invalid_tool_calls([_invalid_tc(name="search", tc_id="search:1")])]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert patched[1].tool_call_id == "search:1"
+        assert patched[1].name == "search"
         assert "arguments were invalid" in patched[1].content
         assert "Failed to parse tool arguments" in patched[1].content
+        assert "write_file failed before execution" not in patched[1].content
 
     def test_valid_and_invalid_tool_calls_are_both_patched(self):
         mw = DanglingToolCallMiddleware()
