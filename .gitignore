@@ -49,6 +49,12 @@ debug.log
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
 
+# Local probe / scratch scripts
+tmp_probe/
+
+# recall_l2 evaluation run outputs (baseline.json is tracked, run-* are local artifacts)
+backend/tests/recall_l2/reports/run-*.json
+
 # pnpm
 .pnpm-store
 sandbox_image_cache.tar

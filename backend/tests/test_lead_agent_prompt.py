@@ -68,10 +68,9 @@ def test_build_custom_mounts_section_uses_explicit_app_config_without_global_rea
     assert "read-write" in section
 
 
-def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
-    mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
+def _patch_minimal_prompt_dependencies(monkeypatch, *, mounts=None):
     config = SimpleNamespace(
-        sandbox=SimpleNamespace(mounts=mounts),
+        sandbox=SimpleNamespace(mounts=mounts or []),
         skills=SimpleNamespace(container_path="/mnt/skills"),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
@@ -80,11 +79,35 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    return config
+
+
+def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
+    mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
+    _patch_minimal_prompt_dependencies(monkeypatch, mounts=mounts)
 
     prompt = prompt_module.apply_prompt_template()
 
     assert "`/home/user/shared`" in prompt
     assert "Custom Mounted Directories" in prompt
+
+
+def test_apply_prompt_template_uses_ehm_ai_workbench_as_default_agent_name(monkeypatch):
+    _patch_minimal_prompt_dependencies(monkeypatch)
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "You are EHM AI 工作台, an open-source super agent." in prompt
+    assert "DeerFlow 2.0" not in prompt
+
+
+def test_apply_prompt_template_prefers_explicit_agent_name(monkeypatch):
+    _patch_minimal_prompt_dependencies(monkeypatch)
+
+    prompt = prompt_module.apply_prompt_template(agent_name="my-custom-agent")
+
+    assert "You are my-custom-agent, an open-source super agent." in prompt
+    assert "You are EHM AI 工作台, an open-source super agent." not in prompt
 
 
 def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
