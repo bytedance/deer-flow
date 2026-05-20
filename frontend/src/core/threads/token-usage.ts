@@ -1,5 +1,6 @@
 import type { TokenUsage } from "@/core/messages/usage";
 
+import type { ContextUsage } from "./api";
 import type { ThreadTokenUsageResponse } from "./types";
 
 export function threadTokenUsageQueryKey(threadId?: string | null) {
@@ -17,4 +18,10 @@ export function threadTokenUsageToTokenUsage(
     outputTokens: usage.total_output_tokens ?? 0,
     totalTokens: usage.total_tokens ?? 0,
   };
+}
+
+export function threadTokenUsageToContextUsage(
+  usage: ThreadTokenUsageResponse | null | undefined,
+): ContextUsage | null {
+  return usage?.context_usage ?? null;
 }

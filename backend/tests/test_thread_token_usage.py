@@ -35,6 +35,10 @@ def test_thread_token_usage_returns_stable_shape():
     )
     app = _make_app(run_store)
 
+    mock_config = MagicMock()
+    mock_config.models = []
+    app.state.config = mock_config
+
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-1/token-usage")
 
@@ -51,5 +55,6 @@ def test_thread_token_usage_returns_stable_shape():
             "subagent": 25,
             "middleware": 5,
         },
+        "context_usage": None,
     }
     run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1")

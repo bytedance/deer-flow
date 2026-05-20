@@ -26,7 +26,7 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
-import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import { threadTokenUsageToContextUsage, threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -55,6 +55,7 @@ export default function AgentChatPage() {
     { enabled: tokenUsageEnabled && !isMock },
   );
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
+  const backendContextUsage = threadTokenUsageToContextUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
 
@@ -163,6 +164,7 @@ export default function AgentChatPage() {
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
+                contextUsage={backendContextUsage}
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}

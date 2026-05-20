@@ -16,6 +16,7 @@ test("maps backend thread token usage to UI token usage", () => {
       subagent: 25,
       middleware: 5,
     },
+    context_usage: null,
   };
 
   expect(threadTokenUsageToTokenUsage(response)).toEqual({
