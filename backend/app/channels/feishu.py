@@ -160,7 +160,7 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_bot_chat_entered).build()
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -218,9 +218,7 @@ class FeishuChannel(Channel):
                     await asyncio.sleep(delay)
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("Feishu send failed without an exception from any attempt")
-        raise last_exc
+        raise last_exc  # type: ignore[misc]
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -581,6 +579,10 @@ class FeishuChannel(Channel):
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
+
+    def _on_bot_chat_entered(self, event) -> None:
+        """Called when a user enters the bot's private chat (runs in lark thread)."""
+        logger.info("[Feishu] bot p2p chat entered: event_type=%s", type(event).__name__)
 
     def _on_message(self, event) -> None:
         """Called by lark-oapi when a message is received (runs in lark thread)."""
