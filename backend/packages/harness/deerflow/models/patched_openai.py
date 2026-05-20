@@ -25,6 +25,8 @@ from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
+from langchain_core.messages.ai import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 
@@ -89,6 +91,49 @@ class PatchedChatOpenAI(ChatOpenAI):
                 _restore_tool_call_signatures(payload_msg, ai_msg)
 
         return payload
+
+    def _create_chat_result(
+        self,
+        response: dict | Any,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        """Preserve raw tool calls on parsed AI messages.
+
+        ``langchain_openai`` parses tool calls into the normalized ``tool_calls``
+        field but drops the original raw payload, which is where Gemini gateways
+        attach ``thought_signature``. We keep a copy in ``additional_kwargs`` so
+        the next request can restore the signatures.
+        """
+        result = super()._create_chat_result(response, generation_info=generation_info)
+        response_dict = response if isinstance(response, dict) else response.model_dump()
+
+        for generation, choice in zip(result.generations, response_dict.get("choices", [])):
+            message = generation.message
+            raw_tool_calls = (choice.get("message") or {}).get("tool_calls")
+            if isinstance(message, AIMessage) and raw_tool_calls:
+                message.additional_kwargs.setdefault("tool_calls", raw_tool_calls)
+
+        return result
+
+    def _get_generation_chunk_from_completion(self, completion: Any) -> ChatGenerationChunk:
+        """Keep raw tool calls on the final streaming chunk.
+
+        The base implementation explicitly drops ``additional_kwargs['tool_calls']``
+        from the final completion chunk. For Gemini thinking gateways that removes
+        the only copy of ``thought_signature`` before the merged AI message is
+        stored in history.
+        """
+        chat_result = self._create_chat_result(completion)
+        chat_message = chat_result.generations[0].message
+        usage_metadata = chat_message.usage_metadata if isinstance(chat_message, AIMessage) else None
+        return ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                additional_kwargs=chat_message.additional_kwargs,
+                usage_metadata=usage_metadata,
+            ),
+            generation_info=chat_result.llm_output,
+        )
 
 
 def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:
