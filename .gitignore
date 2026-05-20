@@ -60,3 +60,9 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+
+# Hermes Agent plans
+.agents/plans/
+
+# OpenCode agent artifacts (plans, conversations, config, cache)
+.opencode/

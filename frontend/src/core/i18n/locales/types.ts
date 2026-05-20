@@ -236,6 +236,9 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+    cache: string;
+    cacheRead: string;
+    cacheCreation: string;
     view: string;
     unavailable: string;
     unavailableShort: string;

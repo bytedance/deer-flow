@@ -16,12 +16,16 @@ test("maps backend thread token usage to UI token usage", () => {
       subagent: 25,
       middleware: 5,
     },
+    cache_read_tokens: 10,
+    cache_creation_tokens: 5,
   };
 
   expect(threadTokenUsageToTokenUsage(response)).toEqual({
     inputTokens: 90,
     outputTokens: 60,
     totalTokens: 150,
+    cacheReadTokens: 10,
+    cacheCreationTokens: 5,
   });
 });
 

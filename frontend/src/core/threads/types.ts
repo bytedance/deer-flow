@@ -44,4 +44,6 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
 }

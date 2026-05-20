@@ -313,6 +313,8 @@ class TestRunRepository:
             "total_runs": 0,
             "by_model": {},
             "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
         }
         assert len(captured) == 1
 

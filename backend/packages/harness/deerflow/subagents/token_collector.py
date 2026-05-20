@@ -47,6 +47,12 @@ class SubagentTokenCollector(BaseCallbackHandler):
                 if total_tk <= 0:
                     continue
                 self._counted_run_ids.add(rid)
+                # Extract cache tokens from input_token_details
+                cache_read = 0
+                cache_creation = 0
+                input_details = usage_dict.get("input_token_details") or {}
+                cache_read = input_details.get("cache_read", 0) or 0
+                cache_creation = input_details.get("cache_creation", 0) or 0
                 self._records.append(
                     {
                         "source_run_id": rid,
@@ -54,6 +60,8 @@ class SubagentTokenCollector(BaseCallbackHandler):
                         "input_tokens": input_tk,
                         "output_tokens": output_tk,
                         "total_tokens": total_tk,
+                        "cache_read_tokens": cache_read,
+                        "cache_creation_tokens": cache_creation,
                     }
                 )
                 return

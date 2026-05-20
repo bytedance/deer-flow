@@ -428,7 +428,7 @@ class TestStream:
         assert events_with_usage[0].data["usage_metadata"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
         end_event = events[-1]
         assert end_event.type == "end"
-        assert end_event.data["usage"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+        assert end_event.data["usage"] == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7, "cache_read_tokens": 0, "cache_creation_tokens": 0}
 
         # The values snapshot itself is still emitted.
         assert any(e.type == "values" for e in events)
@@ -673,6 +673,7 @@ class TestStream:
         # The local ``usage`` is reused only for assertion comparisons
         # below, where structural dict equality is sufficient.
         usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        end_usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5, "cache_read_tokens": 0, "cache_creation_tokens": 0}
         agent = MagicMock()
         agent.stream.return_value = iter(
             [
@@ -711,7 +712,7 @@ class TestStream:
                     "artifacts": [],
                 },
             ),
-            ("end", {"usage": usage}),
+            ("end", {"usage": end_usage}),
         ]
         assert actual == expected
 

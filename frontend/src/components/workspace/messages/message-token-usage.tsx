@@ -12,11 +12,17 @@ function TokenUsageSummary({
   inputTokens,
   outputTokens,
   totalTokens,
+  cacheReadTokens,
+  cacheCreationTokens,
+  unavailable = false,
 }: {
   className?: string;
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  unavailable?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -31,15 +37,29 @@ function TokenUsageSummary({
         <CoinsIcon className="size-3" />
         {t.tokenUsage.label}
       </span>
-      <span>
-        {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
-      </span>
-      <span>
-        {t.tokenUsage.output}: {formatTokenCount(outputTokens ?? 0)}
-      </span>
-      <span className="font-medium">
-        {t.tokenUsage.total}: {formatTokenCount(totalTokens ?? 0)}
-      </span>
+      {!unavailable ? (
+        <>
+          <span>
+            {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
+          </span>
+          <span>
+            {t.tokenUsage.output}: {formatTokenCount(outputTokens ?? 0)}
+          </span>
+          {(cacheReadTokens ?? 0) > 0 || (cacheCreationTokens ?? 0) > 0 ? (
+            <span>
+              {t.tokenUsage.cache}: {formatTokenCount(cacheReadTokens ?? 0)}
+              {(cacheCreationTokens ?? 0) > 0
+                ? ` / ${formatTokenCount(cacheCreationTokens ?? 0)}`
+                : ""}
+            </span>
+          ) : null}
+          <span className="font-medium">
+            {t.tokenUsage.total}: {formatTokenCount(totalTokens ?? 0)}
+          </span>
+        </>
+      ) : (
+        <span>{t.tokenUsage.unavailableShort}</span>
+      )}
     </div>
   );
 }
@@ -77,6 +97,9 @@ export function MessageTokenUsageList({
       inputTokens={usage.inputTokens}
       outputTokens={usage.outputTokens}
       totalTokens={usage.totalTokens}
+      cacheReadTokens={usage.cacheReadTokens}
+      cacheCreationTokens={usage.cacheCreationTokens}
+      unavailable={!usage}
     />
   );
 }
@@ -141,6 +164,17 @@ export function MessageTokenUsageDebugList({
                     {" · "}
                     {t.tokenUsage.output}:{" "}
                     {formatTokenCount(step.usage.outputTokens)}
+                    {(step.usage.cacheReadTokens ?? 0) > 0 ||
+                    (step.usage.cacheCreationTokens ?? 0) > 0 ? (
+                      <>
+                        {" · "}
+                        {t.tokenUsage.cache}:{" "}
+                        {formatTokenCount(step.usage.cacheReadTokens ?? 0)}
+                        {(step.usage.cacheCreationTokens ?? 0) > 0
+                          ? ` / ${formatTokenCount(step.usage.cacheCreationTokens ?? 0)}`
+                          : ""}
+                      </>
+                    ) : null}
                   </>
                 ) : (
                   t.tokenUsage.unavailableShort
