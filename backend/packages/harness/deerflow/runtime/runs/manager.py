@@ -258,12 +258,17 @@ class RunManager:
             action: "interrupt" keeps checkpoint, "rollback" reverts to pre-run state.
 
         Sets the abort event with the action reason and cancels the asyncio task.
-        Returns ``True`` if the run was in-flight and cancellation was initiated.
+        Returns ``True`` if cancellation was initiated **or** the run was already
+        interrupted (idempotent — a second cancel is a no-op success).
+        Returns ``False`` only when the run is unknown to this worker or has
+        reached a terminal state other than interrupted (completed, failed, etc.).
         """
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
                 return False
+            if record.status == RunStatus.interrupted:
+                return True  # idempotent — already cancelled on this worker
             if record.status not in (RunStatus.pending, RunStatus.running):
                 return False
             record.abort_action = action
