@@ -126,9 +126,7 @@
 
 ### 步骤 2：获取原始树，由当前 Agent 生成标准设备上下文 JSON
 
-调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，并读取 `name` / `typeName` / `typeId` 作为当前设备上下文。
-
-随后调用底层原始设备树脚本（**只取树，不在脚本内再起模型**）：
+调用底层原始设备树脚本（**只取树，不在脚本内再起模型**）：
 
 ```bash
 python /opt/features-tool/tools/device_analysis.py "{macId}" --output /mnt/user-data/outputs/device_tree_raw.json
