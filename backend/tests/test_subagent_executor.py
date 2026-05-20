@@ -490,6 +490,35 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_passes_user_id_to_child_runtime_context(self, classes, base_config, msg):
+        """Subagent tools should see the same authenticated user as the parent run."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        captured_context: dict | None = None
+
+        async def capturing_astream(_state, **kwargs):
+            nonlocal captured_context
+            captured_context = kwargs.get("context")
+            yield {"messages": [msg.ai("done", "msg-user-context")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            user_id="user-42",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert captured_context == {"thread_id": "test-thread", "user_id": "user-42"}
+
+    @pytest.mark.anyio
     async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]

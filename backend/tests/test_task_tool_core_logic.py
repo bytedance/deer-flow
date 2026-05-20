@@ -24,11 +24,16 @@ class FakeSubagentStatus(Enum):
     TIMED_OUT = "timed_out"
 
 
-def _make_runtime(*, app_config=None) -> SimpleNamespace:
+def _make_runtime(*, app_config=None, user_id: str | None = None, user_id_in_metadata: str | None = None) -> SimpleNamespace:
     # Minimal ToolRuntime-like object; task_tool only reads these three attributes.
     context = {"thread_id": "thread-1"}
     if app_config is not None:
         context["app_config"] = app_config
+    if user_id is not None:
+        context["user_id"] = user_id
+    metadata = {"model_name": "ark-model", "trace_id": "trace-1"}
+    if user_id_in_metadata is not None:
+        metadata["user_id"] = user_id_in_metadata
     return SimpleNamespace(
         state={
             "sandbox": {"sandbox_id": "local"},
@@ -39,7 +44,7 @@ def _make_runtime(*, app_config=None) -> SimpleNamespace:
             },
         },
         context=context,
-        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1"}},
+        config={"metadata": metadata},
     )
 
 
@@ -88,6 +93,18 @@ class _DummyScheduledTask:
         return None
 
 
+def test_get_user_id_from_runtime_prefers_context_over_metadata():
+    runtime = _make_runtime(user_id="context-user", user_id_in_metadata="metadata-user")
+
+    assert task_tool_module._get_user_id_from_runtime(runtime) == "context-user"
+
+
+def test_get_user_id_from_runtime_falls_back_to_metadata():
+    runtime = _make_runtime(user_id_in_metadata="metadata-user")
+
+    assert task_tool_module._get_user_id_from_runtime(runtime) == "metadata-user"
+
+
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None)
     monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
@@ -121,7 +138,7 @@ def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
 def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypatch):
     app_config = object()
     config = _make_subagent_config(name="bash")
-    runtime = _make_runtime(app_config=app_config)
+    runtime = _make_runtime(app_config=app_config, user_id="user-42")
     events = []
     captured = {}
 
@@ -177,6 +194,7 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
     assert captured["bash_gate_app_config"] is app_config
     assert captured["tools_kwargs"]["app_config"] is app_config
     assert captured["executor_kwargs"]["app_config"] is app_config
+    assert captured["executor_kwargs"]["user_id"] == "user-42"
     assert captured["executor_kwargs"]["tools"] == ["tool-a"]
 
 

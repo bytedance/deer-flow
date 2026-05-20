@@ -155,6 +155,28 @@ def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     return None
 
 
+def _get_user_id_from_runtime(runtime: Any) -> str | None:
+    """Return the authenticated user ID carried by the parent runtime."""
+    if runtime is None:
+        return None
+
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        user_id = context.get("user_id")
+        if isinstance(user_id, str) and user_id:
+            return user_id
+
+    config = getattr(runtime, "config", None)
+    if isinstance(config, dict):
+        metadata = config.get("metadata", {})
+        if isinstance(metadata, dict):
+            user_id = metadata.get("user_id")
+            if isinstance(user_id, str) and user_id:
+                return user_id
+
+    return None
+
+
 def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
     """Return the effective subagent skill allowlist under the parent policy."""
     if parent is None:
@@ -234,6 +256,7 @@ async def task_tool(
     sandbox_state = None
     thread_data = None
     thread_id = None
+    user_id = None
     parent_model = None
     trace_id = None
     metadata: dict = {}
@@ -242,6 +265,7 @@ async def task_tool(
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        user_id = _get_user_id_from_runtime(runtime)
         if thread_id is None:
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
@@ -288,6 +312,7 @@ async def task_tool(
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "thread_id": thread_id,
+        "user_id": user_id,
         "trace_id": trace_id,
     }
     if resolved_app_config is not None:
