@@ -3,11 +3,13 @@
 # serve.sh — Unified DeerFlow service launcher
 #
 # Usage:
-#   ./scripts/serve.sh [--dev|--prod] [--daemon] [--stop|--restart]
+#   ./scripts/serve.sh [--dev|--prod] [--gateway] [--daemon] [--stop|--restart]
 #
 # Modes:
 #   --dev       Development mode with hot-reload (default)
 #   --prod      Production mode, pre-built frontend, no hot-reload
+#   --gateway   Gateway mode (experimental): skip LangGraph server,
+#               agent runtime embedded in Gateway API
 #   --daemon    Run all services in background (nohup), exit after startup
 #
 # Actions:
@@ -16,11 +18,13 @@
 #   --restart   Stop all services, then start with the given mode flags
 #
 # Examples:
-#   ./scripts/serve.sh --dev                 # Gateway dev, hot reload
-#   ./scripts/serve.sh --prod                # Gateway prod
-#   ./scripts/serve.sh --dev --daemon        # Gateway dev, background
+#   ./scripts/serve.sh --dev                 # Standard dev (4 processes)
+#   ./scripts/serve.sh --dev --gateway       # Gateway dev  (3 processes)
+#   ./scripts/serve.sh --prod --gateway      # Gateway prod (3 processes)
+#   ./scripts/serve.sh --dev --daemon        # Standard dev, background
+#   ./scripts/serve.sh --dev --gateway --daemon  # Gateway dev, background
 #   ./scripts/serve.sh --stop                # Stop all services
-#   ./scripts/serve.sh --restart --dev       # Restart dev services
+#   ./scripts/serve.sh --restart --dev --gateway # Restart in gateway mode
 #
 # Must be run from the repo root directory.
 
@@ -40,6 +44,7 @@ fi
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 DEV_MODE=true
+GATEWAY_MODE=false
 DAEMON_MODE=false
 SKIP_INSTALL=false
 ACTION="start"   # start | stop | restart
@@ -48,13 +53,14 @@ for arg in "$@"; do
     case "$arg" in
         --dev)     DEV_MODE=true ;;
         --prod)    DEV_MODE=false ;;
+        --gateway) GATEWAY_MODE=true ;;
         --daemon)  DAEMON_MODE=true ;;
         --skip-install) SKIP_INSTALL=true ;;
         --stop)    ACTION="stop" ;;
         --restart) ACTION="restart" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--stop|--restart]"
+            echo "Usage: $0 [--dev|--prod] [--gateway] [--daemon] [--skip-install] [--stop|--restart]"
             exit 1
             ;;
     esac
@@ -73,6 +79,7 @@ _kill_port() {
 
 stop_all() {
     echo "Stopping all services..."
+    pkill -f "langgraph dev" 2>/dev/null || true
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
@@ -81,6 +88,7 @@ stop_all() {
     sleep 1
     pkill -9 nginx 2>/dev/null || true
     # Force-kill any survivors still holding the service ports
+    _kill_port 2024
     _kill_port 8001
     _kill_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
@@ -101,11 +109,21 @@ if [ "$ACTION" = "restart" ]; then
     ALREADY_STOPPED=true
 fi
 
+# ── Derive runtime flags ────────────────────────────────────────────────────
+
+if $GATEWAY_MODE; then
+    export SKIP_LANGGRAPH_SERVER=1
+fi
+
 # Mode label for banner
-if $DEV_MODE; then
-    MODE_LABEL="DEV (Gateway runtime, hot-reload enabled)"
+if $DEV_MODE && $GATEWAY_MODE; then
+    MODE_LABEL="DEV + GATEWAY (experimental)"
+elif $DEV_MODE; then
+    MODE_LABEL="DEV (hot-reload enabled)"
+elif $GATEWAY_MODE; then
+    MODE_LABEL="PROD + GATEWAY (experimental)"
 else
-    MODE_LABEL="PROD (Gateway runtime, optimized)"
+    MODE_LABEL="PROD (optimized)"
 fi
 
 if $DAEMON_MODE; then
@@ -127,7 +145,8 @@ else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
-# Extra flags for uvicorn
+# Extra flags for uvicorn/langgraph
+LANGGRAPH_EXTRA_FLAGS="--no-reload"
 if $DEV_MODE && ! $DAEMON_MODE; then
     GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
 else
@@ -198,6 +217,32 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+# ── Sync frontend .env.local ─────────────────────────────────────────────────
+# Next.js .env.local takes precedence over process env vars.
+# The script manages the NEXT_PUBLIC_LANGGRAPH_BASE_URL line to ensure
+# the frontend routes match the active backend mode.
+
+FRONTEND_ENV_LOCAL="$REPO_ROOT/frontend/.env.local"
+ENV_KEY="NEXT_PUBLIC_LANGGRAPH_BASE_URL"
+
+sync_frontend_env() {
+    if $GATEWAY_MODE; then
+        # Point frontend to Gateway's compat API
+        if [ -f "$FRONTEND_ENV_LOCAL" ] && grep -q "^${ENV_KEY}=" "$FRONTEND_ENV_LOCAL"; then
+            sed -i.bak "s|^${ENV_KEY}=.*|${ENV_KEY}=/api/langgraph-compat|" "$FRONTEND_ENV_LOCAL" && rm -f "${FRONTEND_ENV_LOCAL}.bak"
+        else
+            echo "${ENV_KEY}=/api/langgraph-compat" >> "$FRONTEND_ENV_LOCAL"
+        fi
+    else
+        # Remove override — frontend falls back to /api/langgraph (standard)
+        if [ -f "$FRONTEND_ENV_LOCAL" ] && grep -q "^${ENV_KEY}=" "$FRONTEND_ENV_LOCAL"; then
+            sed -i.bak "/^${ENV_KEY}=/d" "$FRONTEND_ENV_LOCAL" && rm -f "${FRONTEND_ENV_LOCAL}.bak"
+        fi
+    fi
+}
+
+sync_frontend_env
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -208,7 +253,10 @@ echo ""
 echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
-echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
+if ! $GATEWAY_MODE; then
+    echo "    LangGraph   → localhost:2024  (agent runtime)"
+fi
+echo "    Gateway     → localhost:8001  (REST API$(if $GATEWAY_MODE; then echo " + agent runtime"; fi))"
 echo "    Frontend    → localhost:3000  (Next.js)"
 echo "    Nginx       → localhost:2026  (reverse proxy)"
 echo ""
@@ -216,20 +264,23 @@ echo ""
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
 cleanup() {
+    local exit_code="${1:-0}"
     trap - INT TERM
     echo ""
     stop_all
-    exit 0
+    exit "$exit_code"
 }
 
 trap cleanup INT TERM
 
 # ── Helper: start a service ──────────────────────────────────────────────────
 
-# run_service NAME COMMAND PORT TIMEOUT
-# In daemon mode, wraps with nohup. Waits for port to be ready.
+# run_service NAME COMMAND PORT TIMEOUT [HTTP_URL]
+# In daemon mode, wraps with nohup. Waits for port readiness and optionally
+# validates the service HTTP endpoint before moving on.
 run_service() {
-    local name="$1" cmd="$2" port="$3" timeout="$4"
+    local name="$1" cmd="$2" port="$3" timeout="$4" http_url="${5:-}"
+    local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
@@ -239,11 +290,29 @@ run_service() {
     fi
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
-        local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
-        [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup
+        [ -f "$logfile" ] && tail -60 "$logfile"
+        if [ "$name" = "LangGraph" ] && grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\\.yaml" "$logfile" 2>/dev/null; then
+            echo ""
+            echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
+        elif [ "$name" = "Gateway" ]; then
+            echo ""
+            echo "Likely configuration errors:"
+            grep -E "Failed to load configuration|Environment variable .* not found|config\\.yaml.*not found" "$logfile" | tail -5 || true
+            echo ""
+            echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
+        fi
+        cleanup 1
     }
+
+    if [ -n "$http_url" ]; then
+        bash ./scripts/wait-for-http.sh "$http_url" "$timeout" "$name" || {
+            echo "✗ $name readiness check failed. Last log output:"
+            [ -f "$logfile" ] && tail -60 "$logfile"
+            cleanup 1
+        }
+    fi
+
     echo "✓ $name started on localhost:$port"
 }
 
@@ -252,20 +321,41 @@ run_service() {
 mkdir -p logs
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
-# 1. Gateway API
+# 1. LangGraph (skip in gateway mode)
+if ! $GATEWAY_MODE; then
+    CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
+    LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
+    LANGGRAPH_JOBS_PER_WORKER="${LANGGRAPH_JOBS_PER_WORKER:-10}"
+    LANGGRAPH_ALLOW_BLOCKING="${LANGGRAPH_ALLOW_BLOCKING:-0}"
+    LANGGRAPH_ALLOW_BLOCKING_FLAG=""
+    if [ "$LANGGRAPH_ALLOW_BLOCKING" = "1" ]; then
+        LANGGRAPH_ALLOW_BLOCKING_FLAG="--allow-blocking"
+    fi
+    run_service "LangGraph" \
+        "cd backend && NO_COLOR=1 uv run langgraph dev --no-browser $LANGGRAPH_ALLOW_BLOCKING_FLAG --n-jobs-per-worker $LANGGRAPH_JOBS_PER_WORKER --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1" \
+        2024 60 \
+        "http://127.0.0.1:2024/docs"
+else
+    echo "⏩ Skipping LangGraph (Gateway mode — runtime embedded in Gateway)"
+fi
+
+# 2. Gateway API
 run_service "Gateway" \
     "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
-    8001 30
+    8001 30 \
+    "http://127.0.0.1:8001/health"
 
 # 2. Frontend
 run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
-    3000 120
+    3000 120 \
+    "http://127.0.0.1:3000"
 
 # 3. Nginx
 run_service "Nginx" \
     "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
+    2026 10 \
+    "http://127.0.0.1:2026/health"
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
@@ -276,11 +366,16 @@ echo "=========================================="
 echo ""
 echo "  🌐 http://localhost:2026"
 echo ""
-echo "  Routing: Frontend → Nginx → Gateway"
-echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
+if $GATEWAY_MODE; then
+    echo "  Routing: Frontend → Nginx → Gateway (embedded runtime)"
+    echo "  API:     /api/langgraph-compat/*  →  Gateway agent runtime"
+else
+    echo "  Routing: Frontend → Nginx → LangGraph + Gateway"
+    echo "  API:     /api/langgraph/*  →  LangGraph server (2024)"
+fi
 echo "           /api/*              →  Gateway REST API (8001)"
 echo ""
-echo "  📋 Logs: logs/{gateway,frontend,nginx}.log"
+echo "  📋 Logs: logs/{langgraph,gateway,frontend,nginx}.log"
 echo ""
 
 if $DAEMON_MODE; then
