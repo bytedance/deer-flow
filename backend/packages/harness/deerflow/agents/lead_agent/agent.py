@@ -9,6 +9,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.skill_review_middleware import SkillReviewMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -285,6 +286,18 @@ def _build_middlewares(
 
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+
+    # Add SkillReviewMiddleware if skill_evolution is enabled (after MemoryMiddleware)
+    skill_evolution_config = getattr(resolved_app_config, "skill_evolution", None)
+    skill_evolution_enabled = getattr(skill_evolution_config, "enabled", False)
+    logger.debug(
+        "SkillReviewMiddleware check: enabled=%s",
+        skill_evolution_enabled,
+    )
+    if skill_evolution_enabled:
+        mw = SkillReviewMiddleware(config=resolved_app_config)
+        middlewares.append(mw)
+        logger.debug("SkillReviewMiddleware appended to middleware chain (total: %d)", len(middlewares))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
