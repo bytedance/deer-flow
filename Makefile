@@ -39,7 +39,7 @@ help:
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init              - Prepare the sandbox image (build custom image or pull configured image)"
 	@echo "  make docker-start             - Start Docker services (mode-aware from config.yaml, localhost:2026)"
-	@echo "  make docker-start-backend-dev - Start with frontend (production/dist) + backend (development/hot-reload)"
+	@echo "  make docker-start-backend-dev - Start backend (dev/hot-reload) + nginx with pre-built frontend dist"
 	@echo "  make docker-build-frontend-dist - Build frontend dist image (run before docker-start-backend-dev)"
 	@echo "  make docker-stop              - Stop Docker development services"
 	@echo "  make docker-stop-backend-dev  - Stop Docker backend-dev services"

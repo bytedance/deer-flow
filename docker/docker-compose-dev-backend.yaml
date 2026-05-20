@@ -1,11 +1,15 @@
-# DeerFlow Hybrid Environment: Frontend (production) + Backend (development)
-# Usage: docker compose -p deer-flow-dev-backend -f docker-compose-dev-backend.yaml up --build
+# DeerFlow Backend Dev: Backend (hot-reload) + nginx (with pre-built frontend dist)
+# Usage:
+#   1. Build frontend dist:  make docker-build-frontend-dist
+#   2. Extract dist:         docker compose -p deer-flow-dev-backend -f docker-compose-dev-backend.yaml run --rm frontend-dist
+#   3. Start services:       docker compose -p deer-flow-dev-backend -f docker-compose-dev-backend.yaml up -d --remove-orphans gateway nginx
+#   Or simply:              make docker-start-backend-dev
 #
 # Services:
-#   - nginx:       Reverse proxy (port 2026)
-#   - frontend:    Next.js production server (pre-built dist, port 3000)
-#   - gateway:     FastAPI Gateway API + agent runtime (dev mode, hot-reload, port 8001)
-#   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
+#   - frontend-dist: One-shot init container that extracts pre-built frontend dist to shared volume
+#   - nginx:         Reverse proxy (port 2026) + Next.js production server (combined container)
+#   - gateway:       FastAPI Gateway API + agent runtime (dev mode, hot-reload, port 8001)
+#   - provisioner:   (optional) Sandbox provisioner for Kubernetes mode
 #
 # Access: http://localhost:2026
 
@@ -42,31 +46,34 @@ services:
       retries: 6
       start_period: 15s
 
-  # ── Reverse Proxy ──────────────────────────────────────────────────────
+  # ── Reverse Proxy + Next.js Production Server ─────────────────────────
+  # Runs nginx (port 2026) and serves pre-built frontend dist via Next.js.
+  # Build frontend dist first: make docker-build-frontend-dist
   nginx:
-    image: nginx:latest
+    build:
+      context: ./nginx-frontend
+      dockerfile: Dockerfile
     container_name: deer-flow-nginx
     ports:
       - "2026:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
-        exec nginx -g 'daemon off;'
+      - frontend-dist:/app/frontend:ro
+    environment:
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+    env_file:
+      - ../frontend/.env
     depends_on:
-      - frontend
       - gateway
     networks:
       - deer-flow-dev-backend
     restart: unless-stopped
 
-  # ── Frontend: Next.js Production (pre-built dist) ─────────────────────
-  frontend:
+  # ── Frontend Dist: One-shot init container ─────────────────────────────
+  # Extracts the pre-built frontend dist to a shared volume for nginx+node to use.
+  # Not started automatically; run manually or via make docker-start-backend-dev.
+  frontend-dist:
     build:
       context: ../
       dockerfile: frontend/Dockerfile
@@ -74,15 +81,23 @@ services:
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
-    container_name: deer-flow-frontend
-    environment:
-      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
-      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
-    env_file:
-      - ../frontend/.env
-    networks:
-      - deer-flow-dev-backend
-    restart: unless-stopped
+    container_name: deer-flow-frontend-dist
+    command: >
+      sh -c "
+        echo 'Extracting frontend dist to shared volume...' &&
+        mkdir -p /output &&
+        cp -r /app/frontend/.next /output/ &&
+        cp -r /app/frontend/node_modules /output/ &&
+        cp -r /app/frontend/public /output/ 2>/dev/null; true &&
+        cp -r /app/frontend/src /output/src 2>/dev/null; true &&
+        cp /app/frontend/package.json /output/ &&
+        cp /app/frontend/next.config.js /output/ 2>/dev/null; true &&
+        echo 'Frontend dist extracted successfully'
+      "
+    volumes:
+      - frontend-dist:/output
+    # This service only runs as a one-shot init container (docker compose run --rm)
+    restart: "no"
 
   # ── Backend: Gateway API (dev mode, hot-reload) ────────────────────────
   gateway:
@@ -139,6 +154,7 @@ services:
 volumes:
   gateway-venv:
   gateway-uv-cache:
+  frontend-dist:
 
 networks:
   deer-flow-dev-backend:

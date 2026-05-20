@@ -324,19 +324,19 @@ start-backend-dev() {
     local services
 
     echo "=========================================="
-    echo "  Starting DeerFlow Docker (Frontend: Prod + Backend: Dev)"
+    echo "  Starting DeerFlow Backend Dev (nginx serves pre-built frontend dist)"
     echo "=========================================="
     echo ""
 
     sandbox_mode="$(detect_sandbox_mode)"
     SANDBOX_IMAGE="$(get_configured_sandbox_image)"
 
-    services="frontend gateway nginx"
+    services="nginx gateway"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway provisioner nginx"
+        services="nginx gateway provisioner"
     fi
 
-    echo -e "${BLUE}Frontend: Production (pre-built dist)${NC}"
+    echo -e "${BLUE}Frontend: Pre-built dist (served by nginx + Node.js)${NC}"
     echo -e "${BLUE}Backend:  Development (hot-reload)${NC}"
     echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
     if [ "$sandbox_mode" = "provisioner" ]; then
@@ -397,17 +397,30 @@ start-backend-dev() {
         fi
     fi
 
+    # Check if frontend dist image has been built
+    cd "$DOCKER_DIR"
+    if docker image ls --filter "reference=*frontend-dist*" --format "{{.Repository}}" | grep -q "frontend-dist"; then
+        echo -e "${BLUE}Extracting pre-built frontend dist to shared volume...${NC}"
+        $COMPOSE_BACKEND_DEV_CMD run --rm frontend-dist
+        echo ""
+    else
+        echo -e "${YELLOW}⚠ Frontend dist not built yet. Frontend will not be available.${NC}"
+        echo -e "${YELLOW}  Run 'make docker-build-frontend-dist' first, then re-run this command.${NC}"
+        echo ""
+    fi
+
     echo "Building and starting containers..."
-    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD up -d --remove-orphans $services
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD up --build -d --remove-orphans $services
     echo ""
     echo "=========================================="
-    echo "  DeerFlow Docker is starting!"
+    echo "  DeerFlow Backend Dev is starting!"
     echo "=========================================="
     echo ""
     echo "  🌐 Application: http://localhost:2026"
     echo "  📡 API Gateway: http://localhost:2026/api/*"
-    echo "  🖥  Frontend:    Production (dist)"
+    echo "  🖥  Frontend:    Pre-built dist (via nginx + Node.js)"
     echo "  🔧 Backend:     Development (hot-reload)"
+    echo "  📖 API Docs:    http://localhost:2026/docs"
     echo ""
     echo "  📋 View logs: make docker-logs-backend-dev"
     echo "  🛑 Stop:      make docker-stop-backend-dev"
@@ -420,7 +433,7 @@ build-frontend-dist() {
     echo "  Building Frontend Dist Image"
     echo "=========================================="
     echo ""
-    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD build --no-cache frontend
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD build --no-cache frontend-dist
     echo ""
     echo -e "${GREEN}✓ Frontend dist image built${NC}"
     echo ""
@@ -546,7 +559,7 @@ help() {
     echo "Commands:"
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
-    echo "  start-backend-dev - Start with frontend (production/dist) + backend (development/hot-reload)"
+  	echo "  start-backend-dev - Start backend (dev/hot-reload) + nginx with pre-built frontend dist"
     echo "  build-frontend-dist - Build frontend dist image only (run before start-backend-dev)"
     echo "  restart           - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
