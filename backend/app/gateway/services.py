@@ -86,6 +86,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
@@ -855,9 +856,21 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     secrets / runtime flags read by tools and middlewares from ``runtime.context``;
     keeping them out of ``configurable`` avoids persisting a short-lived token in the
     checkpoint store.
+
+    Client capability context is runtime-only: it is sanitized and copied into
+    ``config['context']['client']`` but never into ``configurable``.
     """
+    existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
+        existing_client_context = sanitize_client_context(existing_runtime_context.get("client"))
+        if existing_client_context is None:
+            existing_runtime_context.pop("client", None)
+        else:
+            existing_runtime_context["client"] = existing_client_context
+
     if not context:
         return
+
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
@@ -876,6 +889,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
+
+    client_context = sanitize_client_context(context.get("client"))
+    if client_context is not None and isinstance(runtime_context, dict):
+        runtime_context.setdefault("client", client_context)
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
