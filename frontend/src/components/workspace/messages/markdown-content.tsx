@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import type { AnchorHTMLAttributes } from "react";
+import type { AnchorHTMLAttributes, HTMLAttributes } from "react";
 
 import {
   MessageResponse,
@@ -11,6 +11,10 @@ import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import {
+  filterPresentChildren,
+  hasBlockLevelChildren,
+} from "./markdown-content-utils";
 
 function isExternalUrl(href: string | undefined): boolean {
   return !!href && /^https?:\/\//.test(href);
@@ -24,6 +28,17 @@ export type MarkdownContentProps = {
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
 };
+
+function Paragraph({
+  children,
+  ...props
+}: HTMLAttributes<HTMLParagraphElement>) {
+  if (hasBlockLevelChildren(children)) {
+    return <>{filterPresentChildren(children)}</>;
+  }
+
+  return <p {...props}>{children}</p>;
+}
 
 /** Renders markdown content. */
 export function MarkdownContent({
@@ -57,6 +72,7 @@ export function MarkdownContent({
           />
         );
       },
+      p: Paragraph,
       ...componentsFromProps,
     };
   }, [componentsFromProps]);
