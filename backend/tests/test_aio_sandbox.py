@@ -242,16 +242,16 @@ class TestDownloadFile:
         """download_file should join chunks from the client iterator into bytes."""
         sandbox._client.file.download_file = MagicMock(return_value=[b"hel", b"lo"])
 
-        result = sandbox.download_file("/tmp/file.bin")
+        result = sandbox.download_file("/mnt/user-data/outputs/file.bin")
 
         assert result == b"hello"
-        sandbox._client.file.download_file.assert_called_once_with(path="/tmp/file.bin")
+        sandbox._client.file.download_file.assert_called_once_with(path="/mnt/user-data/outputs/file.bin")
 
     def test_returns_empty_bytes_for_empty_file(self, sandbox):
         """download_file should return b'' when the iterator yields nothing."""
         sandbox._client.file.download_file = MagicMock(return_value=iter([]))
 
-        result = sandbox.download_file("/tmp/empty.bin")
+        result = sandbox.download_file("/mnt/user-data/outputs/empty.bin")
 
         assert result == b""
 
@@ -265,7 +265,7 @@ class TestDownloadFile:
 
         sandbox._client.file.download_file = tracking_download
 
-        sandbox.download_file("/tmp/file.bin")
+        sandbox.download_file("/mnt/user-data/outputs/file.bin")
 
         assert lock_was_held == [True], "download_file must hold the lock during client call"
 
@@ -274,14 +274,25 @@ class TestDownloadFile:
         sandbox._client.file.download_file = MagicMock(side_effect=RuntimeError("network error"))
 
         with pytest.raises(OSError, match="network error"):
-            sandbox.download_file("/tmp/file.bin")
+            sandbox.download_file("/mnt/user-data/outputs/file.bin")
 
     def test_preserves_oserror_from_client(self, sandbox):
         """OSError raised by the client should propagate without re-wrapping."""
         sandbox._client.file.download_file = MagicMock(side_effect=OSError("disk error"))
 
         with pytest.raises(OSError, match="disk error"):
-            sandbox.download_file("/tmp/file.bin")
+            sandbox.download_file("/mnt/user-data/outputs/file.bin")
+
+    def test_rejects_path_outside_virtual_prefix_and_logs_error(self, sandbox, caplog):
+        """download_file must reject downloads outside /mnt/user-data and log the reason."""
+        sandbox._client.file.download_file = MagicMock()
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(PermissionError, match="must be under"):
+                sandbox.download_file("/etc/passwd")
+
+        assert "outside allowed directory" in caplog.text
+        sandbox._client.file.download_file.assert_not_called()
 
     @pytest.mark.parametrize(
         "path",
@@ -304,6 +315,6 @@ class TestDownloadFile:
         """download_file should work correctly with a single-chunk response."""
         sandbox._client.file.download_file = MagicMock(return_value=[b"single-chunk"])
 
-        result = sandbox.download_file("/tmp/single.bin")
+        result = sandbox.download_file("/mnt/user-data/outputs/single.bin")
 
         assert result == b"single-chunk"

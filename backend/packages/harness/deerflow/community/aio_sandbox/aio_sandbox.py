@@ -6,6 +6,7 @@ import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -106,7 +107,8 @@ class AioSandbox(Sandbox):
         """Download file bytes from the sandbox.
 
         Raises:
-            PermissionError: If the path contains '..' traversal segments.
+            PermissionError: If the path contains '..' traversal segments or is
+                outside ``VIRTUAL_PATH_PREFIX``.
             OSError: If the file cannot be retrieved from the sandbox.
         """
         # Reject path traversal before sending to the container API.
@@ -115,7 +117,14 @@ class AioSandbox(Sandbox):
         normalised = path.replace("\\", "/")
         for segment in normalised.split("/"):
             if segment == "..":
+                logger.error(f"Refused download due to path traversal: {path}")
                 raise PermissionError(f"Access denied: path traversal detected in '{path}'")
+
+        stripped_path = normalised.lstrip("/")
+        allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+        if stripped_path != allowed_prefix and not stripped_path.startswith(f"{allowed_prefix}/"):
+            logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
+            raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
         with self._lock:
             try:
