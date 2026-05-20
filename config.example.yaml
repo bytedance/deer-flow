@@ -601,6 +601,11 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Automatically restart crashed sandbox containers (default: true)
+#   # When enabled, a dead container is detected on the next tool call and
+#   # transparently replaced with a fresh one. Set to false to disable.
+#   # auto_restart: true
+#
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
 #   # mounts:

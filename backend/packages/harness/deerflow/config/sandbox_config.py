@@ -23,6 +23,9 @@ class SandboxConfig(BaseModel):
         replicas: Maximum number of concurrent sandbox containers (default: 3). When the limit is reached the least-recently-used sandbox is evicted to make room.
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         idle_timeout: Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.
+        auto_restart: Automatically restart sandbox containers that have crashed (default: true). When a tool call
+            detects the container is no longer alive, the sandbox is evicted from cache and transparently recreated
+            on the next acquire. Set to false to disable.
         mounts: List of volume mounts to share directories with the container
         environment: Environment variables to inject into the container (values starting with $ are resolved from host env)
     """
@@ -54,6 +57,10 @@ class SandboxConfig(BaseModel):
     idle_timeout: int | None = Field(
         default=None,
         description="Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.",
+    )
+    auto_restart: bool = Field(
+        default=True,
+        description="Automatically restart sandbox containers that have crashed. When a tool call detects the container is no longer alive, the sandbox is evicted from cache and transparently recreated on the next acquire.",
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,

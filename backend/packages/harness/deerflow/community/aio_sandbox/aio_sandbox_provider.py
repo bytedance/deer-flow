@@ -80,6 +80,7 @@ class AioSandboxProvider(SandboxProvider):
         port: 8080                      # Base port for local containers
         container_prefix: deer-flow-sandbox
         idle_timeout: 600               # Idle timeout in seconds (0 to disable)
+        auto_restart: true              # Restart crashed containers automatically
         replicas: 3                     # Max concurrent sandbox containers (LRU eviction when exceeded)
         mounts:                         # Volume mounts for local containers
           - host_path: /path/on/host
@@ -164,12 +165,14 @@ class AioSandboxProvider(SandboxProvider):
 
         idle_timeout = getattr(sandbox_config, "idle_timeout", None)
         replicas = getattr(sandbox_config, "replicas", None)
+        auto_restart = getattr(sandbox_config, "auto_restart", True)
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "auto_restart": auto_restart,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
@@ -608,17 +611,57 @@ class AioSandboxProvider(SandboxProvider):
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.
 
+        When ``auto_restart`` is enabled (the default), the container's liveness
+        is verified on each lookup.  If the underlying container has crashed, the
+        sandbox is evicted from all caches so that the next ``acquire()`` call will
+        transparently create a fresh container.
+
         Args:
             sandbox_id: The ID of the sandbox.
 
         Returns:
-            The sandbox instance if found, None otherwise.
+            The sandbox instance if found and alive, None otherwise.
         """
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
-            if sandbox is not None:
-                self._last_activity[sandbox_id] = time.time()
+            if sandbox is None:
+                return None
+            self._last_activity[sandbox_id] = time.time()
+            auto_restart = self._config.get("auto_restart", True)
+            info = self._sandbox_infos.get(sandbox_id) if auto_restart else None
+
+        if not info:
             return sandbox
+
+        if self._backend.is_alive(info):
+            return sandbox
+
+        info_to_destroy = None
+        with self._lock:
+            current_sandbox = self._sandboxes.get(sandbox_id)
+            current_info = self._sandbox_infos.get(sandbox_id)
+            if current_sandbox is None:
+                return None
+            if current_info is not info:
+                self._last_activity[sandbox_id] = time.time()
+                return current_sandbox
+
+            logger.warning(f"Sandbox {sandbox_id} container is not alive, evicting from cache for auto-restart")
+            self._sandboxes.pop(sandbox_id, None)
+            self._sandbox_infos.pop(sandbox_id, None)
+            self._last_activity.pop(sandbox_id, None)
+            self._warm_pool.pop(sandbox_id, None)
+            thread_ids = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
+            for tid in thread_ids:
+                del self._thread_sandboxes[tid]
+            info_to_destroy = info
+
+        if info_to_destroy:
+            try:
+                self._backend.destroy(info_to_destroy)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup dead sandbox {sandbox_id}: {e}")
+        return None
 
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use into the warm pool.
