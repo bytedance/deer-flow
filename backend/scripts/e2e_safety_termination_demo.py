@@ -126,14 +126,8 @@ def main() -> int:
             (e for e in reversed(events) if e["type"] == "values"),
             None,
         )
-        tool_messages = [
-            e for e in events
-            if e["type"] == "messages-tuple" and isinstance(e["data"], dict) and e["data"].get("type") == "tool"
-        ]
-        ai_tool_call_messages = [
-            e for e in events
-            if e["type"] == "messages-tuple" and isinstance(e["data"], dict) and e["data"].get("type") == "ai" and e["data"].get("tool_calls")
-        ]
+        tool_messages = [e for e in events if e["type"] == "messages-tuple" and isinstance(e["data"], dict) and e["data"].get("type") == "tool"]
+        ai_tool_call_messages = [e for e in events if e["type"] == "messages-tuple" and isinstance(e["data"], dict) and e["data"].get("type") == "ai" and e["data"].get("tool_calls")]
 
         print(f"\n[stats] total stream events: {len(events)}")
         print(f"[stats] model call count: {fake.call_count}")

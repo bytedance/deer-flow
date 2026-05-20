@@ -1,8 +1,9 @@
 """Configuration for SafetyFinishReasonMiddleware.
 
 Mirrors the shape of GuardrailsConfig: detectors are loaded by class path
-through ``deerflow.reflection.resolve_class`` so users can drop in custom
-provider detectors without modifying core code.
+through ``deerflow.reflection.resolve_variable`` (same loader the
+``guardrails.provider`` config uses) so users can drop in custom provider
+detectors without modifying core code.
 """
 
 from __future__ import annotations
@@ -14,10 +15,7 @@ class SafetyDetectorConfig(BaseModel):
     """One detector entry under ``safety_finish_reason.detectors``."""
 
     use: str = Field(
-        description=(
-            "Class path of a SafetyTerminationDetector implementation "
-            "(e.g. 'deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector')."
-        ),
+        description=("Class path of a SafetyTerminationDetector implementation (e.g. 'deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector')."),
     )
     config: dict = Field(
         default_factory=dict,

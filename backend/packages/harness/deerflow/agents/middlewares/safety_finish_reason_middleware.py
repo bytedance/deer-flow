@@ -269,13 +269,13 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             return None
 
         last = messages[-1]
-        if getattr(last, "type", None) != "ai":
+        if not isinstance(last, AIMessage):
             return None
 
         # Issue scope: only intervene when there's something to suppress.
         # ``content_filter`` without tool_calls is allowed through unchanged
         # so the partial text response (if any) reaches the user naturally.
-        tool_calls = getattr(last, "tool_calls", None)
+        tool_calls = last.tool_calls
         if not tool_calls:
             return None
 
