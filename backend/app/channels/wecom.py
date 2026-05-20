@@ -113,6 +113,18 @@ class WeComChannel(Channel):
         if msg.channel_name != self.name:
             return
 
+        # Send attachments BEFORE the final stream reply.
+        # WeCom WS protocol closes stream context after
+        # reply_stream(is_final=True); subsequent file replies are ignored.
+        if msg.is_final:
+            for attachment in msg.attachments:
+                try:
+                    success = await self.send_file(msg, attachment)
+                    if not success:
+                        logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
+                except Exception:
+                    logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+
         try:
             await self.send(msg)
         except Exception:
@@ -121,17 +133,18 @@ class WeComChannel(Channel):
                 self._clear_ws_context(msg.thread_ts)
             return
 
-        for attachment in msg.attachments:
-            try:
-                success = await self.send_file(msg, attachment)
-                if not success:
-                    logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
-            except Exception:
-                logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+        # Remaining attachments (non-final messages only)
+        if not msg.is_final:
+            for attachment in msg.attachments:
+                try:
+                    success = await self.send_file(msg, attachment)
+                    if not success:
+                        logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
+                except Exception:
+                    logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
 
         if msg.is_final:
             self._clear_ws_context(msg.thread_ts)
-
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not msg.is_final:
             return True
