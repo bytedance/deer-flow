@@ -23,12 +23,14 @@ class DiscordChannel(Channel):
     Configuration keys (in ``config.yaml`` under ``channels.discord``):
         - ``bot_token``: Discord Bot token.
         - ``allowed_guilds``: (optional) List of allowed Discord guild IDs. Empty = allow all.
-        - ``mention_only``: (optional) If true, only respond when the bot is mentioned.
+        - ``mention_only``: (optional) Only respond when the bot is @-mentioned.
+          Defaults to ``true`` — set to ``false`` to have the bot respond to every
+          message in the channel (not recommended for shared servers).
         - ``allowed_channels``: (optional) List of channel IDs where messages are always accepted
           (even when mention_only is true). Use for channels where you want the bot to respond
           without mentions. Empty = mention_only applies everywhere.
         - ``thread_mode``: (optional) If true, group a channel conversation into a thread.
-          Default: same as ``mention_only``.
+          Default: same as ``mention_only`` (true).
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -40,8 +42,8 @@ class DiscordChannel(Channel):
                 self._allowed_guilds.add(int(guild_id))
             except (TypeError, ValueError):
                 continue
-        self._mention_only: bool = bool(config.get("mention_only", False))
-        self._thread_mode: bool = config.get("thread_mode", self._mention_only)
+        self._mention_only: bool = bool(config.get("mention_only", True))
+        self._thread_mode: bool = bool(config.get("thread_mode", self._mention_only))
         self._allowed_channels: set[str] = set()
         for channel_id in config.get("allowed_channels", []):
             self._allowed_channels.add(str(channel_id))
