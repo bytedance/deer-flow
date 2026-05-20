@@ -34,6 +34,7 @@ def _runtime(
     thread_id: str | None = "thread-1",
     agent_name: str | None = None,
     user_id: str | None = None,
+    memory_enabled: bool | None = None,
 ) -> SimpleNamespace:
     context = {}
     if thread_id is not None:
@@ -42,6 +43,8 @@ def _runtime(
         context["agent_name"] = agent_name
     if user_id is not None:
         context["user_id"] = user_id
+    if memory_enabled is not None:
+        context["memory_enabled"] = memory_enabled
     return SimpleNamespace(context=context)
 
 
@@ -229,6 +232,24 @@ def test_memory_flush_hook_skips_when_thread_id_missing(monkeypatch: pytest.Monk
     queue.add_nowait.assert_not_called()
 
 
+def test_memory_flush_hook_enqueues_when_runtime_memory_context_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    queue = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_queue", lambda: queue)
+
+    memory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=(),
+            thread_id="thread-1",
+            agent_name=None,
+            runtime=_runtime(),
+        )
+    )
+
+    queue.add_nowait.assert_called_once()
+
+
 def test_memory_flush_hook_enqueues_filtered_messages_and_flushes(monkeypatch: pytest.MonkeyPatch) -> None:
     queue = MagicMock()
     messages = [
@@ -245,7 +266,7 @@ def test_memory_flush_hook_enqueues_filtered_messages_and_flushes(monkeypatch: p
             preserved_messages=(),
             thread_id="thread-1",
             agent_name=None,
-            runtime=_runtime(),
+            runtime=_runtime(memory_enabled=True),
         )
     )
 
@@ -634,7 +655,7 @@ def test_memory_flush_hook_preserves_agent_scoped_memory(monkeypatch: pytest.Mon
             preserved_messages=(),
             thread_id="thread-1",
             agent_name="research-agent",
-            runtime=_runtime(agent_name="research-agent"),
+            runtime=_runtime(agent_name="research-agent", memory_enabled=True),
         )
     )
 
@@ -653,7 +674,7 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
             preserved_messages=(),
             thread_id="main",
             agent_name="researcher",
-            runtime=_runtime(thread_id="main", agent_name="researcher", user_id="alice"),
+            runtime=_runtime(thread_id="main", agent_name="researcher", user_id="alice", memory_enabled=True),
         )
     )
 

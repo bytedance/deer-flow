@@ -189,6 +189,7 @@ def test_run_create_request_accepts_context():
             "model_name": "deepseek-v3",
             "thinking_enabled": True,
             "is_plan_mode": True,
+            "memory_enabled": True,
             "subagent_enabled": True,
             "thread_id": "some-thread-id",
         },
@@ -196,6 +197,7 @@ def test_run_create_request_accepts_context():
     assert body.context is not None
     assert body.context["model_name"] == "deepseek-v3"
     assert body.context["is_plan_mode"] is True
+    assert body.context["memory_enabled"] is True
     assert body.context["subagent_enabled"] is True
 
 
@@ -224,6 +226,7 @@ def test_context_merges_into_configurable():
         "reasoning_effort": "high",
         "thinking_enabled": True,
         "is_plan_mode": True,
+        "memory_enabled": True,
         "subagent_enabled": True,
         "max_concurrent_subagents": 5,
         "thread_id": "should-be-ignored",
@@ -235,6 +238,7 @@ def test_context_merges_into_configurable():
         "thinking_enabled",
         "reasoning_effort",
         "is_plan_mode",
+        "memory_enabled",
         "subagent_enabled",
         "max_concurrent_subagents",
     }
@@ -246,6 +250,7 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["model_name"] == "deepseek-v3"
     assert config["configurable"]["thinking_enabled"] is True
     assert config["configurable"]["is_plan_mode"] is True
+    assert config["configurable"]["memory_enabled"] is True
     assert config["configurable"]["subagent_enabled"] is True
     assert config["configurable"]["max_concurrent_subagents"] == 5
     assert config["configurable"]["reasoning_effort"] == "high"
@@ -267,12 +272,17 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"agent_name": "my-agent", "is_bootstrap": True, "thread_id": "ignored"})
+    merge_run_context_overrides(
+        config,
+        {"agent_name": "my-agent", "is_bootstrap": True, "memory_enabled": True, "thread_id": "ignored"},
+    )
 
     assert config["configurable"]["agent_name"] == "my-agent"
     assert config["configurable"]["is_bootstrap"] is True
+    assert config["configurable"]["memory_enabled"] is True
     assert config["context"]["agent_name"] == "my-agent"
     assert config["context"]["is_bootstrap"] is True
+    assert config["context"]["memory_enabled"] is True
     # Non-whitelisted keys are not forwarded.
     assert "thread_id" not in config["context"]
 
@@ -309,6 +319,7 @@ def test_context_does_not_override_existing_configurable():
         "thinking_enabled",
         "reasoning_effort",
         "is_plan_mode",
+        "memory_enabled",
         "subagent_enabled",
         "max_concurrent_subagents",
     }
