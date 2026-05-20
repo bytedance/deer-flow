@@ -2,7 +2,7 @@
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,16 @@ class CustomSubagentConfig(BaseModel):
     )
     model: str = Field(
         default="inherit",
+        min_length=1,
         description="Model to use - 'inherit' uses parent's model",
     )
+
+    @field_validator("model")
+    @classmethod
+    def _reject_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("model must not be blank")
+        return v
     max_turns: int = Field(
         default=50,
         ge=1,
