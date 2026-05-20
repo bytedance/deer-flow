@@ -26,6 +26,17 @@ def _make_paths(base_dir: Path):
 def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are helpful.") -> None:
     """Write an agent directory with config.yaml and SOUL.md."""
     agent_dir = base_dir / "agents" / name
+    _write_agent_files(agent_dir, name, config, soul)
+
+
+def _write_user_agent(base_dir: Path, user_id: str, name: str, config: dict, soul: str = "You are helpful.") -> None:
+    """Write a user-scoped agent directory with config.yaml and SOUL.md."""
+    agent_dir = base_dir / "users" / user_id / "agents" / name
+    _write_agent_files(agent_dir, name, config, soul)
+
+
+def _write_agent_files(agent_dir: Path, name: str, config: dict, soul: str) -> None:
+    """Write an agent directory with config.yaml and SOUL.md."""
     agent_dir.mkdir(parents=True, exist_ok=True)
 
     config_copy = dict(config)
@@ -36,6 +47,10 @@ def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are h
         yaml.dump(config_copy, f)
 
     (agent_dir / "SOUL.md").write_text(soul, encoding="utf-8")
+
+
+def _user_agent_config_path(base_dir: Path, name: str) -> Path:
+    return base_dir / "users" / "test-user-autouse" / "agents" / name / "config.yaml"
 
 
 # ===========================================================================
@@ -78,6 +93,7 @@ class TestAgentConfig:
 
         cfg = AgentConfig(name="my-agent")
         assert cfg.name == "my-agent"
+        assert cfg.display_name is None
         assert cfg.description == ""
         assert cfg.model is None
         assert cfg.tool_groups is None
@@ -87,22 +103,34 @@ class TestAgentConfig:
 
         cfg = AgentConfig(
             name="code-reviewer",
+            display_name="代码审查",
             description="Specialized for code review",
             model="deepseek-v3",
             tool_groups=["file:read", "bash"],
         )
         assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "代码审查"
         assert cfg.model == "deepseek-v3"
         assert cfg.tool_groups == ["file:read", "bash"]
 
     def test_config_from_dict(self):
         from deerflow.config.agents_config import AgentConfig
 
-        data = {"name": "test-agent", "description": "A test", "model": "gpt-4"}
+        data = {"name": "test-agent", "display_name": "测试助手", "description": "A test", "model": "gpt-4"}
         cfg = AgentConfig(**data)
         assert cfg.name == "test-agent"
+        assert cfg.display_name == "测试助手"
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
+
+    def test_display_name_trims_before_length_validation(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(name="test-agent", display_name=f"  {'a' * 100}  ")
+        assert cfg.display_name == "a" * 100
+
+        with pytest.raises(ValueError):
+            AgentConfig(name="test-agent", display_name=f"  {'a' * 101}  ")
 
 
 # ===========================================================================
@@ -112,7 +140,12 @@ class TestAgentConfig:
 
 class TestLoadAgentConfig:
     def test_load_valid_config(self, tmp_path):
-        config_dict = {"name": "code-reviewer", "description": "Code review agent", "model": "deepseek-v3"}
+        config_dict = {
+            "name": "code-reviewer",
+            "display_name": "代码审查",
+            "description": "Code review agent",
+            "model": "deepseek-v3",
+        }
         _write_agent(tmp_path, "code-reviewer", config_dict)
 
         with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
@@ -121,6 +154,7 @@ class TestLoadAgentConfig:
             cfg = load_agent_config("code-reviewer")
 
         assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "代码审查"
         assert cfg.description == "Code review agent"
         assert cfg.model == "deepseek-v3"
 
@@ -434,14 +468,56 @@ class TestAgentsAPI:
         payload = {
             "name": "code-reviewer",
             "description": "Reviews code",
+            "display_name": "Code Reviewer",
             "soul": "You are a code reviewer.",
         }
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
+        assert data["display_name"] == "Code Reviewer"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
+
+    def test_create_agent_trims_display_name_and_omits_blank(self, agent_client, tmp_path):
+        response = agent_client.post(
+            "/api/agents",
+            json={"name": "trim-agent", "display_name": "  测试助手  ", "soul": "Hello"},
+        )
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "测试助手"
+
+        config = yaml.safe_load(_user_agent_config_path(tmp_path, "trim-agent").read_text(encoding="utf-8"))
+        assert config["display_name"] == "测试助手"
+
+        response = agent_client.post(
+            "/api/agents",
+            json={"name": "blank-agent", "display_name": "   ", "soul": "Hello"},
+        )
+        assert response.status_code == 201
+        assert response.json()["display_name"] is None
+
+        blank_config = yaml.safe_load(_user_agent_config_path(tmp_path, "blank-agent").read_text(encoding="utf-8"))
+        assert "display_name" not in blank_config
+
+    def test_create_agent_accepts_display_name_with_extra_whitespace(self, agent_client):
+        payload = {
+            "name": "code-reviewer",
+            "display_name": f"  {'a' * 100}  ",
+            "soul": "test",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "a" * 100
+
+    def test_create_agent_rejects_long_display_name_after_trimming(self, agent_client):
+        payload = {
+            "name": "code-reviewer",
+            "display_name": f"  {'a' * 101}  ",
+            "soul": "test",
+        }
+        response = agent_client.post("/api/agents", json=payload)
+        assert response.status_code == 422
 
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
@@ -476,12 +552,16 @@ class TestAgentsAPI:
         assert soul_agent["soul"] == "My soul content"
 
     def test_get_agent(self, agent_client):
-        agent_client.post("/api/agents", json={"name": "test-agent", "soul": "Hello world"})
+        agent_client.post(
+            "/api/agents",
+            json={"name": "test-agent", "display_name": "测试助手", "soul": "Hello world"},
+        )
 
         response = agent_client.get("/api/agents/test-agent")
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "test-agent"
+        assert data["display_name"] == "测试助手"
         assert data["soul"] == "Hello world"
 
     def test_get_missing_agent_404(self, agent_client):
@@ -501,6 +581,69 @@ class TestAgentsAPI:
         response = agent_client.put("/api/agents/desc-agent", json={"description": "new desc"})
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
+
+    def test_update_agent_display_name(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "slug-agent", "soul": "p"})
+
+        response = agent_client.put("/api/agents/slug-agent", json={"display_name": "分发Case诊断"})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "分发Case诊断"
+
+    def test_update_agent_display_name_trims_and_can_clear(self, agent_client, tmp_path):
+        agent_client.post(
+            "/api/agents",
+            json={"name": "clearable-agent", "display_name": " 初始名称 ", "description": "desc", "soul": "p"},
+        )
+
+        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "  更新名称  "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "更新名称"
+
+        config_path = _user_agent_config_path(tmp_path, "clearable-agent")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["display_name"] == "更新名称"
+
+        response = agent_client.put("/api/agents/clearable-agent", json={"display_name": "   "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] is None
+
+        cleared_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "display_name" not in cleared_config
+        assert cleared_config["description"] == "desc"
+
+    def test_update_agent_preserves_existing_skills_config(self, agent_client, tmp_path):
+        _write_user_agent(
+            tmp_path,
+            "test-user-autouse",
+            "skilled-agent",
+            {
+                "name": "skilled-agent",
+                "description": "old",
+                "skills": ["research", "coding"],
+            },
+        )
+
+        response = agent_client.put("/api/agents/skilled-agent", json={"description": "new"})
+        assert response.status_code == 200
+        assert response.json()["description"] == "new"
+
+        config_path = _user_agent_config_path(tmp_path, "skilled-agent")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["description"] == "new"
+        assert config["skills"] == ["research", "coding"]
+
+    def test_update_agent_accepts_display_name_with_extra_whitespace(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
+
+        response = agent_client.put("/api/agents/update-me", json={"display_name": f"  {'a' * 100}  "})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "a" * 100
+
+    def test_update_agent_rejects_long_display_name_after_trimming(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "update-me", "soul": "original"})
+
+        response = agent_client.put("/api/agents/update-me", json={"display_name": f"  {'a' * 101}  "})
+        assert response.status_code == 422
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_DISPLAY_NAME_MAX_LENGTH = 100
 
 
 def validate_agent_name(name: str | None) -> str | None:
@@ -39,6 +40,7 @@ class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: str | None = Field(default=None, max_length=AGENT_DISPLAY_NAME_MAX_LENGTH)
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
@@ -47,6 +49,15 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim display names and collapse empty values to None."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

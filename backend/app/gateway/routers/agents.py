@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AGENT_DISPLAY_NAME_MAX_LENGTH, AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -23,6 +23,11 @@ class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
+    display_name: str | None = Field(
+        default=None,
+        description="Optional human-friendly agent display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
+    )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -40,6 +45,10 @@ class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
     name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
+    display_name: str | None = Field(
+        default=None,
+        description="Optional human-friendly agent display name",
+    )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -50,6 +59,10 @@ class AgentCreateRequest(BaseModel):
 class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
+    display_name: str | None = Field(
+        default=None,
+        description="Updated display name",
+    )
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
@@ -78,6 +91,23 @@ def _normalize_agent_name(name: str) -> str:
     return name.lower()
 
 
+def _normalize_display_name(display_name: str | None) -> str | None:
+    """Trim display names and collapse empty values to None."""
+    if display_name is None:
+        return None
+    normalized = display_name.strip()
+    return normalized or None
+
+
+def _validate_display_name_length(display_name: str | None) -> None:
+    """Validate the normalized display name length."""
+    if display_name is not None and len(display_name) > AGENT_DISPLAY_NAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"display_name must be at most {AGENT_DISPLAY_NAME_MAX_LENGTH} characters after trimming",
+        )
+
+
 def _require_agents_api_enabled() -> None:
     """Reject access unless the custom-agent management API is explicitly enabled."""
     if not get_agents_api_config().enabled:
@@ -95,6 +125,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
 
     return AgentResponse(
         name=agent_cfg.name,
+        display_name=agent_cfg.display_name,
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
@@ -115,6 +146,7 @@ async def list_agents() -> AgentsListResponse:
     Returns:
         List of all custom agents with their metadata and soul content.
     """
+
     _require_agents_api_enabled()
 
     user_id = get_effective_user_id()
@@ -224,6 +256,10 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
+        normalized_display_name = _normalize_display_name(request.display_name)
+        _validate_display_name_length(normalized_display_name)
+        if normalized_display_name is not None:
+            config_data["display_name"] = normalized_display_name
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -294,24 +330,37 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         )
 
     try:
-        # Update config if any config fields changed
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
+        config_changed = bool(fields_set & {"display_name", "description", "model", "tool_groups", "skills"})
 
         if config_changed:
-            updated: dict = {
-                "name": agent_cfg.name,
-                "description": request.description if "description" in fields_set else agent_cfg.description,
-            }
+            updated = agent_cfg.model_dump(exclude_none=True)
+            updated["name"] = agent_cfg.name
+            if "description" in fields_set:
+                updated["description"] = request.description
+
+            new_display_name = agent_cfg.display_name
+            if "display_name" in fields_set:
+                new_display_name = _normalize_display_name(request.display_name)
+                _validate_display_name_length(new_display_name)
+            if new_display_name is not None:
+                updated["display_name"] = new_display_name
+            else:
+                updated.pop("display_name", None)
+
             new_model = request.model if "model" in fields_set else agent_cfg.model
             if new_model is not None:
                 updated["model"] = new_model
+            else:
+                updated.pop("model", None)
 
             new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
+            else:
+                updated.pop("tool_groups", None)
 
             # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
             if "skills" in fields_set:
@@ -320,6 +369,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_skills = agent_cfg.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
+            else:
+                updated.pop("skills", None)
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

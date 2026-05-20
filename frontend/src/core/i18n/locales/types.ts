@@ -131,6 +131,7 @@ export interface Translations {
     deleteConfirm: string;
     deleteSuccess: string;
     newChat: string;
+    agentSlugLabel: string;
     createPageTitle: string;
     createPageSubtitle: string;
     nameStepTitle: string;
