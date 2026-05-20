@@ -104,6 +104,11 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
 
     if model_responded:
         return ScanResult("block", "Security scan produced unparseable output; manual review required.")
+
+    # Model was unreachable. Respect the fail_open config for non-executable content.
     if executable:
         return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
+    cfg = app_config or get_app_config()
+    if cfg.skill_evolution.scanner_fail_open:
+        return ScanResult("warn", "Security scan unavailable; content allowed by fail-open policy.")
     return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
