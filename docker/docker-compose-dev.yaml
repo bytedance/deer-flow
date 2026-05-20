@@ -5,62 +5,15 @@
 #   - nginx: Reverse proxy (port 2026)
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API + agent runtime (port 8001)
-#   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
-#   - Kubernetes cluster + kubeconfig are only required when using provisioner mode.
+#   - Uses LocalSandboxProvider (no Kubernetes required)
 #
 # Access: http://localhost:2026
 
 services:
-  # ── Sandbox Provisioner ────────────────────────────────────────────────
-  # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
-  # cluster via the K8s API.
-  # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
-  provisioner:
-    build:
-      context: ./provisioner
-      dockerfile: Dockerfile
-      args:
-        APT_MIRROR: ${APT_MIRROR:-}
-    container_name: deer-flow-provisioner
-    volumes:
-      - ~/.kube/config:/root/.kube/config:ro
-    environment:
-      - K8S_NAMESPACE=deer-flow
-      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-      # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
-      # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
-      # Set these in your shell before running docker-compose:
-      #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
-      # Production: use PVC instead of hostPath to avoid data loss on node failure.
-      # When set, hostPath vars above are ignored for the corresponding volume.
-      # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
-      # - SKILLS_PVC_NAME=deer-flow-skills-pvc
-      # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
-      - KUBECONFIG_PATH=/root/.kube/config
-      - NODE_HOST=host.docker.internal
-      # Override K8S API server URL since kubeconfig uses 127.0.0.1
-      # which is unreachable from inside the container
-      - K8S_API_SERVER=https://host.docker.internal:26443
-    env_file:
-      - ../.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - deer-flow-dev
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 15s
-
   # ── Reverse Proxy ──────────────────────────────────────────────────────
-  # Routes API traffic to gateway and (optionally) provisioner.
+  # Routes API traffic to gateway.
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
