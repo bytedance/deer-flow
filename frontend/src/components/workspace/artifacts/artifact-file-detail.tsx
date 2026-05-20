@@ -3,6 +3,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
+  GitCompareArrowsIcon,
   LoaderIcon,
   PackageIcon,
   SquareArrowOutUpRightIcon,
@@ -29,8 +30,13 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
+import { buildThreadFileHistory } from "@/core/artifacts/history";
 import { useArtifactContent } from "@/core/artifacts/hooks";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import {
+  getThreadFileDisplayPath,
+  normalizeThreadHistoryFileKey,
+  urlOfArtifact,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -42,6 +48,7 @@ import { ArtifactLink } from "../citations/artifact-link";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactFileDiff } from "./artifact-file-diff";
 import { useArtifacts } from "./context";
 
 export function ArtifactFileDetail({
@@ -54,7 +61,7 @@ export function ArtifactFileDetail({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { artifacts, setOpen, select } = useArtifacts();
+  const { files, setOpen, select } = useArtifacts();
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
   }, [filepathFromProps]);
@@ -89,18 +96,47 @@ export function ArtifactFileDetail({
     enabled: isCodeFile && !isWriteFile,
   });
 
-  const displayContent = content ?? "";
-
-  const [viewMode, setViewMode] = useState<"code" | "preview">("code");
+  const [viewMode, setViewMode] = useState<"code" | "preview" | "diff">("code");
+  const [selectedVersionId, setSelectedVersionId] = useState("current");
   const [isInstalling, setIsInstalling] = useState(false);
-  const { isMock } = useThread();
-  useEffect(() => {
-    if (isSupportPreview) {
-      setViewMode("preview");
-    } else {
-      setViewMode("code");
+  const { thread, isMock } = useThread();
+  const history = useMemo(() => {
+    return buildThreadFileHistory(thread.messages);
+  }, [thread.messages]);
+  const historySnapshots = useMemo(() => {
+    if (isWriteFile) {
+      return [];
     }
-  }, [isSupportPreview]);
+    return history[normalizeThreadHistoryFileKey(filepath)] ?? [];
+  }, [filepath, history, isWriteFile]);
+  const selectedSnapshot = useMemo(() => {
+    if (selectedVersionId === "current") {
+      return null;
+    }
+    return (
+      historySnapshots.find((snapshot) => snapshot.id === selectedVersionId) ??
+      null
+    );
+  }, [historySnapshots, selectedVersionId]);
+  const isHistoricalView = selectedSnapshot !== null;
+  const canRenderTextContent = isCodeFile || isHistoricalView;
+  const canShowDiff =
+    isHistoricalView && typeof selectedSnapshot?.previousContent === "string";
+  const displayContent = selectedSnapshot?.content ?? content ?? "";
+
+  useEffect(() => {
+    if (viewMode === "preview" && !isSupportPreview) {
+      setViewMode("code");
+      return;
+    }
+    if (viewMode === "diff" && !canShowDiff) {
+      setViewMode(isSupportPreview ? "preview" : "code");
+    }
+  }, [canShowDiff, isSupportPreview, viewMode]);
+  useEffect(() => {
+    setSelectedVersionId("current");
+    setViewMode(isSupportPreview ? "preview" : "code");
+  }, [filepathFromProps, isSupportPreview]);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -128,28 +164,62 @@ export function ArtifactFileDetail({
       <ArtifactHeader className="px-2">
         <div className="flex items-center gap-2">
           <ArtifactTitle>
-            {isWriteFile ? (
-              <div className="px-2">{getFileName(filepath)}</div>
-            ) : (
-              <Select value={filepath} onValueChange={select}>
-                <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
-                  <SelectValue placeholder="Select a file" />
-                </SelectTrigger>
-                <SelectContent className="select-none">
-                  <SelectGroup>
-                    {(artifacts ?? []).map((filepath) => (
-                      <SelectItem key={filepath} value={filepath}>
-                        {getFileName(filepath)}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            )}
+            <div className="flex min-w-0 flex-col gap-1 px-2">
+              {isWriteFile ? (
+                <div>{getFileName(filepath)}</div>
+              ) : (
+                <Select value={filepath} onValueChange={select}>
+                  <SelectTrigger className="h-auto min-h-9 border-none bg-transparent! px-0 shadow-none select-none focus:outline-0 active:outline-0">
+                    <SelectValue placeholder="Select a file" />
+                  </SelectTrigger>
+                  <SelectContent className="select-none">
+                    <SelectGroup>
+                      {(files ?? []).map((filepath) => (
+                        <SelectItem key={filepath} value={filepath}>
+                          {getThreadFileDisplayPath(filepath)}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              )}
+              {!isWriteFile && historySnapshots.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground text-xs font-medium">
+                    {t.common.version}
+                  </span>
+                  <Select
+                    value={selectedVersionId}
+                    onValueChange={setSelectedVersionId}
+                  >
+                    <SelectTrigger className="h-8 min-w-44 border-none bg-transparent! px-0 text-xs shadow-none focus:outline-0 active:outline-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="select-none">
+                      <SelectGroup>
+                        <SelectItem value="current">
+                          {t.common.current}
+                        </SelectItem>
+                        {[...historySnapshots].reverse().map((snapshot) => (
+                          <SelectItem key={snapshot.id} value={snapshot.id}>
+                            {`${t.common.version} ${snapshot.version} · ${snapshot.operation}`}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {selectedSnapshot?.description && (
+                <div className="text-muted-foreground text-xs">
+                  {selectedSnapshot.description}
+                </div>
+              )}
+            </div>
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center">
-          {isSupportPreview && (
+          {(isSupportPreview || canShowDiff) && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -158,22 +228,29 @@ export function ArtifactFileDetail({
               value={viewMode}
               onValueChange={(value) => {
                 if (value) {
-                  setViewMode(value as "code" | "preview");
+                  setViewMode(value as "code" | "preview" | "diff");
                 }
               }}
             >
               <ToggleGroupItem value="code">
                 <Code2Icon />
               </ToggleGroupItem>
-              <ToggleGroupItem value="preview">
-                <EyeIcon />
-              </ToggleGroupItem>
+              {isSupportPreview && (
+                <ToggleGroupItem value="preview">
+                  <EyeIcon />
+                </ToggleGroupItem>
+              )}
+              {canShowDiff && (
+                <ToggleGroupItem value="diff">
+                  <GitCompareArrowsIcon />
+                </ToggleGroupItem>
+              )}
             </ToggleGroup>
           )}
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
-            {!isWriteFile && filepath.endsWith(".skill") && (
+            {!isWriteFile && !isHistoricalView && filepath.endsWith(".skill") && (
               <Tooltip content={t.toolCalls.skillInstallTooltip}>
                 <ArtifactAction
                   icon={isInstalling ? LoaderIcon : PackageIcon}
@@ -187,7 +264,7 @@ export function ArtifactFileDetail({
                 />
               </Tooltip>
             )}
-            {!isWriteFile && (
+            {!isWriteFile && !isHistoricalView && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}
                 label={t.common.openInNewWindow}
@@ -202,11 +279,11 @@ export function ArtifactFileDetail({
                 }}
               />
             )}
-            {isCodeFile && (
+            {canRenderTextContent && (
               <ArtifactAction
                 icon={CopyIcon}
                 label={t.clipboard.copyToClipboard}
-                disabled={!content}
+                disabled={!displayContent}
                 onClick={async () => {
                   try {
                     await navigator.clipboard.writeText(displayContent ?? "");
@@ -219,7 +296,7 @@ export function ArtifactFileDetail({
                 tooltip={t.clipboard.copyToClipboard}
               />
             )}
-            {!isWriteFile && (
+            {!isWriteFile && !isHistoricalView && (
               <ArtifactAction
                 icon={DownloadIcon}
                 label={t.common.download}
@@ -257,14 +334,23 @@ export function ArtifactFileDetail({
               language={language ?? "text"}
             />
           )}
-        {isCodeFile && viewMode === "code" && (
+        {canRenderTextContent && viewMode === "code" && (
           <CodeEditor
             className="size-full resize-none rounded-none border-none"
             value={displayContent ?? ""}
             readonly
           />
         )}
-        {!isCodeFile && (
+        {canShowDiff && viewMode === "diff" && selectedSnapshot && (
+          <ArtifactFileDiff
+            afterContent={selectedSnapshot.content}
+            afterLabel={`${t.common.after} · ${t.common.version} ${selectedSnapshot.version}`}
+            beforeContent={selectedSnapshot.previousContent ?? ""}
+            beforeLabel={`${t.common.before} · ${t.common.version} ${selectedSnapshot.version - 1}`}
+            title={t.common.diff}
+          />
+        )}
+        {!canRenderTextContent && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}
