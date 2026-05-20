@@ -99,7 +99,13 @@ def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: 
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
-    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config."""
+    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config.
+
+    The ``callbacks`` entry in a LangChain RunnableConfig may be either a plain list
+    of handlers or a ``BaseCallbackManager``/``AsyncCallbackManager`` instance (when
+    LangChain has merged callbacks from multiple sources). The manager object is not
+    directly iterable, so we unwrap it via ``.handlers`` before scanning.
+    """
     if runtime is None:
         return None
     config = getattr(runtime, "config", None)
@@ -108,6 +114,8 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
     callbacks = config.get("callbacks", [])
     if not callbacks:
         return None
+    if hasattr(callbacks, "handlers"):
+        callbacks = callbacks.handlers
     for cb in callbacks:
         if hasattr(cb, "record_external_llm_usage_records"):
             return cb
