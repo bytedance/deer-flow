@@ -133,7 +133,7 @@ class JsonlRunEventStore(RunEventStore):
             results.append(record)
         return results
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         all_events = self._read_thread_events(thread_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
