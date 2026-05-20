@@ -1,4 +1,4 @@
-"""Middleware to fix dangling tool calls in message history.
+"""Middleware to fix malformed or dangling tool calls in message history.
 
 A dangling tool call occurs when an AIMessage contains tool_calls but there are
 no corresponding ToolMessages in the history (e.g., due to user interruption or
@@ -7,6 +7,9 @@ request cancellation). This causes LLM errors due to incomplete message format.
 This middleware intercepts the model call to detect and patch such gaps by
 inserting synthetic ToolMessages with an error indicator immediately after the
 AIMessage that made the tool calls, ensuring correct message ordering.
+It also normalizes model responses whose tool_calls are missing provider-safe
+string IDs, because LangChain only wraps string tool outputs into ToolMessages
+when a tool_call id is present.
 
 Note: Uses wrap_model_call instead of before_model to ensure patches are inserted
 at the correct positions (immediately after each dangling AIMessage), not appended
@@ -21,7 +24,9 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+
+from deerflow.agents.middlewares.tool_call_metadata import normalize_ai_message_tool_call_ids
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +167,34 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
         return patched
 
+    def _normalize_model_response(self, response: ModelCallResult) -> ModelCallResult:
+        """Return a model response whose AI tool calls all have provider-safe IDs."""
+        if isinstance(response, AIMessage):
+            return normalize_ai_message_tool_call_ids(response)
+
+        if not isinstance(response, ModelResponse):
+            return response
+
+        normalized_result = []
+        changed = False
+        for message in response.result:
+            if isinstance(message, AIMessage):
+                normalized_message = normalize_ai_message_tool_call_ids(message)
+                if normalized_message is not message:
+                    changed = True
+                normalized_result.append(normalized_message)
+            else:
+                normalized_result.append(message)
+
+        if not changed:
+            return response
+
+        logger.warning("Normalized missing tool call id(s) in model response")
+        return ModelResponse(
+            result=normalized_result,
+            structured_response=response.structured_response,
+        )
+
     @override
     def wrap_model_call(
         self,
@@ -171,7 +204,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patched = self._build_patched_messages(request.messages)
         if patched is not None:
             request = request.override(messages=patched)
-        return handler(request)
+        return self._normalize_model_response(handler(request))
 
     @override
     async def awrap_model_call(
@@ -182,4 +215,4 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patched = self._build_patched_messages(request.messages)
         if patched is not None:
             request = request.override(messages=patched)
-        return await handler(request)
+        return self._normalize_model_response(await handler(request))

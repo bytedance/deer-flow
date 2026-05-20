@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
@@ -329,6 +330,97 @@ class TestWrapModelCall:
         handler.assert_called_once_with(patched_request)
         assert result == "response"
 
+    def test_normalizes_missing_tool_call_ids_in_model_response(self):
+        mw = DanglingToolCallMiddleware()
+        request = MagicMock()
+        request.messages = [HumanMessage(content="find cars")]
+        message = AIMessage(
+            content="",
+            id="run-123",
+            tool_calls=[
+                {
+                    "name": "vector_search",
+                    "args": {"keyword": "汽车"},
+                    "id": None,
+                    "type": "tool_call",
+                }
+            ],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": None,
+                        "type": "function",
+                        "function": {"name": "vector_search", "arguments": '{"keyword":"汽车"}'},
+                    }
+                ]
+            },
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        response = ModelResponse(result=[message])
+        handler = MagicMock(return_value=response)
+
+        result = mw.wrap_model_call(request, handler)
+
+        normalized = result.result[0]
+        assert isinstance(normalized, AIMessage)
+        tool_call_id = normalized.tool_calls[0]["id"]
+        assert isinstance(tool_call_id, str)
+        assert tool_call_id.startswith("call_")
+        assert normalized.additional_kwargs["tool_calls"][0]["id"] == tool_call_id
+        assert normalized.response_metadata["finish_reason"] == "tool_calls"
+
+    def test_keeps_existing_tool_call_ids_in_model_response(self):
+        mw = DanglingToolCallMiddleware()
+        request = MagicMock()
+        request.messages = [HumanMessage(content="find cars")]
+        message = AIMessage(
+            content="",
+            id="run-123",
+            tool_calls=[_tc("vector_search", "call_existing")],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "call_existing",
+                        "type": "function",
+                        "function": {"name": "vector_search", "arguments": '{"keyword":"汽车"}'},
+                    }
+                ]
+            },
+        )
+        response = ModelResponse(result=[message])
+        handler = MagicMock(return_value=response)
+
+        result = mw.wrap_model_call(request, handler)
+
+        assert result is response
+        assert result.result[0].tool_calls[0]["id"] == "call_existing"
+        assert result.result[0].additional_kwargs["tool_calls"][0]["id"] == "call_existing"
+
+    def test_normalizes_direct_ai_message_model_response(self):
+        mw = DanglingToolCallMiddleware()
+        request = MagicMock()
+        request.messages = [HumanMessage(content="find cars")]
+        message = AIMessage(
+            content="",
+            id="run-direct-123",
+            tool_calls=[{"name": "vector_search", "args": {"keyword": "汽车"}, "id": None}],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": None,
+                        "type": "function",
+                        "function": {"name": "vector_search", "arguments": '{"keyword":"汽车"}'},
+                    }
+                ]
+            },
+        )
+        handler = MagicMock(return_value=message)
+
+        result = mw.wrap_model_call(request, handler)
+
+        assert isinstance(result.tool_calls[0]["id"], str)
+        assert result.additional_kwargs["tool_calls"][0]["id"] == result.tool_calls[0]["id"]
+
 
 class TestAwrapModelCall:
     @pytest.mark.anyio
@@ -364,3 +456,30 @@ class TestAwrapModelCall:
 
         handler.assert_called_once_with(patched_request)
         assert result == "response"
+
+    @pytest.mark.anyio
+    async def test_async_normalizes_missing_tool_call_ids_in_model_response(self):
+        mw = DanglingToolCallMiddleware()
+        request = MagicMock()
+        request.messages = [HumanMessage(content="find cars")]
+        message = AIMessage(
+            content="",
+            id="run-async-123",
+            tool_calls=[{"name": "vector_search", "args": {"keyword": "汽车"}, "id": None}],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": None,
+                        "type": "function",
+                        "function": {"name": "vector_search", "arguments": '{"keyword":"汽车"}'},
+                    }
+                ]
+            },
+        )
+        handler = AsyncMock(return_value=ModelResponse(result=[message]))
+
+        result = await mw.awrap_model_call(request, handler)
+
+        normalized = result.result[0]
+        assert isinstance(normalized.tool_calls[0]["id"], str)
+        assert normalized.additional_kwargs["tool_calls"][0]["id"] == normalized.tool_calls[0]["id"]
