@@ -10,6 +10,8 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { getBackendBaseURL } from "@/core/config";
+
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -56,7 +58,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const refreshUser = useCallback(async () => {
     try {
       setIsLoading(true);
-      const res = await fetch("/api/v1/auth/me", {
+      const res = await fetch(`${getBackendBaseURL()}/api/v1/auth/me`, {
         credentials: "include",
       });
 
@@ -88,7 +90,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     setUser(null);
 
     try {
-      await fetch("/api/v1/auth/logout", {
+      await fetch(`${getBackendBaseURL()}/api/v1/auth/logout`, {
         method: "POST",
         credentials: "include",
       });
