@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -7,8 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.authentik_trust_middleware import AuthentikTrustMiddleware
 from app.gateway.config import get_gateway_config
-from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
+from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
@@ -57,18 +59,28 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     authentication have existing LangGraph thread data that needs an
     owner assigned.
         First boot (no admin exists):
-            - Does NOT create any user accounts automatically.
-            - The operator must visit ``/setup`` to create the first admin.
+            - If ``DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL`` is set: auto-create that
+              email as the first admin (needs_setup=False). Used by SSO
+              deployments where Authentik already gates access and the
+              operator should land directly on ``/workspace`` without
+              visiting ``/setup``. Password defaults to a random secret
+              when ``DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD`` is unset, which
+              is safe because the Authentik trust middleware mints the
+              session without ever invoking ``/login/local``.
+            - Otherwise: does NOT create any user accounts automatically.
+              The operator must visit ``/setup`` to create the first admin.
 
     Subsequent boots (admin already exists):
       - Runs the one-time "no-auth → with-auth" orphan thread migration for
-        existing LangGraph thread metadata that has no user_id.
+        existing LangGraph thread metadata that has no owner_id.
 
     No SQL persistence migration is needed: the four user_id columns
     (threads_meta, runs, run_events, feedback) only come into existence
     alongside the auth module via create_all, so freshly created tables
     never contain NULL-owner rows.
     """
+    import secrets
+
     from sqlalchemy import select
 
     from app.gateway.deps import get_local_provider
@@ -90,6 +102,26 @@ async def _ensure_admin_user(app: FastAPI) -> None:
     admin_count = await provider.count_admin_users()
 
     if admin_count == 0:
+        bootstrap_email = os.environ.get("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "").strip()
+        if bootstrap_email:
+            password = os.environ.get("DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD") or secrets.token_urlsafe(32)
+            try:
+                await provider.create_user(
+                    email=bootstrap_email,
+                    password=password,
+                    system_role="admin",
+                    needs_setup=False,
+                )
+                logger.info(
+                    "Bootstrapped admin account %s from DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL",
+                    bootstrap_email,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to bootstrap admin %s — fall back to /setup flow",
+                    bootstrap_email,
+                )
+            return
         logger.info("=" * 60)
         logger.info("  First boot detected — no admin account exists.")
         logger.info("  Visit /setup to complete admin account creation.")
@@ -177,7 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")
 
-        # Check admin bootstrap state and migrate orphan threads after admin exists.
+        # Ensure admin user exists (auto-create on first boot)
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
@@ -218,9 +250,7 @@ def create_app() -> FastAPI:
         Configured FastAPI application instance.
     """
     config = get_gateway_config()
-    docs_url = "/docs" if config.enable_docs else None
-    redoc_url = "/redoc" if config.enable_docs else None
-    openapi_url = "/openapi.json" if config.enable_docs else None
+    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
     app = FastAPI(
         title="DeerFlow API Gateway",
@@ -240,14 +270,12 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 
 ### Architecture
 
-LangGraph-compatible requests are routed through nginx to this gateway.
-This gateway provides runtime endpoints for agent runs plus custom endpoints for models, MCP configuration, skills, and artifacts.
+LangGraph requests are handled by nginx reverse proxy.
+This gateway provides custom endpoints for models, MCP configuration, skills, and artifacts.
         """,
         version="0.1.0",
         lifespan=lifespan,
-        docs_url=docs_url,
-        redoc_url=redoc_url,
-        openapi_url=openapi_url,
+        **docs_kwargs,
         openapi_tags=[
             {
                 "name": "models",
@@ -310,18 +338,31 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 
-    # CORS: the unified nginx endpoint is same-origin by default. Split-origin
-    # browser clients must opt in with this explicit Gateway allowlist so CORS
-    # and CSRF origin checks share the same source of truth.
-    cors_origins = sorted(get_configured_cors_origins())
-    if cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=cors_origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # Authentik forward-auth trust: opt-in via DEER_FLOW_AUTHENTIK_TRUST_ENABLED.
+    # Mounted AFTER CSRF/Auth so it runs BEFORE them on inbound requests --
+    # it injects the synthesized access_token cookie that AuthMiddleware
+    # then validates normally.
+    app.add_middleware(AuthentikTrustMiddleware)
+
+    # CORS: when GATEWAY_CORS_ORIGINS is set (dev without nginx), add CORS middleware.
+    # In production, nginx handles CORS and no middleware is needed.
+    cors_origins_env = os.environ.get("GATEWAY_CORS_ORIGINS", "")
+    if cors_origins_env:
+        cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+        # Validate: wildcard origin with credentials is a security misconfiguration
+        for origin in cors_origins:
+            if origin == "*":
+                logger.error("GATEWAY_CORS_ORIGINS contains wildcard '*' with allow_credentials=True. This is a security misconfiguration — browsers will reject the response. Use explicit scheme://host:port origins instead.")
+                cors_origins = [o for o in cors_origins if o != "*"]
+                break
+        if cors_origins:
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=cors_origins,
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
     # Include routers
     # Models API is mounted at /api/models
@@ -370,7 +411,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(runs.router)
 
     @app.get("/health", tags=["health"])
-    async def health_check() -> dict[str, str]:
+    async def health_check() -> dict:
         """Health check endpoint.
 
         Returns:
