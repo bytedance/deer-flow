@@ -20,6 +20,7 @@ from deerflow.knowledge_base.retrieval import (
     build_selection_snapshot,
     resolve_runtime_kb_selection,
 )
+from deerflow.rag.job_context import kb_context
 from deerflow.rag.decisions import KB_DECISION_KEY, RagDecisionEvent
 from deerflow.rag.prompt import format_chunks_for_injection, format_multi_kb_context
 from deerflow.rag.retrieval import DocumentRetriever
@@ -121,7 +122,7 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
                     )
                 )
                 return None
-            return await self._retrieve_from_default(last_user_content, config)
+            return await self._retrieve_from_default(last_user_content, config, runtime)
         except Exception as e:
             logger.warning("RagMiddleware.before_agent failed: %s", e)
             _rag_decision_context.set(
@@ -278,6 +279,8 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
             knowledge_bases,
             query,
             compute_effective_top_k(config),
+            tenant_id=tenant_id,
+            user_id=owner_user_id,
         )
         # multi_kb_retrieve already applies the reranker; trim to the
         # injection budget so downstream formatters see exactly the K
@@ -353,18 +356,36 @@ class RagMiddleware(AgentMiddleware[RagMiddlewareState]):
         )
         return {"messages": [SystemMessage(content=content)]}
 
-    async def _retrieve_from_default(self, query: str, config) -> dict | None:
+    async def _retrieve_from_default(self, query: str, config, runtime: Runtime) -> dict | None:
         from langchain_core.messages import SystemMessage
 
         from deerflow.rag.retrieval import rerank
 
+        context = runtime.context or {}
+        tenant_id = context.get("tenant_id") or get_current_tenant_id()
+        owner_user_id = context.get("user_id") or get_effective_user_id()
+        if not tenant_id or not owner_user_id:
+            _rag_decision_context.set(
+                RagDecisionEvent(
+                    outcome="blocked",
+                    reason="missing tenant_id or user_id in runtime context",
+                    source="middleware",
+                    query=query[:200],
+                )
+            )
+            return None
+
         retriever = self._get_retriever()
-        result = await asyncio.to_thread(
-            retriever.retrieve,
-            query=query,
-            top_k=compute_effective_top_k(config),
-            score_threshold=config.score_threshold,
-        )
+
+        def _retrieve() -> Any:
+            with kb_context(tenant_id=tenant_id, user_id=owner_user_id):
+                return retriever.retrieve(
+                    query=query,
+                    top_k=compute_effective_top_k(config),
+                    score_threshold=config.score_threshold,
+                )
+
+        result = await asyncio.to_thread(_retrieve)
 
         if not result.results:
             logger.debug("RagMiddleware: no results from default collection for query=%r", query[:80])

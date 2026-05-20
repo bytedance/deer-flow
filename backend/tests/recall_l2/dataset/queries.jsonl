@@ -1,0 +1,8 @@
+{"qid": "q-001", "query": "电机振动过大如何排查", "relevant_doc_ids": ["equipment_runbook.md#vibration"], "notes": "命中 RMS > 4.5 mm/s 处置流程"}
+{"qid": "q-002", "query": "FFT 频谱分析如何识别不平衡和不对中", "relevant_doc_ids": ["fault_diagnosis.md#fft"], "notes": "1xRPM / 2xRPM 特征"}
+{"qid": "q-003", "query": "P1 工单超时后会触发什么动作", "relevant_doc_ids": ["sla_policy.md#p1", "sla_policy.md#escalation"], "notes": "MTTR 4h + page 主管 + 战情室"}
+{"qid": "q-004", "query": "急停按钮怎么定期测试", "relevant_doc_ids": ["safety_protocol.md#estop_test"], "notes": "每月第一个工作日"}
+{"qid": "q-005", "query": "轴承故障特征频率怎么算", "relevant_doc_ids": ["fault_diagnosis.md#bearing"], "notes": "BPFO / BPFI / BSF / FTF 公式"}
+{"qid": "q-006", "query": "我想了解振动诊断和频谱分析的整体流程", "relevant_doc_ids": ["equipment_runbook.md#vibration", "fault_diagnosis.md#fft"], "notes": "跨文档: 流程 + 方法"}
+{"qid": "q-007", "query": "热成像和绝缘电阻测试分别在什么时候做", "relevant_doc_ids": ["inspection_schedule.md#quarterly_checklist", "inspection_schedule.md#thermography", "fault_diagnosis.md#thermal"], "notes": "跨文档: 季度 + 月度"}
+{"qid": "q-008", "query": "周末团建烧烤适合什么样的肉", "relevant_doc_ids": [], "notes": "负例 — 故意检索不到任何文档,验证阈值或低分提示"}

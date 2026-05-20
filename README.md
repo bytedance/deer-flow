@@ -713,7 +713,7 @@ The `rag` section in `config.yaml` controls how the knowledge-base pipeline inde
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `rag.allow_no_auth_kb` | `false` | When `true`, KB access is permitted in no-auth mode (dev / demo only). Production must keep this `false` so the Chroma default-tenant guard refuses to write cross-tenant collections. |
+| `rag.allow_no_auth_kb` | `false` | When `true`, KB access is permitted in no-auth mode (dev / demo only). Production must keep this `false` so the Chroma default-tenant guard refuses to write cross-tenant collections, and query-time retrieval now restores the caller's tenant context before any thread-pooled vector search. |
 | `rag.indexing_workers` | `2` | Async dispatcher worker count. `0` disables the dispatcher and falls back to inline `IndexingService.execute_index_job` (handy for tests / bare-bones dev). Raise for higher write throughput. |
 | `rag.indexing_queue_max` | `256` | Back-pressure bound on the dispatcher queue. Hitting it surfaces as a `503` to the upload caller. |
 | `rag.indexing_shutdown_timeout` | `30.0` (seconds) | Bound on `aclose()`; jobs still running at the deadline are reset to `pending` and reclaimed by `recover()` on the next start. |

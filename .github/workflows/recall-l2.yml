@@ -1,0 +1,61 @@
+name: L2 Recall Evaluation
+
+# 仅手动触发,不接 PR / 不接 cron。
+# 真实 embedding API 慢 + 烧钱 + 可能不稳定,这套评测属于 nightly/release-gate 性质工具。
+on:
+  workflow_dispatch:
+    inputs:
+      update_baseline:
+        description: "把本次结果写入 reports/baseline.json(初次冻结或人工确认 OK 后用)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  eval-recall:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Bootstrap config.yaml
+        # 评测脚本依赖 config.yaml 解析 embedding model + base_url。
+        # CI runner 没有 config.yaml,直接拷 config.example.yaml 即可 ——
+        # 真正的 OPENAI_API_KEY 通过环境变量 $OPENAI_API_KEY 由 RagConfig 解析。
+        run: cp config.example.yaml config.yaml
+
+      - name: Run L2 recall evaluation
+        working-directory: backend
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ "${{ inputs.update_baseline }}" = "true" ]; then
+            make eval-recall-update-baseline
+          else
+            make eval-recall
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-l2-reports
+          path: backend/tests/recall_l2/reports/
+          retention-days: 30
+          if-no-files-found: warn

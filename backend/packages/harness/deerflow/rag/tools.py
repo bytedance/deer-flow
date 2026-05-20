@@ -199,6 +199,8 @@ async def _search_selected_kbs(
         knowledge_bases,
         query,
         rag_config.retrieval_top_k,
+        tenant_id=tenant_id,
+        user_id=user_id,
     )
 
     formatted = [
@@ -306,6 +308,8 @@ async def _search_single_collection(query: str, collection: str, rag_config, con
         knowledge_bases,
         query,
         rag_config.retrieval_top_k,
+        tenant_id=tenant_id,
+        user_id=user_id,
     )
 
     formatted = [

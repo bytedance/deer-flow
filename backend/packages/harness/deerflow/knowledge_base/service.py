@@ -723,6 +723,7 @@ class KnowledgeBaseService:
         query: str,
         top_k: int = 5,
     ) -> list[dict[str, Any]]:
+        from deerflow.rag.job_context import kb_context
         from deerflow.rag.retrieval import DocumentRetriever
 
         kb = await self._kb_repo.get(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
@@ -730,7 +731,8 @@ class KnowledgeBaseService:
             raise ValueError(f"Knowledge base {kb_id} not found")
 
         retriever = DocumentRetriever()
-        result = retriever.retrieve(query, collection=kb["collection_name"], top_k=top_k)
+        with kb_context(tenant_id=tenant_id, user_id=owner_user_id):
+            result = retriever.retrieve(query, collection=kb["collection_name"], top_k=top_k)
 
         return [
             {"chunk_id": r.chunk_id, "content": r.content, "score": r.score, "metadata": r.metadata}

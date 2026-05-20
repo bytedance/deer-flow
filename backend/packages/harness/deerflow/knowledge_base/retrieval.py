@@ -8,11 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from typing import Any
 
 from deerflow.config.rag_config import get_rag_config
+from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
+from deerflow.rag.job_context import kb_context
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.thread_meta import make_thread_store
 from deerflow.rag.embeddings import get_embedding_provider
 from deerflow.rag.retrieval import DocumentRetriever, normalize_scores, rerank
 from deerflow.rag.vector_store import SearchResult
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +160,9 @@ def multi_kb_retrieve(
     knowledge_bases: list[dict[str, Any]],
     query: str,
     top_k: int = 10,
+    *,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[SearchResult]:
     """Retrieve from multiple KB collections in parallel, merge by score.
 
@@ -217,13 +223,20 @@ def multi_kb_retrieve(
             embedder_cache[key] = get_embedding_provider(spec)
         return embedder_cache[key]
 
+    effective_tenant_id = tenant_id or get_current_tenant_id()
+    effective_user_id = user_id or get_effective_user_id()
+
     def _retrieve_one(kb: dict[str, Any]) -> list[SearchResult]:
         collection = kb["collection_name"]
         priority = _kb_priority(kb)
         spec = kb.get("embedding_model")
         embedder = _embedder_for(spec)
         retriever = DocumentRetriever(embedder=embedder)
-        result = retriever.retrieve(query=query, collection=collection, top_k=per_kb_k)
+        if effective_tenant_id and effective_tenant_id != _DEFAULT_TENANT_ID:
+            with kb_context(tenant_id=effective_tenant_id, user_id=effective_user_id):
+                result = retriever.retrieve(query=query, collection=collection, top_k=per_kb_k)
+        else:
+            result = retriever.retrieve(query=query, collection=collection, top_k=per_kb_k)
         for r in result.results:
             if "kb_name" not in r.metadata:
                 r.metadata["kb_name"] = kb.get("name", "")

@@ -21,6 +21,7 @@ from deerflow.agents.middlewares.rag_middleware import (
     _rag_retrieval_context,
 )
 from deerflow.config.rag_config import RagConfig, set_rag_config
+from deerflow.config.tenant import get_current_tenant_id
 from deerflow.rag.decisions import KB_DECISION_KEY, RagDecisionEvent
 
 
@@ -174,11 +175,52 @@ class TestRagMiddlewareDecisionEvents:
             or "missing" in decision.reason.lower()
         )
 
-    def test_after_agent_passthrough_when_no_decision_set(self) -> None:
+    @pytest.mark.asyncio
+    async def test_default_path_restores_runtime_tenant_inside_worker_thread(self) -> None:
+        set_rag_config(
+            RagConfig(enabled=True, injection_enabled=True, allow_no_auth_kb=True)
+        )
         mw = RagMiddleware()
-        ai = AIMessage(content="hi")
-        result = mw.after_agent({"messages": [ai]}, _make_runtime({}))
-        assert result is None
+        state = {"messages": [HumanMessage(content="what is x?")]}
+        runtime = _make_runtime({"tenant_id": "tenant-acme", "user_id": "user-1"})
+
+        async def _no_selection(_runtime):
+            return None, None
+
+        observed: dict[str, str | None] = {}
+
+        class _FakeRetriever:
+            def retrieve(self, *, query, top_k, score_threshold):
+                from deerflow.rag.retrieval import RetrievalResult
+                from deerflow.rag.vector_store import SearchResult
+
+                observed["tenant_id"] = get_current_tenant_id()
+                return RetrievalResult(
+                    query=query,
+                    collection="default",
+                    results=[
+                        SearchResult(
+                            chunk_id="c1",
+                            content="chunk",
+                            metadata={"source": "kb"},
+                            score=0.9,
+                        )
+                    ],
+                )
+
+        with patch(
+            "deerflow.agents.middlewares.rag_middleware.resolve_runtime_kb_selection",
+            side_effect=_no_selection,
+        ):
+            mw._retriever = _FakeRetriever()
+            result = await mw.abefore_agent(state, runtime)
+
+        assert result is not None
+        assert observed["tenant_id"] == "tenant-acme"
+        decision = _rag_decision_context.get()
+        assert decision is not None
+        assert decision.outcome == "injected"
+
 
     def test_namespaced_decision_key(self) -> None:
         assert KB_DECISION_KEY == "knowledge_base_decision"

@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from deerflow.config.rag_config import RagConfig, set_rag_config
+from deerflow.config.tenant import get_current_tenant_id, reset_tenant_id, set_current_tenant_id
 from deerflow.knowledge_base.retrieval import multi_kb_retrieve
 from deerflow.rag.retrieval import RetrievalResult
 from deerflow.rag.vector_store import SearchResult
@@ -132,6 +133,88 @@ class TestCrossEmbeddingModelRetrieval:
         assert seen_map["col_a"] == "openai:m1"
         assert seen_map["col_b"] == "openai:m2"
 
+    def test_multi_kb_retrieve_restores_explicit_tenant_context_in_workers(self) -> None:
+        set_rag_config(
+            RagConfig(
+                enabled=True,
+                cross_kb_score_strategy="absolute",
+                max_chunks_per_document=10,
+            )
+        )
+
+        kbs = [
+            _make_kb(kb_id="a", name="A", embedding_model="openai:m1"),
+            _make_kb(kb_id="b", name="B", embedding_model="openai:m2"),
+        ]
+
+        observed: list[tuple[str, str]] = []
+
+        def fake_provider(spec: str | None = None):
+            embedder = MagicMock()
+            embedder.embed_query.return_value = [0.0]
+            return embedder
+
+        def fake_retrieve(self, *, query, collection, top_k):
+            observed.append((collection, get_current_tenant_id()))
+            return RetrievalResult(query=query, results=[], collection=collection)
+
+        with patch(
+            "deerflow.knowledge_base.retrieval.get_embedding_provider",
+            side_effect=fake_provider,
+        ), patch(
+            "deerflow.rag.retrieval.DocumentRetriever.retrieve",
+            new=fake_retrieve,
+        ):
+            multi_kb_retrieve(
+                kbs,
+                query="q",
+                top_k=4,
+                tenant_id="tenant-acme",
+                user_id="user-1",
+            )
+
+        assert observed
+        assert {tenant_id for _, tenant_id in observed} == {"tenant-acme"}
+
+    def test_multi_kb_retrieve_inherits_current_tenant_context_when_not_explicit(self) -> None:
+        set_rag_config(
+            RagConfig(
+                enabled=True,
+                cross_kb_score_strategy="absolute",
+                max_chunks_per_document=10,
+            )
+        )
+
+        token = set_current_tenant_id("tenant-inherited")
+        try:
+            kbs = [
+                _make_kb(kb_id="a", name="A", embedding_model="openai:m1"),
+            ]
+
+            observed: list[str] = []
+
+            def fake_provider(spec: str | None = None):
+                embedder = MagicMock()
+                embedder.embed_query.return_value = [0.0]
+                return embedder
+
+            def fake_retrieve(self, *, query, collection, top_k):
+                observed.append(get_current_tenant_id())
+                return RetrievalResult(query=query, results=[], collection=collection)
+
+            with patch(
+                "deerflow.knowledge_base.retrieval.get_embedding_provider",
+                side_effect=fake_provider,
+            ), patch(
+                "deerflow.rag.retrieval.DocumentRetriever.retrieve",
+                new=fake_retrieve,
+            ):
+                multi_kb_retrieve(kbs, query="q", top_k=4)
+        finally:
+            reset_tenant_id(token)
+
+        assert observed == ["tenant-inherited"]
+
     def test_logs_embedding_models_used(self, caplog) -> None:
         set_rag_config(
             RagConfig(
@@ -182,7 +265,6 @@ class TestCrossEmbeddingModelRetrieval:
         assert "embedding_models_used" in log_text
         assert "openai:m1" in log_text
         assert "openai:m2" in log_text
-        # Each result also carries the embedding_model in metadata.
         assert {r.metadata.get("embedding_model") for r in results} == {
             "openai:m1",
             "openai:m2",

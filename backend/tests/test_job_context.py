@@ -25,10 +25,21 @@ from deerflow.config.tenant import (
     get_current_tenant_id,
 )
 from deerflow.rag.backends.chroma import ChromaVectorStore
-from deerflow.rag.job_context import with_kb_context
+from deerflow.rag.job_context import kb_context, with_kb_context
 
 
 class TestWithKbContextScoping:
+    def test_kb_context_sets_tenant_inside_block_and_restores_on_exit(self):
+        before = get_current_tenant_id()
+        with kb_context(tenant_id="acme-corp"):
+            assert get_current_tenant_id() == "acme-corp"
+        assert get_current_tenant_id() == before
+
+    def test_kb_context_rejects_default_tenant_id(self):
+        with pytest.raises(ValueError, match="real tenant_id"):
+            with kb_context(tenant_id="default"):
+                pass
+
     @pytest.mark.asyncio
     async def test_sets_tenant_inside_block_and_restores_on_exit(self):
         before = get_current_tenant_id()

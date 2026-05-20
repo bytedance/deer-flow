@@ -39,13 +39,60 @@ that makes sure no caller forgets to reset.
 from __future__ import annotations
 
 import contextlib
-from typing import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 from deerflow.config.tenant import (
     _DEFAULT_TENANT_ID,
     reset_tenant_id,
     set_current_tenant_id,
 )
+
+
+def _validate_kb_tenant_id(tenant_id: str | None) -> str:
+    if not tenant_id or tenant_id == _DEFAULT_TENANT_ID:
+        raise ValueError(
+            "with_kb_context requires a real tenant_id; got "
+            f"{tenant_id!r}. Background indexing jobs must carry the "
+            "submitter's tenant — falling back to the 'default' bucket "
+            "would mix vectors across tenants."
+        )
+    return tenant_id
+
+
+@contextlib.contextmanager
+def kb_context(
+    *,
+    tenant_id: str | None,
+    user_id: str | None = None,
+) -> Iterator[None]:
+    """Restore tenant + optional user context in sync code paths.
+
+    Used by query-time retrieval offloaded to worker threads. Mirrors
+    ``with_kb_context`` so thread-pool work doesn't fall back to the
+    global ``default`` tenant collection.
+    """
+    tenant_token = set_current_tenant_id(_validate_kb_tenant_id(tenant_id))
+
+    user_token = None
+    if user_id:
+        from deerflow.runtime.user_context import _current_user
+
+        class _BgUser:
+            __slots__ = ("id",)
+
+            def __init__(self, uid: str) -> None:
+                self.id = uid
+
+        user_token = _current_user.set(_BgUser(user_id))
+
+    try:
+        yield
+    finally:
+        if user_token is not None:
+            from deerflow.runtime.user_context import _current_user
+
+            _current_user.reset(user_token)
+        reset_tenant_id(tenant_token)
 
 
 @contextlib.asynccontextmanager
@@ -71,39 +118,5 @@ async def with_kb_context(
     reindex-all dispatched on behalf of a tenant). Pass it when the
     enqueueing request had it.
     """
-    if not tenant_id or tenant_id == _DEFAULT_TENANT_ID:
-        raise ValueError(
-            "with_kb_context requires a real tenant_id; got "
-            f"{tenant_id!r}. Background indexing jobs must carry the "
-            "submitter's tenant — falling back to the 'default' bucket "
-            "would mix vectors across tenants."
-        )
-
-    tenant_token = set_current_tenant_id(tenant_id)
-
-    user_token = None
-    if user_id:
-        # Lazy import keeps the runtime/user_context import out of the
-        # tenant-only call path, which the unit tests exercise without
-        # an auth context.
-        from deerflow.runtime.user_context import _current_user
-
-        # We carry the id as a structural CurrentUser by wrapping it in
-        # a tiny shim object — set_current_user expects something with
-        # an `id` attribute.
-        class _BgUser:
-            __slots__ = ("id",)
-
-            def __init__(self, uid: str) -> None:
-                self.id = uid
-
-        user_token = _current_user.set(_BgUser(user_id))
-
-    try:
+    with kb_context(tenant_id=tenant_id, user_id=user_id):
         yield
-    finally:
-        if user_token is not None:
-            from deerflow.runtime.user_context import _current_user
-
-            _current_user.reset(user_token)
-        reset_tenant_id(tenant_token)
