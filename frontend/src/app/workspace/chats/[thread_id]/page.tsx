@@ -127,7 +127,7 @@ export default function ChatPage() {
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
 
   return (
-    <ThreadContext.Provider value={{ thread, isMock }}>
+    <ThreadContext.Provider value={{ thread, threadId, isMock }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header

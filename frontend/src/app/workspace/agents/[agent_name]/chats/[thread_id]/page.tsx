@@ -126,7 +126,7 @@ export default function AgentChatPage() {
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider value={{ thread, threadId }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header

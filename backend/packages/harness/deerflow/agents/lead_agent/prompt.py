@@ -465,6 +465,8 @@ You: "Deploying to staging..." [proceed]
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
+- Use `present_files` to show generated files or images to the user
+- Use `view_image` only when you need the model to inspect image pixels for visual analysis
 {acp_section}
 </working_directory>
 

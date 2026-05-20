@@ -23,7 +23,10 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.middlewares.view_image_middleware import (
+    VIEW_IMAGE_INJECTION_MARKER,
+    ViewImageMiddleware,
+)
 
 
 def _view_image_call(call_id: str = "call_1", path: str = "/mnt/user-data/uploads/img.png") -> dict:
@@ -311,6 +314,47 @@ class TestShouldInjectImageMessage:
         }
         assert mw._should_inject_image_message(state) is False
 
+    def test_false_when_already_injected_with_internal_marker(self):
+        mw = ViewImageMiddleware()
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        already_injected = HumanMessage(
+            content="internal image context",
+            additional_kwargs={
+                "hide_from_ui": True,
+                VIEW_IMAGE_INJECTION_MARKER: True,
+            },
+        )
+        state = {
+            "messages": [
+                assistant,
+                ToolMessage(content="ok", tool_call_id="c1"),
+                already_injected,
+            ],
+            "viewed_images": {
+                "/img.png": {"base64": "AAA", "mime_type": "image/png"},
+            },
+        }
+        assert mw._should_inject_image_message(state) is False
+
+    def test_true_when_unrelated_hidden_message_present(self):
+        mw = ViewImageMiddleware()
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        unrelated_hidden = HumanMessage(
+            content="some other hidden context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        state = {
+            "messages": [
+                assistant,
+                ToolMessage(content="ok", tool_call_id="c1"),
+                unrelated_hidden,
+            ],
+            "viewed_images": {
+                "/img.png": {"base64": "AAA", "mime_type": "image/png"},
+            },
+        }
+        assert mw._should_inject_image_message(state) is True
+
     def test_false_when_legacy_details_marker_present(self):
         """The middleware also recognizes the legacy 'Here are the details of the
         images you've viewed' marker as an already-injected signal."""
@@ -356,6 +400,8 @@ class TestInjectImageMessage:
         # Mixed-content payload: list of text + image_url blocks
         assert isinstance(injected.content, list)
         assert any(isinstance(b, dict) and b.get("type") == "image_url" for b in injected.content)
+        assert injected.additional_kwargs["hide_from_ui"] is True
+        assert injected.additional_kwargs[VIEW_IMAGE_INJECTION_MARKER] is True
 
 
 class TestBeforeModel:
@@ -376,6 +422,8 @@ class TestBeforeModel:
         result = mw.before_model(state, _runtime())
         assert result is not None
         assert isinstance(result["messages"][0], HumanMessage)
+        assert result["messages"][0].additional_kwargs["hide_from_ui"] is True
+        assert result["messages"][0].additional_kwargs[VIEW_IMAGE_INJECTION_MARKER] is True
 
     @pytest.mark.anyio
     async def test_abefore_model_matches_sync_behavior(self):
@@ -390,6 +438,8 @@ class TestBeforeModel:
         result = await mw.abefore_model(state, _runtime())
         assert result is not None
         assert isinstance(result["messages"][0], HumanMessage)
+        assert result["messages"][0].additional_kwargs["hide_from_ui"] is True
+        assert result["messages"][0].additional_kwargs[VIEW_IMAGE_INJECTION_MARKER] is True
 
     @pytest.mark.anyio
     async def test_abefore_model_returns_none_when_no_injection(self):

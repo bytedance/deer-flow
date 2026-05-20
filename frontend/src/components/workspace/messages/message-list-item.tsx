@@ -34,7 +34,10 @@ import {
   upsertFeedback,
   type FeedbackData,
 } from "@/core/api/feedback";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  isArtifactVirtualPath,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -199,7 +202,9 @@ function MessageImage({
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
   }
 
-  const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
+  const url = isArtifactVirtualPath(src)
+    ? resolveArtifactURL(src, threadId)
+    : src;
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
