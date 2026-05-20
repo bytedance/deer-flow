@@ -112,6 +112,8 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert captured[0].agent_name is None
     assert isinstance(result["messages"][0], RemoveMessage)
     assert result["messages"][1].content.startswith("Here is a summary")
+    assert result["messages"][1].additional_kwargs["hide_from_ui"] is True
+    assert result["messages"][1].additional_kwargs["deerflow_conversation_summary"] is True
 
 
 def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:

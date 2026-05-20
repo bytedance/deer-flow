@@ -1,13 +1,14 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildTokenDebugSteps,
@@ -23,6 +24,7 @@ import {
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  isHiddenFromUIMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -153,6 +155,70 @@ function LoadMoreHistoryIndicator({
   );
 }
 
+type ThreadMessagesResponse = {
+  messages?: AgentThreadState["messages"];
+};
+
+function messageFingerprint(message: AgentThreadState["messages"][number]) {
+  const content =
+    typeof message.content === "string"
+      ? message.content
+      : JSON.stringify(message.content);
+  const toolCallId =
+    "tool_call_id" in message && typeof message.tool_call_id === "string"
+      ? message.tool_call_id
+      : "";
+  return `${message.type}:${message.name ?? ""}:${toolCallId}:${content}`;
+}
+
+function mergeTranscriptWithLiveMessages(
+  transcriptMessages: AgentThreadState["messages"],
+  liveMessages: AgentThreadState["messages"],
+) {
+  if (transcriptMessages.length === 0) {
+    return liveMessages;
+  }
+
+  const merged = [...transcriptMessages];
+  const seenIds = new Set(
+    transcriptMessages
+      .map((message) => message.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  );
+  const unidentifiedByFingerprint = new Map<string, number>();
+
+  transcriptMessages.forEach((message, index) => {
+    if (!message.id) {
+      unidentifiedByFingerprint.set(messageFingerprint(message), index);
+    }
+  });
+
+  for (const message of liveMessages) {
+    if (isHiddenFromUIMessage(message)) {
+      continue;
+    }
+    if (message.id && seenIds.has(message.id)) {
+      continue;
+    }
+
+    const fingerprint = messageFingerprint(message);
+    const unidentifiedIndex = unidentifiedByFingerprint.get(fingerprint);
+    if (message.id && unidentifiedIndex !== undefined) {
+      merged[unidentifiedIndex] = message;
+      seenIds.add(message.id);
+      unidentifiedByFingerprint.delete(fingerprint);
+      continue;
+    }
+
+    if (message.id) {
+      seenIds.add(message.id);
+    }
+    merged.push(message);
+  }
+
+  return merged;
+}
+
 export function MessageList({
   className,
   threadId,
@@ -175,7 +241,23 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  const [transcriptMessages, setTranscriptMessages] = useState<
+    AgentThreadState["messages"]
+  >([]);
+  const [transcriptLoadedForThread, setTranscriptLoadedForThread] = useState<
+    string | null
+  >(null);
+  const messages = useMemo(() => {
+    if (transcriptLoadedForThread !== threadId) {
+      return thread.messages;
+    }
+    return mergeTranscriptWithLiveMessages(transcriptMessages, thread.messages);
+  }, [
+    thread.messages,
+    threadId,
+    transcriptLoadedForThread,
+    transcriptMessages,
+  ]);
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
@@ -183,6 +265,47 @@ export function MessageList({
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
   );
+
+  useEffect(() => {
+    setTranscriptMessages([]);
+    setTranscriptLoadedForThread(null);
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId || thread.isThreadLoading || thread.isLoading) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const loadTranscript = async () => {
+      const response = await fetch(
+        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/messages`,
+        {
+          signal: controller.signal,
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to load thread messages: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as ThreadMessagesResponse;
+      setTranscriptMessages(payload.messages ?? []);
+      setTranscriptLoadedForThread(threadId);
+    };
+
+    void loadTranscript().catch((error: unknown) => {
+      if (controller.signal.aborted) {
+        return;
+      }
+      console.error("Failed to load canonical thread transcript", error);
+      setTranscriptMessages([]);
+      setTranscriptLoadedForThread(threadId);
+    });
+
+    return () => controller.abort();
+  }, [thread.isLoading, thread.isThreadLoading, threadId]);
 
   const renderAssistantCopyButton = useCallback((messages: Message[]) => {
     const clipboardData = [...messages]

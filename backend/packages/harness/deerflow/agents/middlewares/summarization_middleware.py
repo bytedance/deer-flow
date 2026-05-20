@@ -19,6 +19,8 @@ from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with
 
 logger = logging.getLogger(__name__)
 
+SUMMARY_MESSAGE_KWARG = "deerflow_conversation_summary"
+
 
 @dataclass(frozen=True)
 class SummarizationEvent:
@@ -123,6 +125,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
+    def _build_new_messages(self, summary) -> list[AnyMessage]:
+        messages = super()._build_new_messages(summary)
+        for message in messages:
+            additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+            additional_kwargs["hide_from_ui"] = True
+            additional_kwargs[SUMMARY_MESSAGE_KWARG] = True
+            message.additional_kwargs = additional_kwargs
+        return messages
+
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
@@ -180,7 +191,16 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         """Override the base implementation to let the human message with the special name 'summary'.
         And this message will be ignored to display in the frontend, but still can be used as context for the model.
         """
-        return [HumanMessage(content=f"Here is a summary of the conversation to date:\n\n{summary}", name="summary")]
+        return [
+            HumanMessage(
+                content=f"Here is a summary of the conversation to date:\n\n{summary}",
+                name="summary",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    SUMMARY_MESSAGE_KWARG: True,
+                },
+            )
+        ]
 
     def _preserve_dynamic_context_reminders(
         self,

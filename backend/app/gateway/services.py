@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.transcripts import append_thread_transcript_messages
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -245,6 +246,29 @@ def build_run_config(
 # ---------------------------------------------------------------------------
 
 
+async def _sync_thread_transcript_after_run(
+    run_task: asyncio.Task,
+    thread_id: str,
+    checkpointer: Any,
+    store: Any,
+) -> None:
+    """Wait for *run_task* to finish, then append final visible messages."""
+    await asyncio.wait({run_task})
+
+    try:
+        ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+        if ckpt_tuple is None:
+            return
+
+        channel_values = ckpt_tuple.checkpoint.get("channel_values", {})
+        messages = channel_values.get("messages")
+        if isinstance(messages, list):
+            await append_thread_transcript_messages(store, thread_id, messages)
+    except Exception:
+        logger.debug("Failed to sync transcript for thread %s (non-fatal)", sanitize_log_param(thread_id), exc_info=True)
+
+
 async def start_run(
     body: Any,
     thread_id: str,
@@ -320,6 +344,14 @@ async def start_run(
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
+    if run_ctx.store is not None:
+        try:
+            input_messages = graph_input.get("messages")
+            if isinstance(input_messages, list):
+                await append_thread_transcript_messages(run_ctx.store, thread_id, input_messages)
+        except Exception:
+            logger.debug("Failed to append submitted messages for thread %s (non-fatal)", sanitize_log_param(thread_id), exc_info=True)
+
     # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
@@ -345,6 +377,9 @@ async def start_run(
         )
     )
     record.task = task
+
+    if run_ctx.store is not None and run_ctx.checkpointer is not None:
+        asyncio.create_task(_sync_thread_transcript_after_run(task, thread_id, run_ctx.checkpointer, run_ctx.store))
 
     # Title sync is handled by worker.py's finally block which reads the
     # title from the checkpoint and calls thread_store.update_display_name

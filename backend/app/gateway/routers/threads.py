@@ -21,7 +21,8 @@ from langgraph.checkpoint.base import empty_checkpoint
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_store
+from app.gateway.transcripts import delete_thread_transcript, get_thread_transcript
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
@@ -161,6 +162,12 @@ class ThreadHistoryRequest(BaseModel):
     before: str | None = Field(default=None, description="Cursor for pagination")
 
 
+class ThreadMessagesResponse(BaseModel):
+    """Canonical UI transcript for a thread."""
+
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -223,6 +230,14 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     # Clean local filesystem
     response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
 
+    # Remove canonical UI transcript (best-effort)
+    store = get_store(request)
+    if store is not None:
+        try:
+            await delete_thread_transcript(store, thread_id)
+        except Exception:
+            logger.debug("Could not delete transcript for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
@@ -241,6 +256,25 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
     return response
+
+
+@router.get("/{thread_id}/messages", response_model=ThreadMessagesResponse)
+@require_permission("threads", "read", owner_check=True)
+async def get_thread_messages(thread_id: str, request: Request) -> ThreadMessagesResponse:
+    """Return the canonical UI transcript for a thread.
+
+    Unlike checkpoint state, this transcript is not rewritten by model-context
+    summarization and is therefore the preferred source for chat rendering.
+    """
+    store = get_store(request)
+    if store is None:
+        return ThreadMessagesResponse(messages=[])
+
+    try:
+        return ThreadMessagesResponse(messages=await get_thread_transcript(store, thread_id))
+    except Exception:
+        logger.exception("Failed to get transcript for thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to get thread messages")
 
 
 @router.post("", response_model=ThreadResponse)
