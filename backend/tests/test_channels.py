@@ -440,6 +440,23 @@ class TestExtractResponseText:
         assert _strip_loop_warning_text("No sentinels here.") == "No sentinels here."
         assert _strip_loop_warning_text("[LOOP DETECTED] looping.\n[FORCED STOP] stopped.") == ""
 
+    def test_strips_forced_stop_from_content_block_list(self):
+        """[FORCED STOP] must be stripped even when content is a list of blocks."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "do something"},
+                {
+                    "type": "ai",
+                    "content": [
+                        {"type": "text", "text": "[FORCED STOP] Safety limit exceeded.\n\nHere is the summary."},
+                    ],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == "Here is the summary."
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
