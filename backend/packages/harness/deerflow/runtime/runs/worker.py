@@ -224,6 +224,17 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
+        # Inject Langfuse per-run session/user metadata so traces are grouped by
+        # thread and user in the Langfuse dashboard.  The LangfuseCallbackHandler
+        # reads langfuse_session_id and langfuse_user_id from the LangChain run
+        # metadata dict; no handler-level changes are needed.
+        config.setdefault("metadata", {}).update(
+            {
+                "langfuse_session_id": thread_id,
+                "langfuse_user_id": runtime_ctx.get("user_id", ""),
+            }
+        )
+
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
