@@ -29,6 +29,21 @@ export interface ContextUsage {
   percentage: number | null;
 }
 
+export async function fetchContextUsage(
+  threadId: string,
+): Promise<ContextUsage | null> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/context-usage`,
+    { method: "GET" },
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as ContextUsage | null;
+}
+
 export interface ClearContextResponse {
   success: boolean;
   message: string;

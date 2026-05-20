@@ -201,7 +201,7 @@ export function ContextEventDivider() {
             {t.conversation.compactSummary} ▾
           </CollapsibleTrigger>
           <CollapsibleContent>
-            <div className="bg-muted/50 mt-1 rounded-lg p-3 text-sm whitespace-pre-wrap">
+            <div className="bg-muted/50 mt-1 max-h-48 overflow-y-auto rounded-lg p-3 text-sm whitespace-pre-wrap">
               {event.summary}
             </div>
           </CollapsibleContent>

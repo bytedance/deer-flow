@@ -65,8 +65,23 @@ export function TokenUsageIndicator({
   );
   const preset = getTokenUsageViewPreset(preferences);
 
-  if (!enabled) {
+  const hasContextPercentage = contextUsage?.percentage != null;
+
+  if (!enabled && !hasContextPercentage) {
     return null;
+  }
+
+  if (!enabled) {
+    return (
+      <span
+        className={cn(
+          "text-muted-foreground bg-background/70 flex h-auto items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-normal",
+          className,
+        )}
+      >
+        <span className="font-mono">{contextUsage!.percentage}%</span>
+      </span>
+    );
   }
 
   return (
@@ -89,6 +104,11 @@ export function TokenUsageIndicator({
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
+          {hasContextPercentage && (
+            <span className="text-muted-foreground/80 font-mono">
+              · {contextUsage.percentage}%
+            </span>
+          )}
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>
@@ -117,7 +137,7 @@ export function TokenUsageIndicator({
                   </span>
                 </div>
               </div>
-              {contextUsage?.percentage != null && (
+              {hasContextPercentage && (
                 <div className="border-t pt-1">
                   <div className="flex justify-between gap-4">
                     <span>{t.tokenUsage.contextUsed}</span>
@@ -129,8 +149,20 @@ export function TokenUsageIndicator({
               )}
             </div>
           ) : (
-            <div className="text-muted-foreground">
-              {t.tokenUsage.unavailable}
+            <div className="space-y-1">
+              <div className="text-muted-foreground">
+                {t.tokenUsage.unavailable}
+              </div>
+              {hasContextPercentage && (
+                <div className="border-t pt-1">
+                  <div className="flex justify-between gap-4">
+                    <span>{t.tokenUsage.contextUsed}</span>
+                    <span className="font-mono font-medium">
+                      {contextUsage.percentage}%
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

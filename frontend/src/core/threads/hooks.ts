@@ -17,9 +17,9 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage, clearThreadContext, compactThreadContext } from "./api";
-import type { ClearContextResponse, CompactContextResponse } from "./api";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import { fetchThreadTokenUsage, fetchContextUsage, clearThreadContext, compactThreadContext } from "./api";
+import type { ClearContextResponse, CompactContextResponse, ContextUsage } from "./api";
+import { contextUsageQueryKey, threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
@@ -342,6 +342,9 @@ export function useThreadStream({
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
         });
+        void queryClient.invalidateQueries({
+          queryKey: contextUsageQueryKey(threadIdRef.current),
+        });
       }
     },
     onFinish(state) {
@@ -355,6 +358,9 @@ export function useThreadStream({
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: contextUsageQueryKey(threadIdRef.current),
         });
       }
     },
@@ -878,6 +884,22 @@ export function useThreadTokenUsage(
         return null;
       }
       return fetchThreadTokenUsage(threadId);
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useContextUsage(
+  threadId?: string | null,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery<ContextUsage | null>({
+    queryKey: contextUsageQueryKey(threadId),
+    queryFn: async () => {
+      if (!threadId) return null;
+      return fetchContextUsage(threadId);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,

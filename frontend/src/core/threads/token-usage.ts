@@ -7,6 +7,10 @@ export function threadTokenUsageQueryKey(threadId?: string | null) {
   return ["thread-token-usage", threadId] as const;
 }
 
+export function contextUsageQueryKey(threadId?: string | null) {
+  return ["thread-context-usage", threadId] as const;
+}
+
 export function threadTokenUsageToTokenUsage(
   usage: ThreadTokenUsageResponse | null | undefined,
 ): TokenUsage | null {

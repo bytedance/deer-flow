@@ -709,6 +709,24 @@ def _compute_context_usage(
         return None
 
 
+@router.get("/{thread_id}/context-usage", response_model=ContextUsage | None)
+@require_permission("threads", "read", owner_check=True)
+async def get_thread_context_usage(thread_id: str, request: Request) -> ContextUsage | None:
+    """Return the current context window usage for a thread."""
+    try:
+        app_config = get_config(request)
+        checkpointer = get_checkpointer(request)
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+        if not checkpoint_tuple or not checkpoint_tuple.checkpoint:
+            return ContextUsage(token_count=0, max_context_tokens=None, percentage=0.0)
+        channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
+        return _compute_context_usage(channel_values, app_config)
+    except Exception:
+        logger.debug("Failed to compute context usage for thread %s", sanitize_log_param(thread_id), exc_info=True)
+        return None
+
+
 @router.post("/{thread_id}/clear-context", response_model=ClearContextResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def clear_thread_context(thread_id: str, request: Request) -> ClearContextResponse:
