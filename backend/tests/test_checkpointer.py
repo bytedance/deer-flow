@@ -101,6 +101,12 @@ class TestHarnessPackaging:
         optional_dependencies = data["project"]["optional-dependencies"]
         assert optional_dependencies["postgres"] == ["deerflow-harness[postgres]"]
 
+    def test_pyproject_declares_requests_dependency(self):
+        pyproject_path = Path(__file__).resolve().parents[1] / "packages" / "harness" / "pyproject.toml"
+        data = tomllib.loads(pyproject_path.read_text())
+        deps = data["project"]["dependencies"]
+        assert any(d.startswith("requests") for d in deps), "requests must be a direct harness dependency"
+
     def test_postgres_missing_dependency_messages_recommend_package_extra(self):
         assert "deerflow-harness[postgres]" in POSTGRES_INSTALL
         assert "deerflow-harness[postgres]" in POSTGRES_STORE_INSTALL
