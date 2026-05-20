@@ -26,6 +26,16 @@ from deerflow.skills.types import Skill
 logger = logging.getLogger(__name__)
 
 
+def _normalize_selected_skill_names(value: object) -> set[str] | None:
+    """Normalize optional per-run skill selection from configurable context."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        logger.warning("Ignoring invalid selected_skill_names value: %r", value)
+        return None
+    return {item.strip() for item in value if isinstance(item, str) and item.strip()}
+
+
 def _get_runtime_config(config: RunnableConfig) -> dict:
     """Merge legacy configurable options with LangGraph runtime context."""
     cfg = dict(config.get("configurable", {}) or {})
@@ -363,9 +373,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
+    selected_skill_names = _normalize_selected_skill_names(cfg.get("selected_skill_names"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    if selected_skill_names is not None and not is_bootstrap:
+        available_skills = selected_skill_names if available_skills is None else available_skills.intersection(selected_skill_names)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -439,7 +452,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            available_skills=available_skills,
             app_config=resolved_app_config,
         ),
         state_schema=ThreadState,
