@@ -74,6 +74,42 @@ def test_normalize_input_with_messages():
     assert result["messages"][0].content == "hi"
 
 
+def test_normalize_input_preserves_files_additional_kwargs():
+    from app.gateway.services import normalize_input
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hi",
+                    "additional_kwargs": {
+                        "files": [
+                            {
+                                "filename": "report.pdf",
+                                "size": 123,
+                                "path": "/mnt/user-data/uploads/report.pdf",
+                                "status": "uploaded",
+                            }
+                        ],
+                        "tool_calls": [{"name": "get_weather"}],
+                    },
+                }
+            ]
+        }
+    )
+    assert result["messages"][0].additional_kwargs == {
+        "files": [
+            {
+                "filename": "report.pdf",
+                "size": 123,
+                "path": "/mnt/user-data/uploads/report.pdf",
+                "status": "uploaded",
+            }
+        ]
+    }
+
+
 def test_normalize_input_passthrough():
     from app.gateway.services import normalize_input
 
