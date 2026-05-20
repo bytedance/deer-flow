@@ -6,11 +6,11 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-_ENV_VAR_INLINE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.runtime_paths import existing_project_file
+
+_ENV_VAR_INLINE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class McpOAuthConfig(BaseModel):
