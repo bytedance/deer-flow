@@ -144,7 +144,7 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
-    assert config["run_name"] == "other-agent"
+    assert config["run_name"] == "explicit-agent"
 
 
 def test_build_run_config_context_custom_agent_injects_agent_name():
