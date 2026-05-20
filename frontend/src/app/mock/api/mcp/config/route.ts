@@ -3,12 +3,6 @@ export function GET() {
     mcp_servers: {
       "mcp-github-trending": {
         enabled: true,
-        type: "stdio",
-        command: "uvx",
-        args: ["mcp-github-trending"],
-        env: {},
-        url: null,
-        headers: {},
         description:
           "A MCP server that provides access to GitHub trending repositories and developers data",
       },

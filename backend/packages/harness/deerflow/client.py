@@ -39,6 +39,7 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
+from deerflow.mcp.management import summarize_mcp_servers, update_mcp_server_enabled_states
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -896,45 +897,43 @@ class DeerFlowClient:
         """Get MCP server configurations.
 
         Returns:
-            Dict with "mcp_servers" key mapping server name to config,
+            Dict with "mcp_servers" key mapping server name to public config,
             matching the Gateway API ``McpConfigResponse`` schema.
         """
         config = get_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()}}
+        return {"mcp_servers": summarize_mcp_servers(config)}
 
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
-        """Update MCP server configurations.
+        """Update MCP enabled states for existing servers.
 
-        Writes to extensions_config.json and reloads the cache.
+        Writes enabled-state toggles to extensions_config.json and reloads the cache.
 
         Args:
-            mcp_servers: Dict mapping server name to config dict.
-                Each value should contain keys like enabled, type, command, args, env, url, etc.
+            mcp_servers: Dict mapping server name to update dicts.
+                Each value must include an ``enabled`` boolean.
 
         Returns:
             Dict with "mcp_servers" key, matching the Gateway API
             ``McpConfigResponse`` schema.
 
         Raises:
-            OSError: If the config file cannot be written.
+            FileNotFoundError: If the config file cannot be located.
+            KeyError: If an unknown MCP server is provided.
+            TypeError: If an MCP server update is not a dict.
+            ValueError: If an MCP server update omits the ``enabled`` field.
         """
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+        enabled_updates: dict[str, bool] = {}
+        for name, server in mcp_servers.items():
+            if not isinstance(server, dict):
+                raise TypeError(f"MCP server update for '{name}' must be a dict")
+            if "enabled" not in server:
+                raise ValueError(f"MCP server update for '{name}' must include 'enabled'")
+            enabled_updates[name] = bool(server["enabled"])
 
-        current_config = get_extensions_config()
-
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
-
-        self._atomic_write_json(config_path, config_data)
-
+        reloaded = update_mcp_server_enabled_states(enabled_updates)
         self._agent = None
         self._agent_config_key = None
-        reloaded = reload_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
+        return {"mcp_servers": summarize_mcp_servers(reloaded)}
 
     # ------------------------------------------------------------------
     # Public API — skills management

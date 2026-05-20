@@ -222,7 +222,7 @@ GET /api/models/{model_name}
 
 #### Get MCP Config
 
-Get current MCP server configurations.
+Get the current MCP server summaries.
 
 ```http
 GET /api/mcp/config
@@ -231,31 +231,24 @@ GET /api/mcp/config
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_TOKEN": "***"
-      },
       "description": "GitHub operations"
     },
     "filesystem": {
       "enabled": false,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
       "description": "File system access"
     }
   }
 }
 ```
 
+Transport definitions, environment variables, headers, and OAuth secrets remain file-managed in `extensions_config.json` and are not exposed by the HTTP API.
+
 #### Update MCP Config
 
-Update MCP server configurations.
+Update enabled states for existing MCP servers.
 
 ```http
 PUT /api/mcp/config
@@ -265,16 +258,9 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
-      "enabled": true,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_TOKEN": "$GITHUB_TOKEN"
-      },
-      "description": "GitHub operations"
+      "enabled": true
     }
   }
 }
@@ -283,8 +269,12 @@ Content-Type: application/json
 **Response:**
 ```json
 {
-  "success": true,
-  "message": "MCP configuration updated"
+  "mcp_servers": {
+    "github": {
+      "enabled": true,
+      "description": "GitHub operations"
+    }
+  }
 }
 ```
 
