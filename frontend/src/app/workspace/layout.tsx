@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -12,6 +13,14 @@ export const dynamic = "force-dynamic";
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // Allow ?mock=true demo URLs through without authentication. The middleware
+  // at src/middleware.ts sets x-mock on the request so layouts can read it
+  // via headers() (layouts do not receive searchParams in App Router).
+  const headersList = await headers();
+  if (headersList.get("x-mock") === "true") {
+    return <WorkspaceContent>{children}</WorkspaceContent>;
+  }
+
   const result = await getServerSideUser();
 
   switch (result.tag) {
