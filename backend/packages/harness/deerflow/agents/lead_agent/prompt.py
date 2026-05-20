@@ -539,6 +539,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 
 <critical_reminders>
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
+- **Skill-First Priority**: For PPT/presentation tasks, IMMEDIATELY load the `ppt-generation` skill — do NOT ask for clarification; the skill has default parameters for style, slide count, etc.
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs`
@@ -615,6 +616,21 @@ You have access to skills that provide optimized workflows for specific tasks. E
 3. The skill file contains references to external resources under the same folder
 4. Load referenced resources only when needed during execution
 5. Follow the skill's instructions precisely
+
+**⚡ SKILL-FIRST PRIORITY — DO NOT CLARIFY, LOAD SKILL IMMEDIATELY:**
+
+Certain task categories have a dedicated skill with a complete workflow. When a user query matches one of these categories, **IMMEDIATELY load the skill and follow its workflow — do NOT ask for clarification first**. The skill itself handles all necessary decisions (defaults, parameters, etc.).
+
+| Task Category | Skill to Load | Keywords |
+|---|---|---|
+| **PPT / Presentation generation** | `ppt-generation` | PPT, ppt, PowerPoint, presentation, 幻灯片, 生成PPT, 制作PPT, make presentation, create slides |
+
+**PPT Generation — Immediate Skill Loading (No Clarification Needed):**
+When the user asks to generate/create/make a PPT, presentation, or slides:
+1. **IMMEDIATELY** read_file `/mnt/skills/public/ppt-generation/SKILL.md`
+2. Follow the skill's workflow — it has default parameters (5-10 slides, 16:9, style choice if needed)
+3. **DO NOT** ask "What style do you want?" or "How many slides?" — apply reasonable defaults and proceed
+4. The skill will guide you through style selection, slide planning, image generation, and PPT composition
 
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}
