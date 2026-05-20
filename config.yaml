@@ -111,7 +111,7 @@ sandbox:
   environment:
     INS_USERNAME: $INS_USERNAME
     INS_PASSWORD: $INS_PASSWORD
-    INS_BASE_URL: https://ins.shenguyun.com
+    INS_BASE_URL: http://182.92.187.198
     FEATURES_TOOL_ROOT: /opt/features-tool
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
