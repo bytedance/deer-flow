@@ -2,6 +2,11 @@ import logging
 
 from langchain.chat_models import BaseChatModel
 
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:  # pragma: no cover - optional dependency guard
+    ChatOpenAI = None
+
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_class
@@ -138,16 +143,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # Enforce max_retries constraint to prevent cascading timeouts.
         model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
 
-    # Ensure stream_usage is enabled so that token usage metadata is available
-    # in streaming responses.  LangChain's BaseChatOpenAI only defaults
-    # stream_usage=True when no custom base_url/api_base is set, so models
-    # hitting third-party endpoints (e.g. doubao, deepseek) silently lose
-    # usage data.  We default it to True unless explicitly configured.
-    if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
-        if "stream_usage" in getattr(model_class, "model_fields", {}):
-            model_settings_from_config["stream_usage"] = True
+    effective_settings = {**model_settings_from_config, **kwargs}
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    # OpenAI-compatible streaming models only emit usage metadata when stream_usage is enabled.
+    # Respect explicit values from config or caller kwargs; only fill the default when both omit it.
+    if "stream_usage" not in effective_settings:
+        if "stream_usage" in getattr(model_class, "model_fields", {}):
+            effective_settings["stream_usage"] = True
+
+    model_instance = model_class(**effective_settings)
 
     callbacks = build_tracing_callbacks()
     if callbacks:
