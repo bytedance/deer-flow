@@ -10,7 +10,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
-import { SettingsSection } from "./settings-section";
+import { SettingsCard, SettingsRow, SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
@@ -68,73 +68,126 @@ export function AccountSettingsPage() {
     }
   };
 
+  const initial = (
+    user?.email?.[0] ??
+    user?.system_role?.[0] ??
+    "?"
+  ).toUpperCase();
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       <SettingsSection title={t.settings.account.profileTitle}>
-        <div className="space-y-2">
-          <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
-            <span className="text-muted-foreground text-sm">
-              {t.settings.account.email}
-            </span>
-            <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-            <span className="text-muted-foreground text-sm">
-              {t.settings.account.role}
-            </span>
-            <span className="text-sm font-medium capitalize">
-              {user?.system_role ?? "—"}
-            </span>
+        <SettingsCard>
+          <div className="flex items-center gap-4 px-5 py-4">
+            <div className="bg-primary text-primary-foreground flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold">
+              {initial}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold">
+                {user?.email ?? "—"}
+              </div>
+              <div className="text-muted-foreground mt-0.5 text-xs capitalize">
+                {user?.system_role ?? "—"}
+              </div>
+            </div>
           </div>
-        </div>
+        </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
         title={t.settings.account.changePasswordTitle}
         description={t.settings.account.changePasswordDescription}
       >
-        <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
-          <Input
-            type="password"
-            placeholder={t.settings.account.currentPassword}
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-          />
-          <Input
-            type="password"
-            placeholder={t.settings.account.newPassword}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          <Input
-            type="password"
-            placeholder={t.settings.account.confirmNewPassword}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={8}
-          />
-          {error && <p className="text-sm text-red-500">{error}</p>}
-          {message && <p className="text-sm text-green-500">{message}</p>}
-          <Button type="submit" variant="outline" size="sm" disabled={loading}>
-            {loading
-              ? t.settings.account.updating
-              : t.settings.account.updatePassword}
-          </Button>
-        </form>
+        <SettingsCard>
+          <form onSubmit={handleChangePassword}>
+            <SettingsRow
+              size="compact"
+              label={t.settings.account.currentPassword}
+              control={
+                <Input
+                  type="password"
+                  placeholder="••••••••"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  required
+                  className="w-[260px]"
+                />
+              }
+            />
+            <SettingsRow
+              size="compact"
+              label={t.settings.account.newPassword}
+              control={
+                <Input
+                  type="password"
+                  placeholder="••••••••"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  className="w-[260px]"
+                />
+              }
+            />
+            <SettingsRow
+              size="compact"
+              label={t.settings.account.confirmNewPassword}
+              control={
+                <Input
+                  type="password"
+                  placeholder="••••••••"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  className="w-[260px]"
+                />
+              }
+            />
+            {(error || message) && (
+              <div className="px-5 py-2">
+                {error && <p className="text-sm text-red-500">{error}</p>}
+                {message && (
+                  <p className="text-sm text-emerald-600 dark:text-emerald-400">
+                    {message}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex justify-end px-5 py-3">
+              <Button
+                type="submit"
+                variant="default"
+                size="sm"
+                disabled={loading}
+              >
+                {loading
+                  ? t.settings.account.updating
+                  : t.settings.account.updatePassword}
+              </Button>
+            </div>
+          </form>
+        </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="" description="">
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={logout}
-          className="gap-2"
-        >
-          <LogOutIcon className="size-4" />
-          {t.settings.account.signOut}
-        </Button>
+      <SettingsSection title={t.settings.account.sessionTitle}>
+        <SettingsCard>
+          <SettingsRow
+            label={t.settings.account.signOut}
+            description={t.settings.account.signOutDescription}
+            control={
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={logout}
+                className="gap-2"
+              >
+                <LogOutIcon className="size-4" />
+                {t.settings.account.signOut}
+              </Button>
+            }
+          />
+        </SettingsCard>
       </SettingsSection>
     </div>
   );

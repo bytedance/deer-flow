@@ -571,9 +571,16 @@ export function MemorySettingsPage() {
                   }}
                   variant="outline"
                 >
-                  <ToggleGroupItem value="all">{filterAll}</ToggleGroupItem>
-                  <ToggleGroupItem value="facts">{filterFacts}</ToggleGroupItem>
-                  <ToggleGroupItem value="summaries">
+                  <ToggleGroupItem value="all" className="whitespace-nowrap">
+                    {filterAll}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
+                    {filterFacts}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="summaries"
+                    className="whitespace-nowrap"
+                  >
                     {filterSummaries}
                   </ToggleGroupItem>
                 </ToggleGroup>
@@ -591,6 +598,7 @@ export function MemorySettingsPage() {
                   variant="outline"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={importMemoryMutation.isPending}
+                  className="whitespace-nowrap"
                 >
                   <UploadIcon className="mr-2 h-4 w-4" />
                   {importButton}
@@ -599,11 +607,16 @@ export function MemorySettingsPage() {
                   variant="outline"
                   onClick={() => void handleExportMemory()}
                   disabled={isExporting}
+                  className="whitespace-nowrap"
                 >
                   <DownloadIcon className="mr-2 h-4 w-4" />
                   {isExporting ? t.common.loading : exportButton}
                 </Button>
-                <Button variant="outline" onClick={openCreateFactDialog}>
+                <Button
+                  variant="outline"
+                  onClick={openCreateFactDialog}
+                  className="whitespace-nowrap"
+                >
                   <PlusIcon className="mr-2 h-4 w-4" />
                   {addFactLabel}
                 </Button>
@@ -611,6 +624,7 @@ export function MemorySettingsPage() {
                   variant="destructive"
                   onClick={() => setClearDialogOpen(true)}
                   disabled={clearMemory.isPending}
+                  className="whitespace-nowrap"
                 >
                   {clearMemory.isPending ? t.common.loading : clearAllLabel}
                 </Button>

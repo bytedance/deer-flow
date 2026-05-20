@@ -351,6 +351,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      general: "General",
       account: "Account",
       appearance: "Appearance",
       memory: "Memory",
@@ -365,9 +366,9 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
-      exportButton: "Export memory",
+      exportButton: "Export",
       exportSuccess: "Memory exported",
-      importButton: "Import memory",
+      importButton: "Import",
       importConfirmTitle: "Import memory?",
       importConfirmDescription:
         "This will overwrite your current memory with the selected JSON backup.",
@@ -381,7 +382,7 @@ export const enUS: Translations = {
       editFactTitle: "Edit memory fact",
       addFactSuccess: "Fact created",
       editFactSuccess: "Fact updated",
-      clearAll: "Clear all memory",
+      clearAll: "Clear all",
       clearAllConfirmTitle: "Clear all memory?",
       clearAllConfirmDescription:
         "This will remove all saved summaries and facts. This action cannot be undone.",
@@ -493,7 +494,10 @@ export const enUS: Translations = {
       networkError: "Network error. Please try again.",
       updating: "Updating...",
       updatePassword: "Update Password",
+      sessionTitle: "Session",
       signOut: "Sign Out",
+      signOutDescription:
+        "Sign out of this device. You can sign back in any time.",
     },
     acknowledge: {
       emptyTitle: "Acknowledgements",
