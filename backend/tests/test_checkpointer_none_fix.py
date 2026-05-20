@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.config.database_config import DatabaseConfig
+
 
 class TestCheckpointerNoneFix:
     """Tests that checkpointer context managers return InMemorySaver instead of None."""
@@ -14,10 +16,12 @@ class TestCheckpointerNoneFix:
         """make_checkpointer should return InMemorySaver when config.checkpointer is None."""
         from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
-        # Mock get_app_config to return a config with checkpointer=None and database=None
+        # Mock get_app_config to return a config with checkpointer=None and the
+        # default database backend (``memory``) — matches the pydantic schema
+        # where ``AppConfig.database`` is non-Optional with default_factory.
         mock_config = MagicMock()
         mock_config.checkpointer = None
-        mock_config.database = None
+        mock_config.database = DatabaseConfig()
 
         with patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config):
             async with make_checkpointer() as checkpointer:
@@ -38,9 +42,11 @@ class TestCheckpointerNoneFix:
         """checkpointer_context should return InMemorySaver when config.checkpointer is None."""
         from deerflow.runtime.checkpointer.provider import checkpointer_context
 
-        # Mock get_app_config to return a config with checkpointer=None
+        # Mock get_app_config to return a config with checkpointer=None and the
+        # default database backend (``memory``).
         mock_config = MagicMock()
         mock_config.checkpointer = None
+        mock_config.database = DatabaseConfig()
 
         with patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=mock_config):
             with checkpointer_context() as checkpointer:
