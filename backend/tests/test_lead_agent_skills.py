@@ -25,6 +25,20 @@ def _make_skill(name: str, allowed_tools: list[str] | None = None) -> Skill:
     )
 
 
+def _make_custom_skill(name: str, relative_path: str | None = None) -> Skill:
+    skill_path = Path(relative_path or name)
+    return Skill(
+        name=name,
+        description=f"Description for {name}",
+        license="MIT",
+        skill_dir=Path("/tmp/custom") / skill_path,
+        skill_file=Path("/tmp/custom") / skill_path / "SKILL.md",
+        relative_path=skill_path,
+        category="custom",
+        enabled=True,
+    )
+
+
 def test_get_skills_prompt_section_returns_empty_when_no_skills_match(monkeypatch):
     skills = [_make_skill("skill1"), _make_skill("skill2")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
@@ -49,6 +63,7 @@ def test_get_skills_prompt_section_returns_skills(monkeypatch):
     assert "skill1" in result
     assert "skill2" not in result
     assert "[built-in]" in result
+    assert 'path="/mnt/skills/public/skill1/SKILL.md"' in result
 
 
 def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(monkeypatch):
@@ -58,6 +73,32 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
     result = get_skills_prompt_section(available_skills=None)
     assert "skill1" in result
     assert "skill2" in result
+
+
+def test_get_skills_prompt_section_includes_exact_custom_skill_path(monkeypatch):
+    skills = [_make_custom_skill("team-helper", relative_path="team/helper")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+
+    result = get_skills_prompt_section(available_skills=None)
+
+    assert 'path="/mnt/skills/custom/team/helper/SKILL.md"' in result
+    assert "<location>/mnt/skills/custom/team/helper/SKILL.md</location>" in result
+    assert 'category="custom"' in result
+    assert "[custom, editable]" in result
+    assert "user custom skills live under `/mnt/skills/custom/...`" in result
+
+
+def test_get_skills_prompt_section_escapes_skill_xml_values(monkeypatch):
+    skills = [_make_custom_skill("team&helper", relative_path='team/a&"b')]
+    skills[0].description = "Use <safe> & exact paths"
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+
+    result = get_skills_prompt_section(available_skills=None)
+
+    assert 'path="/mnt/skills/custom/team/a&amp;&quot;b/SKILL.md"' in result
+    assert "<name>team&amp;helper</name>" in result
+    assert "<description>Use &lt;safe&gt; &amp; exact paths [custom, editable]</description>" in result
+    assert "<location>/mnt/skills/custom/team/a&amp;&quot;b/SKILL.md</location>" in result
 
 
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
