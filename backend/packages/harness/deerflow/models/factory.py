@@ -72,6 +72,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "description",
             "supports_thinking",
             "supports_reasoning_effort",
+            "supports_stream_usage",
             "when_thinking_enabled",
             "when_thinking_disabled",
             "thinking",
@@ -115,6 +116,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         model_settings_from_config.pop("reasoning_effort", None)
 
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
+
+    if model_config.supports_stream_usage:
+        if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
+            model_settings_from_config["stream_usage"] = True
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
