@@ -277,6 +277,68 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     assert "thread_id" not in config["context"]
 
 
+def test_merge_run_context_overrides_propagates_sanitized_client_context_to_runtime_only():
+    """``context.client`` should be available to runtime consumers, not legacy configurable readers."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "client": {
+                "name": "custom-analytics-frontend",
+                "access_token": "must-not-propagate",
+                "capabilities": {
+                    "artifacts": True,
+                    "csv_download": True,
+                    "charts": False,
+                    "bad key": True,
+                    "coerced": "true",
+                },
+                "preferences": {
+                    "csv": "present",
+                    "chart": "skip",
+                    "nested": {"bad": "value"},
+                },
+            }
+        },
+    )
+
+    assert config["context"]["client"] == {
+        "name": "custom-analytics-frontend",
+        "capabilities": {
+            "artifacts": True,
+            "charts": False,
+            "csv_download": True,
+        },
+        "preferences": {
+            "chart": "skip",
+            "csv": "present",
+        },
+    }
+    assert "client" not in config["configurable"]
+
+
+def test_merge_run_context_overrides_preserves_explicit_config_context_client():
+    """Explicit ``config.context.client`` wins over top-level ``context.client``."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"client": {"name": "config-client", "capabilities": {"artifacts": False}}}},
+        None,
+    )
+    merge_run_context_overrides(
+        config,
+        {"client": {"name": "body-client", "capabilities": {"artifacts": True}}},
+    )
+
+    assert config["context"]["client"] == {
+        "name": "config-client",
+        "capabilities": {"artifacts": False},
+    }
+
+
 def test_merge_run_context_overrides_noop_for_empty_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 

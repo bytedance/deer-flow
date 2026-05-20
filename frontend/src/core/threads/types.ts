@@ -9,6 +9,12 @@ export interface AgentThreadState extends Record<string, unknown> {
   todos?: Todo[];
 }
 
+export interface AgentClientContext {
+  name?: string;
+  capabilities?: Record<string, boolean>;
+  preferences?: Record<string, string | number | boolean>;
+}
+
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
@@ -17,6 +23,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   subagent_enabled: boolean;
   reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
+  client?: AgentClientContext;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {
