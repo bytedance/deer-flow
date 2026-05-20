@@ -57,6 +57,7 @@ def _middleware(
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.with_config.return_value = model
     return DeerFlowSummarizationMiddleware(
         model=model,
         trigger=trigger,
@@ -659,3 +660,22 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
 
     queue.add_nowait.assert_called_once()
     assert queue.add_nowait.call_args.kwargs["user_id"] == "alice"
+
+
+def test_model_configured_with_nostream_tag() -> None:
+    """Summarization model gets 'nostream' tag so its tokens are not broadcast to clients."""
+    tagged_model = MagicMock()
+    tagged_model.invoke.return_value = SimpleNamespace(text="compressed summary")
+
+    original_model = MagicMock()
+    original_model.with_config.return_value = tagged_model
+
+    middleware = DeerFlowSummarizationMiddleware(
+        model=original_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+
+    original_model.with_config.assert_called_once_with(tags=["nostream"])
+    assert middleware.model is tagged_model
