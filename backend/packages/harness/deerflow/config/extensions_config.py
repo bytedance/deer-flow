@@ -1,5 +1,6 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from deerflow.config.runtime_paths import existing_project_file
+from deerflow.config.runtime_paths import existing_project_file, runtime_home
+
+USER_MCP_SETTINGS_FILENAME = "mcp_settings.json"
+
+
+def _validate_user_id_for_path(user_id: str) -> str:
+    """Validate a user id before using it as a path segment."""
+    normalized = user_id.strip()
+    if not normalized or normalized in {".", ".."} or "/" in normalized or "\\" in normalized or "\x00" in normalized:
+        raise ValueError(f"Invalid user_id {user_id!r}: user ids used in paths cannot be empty or contain path separators.")
+    return normalized
 
 
 class McpOAuthConfig(BaseModel):
@@ -69,6 +80,44 @@ class ExtensionsConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     @classmethod
+    def user_mcp_settings_path(cls, user_id: str) -> Path:
+        """Return the user-level MCP settings path for a user id.
+
+        The file is intentionally separate from the global `extensions_config.json`
+        so future call sites can load per-user MCP settings without changing the
+        existing global configuration behavior.
+        """
+        safe_user_id = _validate_user_id_for_path(user_id)
+        return runtime_home() / "users" / safe_user_id / USER_MCP_SETTINGS_FILENAME
+
+    @classmethod
+    def resolve_user_mcp_settings_path(cls, user_id: str | None = None, user_config_path: str | None = None) -> Path | None:
+        """Resolve an existing user-level MCP settings file.
+
+        Args:
+            user_id: User id whose settings should be loaded from
+                     `{runtime_home}/users/{user_id}/mcp_settings.json`.
+            user_config_path: Optional explicit settings file path, mainly useful
+                              for tests and future API call sites.
+
+        Returns:
+            Path to an existing user MCP settings file, or None if no user file
+            should be loaded.
+        """
+        if user_config_path:
+            path = Path(user_config_path)
+            if not path.exists():
+                raise FileNotFoundError(f"User MCP settings file specified by param `user_config_path` not found at {path}")
+            return path
+        if user_id is None:
+            return None
+
+        path = cls.user_mcp_settings_path(user_id)
+        if path.is_file():
+            return path
+        return None
+
+    @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
         """Resolve the extensions config file path.
 
@@ -122,13 +171,15 @@ class ExtensionsConfig(BaseModel):
             return None
 
     @classmethod
-    def from_file(cls, config_path: str | None = None) -> "ExtensionsConfig":
+    def from_file(cls, config_path: str | None = None, *, user_id: str | None = None, user_config_path: str | None = None) -> "ExtensionsConfig":
         """Load extensions config from JSON file.
 
         See `resolve_config_path` for more details.
 
         Args:
             config_path: Path to the extensions config file.
+            user_id: Optional user id used to load and merge user-level MCP settings.
+            user_config_path: Optional explicit user MCP settings file path.
 
         Returns:
             ExtensionsConfig: The loaded config, or empty config if file not found.
@@ -136,17 +187,64 @@ class ExtensionsConfig(BaseModel):
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
             # Return empty config if extensions config file is not found
-            return cls(mcp_servers={}, skills={})
+            config_data: dict[str, Any] = {"mcpServers": {}, "skills": {}}
+        else:
+            config_data = cls._load_config_data(resolved_path, description="Extensions config file")
+
+        resolved_user_path = cls.resolve_user_mcp_settings_path(user_id=user_id, user_config_path=user_config_path)
+        if resolved_user_path is not None:
+            user_config_data = cls._load_config_data(resolved_user_path, description="User MCP settings file")
+            config_data = cls.merge_user_mcp_settings_data(config_data, user_config_data)
 
         try:
-            with open(resolved_path, encoding="utf-8") as f:
-                config_data = json.load(f)
             cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
-            raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
+            source = resolved_path or "empty extensions config"
+            raise RuntimeError(f"Failed to load extensions config from {source}: {e}") from e
+
+    @classmethod
+    def _load_config_data(cls, path: Path, *, description: str) -> dict[str, Any]:
+        """Load raw JSON config data from a file."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                config_data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{description} at {path} is not valid JSON: {e}") from e
+
+        if not isinstance(config_data, dict):
+            raise ValueError(f"{description} at {path} must contain a JSON object")
+        return config_data
+
+    @classmethod
+    def merge_user_mcp_settings_data(cls, base_config: dict[str, Any], user_config: dict[str, Any]) -> dict[str, Any]:
+        """Merge user-level MCP server settings into a global extensions config.
+
+        Only `mcpServers` is merged from the user config. Global skills and other
+        extension-level fields remain owned by the global config. For an MCP
+        server with the same name, user-provided fields override the global server
+        fields while unspecified fields are inherited from the global server.
+        """
+        merged = copy.deepcopy(base_config)
+        base_servers_raw = merged.get("mcpServers")
+        user_servers_raw = user_config.get("mcpServers")
+        base_servers = copy.deepcopy(base_servers_raw) if base_servers_raw is not None else {}
+        user_servers = user_servers_raw if user_servers_raw is not None else {}
+
+        if not isinstance(base_servers, dict):
+            raise ValueError("Global extensions config field `mcpServers` must be an object")
+        if not isinstance(user_servers, dict):
+            raise ValueError("User MCP settings field `mcpServers` must be an object")
+
+        for server_name, user_server in user_servers.items():
+            base_server = base_servers.get(server_name)
+            if isinstance(base_server, dict) and isinstance(user_server, dict):
+                base_servers[server_name] = {**base_server, **copy.deepcopy(user_server)}
+            else:
+                base_servers[server_name] = copy.deepcopy(user_server)
+
+        merged["mcpServers"] = base_servers
+        return merged
 
     @classmethod
     def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
