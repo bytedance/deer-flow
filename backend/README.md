@@ -397,6 +397,7 @@ uv run pytest
 - [Configuration Guide](docs/CONFIGURATION.md)
 - [Architecture Details](docs/ARCHITECTURE.md)
 - [API Reference](docs/API.md)
+- [Benchmark Recursion Profiles](docs/BENCHMARKS.md)
 - [File Upload](docs/FILE_UPLOAD.md)
 - [Path Examples](docs/PATH_EXAMPLES.md)
 - [Context Summarization](docs/summarization.md)

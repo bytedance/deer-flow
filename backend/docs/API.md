@@ -110,6 +110,9 @@ starting point for plan-mode or subagent-heavy runs. Clients can still set
 `recursion_limit` explicitly in the request body; increase it if you run deeply
 nested subagent graphs.
 
+For benchmark runs, see [Benchmark Recursion Profiles](BENCHMARKS.md) for
+GAIA, SWE-bench Lite, and generic long-horizon profile recommendations.
+
 **Configurable Options:**
 - `model_name` (string): Override the default model
 - `thinking_enabled` (boolean): Enable extended thinking for supported models
@@ -669,4 +672,6 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
 > The unified Gateway path defaults `config.recursion_limit` to 100 for
 > plan-mode and subagent-heavy runs. Clients may still set
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
-> section for details.
+> section for details and
+> [Benchmark Recursion Profiles](BENCHMARKS.md) for long-horizon evaluation
+> profiles.
