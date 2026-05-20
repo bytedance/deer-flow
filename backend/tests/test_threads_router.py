@@ -1,5 +1,5 @@
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -485,3 +485,158 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
         response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200
+
+
+# ── clear-context and compact endpoints ──────────────────────────────────────
+
+
+def _seed_thread_with_messages(
+    app: FastAPI, thread_id: str, messages: list | None = None
+) -> None:
+    """Seed a thread by creating it and updating state via the API."""
+    from langchain_core.messages import HumanMessage
+
+    with TestClient(app) as client:
+        client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}})
+        client.post(
+            f"/api/threads/{thread_id}/state",
+            json={
+                "values": {
+                    "messages": messages
+                    if messages is not None
+                    else [{"type": "human", "content": "hello"}]
+                },
+                "as_node": "__start__",
+            },
+        )
+
+
+def test_clear_context_returns_success() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "clear-test"
+    _seed_thread_with_messages(app, thread_id)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/clear-context")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["message"] == "Context cleared"
+    assert body["checkpoint_id"] is not None
+
+
+def test_clear_context_empties_messages() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "clear-empty-check"
+    _seed_thread_with_messages(app, thread_id)
+
+    with TestClient(app) as client:
+        client.post(f"/api/threads/{thread_id}/clear-context")
+        state_resp = client.get(f"/api/threads/{thread_id}/state")
+
+    assert state_resp.status_code == 200
+    values = state_resp.json()["values"]
+    assert not values.get("messages")
+
+
+def test_clear_context_returns_404_for_missing_thread() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/nonexistent-thread/clear-context")
+
+    assert response.status_code == 404
+
+
+def _build_compact_app(messages=None) -> FastAPI:
+    """Build an app for compact tests with a mock checkpointer returning given messages."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    thread_store = _PermissiveThreadMetaStore(store)
+    app.state.store = store
+    app.state.thread_store = thread_store
+
+    thread_id = "compact-test"
+    asyncio.run(thread_store.create(thread_id))
+
+    mock_checkpoint = {
+        "channel_values": {
+            "messages": messages if messages is not None else [HumanMessage(content="hello")],
+        },
+        "id": "test-checkpoint",
+        "channel_versions": {},
+        "versions_seen": {},
+        "pending_sends": [],
+    }
+    mock_tuple = MagicMock()
+    mock_tuple.checkpoint = mock_checkpoint
+    mock_tuple.metadata = {"step": 1, "source": "input"}
+    mock_tuple.config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": "cp-1"}}
+    mock_tuple.parent_config = None
+    mock_tuple.tasks = []
+
+    checkpointer = MagicMock()
+    checkpointer.aget_tuple = AsyncMock(return_value=mock_tuple)
+    checkpointer.aput = AsyncMock(return_value={"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": "cp-new"}})
+    app.state.checkpointer = checkpointer
+
+    mock_config = MagicMock()
+    mock_config.summarization = MagicMock()
+    mock_config.summarization.model_name = None
+    mock_config.summarization.summary_prompt = None
+    mock_config.summarization.trim_tokens_to_summarize = 4000
+    app.state.config = mock_config
+
+    app.include_router(threads.router)
+    return app
+
+
+def test_compact_returns_success_with_summary() -> None:
+    app = _build_compact_app()
+
+    mock_model = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Summary of conversation"
+    mock_model.ainvoke = AsyncMock(return_value=mock_response)
+
+    with (
+        patch("deerflow.models.create_chat_model", return_value=mock_model),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/compact-test/compact")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["message"] == "Context compacted"
+    assert body["summary"] == "Summary of conversation"
+    assert body["checkpoint_id"] is not None
+    mock_model.ainvoke.assert_awaited_once()
+
+
+def test_compact_returns_400_when_no_messages() -> None:
+    app = _build_compact_app(messages=[])
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/compact-test/compact")
+
+    assert response.status_code == 400
+    assert "No messages to compact" in response.json()["detail"]
+
+
+def test_compact_returns_404_for_missing_thread() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    mock_config = MagicMock()
+    mock_config.summarization = MagicMock()
+    app.state.config = mock_config
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/nonexistent-thread/compact")
+
+    assert response.status_code == 404
