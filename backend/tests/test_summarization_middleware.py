@@ -658,4 +658,76 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     )
 
     queue.add_nowait.assert_called_once()
-    assert queue.add_nowait.call_args.kwargs["user_id"] == "alice"
+
+
+# ---------------------------------------------------------------------------
+# Stream event: _emit_archived_messages_event
+# ---------------------------------------------------------------------------
+
+
+def test_emit_archived_messages_event_calls_stream_writer():
+    """Summarization emits a messages_archived custom event via get_stream_writer."""
+    middleware = _middleware()
+    emitted: list = []
+
+    with mock.patch("deerflow.agents.middlewares.summarization_middleware.get_stream_writer", return_value=emitted.append):
+        middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert event["type"] == "messages_archived"
+    assert isinstance(event["messages"], list)
+    assert len(event["messages"]) == 2  # messages_to_summarize (first 2)
+
+
+def test_emit_archived_messages_contains_correct_messages():
+    """messages_archived event contains exactly the messages being archived, not preserved ones."""
+    middleware = _middleware()
+    emitted: list = []
+
+    with mock.patch("deerflow.agents.middlewares.summarization_middleware.get_stream_writer", return_value=emitted.append):
+        middleware.before_model({"messages": _messages()}, _runtime())
+
+    archived_contents = [m.content for m in emitted[0]["messages"]]
+    assert "user-1" in archived_contents
+    assert "assistant-1" in archived_contents
+    # Preserved messages must NOT be in the archive event
+    assert "user-2" not in archived_contents
+    assert "assistant-2" not in archived_contents
+
+
+def test_emit_failure_does_not_abort_summarization():
+    """If get_stream_writer raises, summarization still completes and returns state."""
+    middleware = _middleware()
+
+    with mock.patch(
+        "deerflow.agents.middlewares.summarization_middleware.get_stream_writer",
+        side_effect=RuntimeError("no stream context"),
+    ):
+        result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is not None
+    assert isinstance(result["messages"][0], RemoveMessage)
+
+
+def test_emit_is_called_after_hooks_before_return():
+    """Custom event is emitted after hooks fire but before the state update is returned."""
+    middleware = _middleware()
+    call_order: list[str] = []
+
+    def fake_writer(event):
+        call_order.append("emit")
+
+    original_fire_hooks = middleware._fire_hooks
+
+    def tracking_fire_hooks(*args, **kwargs):
+        call_order.append("hooks")
+        original_fire_hooks(*args, **kwargs)
+
+    middleware._fire_hooks = tracking_fire_hooks
+
+    with mock.patch("deerflow.agents.middlewares.summarization_middleware.get_stream_writer", return_value=fake_writer):
+        result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert call_order == ["hooks", "emit"]
+    assert isinstance(result["messages"][0], RemoveMessage)

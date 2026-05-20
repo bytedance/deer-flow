@@ -10,7 +10,7 @@ from typing import Any, Protocol, override, runtime_checkable
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
-from langgraph.config import get_config
+from langgraph.config import get_config, get_stream_writer
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
@@ -138,6 +138,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
         messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._emit_archived_messages_event(messages_to_summarize)
         summary = self._create_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
 
@@ -164,6 +165,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages = self._partition_with_skill_rescue(messages, cutoff_index)
         messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._emit_archived_messages_event(messages_to_summarize)
         summary = await self._acreate_summary(messages_to_summarize)
         new_messages = self._build_new_messages(summary)
 
@@ -372,3 +374,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             except Exception:
                 hook_name = getattr(hook, "__name__", None) or type(hook).__name__
                 logger.exception("before_summarization hook %s failed", hook_name)
+
+    def _emit_archived_messages_event(self, messages_to_summarize: list[AnyMessage]) -> None:
+        """Emit a custom stream event so the frontend can preserve archived messages in the live UI.
+
+        Uses the same pattern as LLMErrorHandlingMiddleware._emit_retry_event.
+        Failure is swallowed so summarization is never interrupted.
+        """
+        try:
+            writer = get_stream_writer()
+            writer({"type": "messages_archived", "messages": messages_to_summarize})
+        except Exception:
+            logger.debug("Failed to emit messages_archived stream event", exc_info=True)
