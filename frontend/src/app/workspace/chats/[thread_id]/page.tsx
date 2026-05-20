@@ -67,6 +67,7 @@ export default function ChatPage() {
 
   const {
     thread,
+    pendingStreamMessages,
     pendingUsageMessages,
     sendMessage,
     isUploading,
@@ -163,6 +164,7 @@ export default function ChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                pendingStreamMessages={pendingStreamMessages}
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}

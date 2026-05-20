@@ -63,6 +63,122 @@ function messageIdentity(message: Message): string | undefined {
   return undefined;
 }
 
+export type MessageBaseline = {
+  fingerprintCounts: Map<string, number>;
+};
+
+const MESSAGE_SNAPSHOT = Symbol("message-snapshot");
+
+type MessageSnapshot = {
+  readonly [MESSAGE_SNAPSHOT]: true;
+  message: Message;
+  fingerprint: string;
+};
+
+type MessageSource = Message[] | MessageSnapshot[];
+
+type StreamMetadataLookup = (
+  message: Message,
+  index: number,
+) => { streamMetadata?: Record<string, unknown> } | undefined;
+
+function stableSerialize(value: unknown): string {
+  const seen = new WeakSet<object>();
+
+  return (
+    JSON.stringify(value, (_key, currentValue: unknown) => {
+      if (
+        !currentValue ||
+        typeof currentValue !== "object" ||
+        currentValue instanceof Date
+      ) {
+        return currentValue;
+      }
+
+      if (seen.has(currentValue)) {
+        return "[Circular]";
+      }
+      seen.add(currentValue);
+
+      if (Array.isArray(currentValue)) {
+        return currentValue;
+      }
+
+      return Object.keys(currentValue)
+        .sort()
+        .reduce<Record<string, unknown>>((normalized, key) => {
+          normalized[key] = (currentValue as Record<string, unknown>)[key];
+          return normalized;
+        }, {});
+    }) ?? ""
+  );
+}
+
+function messageFingerprint(message: Message): string {
+  const fingerprint = {
+    identity: messageIdentity(message),
+    type: message.type,
+    content: message.content,
+    name: message.name,
+    additional_kwargs: message.additional_kwargs,
+    tool_call_id: "tool_call_id" in message ? message.tool_call_id : undefined,
+    status: "status" in message ? message.status : undefined,
+    tool_calls: message.type === "ai" ? message.tool_calls : undefined,
+    invalid_tool_calls:
+      message.type === "ai" ? message.invalid_tool_calls : undefined,
+  };
+
+  return stableSerialize(fingerprint);
+}
+
+function createMessageSnapshots(messages: Message[]): MessageSnapshot[] {
+  return messages.map((message) => ({
+    [MESSAGE_SNAPSHOT]: true,
+    message,
+    fingerprint: messageFingerprint(message),
+  }));
+}
+
+function isMessageSnapshot(
+  value: Message | MessageSnapshot,
+): value is MessageSnapshot {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    MESSAGE_SNAPSHOT in value &&
+    value[MESSAGE_SNAPSHOT] === true
+  );
+}
+
+function toMessageSnapshots(source: MessageSource): MessageSnapshot[] {
+  const firstItem = source[0];
+  if (firstItem && isMessageSnapshot(firstItem)) {
+    return source as MessageSnapshot[];
+  }
+  return createMessageSnapshots(source as Message[]);
+}
+
+function toMessages(source: MessageSource): Message[] {
+  const firstItem = source[0];
+  if (firstItem && isMessageSnapshot(firstItem)) {
+    return (source as MessageSnapshot[]).map(({ message }) => message);
+  }
+  return source as Message[];
+}
+
+export function createMessageBaseline(source: MessageSource): MessageBaseline {
+  const fingerprintCounts = new Map<string, number>();
+
+  for (const { fingerprint } of toMessageSnapshots(source)) {
+    fingerprintCounts.set(
+      fingerprint,
+      (fingerprintCounts.get(fingerprint) ?? 0) + 1,
+    );
+  }
+
+  return { fingerprintCounts };
+}
+
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const lastIndexByIdentity = new Map<string, number>();
 
@@ -103,7 +219,7 @@ export function mergeMessages(
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
   // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
-  // we hit one that isn't — everything before that point is non-overlapping.
+  // we hit one that isn't; everything before that point is non-overlapping.
   let cutoff = historyMessages.length;
   for (let i = historyMessages.length - 1; i >= 0; i--) {
     const msg = historyMessages[i];
@@ -125,14 +241,65 @@ export function mergeMessages(
   ]);
 }
 
-function getMessagesAfterBaseline(
-  messages: Message[],
-  baselineMessageIds: ReadonlySet<string>,
+export function getMessagesAfterBaseline(
+  source: MessageSource,
+  baseline: MessageBaseline,
 ): Message[] {
-  return messages.filter((message) => {
-    const id = messageIdentity(message);
-    return !id || !baselineMessageIds.has(id);
+  const remainingBaselineCounts = new Map(baseline.fingerprintCounts);
+
+  return toMessageSnapshots(source).flatMap(({ message, fingerprint }) => {
+    const remainingCount = remainingBaselineCounts.get(fingerprint) ?? 0;
+
+    if (remainingCount > 0) {
+      if (remainingCount === 1) {
+        remainingBaselineCounts.delete(fingerprint);
+      } else {
+        remainingBaselineCounts.set(fingerprint, remainingCount - 1);
+      }
+      return [];
+    }
+
+    return [message];
   });
+}
+
+export function getPendingStreamMessages(
+  source: MessageSource,
+  {
+    isLoading,
+    baseline,
+    baselineInitialized,
+    getMessagesMetadata,
+  }: {
+    isLoading: boolean;
+    baseline: MessageBaseline;
+    baselineInitialized: boolean;
+    getMessagesMetadata?: StreamMetadataLookup;
+  },
+): Message[] {
+  if (!isLoading) {
+    return [];
+  }
+
+  const pendingMessages = baselineInitialized
+    ? getMessagesAfterBaseline(source, baseline)
+    : [];
+  const pendingMessageRefs = new Set(pendingMessages);
+  const messages = toMessages(source);
+
+  messages.forEach((message, index) => {
+    if (
+      message.type === "ai" &&
+      getMessagesMetadata?.(message, index)?.streamMetadata
+    ) {
+      if (!pendingMessageRefs.has(message)) {
+        pendingMessages.push(message);
+        pendingMessageRefs.add(message);
+      }
+    }
+  });
+
+  return pendingMessages;
 }
 
 function getStreamErrorMessage(error: unknown): string {
@@ -174,7 +341,14 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
-  const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const pendingUsageBaselineRef = useRef<MessageBaseline>(
+    createMessageBaseline([]),
+  );
+  const pendingUsageBaselineInitializedRef = useRef(false);
+  const pendingStreamBaselineRef = useRef<MessageBaseline>(
+    createMessageBaseline([]),
+  );
+  const pendingStreamBaselineInitializedRef = useRef(false);
   const listeners = useRef({
     onSend,
     onStart,
@@ -332,11 +506,14 @@ export function useThreadStream({
     onError(error) {
       setOptimisticMessages([]);
       toast.error(getStreamErrorMessage(error));
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
+      pendingUsageBaselineRef.current = createMessageBaseline(
+        messagesRef.current,
       );
+      pendingUsageBaselineInitializedRef.current = true;
+      pendingStreamBaselineRef.current = createMessageBaseline(
+        messagesRef.current,
+      );
+      pendingStreamBaselineInitializedRef.current = true;
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
@@ -345,11 +522,14 @@ export function useThreadStream({
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
+      pendingUsageBaselineRef.current = createMessageBaseline(
+        messagesRef.current,
       );
+      pendingUsageBaselineInitializedRef.current = true;
+      pendingStreamBaselineRef.current = createMessageBaseline(
+        messagesRef.current,
+      );
+      pendingStreamBaselineInitializedRef.current = true;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
@@ -383,11 +563,10 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
-    pendingUsageBaselineMessageIdsRef.current = new Set(
-      messagesRef.current
-        .map(messageIdentity)
-        .filter((id): id is string => Boolean(id)),
-    );
+    pendingUsageBaselineRef.current = createMessageBaseline([]);
+    pendingUsageBaselineInitializedRef.current = false;
+    pendingStreamBaselineRef.current = createMessageBaseline([]);
+    pendingStreamBaselineInitializedRef.current = false;
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
@@ -396,16 +575,34 @@ export function useThreadStream({
   // from another client, or page reload mid-stream), snapshot the current
   // messages so only *new* messages are treated as "pending" for token usage.
   useEffect(() => {
-    if (
-      thread.isLoading &&
-      pendingUsageBaselineMessageIdsRef.current.size === 0
-    ) {
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
+    if (thread.isLoading && !pendingUsageBaselineInitializedRef.current) {
+      pendingUsageBaselineRef.current = createMessageBaseline(thread.messages);
+      pendingUsageBaselineInitializedRef.current = true;
+      return;
     }
+
+    if (!thread.isLoading) {
+      pendingUsageBaselineInitializedRef.current = false;
+    }
+  }, [thread.isLoading, thread.messages]);
+
+  // For copy-button visibility, keep a separate current-stream baseline. A
+  // local send initializes this explicitly, even for empty new threads. Runs
+  // observed without a local send baseline snapshot the current messages first
+  // so historical answers do not become the active stream.
+  useEffect(() => {
+    if (thread.isLoading) {
+      if (!pendingStreamBaselineInitializedRef.current) {
+        pendingStreamBaselineRef.current = createMessageBaseline(
+          thread.messages,
+        );
+        pendingStreamBaselineInitializedRef.current = true;
+      }
+      return;
+    }
+
+    pendingStreamBaselineRef.current = createMessageBaseline(thread.messages);
+    pendingStreamBaselineInitializedRef.current = false;
   }, [thread.isLoading, thread.messages]);
 
   // Clear optimistic when server messages arrive.
@@ -442,11 +639,10 @@ export function useThreadStream({
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
       prevHumanMsgCountRef.current = humanMessageCount;
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
+      pendingUsageBaselineRef.current = createMessageBaseline(thread.messages);
+      pendingUsageBaselineInitializedRef.current = true;
+      pendingStreamBaselineRef.current = createMessageBaseline(thread.messages);
+      pendingStreamBaselineInitializedRef.current = true;
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -632,12 +828,26 @@ export function useThreadStream({
     thread.messages,
     optimisticMessages,
   );
-  const pendingUsageMessages = thread.isLoading
-    ? getMessagesAfterBaseline(
-        thread.messages,
-        pendingUsageBaselineMessageIdsRef.current,
-      )
-    : [];
+  const needsPendingMessageDiff =
+    thread.isLoading &&
+    (pendingStreamBaselineInitializedRef.current ||
+      pendingUsageBaselineInitializedRef.current);
+  const pendingMessageSource = needsPendingMessageDiff
+    ? createMessageSnapshots(thread.messages)
+    : thread.messages;
+  const pendingStreamMessages = getPendingStreamMessages(pendingMessageSource, {
+    isLoading: thread.isLoading,
+    baseline: pendingStreamBaselineRef.current,
+    baselineInitialized: pendingStreamBaselineInitializedRef.current,
+    getMessagesMetadata: thread.getMessagesMetadata,
+  });
+  const pendingUsageMessages =
+    needsPendingMessageDiff && pendingUsageBaselineInitializedRef.current
+      ? getMessagesAfterBaseline(
+          pendingMessageSource,
+          pendingUsageBaselineRef.current,
+        )
+      : [];
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
@@ -648,6 +858,7 @@ export function useThreadStream({
 
   return {
     thread: mergedThread,
+    pendingStreamMessages,
     pendingUsageMessages,
     sendMessage,
     isUploading,

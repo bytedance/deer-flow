@@ -170,6 +170,84 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   return usageMessagesByGroupIndex;
 }
 
+function isSameMessage(left: Message, right: Message) {
+  if (
+    typeof left.id === "string" &&
+    left.id.length > 0 &&
+    typeof right.id === "string" &&
+    right.id.length > 0
+  ) {
+    return left.id === right.id;
+  }
+
+  return left === right;
+}
+
+export function isCurrentStreamingAssistantTurn(
+  groupMessages: Message[],
+  currentStreamingAssistantMessage: Message | null,
+) {
+  if (!currentStreamingAssistantMessage) {
+    return false;
+  }
+
+  return groupMessages.some((message) =>
+    isSameMessage(message, currentStreamingAssistantMessage),
+  );
+}
+
+export function getCurrentStreamingAssistantMessage(
+  _messages: Message[],
+  isStreaming: boolean,
+  { pendingStreamMessages = [] }: { pendingStreamMessages?: Message[] } = {},
+) {
+  if (!isStreaming) {
+    return null;
+  }
+
+  return getLatestStreamingAssistantMessage(pendingStreamMessages);
+}
+
+function getLatestStreamingAssistantMessage(messages: Message[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+
+    if (!message) {
+      continue;
+    }
+
+    if (isHiddenFromUIMessage(message)) {
+      continue;
+    }
+
+    if (message.type === "ai") {
+      return message;
+    }
+  }
+
+  return null;
+}
+
+export function getAssistantTurnCopyData(
+  messages: Message[],
+  { isStreaming = false }: { isStreaming?: boolean } = {},
+) {
+  if (isStreaming) {
+    return null;
+  }
+
+  return (
+    [...messages]
+      .reverse()
+      .filter((message) => message.type === "ai")
+      .map((message) => {
+        const content = extractContentFromMessage(message);
+        return content ?? extractReasoningContentFromMessage(message) ?? "";
+      })
+      .find((content) => content.length > 0) ?? null
+  );
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (

@@ -64,6 +64,7 @@ export default function AgentChatPage() {
 
   const {
     thread,
+    pendingStreamMessages,
     pendingUsageMessages,
     sendMessage,
     isUploading,
@@ -182,6 +183,7 @@ export default function AgentChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                pendingStreamMessages={pendingStreamMessages}
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}

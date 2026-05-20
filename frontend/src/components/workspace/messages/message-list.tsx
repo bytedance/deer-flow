@@ -16,13 +16,15 @@ import {
 import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractReasoningContentFromMessage,
   extractTextFromMessage,
+  getCurrentStreamingAssistantMessage,
+  getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  isCurrentStreamingAssistantTurn,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
@@ -157,6 +159,7 @@ export function MessageList({
   className,
   threadId,
   thread,
+  pendingStreamMessages = [],
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
   tokenUsageInlineMode = "off",
   hasMoreHistory,
@@ -166,6 +169,7 @@ export function MessageList({
   className?: string;
   threadId: string;
   thread: BaseStream<AgentThreadState>;
+  pendingStreamMessages?: Message[];
   paddingBottom?: number;
   tokenUsageInlineMode?: TokenUsageInlineMode;
   hasMoreHistory?: boolean;
@@ -179,31 +183,34 @@ export function MessageList({
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
+  const currentStreamingAssistantMessage = useMemo(
+    () =>
+      getCurrentStreamingAssistantMessage(messages, thread.isLoading, {
+        pendingStreamMessages,
+      }),
+    [messages, pendingStreamMessages, thread.isLoading],
+  );
   const tokenDebugSteps = useMemo(
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
   );
 
-  const renderAssistantCopyButton = useCallback((messages: Message[]) => {
-    const clipboardData = [...messages]
-      .reverse()
-      .filter((message) => message.type === "ai")
-      .map((message) => {
-        const content = extractContentFromMessage(message);
-        return content ?? extractReasoningContentFromMessage(message) ?? "";
-      })
-      .find((content) => content.length > 0);
+  const renderAssistantCopyButton = useCallback(
+    (messages: Message[], isStreaming: boolean) => {
+      const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
 
-    if (!clipboardData) {
-      return null;
-    }
+      if (!clipboardData) {
+        return null;
+      }
 
-    return (
-      <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
-        <CopyButton clipboardData={clipboardData} />
-      </div>
-    );
-  }, []);
+      return (
+        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+          <CopyButton clipboardData={clipboardData} />
+        </div>
+      );
+    },
+    [],
+  );
 
   const renderTokenUsage = useCallback(
     ({
@@ -293,7 +300,13 @@ export function MessageList({
                   turnUsageMessages,
                 })}
                 {group.type === "assistant" &&
-                  renderAssistantCopyButton(group.messages)}
+                  renderAssistantCopyButton(
+                    group.messages,
+                    isCurrentStreamingAssistantTurn(
+                      group.messages,
+                      currentStreamingAssistantMessage,
+                    ),
+                  )}
               </div>
             );
           } else if (group.type === "assistant:clarification") {

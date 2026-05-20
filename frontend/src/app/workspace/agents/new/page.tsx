@@ -86,7 +86,7 @@ export default function NewAgentPage() {
 
   const threadId = useMemo(() => uuid(), []);
 
-  const { thread, sendMessage } = useThreadStream({
+  const { thread, pendingStreamMessages, sendMessage } = useThreadStream({
     threadId: undefined,
     context: {
       mode: "flash",
@@ -343,6 +343,7 @@ export default function NewAgentPage() {
                 className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                pendingStreamMessages={pendingStreamMessages}
               />
             </div>
 
