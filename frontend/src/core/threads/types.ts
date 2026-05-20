@@ -5,6 +5,7 @@ import type { Todo } from "../todos";
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
+  display_messages?: Message[];
   artifacts: string[];
   todos?: Todo[];
 }

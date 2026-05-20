@@ -139,14 +139,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._create_summary(messages_to_summarize)
-        new_messages = self._build_new_messages(summary)
+        new_messages = self._build_hidden_summary_messages(summary)
 
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 *new_messages,
                 *preserved_messages,
-            ]
+            ],
+            "display_messages": self._visible_messages(messages_to_summarize),
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -165,15 +166,29 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._acreate_summary(messages_to_summarize)
-        new_messages = self._build_new_messages(summary)
+        new_messages = self._build_hidden_summary_messages(summary)
 
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 *new_messages,
                 *preserved_messages,
-            ]
+            ],
+            "display_messages": self._visible_messages(messages_to_summarize),
         }
+
+    def _build_hidden_summary_messages(self, summary: str) -> list[AnyMessage]:
+        new_messages = self._build_new_messages(summary)
+        for message in new_messages:
+            message.additional_kwargs = {
+                **getattr(message, "additional_kwargs", {}),
+                "hide_from_ui": True,
+            }
+        return new_messages
+
+    @staticmethod
+    def _visible_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+        return [message for message in messages if getattr(message, "additional_kwargs", {}).get("hide_from_ui") is not True]
 
     @override
     def _build_new_messages(self, summary: str) -> list[HumanMessage]:

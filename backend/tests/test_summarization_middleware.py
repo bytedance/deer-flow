@@ -112,6 +112,8 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert captured[0].agent_name is None
     assert isinstance(result["messages"][0], RemoveMessage)
     assert result["messages"][1].content.startswith("Here is a summary")
+    assert result["messages"][1].additional_kwargs["hide_from_ui"] is True
+    assert [message.content for message in result["display_messages"]] == ["user-1", "assistant-1"]
 
 
 def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
@@ -191,6 +193,19 @@ async def test_abefore_model_calls_hooks_same_as_sync() -> None:
 
     assert len(captured) == 1
     assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+@pytest.mark.anyio
+async def test_abefore_model_returns_visible_history_after_summarization() -> None:
+    middleware = _middleware()
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert isinstance(result["messages"][0], RemoveMessage)
+    assert result["messages"][1].content.startswith("Here is a summary")
+    assert result["messages"][1].additional_kwargs["hide_from_ui"] is True
+    assert [message.content for message in result["display_messages"]] == ["user-1", "assistant-1"]
+    assert [message.content for message in result["messages"][2:]] == ["user-2", "assistant-2"]
 
 
 def test_memory_flush_hook_skips_when_memory_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

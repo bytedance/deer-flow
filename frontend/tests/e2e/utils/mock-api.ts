@@ -6,6 +6,7 @@
  * `handleRunStream` from here.
  */
 
+import type { Message } from "@langchain/langgraph-sdk";
 import type { Page, Route } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,11 @@ export type MockThread = {
   title?: string;
   updated_at?: string;
   agent_name?: string;
+  values?: {
+    title?: string;
+    messages?: Message[];
+    display_messages?: Message[];
+  };
 };
 
 export type MockAgent = {
@@ -59,7 +65,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
       metadata: t.agent_name ? { agent_name: t.agent_name } : {},
       status: "idle",
-      values: { title: t.title ?? "Untitled" },
+      values: { title: t.title ?? t.values?.title ?? "Untitled" },
     }));
     return route.fulfill({
       status: 200,
@@ -112,8 +118,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify([
           {
             values: {
-              title: matchingThread.title ?? "Untitled",
-              messages: [
+              title:
+                matchingThread.title ??
+                matchingThread.values?.title ??
+                "Untitled",
+              display_messages: matchingThread.values?.display_messages,
+              messages: matchingThread.values?.messages ?? [
                 {
                   type: "human",
                   id: `msg-human-${matchingThread.thread_id}`,
@@ -122,7 +132,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
                 {
                   type: "ai",
                   id: `msg-ai-${matchingThread.thread_id}`,
-                  content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
+                  content: `Response in thread ${
+                    matchingThread.title ?? matchingThread.thread_id
+                  }`,
                 },
               ],
             },
@@ -153,9 +165,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         contentType: "application/json",
         body: JSON.stringify({
           values: {
-            title: matchingThread?.title ?? "Untitled",
+            title:
+              matchingThread?.title ??
+              matchingThread?.values?.title ??
+              "Untitled",
+            display_messages: matchingThread?.values?.display_messages,
             messages: matchingThread
-              ? [
+              ? (matchingThread.values?.messages ?? [
                   {
                     type: "human",
                     id: `msg-human-${matchingThread.thread_id}`,
@@ -164,9 +180,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
                   {
                     type: "ai",
                     id: `msg-ai-${matchingThread.thread_id}`,
-                    content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
+                    content: `Response in thread ${
+                      matchingThread.title ?? matchingThread.thread_id
+                    }`,
                   },
-                ]
+                ])
               : [],
           },
           next: [],

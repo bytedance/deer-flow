@@ -175,7 +175,10 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  const messages = useMemo(
+    () => [...(thread.values.display_messages ?? []), ...thread.messages],
+    [thread.messages, thread.values.display_messages],
+  );
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
