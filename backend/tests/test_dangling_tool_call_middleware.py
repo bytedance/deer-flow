@@ -190,6 +190,24 @@ class TestBuildPatchedMessagesPatching:
         assert [patched[1].tool_call_id, patched[2].tool_call_id] == ["call_1", "call_2"]
         assert isinstance(patched[3], HumanMessage)
 
+    def test_non_tool_message_inserted_between_partial_tool_results_is_regrouped(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1"), _tc("read", "call_2")]),
+            _tool_msg("call_1", "bash"),
+            HumanMessage(content="interruption"),
+            _tool_msg("call_2", "read"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert isinstance(patched[2], ToolMessage)
+        assert [patched[1].tool_call_id, patched[2].tool_call_id] == ["call_1", "call_2"]
+        assert isinstance(patched[3], HumanMessage)
+
     def test_valid_adjacent_tool_results_are_unchanged(self):
         mw = DanglingToolCallMiddleware()
         msgs = [
@@ -237,7 +255,8 @@ class TestBuildPatchedMessagesPatching:
         assert isinstance(patched[0], AIMessage)
         assert isinstance(patched[1], ToolMessage)
         assert patched[1].tool_call_id == "call_1"
-        assert orphan in patched
+        assert patched[2] is orphan
+        assert isinstance(patched[3], HumanMessage)
         assert patched.count(orphan) == 1
 
     def test_invalid_tool_call_is_patched(self):
