@@ -1,3 +1,5 @@
+corporate-ai-team/
+
 # DeerFlow docker image cache
 docker/.cache/
 # oh-my-claudecode state
@@ -55,6 +57,8 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+# asuka.sh service manager
+.asuka_pids/
 .playwright-mcp
 /frontend/test-results/
 /frontend/playwright-report/
