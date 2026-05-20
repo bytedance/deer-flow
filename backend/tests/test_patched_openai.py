@@ -1,16 +1,25 @@
 """Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
 
-These tests verify that _restore_tool_call_signatures correctly re-injects
-``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
+These tests verify that the patched provider correctly re-injects gateway-
+specific assistant fields, covering:
+
+- ``reasoning_content`` restoration onto assistant messages
+- ``thought_signature`` restoration onto tool calls
+- id-based matching, positional fallback, camelCase keys, and edge-cases
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
+from unittest.mock import MagicMock, patch
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from langchain_core.messages import AIMessage
+from langchain_openai import ChatOpenAI
+
+from deerflow.models.patched_openai import (
+    PatchedChatOpenAI,
+    _restore_reasoning_content,
+    _restore_tool_call_signatures,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,9 +55,38 @@ def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
     return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
 
 
+def _make_model(**kwargs):
+    return PatchedChatOpenAI(
+        model="gpt-4o-mini",
+        api_key="test-key",
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core: signed tool-call restoration
 # ---------------------------------------------------------------------------
+
+
+def test_reasoning_content_restored_on_assistant_message():
+    payload_msg = {"role": "assistant", "content": "Answer"}
+    orig = AIMessage(
+        content="Answer",
+        additional_kwargs={"reasoning_content": "Reason first, answer second."},
+    )
+
+    _restore_reasoning_content(payload_msg, orig)
+
+    assert payload_msg["reasoning_content"] == "Reason first, answer second."
+
+
+def test_reasoning_content_noop_when_absent():
+    payload_msg = {"role": "assistant", "content": "Answer"}
+    orig = AIMessage(content="Answer", additional_kwargs={})
+
+    _restore_reasoning_content(payload_msg, orig)
+
+    assert "reasoning_content" not in payload_msg
 
 
 def test_tool_call_signature_restored_by_id():
@@ -172,5 +210,30 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
 
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+def test_get_request_payload_restores_reasoning_content_and_tool_signatures():
+    model = _make_model()
+    payload = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [PAYLOAD_TC_1.copy()],
+            }
+        ]
+    }
+    orig = AIMessage(
+        content="",
+        additional_kwargs={
+            "reasoning_content": "Plan the next tool call carefully.",
+            "tool_calls": [RAW_TC_SIGNED],
+        },
+    )
+
+    with patch.object(ChatOpenAI, "_get_request_payload", return_value=payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [orig])
+            result = model._get_request_payload([orig])
+
+    assistant_msg = result["messages"][0]
+    assert assistant_msg["reasoning_content"] == "Plan the next tool call carefully."
+    assert assistant_msg["tool_calls"][0]["thought_signature"] == "SIG_A=="
