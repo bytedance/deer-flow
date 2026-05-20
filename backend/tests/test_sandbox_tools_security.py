@@ -8,6 +8,7 @@ import pytest
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
+    _prefix_bash_env,
     _get_custom_mount_for_path,
     _get_custom_mounts,
     _is_acp_workspace_path,
@@ -17,6 +18,7 @@ from deerflow.sandbox.tools import (
     _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
+    _runtime_shell_env,
     bash_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
@@ -485,6 +487,17 @@ def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) 
     )
 
     assert "path traversal" in result
+
+
+def test_runtime_shell_env_exports_access_token() -> None:
+    runtime = SimpleNamespace(context={"thread_id": "thread-1", "access_token": "secret-token"})
+    assert _runtime_shell_env(runtime) == {"INS_ACCESS_TOKEN": "secret-token"}
+
+
+def test_prefix_bash_env_prepends_export_statement() -> None:
+    command = _prefix_bash_env("python /mnt/user-data/workspace/run.py", {"INS_ACCESS_TOKEN": "secret token"})
+    assert command.startswith("export INS_ACCESS_TOKEN='secret token'; ")
+    assert command.endswith("python /mnt/user-data/workspace/run.py")
 
 
 # ---------- Skills path tests ----------

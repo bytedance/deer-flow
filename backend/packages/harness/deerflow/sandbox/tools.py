@@ -1197,6 +1197,31 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+def _runtime_shell_env(runtime: ToolRuntime[ContextT, ThreadState]) -> dict[str, str]:
+    """Expose selected runtime context values to bash subprocesses.
+
+    Rotating diagnosis uses the authenticated Deer Flow bearer token directly
+    for InS data access; inject it as ``INS_ACCESS_TOKEN`` so shell-launched
+    Python entrypoints see the same request context without re-login.
+    """
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return {}
+
+    env: dict[str, str] = {}
+    access_token = context.get("access_token")
+    if isinstance(access_token, str) and access_token.strip():
+        env["INS_ACCESS_TOKEN"] = access_token.strip()
+    return env
+
+
+def _prefix_bash_env(command: str, env: dict[str, str]) -> str:
+    if not env:
+        return command
+    exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    return f"export {exports}; {command}"
+
+
 def _truncate_ls_output(output: str, max_chars: int) -> str:
     """Head-truncate ls output, preserving the beginning of the listing.
 
@@ -1234,6 +1259,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
     try:
+        command = _prefix_bash_env(command, _runtime_shell_env(runtime))
         sandbox = ensure_sandbox_initialized(runtime)
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():

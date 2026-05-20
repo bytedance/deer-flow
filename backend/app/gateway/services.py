@@ -31,6 +31,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.cost.storage import UsageStorage
@@ -98,6 +99,35 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
     return raw_input
+
+
+def _resolve_request_access_token(request: Request) -> str | None:
+    """Return the caller's bearer/access token when available.
+
+    This is used only to propagate the already-authenticated user token into
+    sandboxed data-access tools so they can call InS directly without
+    re-authenticating via username/password.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        if token:
+            return token
+
+    cookie_token = request.cookies.get("access_token", "").strip()
+    if cookie_token:
+        return cookie_token
+
+    state_user = getattr(getattr(request, "state", None), "user", None)
+    if isinstance(state_user, dict):
+        token = str(state_user.get("ins_base_token") or "").strip()
+        if token:
+            return token
+
+    # Local auth does not expose a reusable upstream data token.
+    if get_auth_config().provider != "ins_base":
+        return None
+    return None
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -378,10 +408,14 @@ async def start_run(
     runtime_context = config.setdefault("context", {})
     runtime_context["tenant_id"] = get_current_tenant_id()
     runtime_context["user_id"] = get_effective_user_id()
+    access_token = _resolve_request_access_token(request)
+    if access_token:
+        runtime_context["access_token"] = access_token
     logger.info(
-        "start_run: injected context tenant_id=%s, user_id=%s",
+        "start_run: injected context tenant_id=%s, user_id=%s, access_token=%s",
         runtime_context["tenant_id"],
         runtime_context["user_id"],
+        "present" if access_token else "absent",
     )
 
     stream_modes = normalize_stream_modes(body.stream_mode)

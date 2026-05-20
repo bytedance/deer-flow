@@ -4,16 +4,16 @@ Story S1-8 acceptance (initial) + Story S2-6 expansion (full coverage):
 
 1. Parent group + 3 sub-agent configs are discovered by ``scan_builtin_agents``
 2. Each sub-agent SOUL.md uses its own callback_id prefix → no cross-talk
-3. All three SOULs realize the full Stage1 → Stage2 → render → export pipeline
-   contract (callbacks, scripts, in-process import, present_files allowlist)
-4. ``data_source=demo_fallback`` flows through all stages and historical_cases
-   are tagged so the SOUL can prefix "演示".
+3. Pump / reciprocating SOULs preserve the staged MVP pipeline contract, while
+   rotating SOUL follows the new real-rule runtime contract.
+4. ``data_source=demo_fallback`` flows through the MVP pipelines and
+   historical_cases are tagged so the SOUL can prefix "演示".
 5. The four forbidden structured-summary headings never appear as Markdown
    headings in any of the new SOUL files.
-6. Rotating SOUL renders orbit blocks; reciprocating SOUL skips orbit (and
-   never invokes ins-get-orbit-data / ins-extract-orbit-centerline-features).
-7. Each SOUL declares the correct fault-family code count
-   (pump=9, rotating=12, reciprocating=11) via ``focus_*`` field names.
+6. Rotating SOUL renders orbit blocks via cached report payloads;
+   reciprocating SOUL skips orbit.
+7. Pump / reciprocating SOULs declare the expected ``focus_*`` field names;
+   rotating SOUL now uses the two-step real-rule form flow instead of a focus form.
 
 These checks defend the fault-diagnosis MVP at the contract level. Live
 GenUI rendering / browser flow is verified manually (screenshots archived
@@ -65,11 +65,25 @@ EXPECTED_FOCUS_CODES: dict[str, list[str]] = {
     ],  # 11
 }
 
-# Each sub-agent's expected callback prefix mapping
-CALLBACK_PREFIX: dict[str, str] = {
-    "fault-diagnosis--pump": "fd-pump",
-    "fault-diagnosis--rotating": "fd-rotating",
-    "fault-diagnosis--reciprocating": "fd-reciprocating",
+# Expected callback IDs by sub-agent. Rotating switched to a dedicated
+# two-step device/time flow for the real-rule runtime.
+CALLBACK_IDS_BY_AGENT: dict[str, list[str]] = {
+    "fault-diagnosis--pump": [
+        "fd-pump-scope",
+        "fd-pump-device",
+        "fd-pump-target",
+        "fd-pump-focus",
+    ],
+    "fault-diagnosis--rotating": [
+        "fd-rotating-device",
+        "fd-rotating-time",
+    ],
+    "fault-diagnosis--reciprocating": [
+        "fd-reciprocating-scope",
+        "fd-reciprocating-device",
+        "fd-reciprocating-target",
+        "fd-reciprocating-focus",
+    ],
 }
 
 # rules-skill mapping per design doc §4.6
@@ -162,11 +176,10 @@ def test_no_forbidden_structured_summary_headings(name):
 
 @pytest.mark.parametrize("name", SUB_AGENTS)
 def test_subagent_uses_correct_callback_prefix(name):
-    """Each SOUL must use its own callback_id prefix (no cross-talk)."""
+    """Each SOUL must use its own callback IDs (no cross-talk)."""
     soul = _read_soul(name)
-    prefix = CALLBACK_PREFIX[name]
-    for suffix in ("scope", "target", "focus"):
-        assert f"{prefix}-{suffix}" in soul, f"{name} missing callback {prefix}-{suffix}"
+    for callback_id in CALLBACK_IDS_BY_AGENT[name]:
+        assert callback_id in soul, f"{name} missing callback {callback_id}"
 
 
 @pytest.mark.parametrize("name", SUB_AGENTS)
@@ -177,11 +190,10 @@ def test_subagent_callbacks_do_not_cross_talk(name):
     accidentally read fd-rotating-* callbacks from history, an in-flight
     rotating diagnosis could be hijacked when the user switches to pump."""
     soul = _read_soul(name)
-    for other_name, other_prefix in CALLBACK_PREFIX.items():
+    for other_name, other_callbacks in CALLBACK_IDS_BY_AGENT.items():
         if other_name == name:
             continue
-        for suffix in ("scope", "target", "focus"):
-            foreign = f"{other_prefix}-{suffix}"
+        for foreign in other_callbacks:
             assert foreign not in soul, f"{name} leaks foreign callback '{foreign}'"
 
 
@@ -189,9 +201,6 @@ def test_subagent_callbacks_do_not_cross_talk(name):
 def test_subagent_contract_blocks_present(name):
     """Every sub-agent SOUL must contain canonical contract phrases per design §4.5."""
     soul = _read_soul(name)
-    # Two-stage pull contract
-    assert "第一阶段" in soul or "聚合特征拉取" in soul
-    assert "第二阶段" in soul or "深度采样" in soul
     # In-process import contract
     assert "from export_report import write_report" in soul
     assert "render_diagnosis_markdown" in soul
@@ -201,26 +210,36 @@ def test_subagent_contract_blocks_present(name):
     # present_files allowlist
     assert "diagnosis_report.md" in soul
     assert "diagnosis_report.pdf" in soul
-    # Demo-fallback warning contract (design risk row 9)
-    assert "demo_fallback" in soul
-    assert "演示" in soul
     # rules-skill must match the design contract
     expected_skill = RULES_SKILL_BY_AGENT[name]
     assert expected_skill in soul, f"{name} missing --rules-skill {expected_skill}"
+    if name == "fault-diagnosis--rotating":
+        assert "sub-device-selector" in soul
+        assert "run_rotating_rule_diagnosis.py" in soul
+        assert "build_rotating_report_payload.py" in soul
+        assert "rotating_rule_cache" in soul
+        assert "禁止静默回退" in soul
+    else:
+        # Two-stage pull contract
+        assert "第一阶段" in soul or "聚合特征拉取" in soul
+        assert "第二阶段" in soul or "深度采样" in soul
+        # Demo-fallback warning contract (design risk row 9)
+        assert "demo_fallback" in soul
+        assert "演示" in soul
 
 
-@pytest.mark.parametrize("name", SUB_AGENTS)
+@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
 def test_subagent_default_selection_documented(name):
-    """All three SOULs must explicitly note the ≤5-device default (design §4.3)."""
+    """Pump / reciprocating SOULs must explicitly note the ≤5-device default."""
     soul = _read_soul(name)
     assert "5 台" in soul
     # Explicit deviation from daily 全选 convention must be called out
     assert "日报" in soul and ("全选" in soul or "默认勾选" in soul)
 
 
-@pytest.mark.parametrize("name", SUB_AGENTS)
+@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
 def test_subagent_has_three_well_formed_form_blocks(name):
-    """The three form blocks must parse as JSON and use the expected callback_ids."""
+    """Pump / reciprocating staged forms must parse as JSON and use expected callback IDs."""
     soul = _read_soul(name)
     blocks = re.findall(r"```json\n(.*?)\n```", soul, re.DOTALL)
     assert len(blocks) >= 3, f"{name}: expected ≥3 JSON form blocks, got {len(blocks)}"
@@ -233,19 +252,44 @@ def test_subagent_has_three_well_formed_form_blocks(name):
             # Every form must set a non-trivial callback_timeout_ms
             assert parsed.get("callback_timeout_ms", 0) >= 60_000
 
-    own = CALLBACK_PREFIX[name]
-    for suffix in ("scope", "target", "focus"):
-        assert f"{own}-{suffix}" in callbacks, f"{name} form block missing callback {own}-{suffix}"
+    expected_forms = [
+        callback_id
+        for callback_id in CALLBACK_IDS_BY_AGENT[name]
+        if callback_id.endswith(("scope", "target", "focus"))
+    ]
+    for callback_id in expected_forms:
+        assert callback_id in callbacks, f"{name} form block missing callback {callback_id}"
 
 
-@pytest.mark.parametrize("name", SUB_AGENTS)
+@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
 def test_subagent_focus_codes_match_design(name):
-    """Each SOUL must declare exactly the focus_* fields specified by design §4.4."""
+    """Pump / reciprocating SOULs must declare the expected focus_* fields."""
     soul = _read_soul(name)
     expected = EXPECTED_FOCUS_CODES[name]
     for code in expected:
         field_name = f"focus_{code}"
         assert field_name in soul, f"{name} missing field {field_name}"
+
+
+def test_rotating_soul_uses_two_step_real_rule_flow():
+    """Rotating SOUL must use the dedicated device/time callbacks and runtime scripts."""
+    soul = _read_soul("fault-diagnosis--rotating")
+    blocks = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", soul, re.DOTALL)]
+
+    assert len(blocks) >= 2, "rotating SOUL should declare device selector + time form"
+    assert blocks[0]["component"] == "sub-device-selector"
+    assert blocks[0]["callback_id"] == "fd-rotating-device"
+    assert blocks[0]["callback_timeout_ms"] >= 60_000
+    assert blocks[1]["component"] == "form"
+    assert blocks[1]["callback_id"] == "fd-rotating-time"
+    assert blocks[1]["callback_timeout_ms"] >= 60_000
+    assert "focus_" not in soul
+    assert "run_rotating_rule_diagnosis.py" in soul
+    assert "build_rotating_report_payload.py" in soul
+    assert "rotating_rule_result.json" in soul
+    assert "diagnosis_features.json" in soul
+    assert "INS_ACCESS_TOKEN" in soul
+    assert "sub-device-selector" in soul
 
 
 # --- Reciprocating-specific orbit prohibition ---
@@ -266,10 +310,11 @@ def test_reciprocating_soul_skips_orbit_calls():
 
 
 def test_rotating_soul_keeps_orbit_pipeline():
-    """Rotating SOUL must keep orbit ins-* skill calls (contrast with reciprocating)."""
+    """Rotating SOUL must keep orbit rendering in the report payload flow."""
     soul = _read_soul("fault-diagnosis--rotating")
-    assert "ins-get-orbit-data" in soul
-    assert "ins-extract-orbit-centerline-features" in soul
+    assert "orbit_charts[]" in soul
+    assert "轴心轨迹" in soul
+    assert "跳过该条目而不是降级整个 Block" in soul
 
 
 def test_pump_soul_keeps_orbit_pipeline():
@@ -290,9 +335,9 @@ def test_group_soul_is_landing_page():
     assert "fault-diagnosis--rotating" in soul
     assert "fault-diagnosis--reciprocating" in soul
     # Group SOUL must NOT contain any callback id (it does not run GenUI)
-    for prefix in CALLBACK_PREFIX.values():
-        for suffix in ("scope", "target", "focus"):
-            assert f"{prefix}-{suffix}" not in soul, f"group SOUL leaks {prefix}-{suffix}"
+    for callbacks in CALLBACK_IDS_BY_AGENT.values():
+        for callback_id in callbacks:
+            assert callback_id not in soul, f"group SOUL leaks {callback_id}"
 
 
 # --- End-to-end pipeline (demo fallback path) ---

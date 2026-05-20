@@ -21,13 +21,14 @@ async def get_device_children(device_id: str) -> dict[str, object]:
     Args:
         device_id: 设备 ID，对应 InS 系统中的 machineIds 参数。
     """
-    if not INS_SETTINGS.username or not INS_SETTINGS.password:
-        raise RuntimeError("缺少 INS_USERNAME 或 INS_PASSWORD 环境变量，无法登录 InS 接口")
-
     return {
         "device_id": device_id,
         "child_device_list": await ins_client.get_slim_components(device_id),
     }
+
+
+async def analyze_device(device_id: str) -> dict[str, object]:
+    return await get_device_children(device_id)
 
 
 async def close_clients() -> None:

@@ -1,0 +1,871 @@
+{
+  "trend_window_days": 30,
+  "max_waveform_points": 2,
+  "max_orbit_points": 2,
+  "max_final_faults": 2,
+  "device_type_aliases": {
+    "汽轮机": [
+      "汽轮机",
+      "steam turbine",
+      "透平"
+    ],
+    "离心式&轴流式压缩机": [
+      "离心式压缩机",
+      "离心压缩机",
+      "轴流式压缩机",
+      "轴流压缩机",
+      "压缩机",
+      "空压机",
+      "低压缸",
+      "高压缸",
+      "中压缸",
+      "增压机",
+      "高速轴"
+    ],
+    "多轴式（齿轮式）压缩机": [
+      "多轴式压缩机",
+      "齿轮式压缩机",
+      "多轴压缩机"
+    ],
+    "螺杆式压缩机": [
+      "螺杆式压缩机",
+      "螺杆压缩机"
+    ],
+    "齿轮箱": [
+      "齿轮箱",
+      "gearbox"
+    ],
+    "烟气轮机": [
+      "烟气轮机"
+    ],
+    "发电机": [
+      "发电机",
+      "generator"
+    ]
+  },
+  "point_type_keywords": {
+    "轴振": [
+      "轴振",
+      "径向振动",
+      "瓦振"
+    ],
+    "轴位移": [
+      "轴位移",
+      "轴向位移",
+      "位移"
+    ],
+    "轴位移波形": [
+      "轴位移波形",
+      "位移波形"
+    ],
+    "轴承温度": [
+      "轴承温度",
+      "瓦温",
+      "轴瓦温度",
+      "承温",
+      "推力温度",
+      "bearing temp",
+      "bearing temperature"
+    ],
+    "润滑油温度": [
+      "润滑油温度",
+      "油温",
+      "回油温度",
+      "进油温度"
+    ],
+    "防喘振阀开度": [
+      "防喘振阀",
+      "阀位",
+      "开度"
+    ],
+    "压缩机进气参数": [
+      "进气压力",
+      "入口压力",
+      "入口温度",
+      "进气参数"
+    ],
+    "出口温度": [
+      "出口温度",
+      "排气温度"
+    ],
+    "入口流量": [
+      "入口流量",
+      "流量"
+    ],
+    "其他工艺参数": [
+      "负荷",
+      "功率",
+      "蒸汽",
+      "压力",
+      "温度",
+      "流量",
+      "阀位",
+      "开度"
+    ]
+  },
+  "bearing_direction_keywords": {
+    "联端": [
+      "联端",
+      "de",
+      "drive end",
+      "coupling"
+    ],
+    "非联端": [
+      "非联端",
+      "自由端",
+      "nde",
+      "non drive end"
+    ]
+  },
+  "thresholds": {
+    "high_alarm_ratio": 1.0,
+    "hh_alarm_ratio": 1.0,
+    "vibration_high_um": 35.0,
+    "vibration_medium_um": 25.0,
+    "bearing_xy_diff_um": 20.0,
+    "vibration_jump_um": 10.0,
+    "temperature_high_c": 90.0,
+    "shaft_displacement_change_mm": 0.1,
+    "gap_change_v": 0.3,
+    "amp_1x_ratio_high": 0.75,
+    "amp_1x_ratio_medium": 0.55,
+    "amp_1x_ratio_low": 0.35,
+    "amp_2x_to_1x_ratio_misalignment": 0.25,
+    "amp_2x_to_1x_ratio_high": 0.8,
+    "low_freq_order_upper": 0.55,
+    "very_low_freq_order_upper": 0.35,
+    "oil_whirl_order_lower": 0.3,
+    "oil_whirl_order_upper": 0.52,
+    "sub_sync_peak_min_amplitude": 1.0,
+    "sub_sync_peak_relative_to_dominant_min": 0.12,
+    "sub_sync_peak_relative_to_1x_min": 0.18,
+    "low_freq_peak_min_amplitude": 1.0,
+    "low_freq_peak_relative_to_dominant_min": 0.18,
+    "low_freq_peak_relative_to_1x_min": 0.22,
+    "waveform_min_cases_for_pattern_rules": 2,
+    "orbit_min_cases_for_pattern_rules": 1,
+    "waveform_sine_fit_high": 0.8,
+    "waveform_periodicity_high": 0.75,
+    "orbit_repetition_high": 0.72,
+    "orbit_repetition_low": 0.45,
+    "orbit_axis_ratio_elongated": 2.2,
+    "orbit_self_intersection_min": 1,
+    "rapid_rise_relative": 0.25,
+    "gradual_rise_relative": 0.1,
+    "long_term_high_deviation_ratio": 1.2,
+    "volatility_period_min": 1,
+    "sensor_spike_single_channel_max_support": 1,
+    "candidate_min_score": 0.3,
+    "high_confidence_score": 0.75,
+    "medium_confidence_score": 0.5,
+    "kurtosis_normal_max": 2.0,
+    "kurtosis_impact_min": 3.5,
+    "kurtosis_sensor_min": 6.0,
+    "kurtosis_outlier_max": 20.0,
+    "crest_factor_sine_max": 1.6,
+    "crest_factor_impact_min": 2.0,
+    "crest_factor_sensor_min": 4.0,
+    "asymmetry_ratio_normal_max": 1.2,
+    "asymmetry_ratio_friction_min": 1.3,
+    "skewness_normal_max": 0.3,
+    "skewness_friction_min": 0.5,
+    "cycle_repeatability_high": 0.8,
+    "cycle_repeatability_low": 0.45,
+    "glitch_ratio_high": 0.05,
+    "drift_value_high": 5.0,
+    "figure_eight_score_min": 0.4,
+    "crescent_score_min": 0.4,
+    "circle_likeness_high": 0.7,
+    "orbit_shape_similarity_high": 0.7,
+    "orbit_shape_similarity_low": 0.4,
+    "ellipse_fit_residual_high": 1.5,
+    "cycle_size_similarity_low": 0.55,
+    "trend_cv_high": 0.25,
+    "fractional_harmonic_order_tolerance": 0.08
+  },
+  "trend_feature_map": {
+    "轴振": [
+      "pp_value",
+      "rms",
+      "p_value",
+      "speed",
+      "gap",
+      "one_freq_y",
+      "one_freq_x",
+      "two_freq_y",
+      "two_freq_x",
+      "half_freq",
+      "remain_freq"
+    ],
+    "轴位移": [
+      "value"
+    ],
+    "轴承温度": [
+      "value"
+    ],
+    "润滑油温度": [
+      "value"
+    ],
+    "防喘振阀开度": [
+      "value"
+    ],
+    "压缩机进气参数": [
+      "value"
+    ],
+    "出口温度": [
+      "value"
+    ],
+    "入口流量": [
+      "value"
+    ],
+    "其他工艺参数": [
+      "value"
+    ]
+  },
+  "fault_mapping": {
+    "汽轮机": {
+      "sensor_anomaly": [
+        "传感器异常及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "process_sync": [
+        "轴位移异常",
+        "随负荷调整同步波动"
+      ],
+      "fluid_excitation": [
+        "流体扰动类",
+        "汽流激振"
+      ],
+      "fluid_disturbance": [
+        "流体扰动类",
+        "汽流扰动"
+      ],
+      "friction": [
+        "动静摩擦",
+        "汽轮机油封漆膜摩擦"
+      ],
+      "seal_fouling": [
+        "动静摩擦",
+        "油封积垢/结垢摩擦"
+      ],
+      "seal_coking": [
+        "轴位移异常",
+        "油封结垢/结焦"
+      ],
+      "oil_whirl": [
+        "支撑轴承类",
+        "油膜涡动"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "不平衡"
+      ],
+      "unbalance_gradual": [
+        "不平衡类",
+        "转子叶片结垢"
+      ],
+      "unbalance_sudden": [
+        "不平衡类",
+        "转子叶片损伤断裂、平衡块脱落"
+      ],
+      "critical_response": [
+        "不平衡类",
+        "临界响应大"
+      ],
+      "misalignment": [
+        "不对中类",
+        "不对中"
+      ],
+      "coupling_damage": [
+        "不平衡类",
+        "联轴器损伤"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承磨损、损伤"
+      ],
+      "bearing_assembly": [
+        "支撑轴承类",
+        "支撑轴承装配、软脚/刚度差异"
+      ],
+      "bearing_coating": [
+        "支撑轴承类",
+        "轴承瓦块漆膜"
+      ],
+      "shaft_current": [
+        "支撑轴承类",
+        "轴电流"
+      ],
+      "thrust_wear": [
+        "推力轴承故障",
+        "推力轴承磨损"
+      ],
+      "thrust_assembly": [
+        "推力轴承温度异常",
+        "推力轴承装配或设计异常"
+      ],
+      "rotor_runout": [
+        "转子弯曲类",
+        "测振区晃度"
+      ],
+      "bent_rotor": [
+        "转子弯曲类",
+        "转子永久性弯曲"
+      ],
+      "medium_fouling": [
+        "轴位移异常",
+        "介质结垢"
+      ]
+    },
+    "离心式&轴流式压缩机": {
+      "sensor_anomaly": [
+        "传感器故障及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "fluid_excitation": [
+        "流体扰动类",
+        "气体激振"
+      ],
+      "fluid_disturbance": [
+        "流体扰动类",
+        "气流扰动"
+      ],
+      "friction": [
+        "动静摩擦",
+        "密封摩擦"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "不平衡"
+      ],
+      "impeller_fouling": [
+        "不平衡类",
+        "转子叶轮结垢"
+      ],
+      "unbalance_gradual": [
+        "不平衡类",
+        "转子叶轮结垢"
+      ],
+      "unbalance_sudden": [
+        "不平衡类",
+        "转子叶片损伤断裂、进异物"
+      ],
+      "critical_response": [
+        "不平衡类",
+        "临界响应大"
+      ],
+      "misalignment": [
+        "不对中类",
+        "不对中"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承磨损、损伤"
+      ],
+      "bearing_assembly": [
+        "支撑轴承类",
+        "支撑轴承装配、软脚/刚度差异"
+      ],
+      "bearing_coating": [
+        "支撑轴承类",
+        "轴承瓦块漆膜"
+      ],
+      "shaft_current": [
+        "支撑轴承类",
+        "轴电流"
+      ],
+      "oil_whirl": [
+        "支撑轴承类",
+        "油膜涡动"
+      ],
+      "rotor_runout": [
+        "转子弯曲类",
+        "测振区晃度"
+      ],
+      "bent_rotor": [
+        "转子弯曲类",
+        "转子永久性弯曲"
+      ]
+    },
+    "多轴式（齿轮式）压缩机": {
+      "sensor_anomaly": [
+        "传感器故障及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "fluid_excitation": [
+        "流体扰动类",
+        "气体激振"
+      ],
+      "fluid_disturbance": [
+        "流体扰动类",
+        "气流扰动"
+      ],
+      "friction": [
+        "动静摩擦",
+        "密封摩擦"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "不平衡"
+      ],
+      "impeller_fouling": [
+        "不平衡类",
+        "转子叶轮漆膜、结垢"
+      ],
+      "unbalance_gradual": [
+        "不平衡类",
+        "转子叶轮漆膜、结垢"
+      ],
+      "unbalance_sudden": [
+        "不平衡类",
+        "转子叶片损伤断裂、进异物"
+      ],
+      "critical_response": [
+        "不平衡类",
+        "临界响应大"
+      ],
+      "misalignment": [
+        "齿轮类",
+        "齿轮啮合不良"
+      ],
+      "gear_mesh": [
+        "齿轮类",
+        "齿轮啮合不良"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承磨损、损伤"
+      ],
+      "bearing_assembly": [
+        "支撑轴承类",
+        "支撑轴承装配、软脚/刚度差异"
+      ],
+      "bearing_coating": [
+        "支撑轴承类",
+        "轴承瓦块漆膜"
+      ],
+      "shaft_current": [
+        "支撑轴承类",
+        "轴电流"
+      ],
+      "gear_damage": [
+        "齿轮类",
+        "轮齿损伤断裂"
+      ]
+    },
+    "螺杆式压缩机": {
+      "sensor_anomaly": [
+        "传感器故障及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "不平衡"
+      ],
+      "unbalance_sudden": [
+        "螺杆啮合类",
+        "漆膜/结垢/进异物 (螺杆压缩机进异物类故障)"
+      ],
+      "screw_ingestion": [
+        "螺杆啮合类",
+        "进异物导致螺杆啮合偏差"
+      ],
+      "misalignment": [
+        "螺杆啮合类",
+        "螺杆啮合不良"
+      ],
+      "gear_mesh": [
+        "螺杆啮合类",
+        "螺杆啮合不良"
+      ],
+      "bent_rotor": [
+        "不平衡类",
+        "螺杆转子弯曲"
+      ]
+    },
+    "齿轮箱": {
+      "sensor_anomaly": [
+        "传感器故障及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "不平衡"
+      ],
+      "critical_response": [
+        "不平衡类",
+        "临界响应大"
+      ],
+      "oil_whirl": [
+        "支撑轴承类",
+        "油膜涡动"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承磨损、损伤"
+      ],
+      "bearing_assembly": [
+        "支撑轴承类",
+        "支撑轴承装配、软脚/刚度差异"
+      ],
+      "bearing_coating": [
+        "支撑轴承类",
+        "轴承瓦块漆膜"
+      ],
+      "shaft_current": [
+        "支撑轴承类",
+        "轴电流"
+      ],
+      "gear_mesh": [
+        "齿轮啮合类",
+        "齿轮啮合不良"
+      ],
+      "gear_damage": [
+        "齿轮啮合类",
+        "轮齿损伤断裂"
+      ]
+    },
+    "烟气轮机": {
+      "sensor_anomaly": [
+        "传感器故障及测量因素类",
+        "测温传感器自身因素"
+      ],
+      "fluid_disturbance": [
+        "流体扰动类",
+        "气流扰动"
+      ],
+      "friction": [
+        "动静摩擦",
+        "轴端密封摩擦"
+      ],
+      "oil_whirl": [
+        "支撑轴承类",
+        "油膜涡动"
+      ],
+      "unbalance_gradual": [
+        "不平衡类",
+        "转子轮盘、叶片结垢"
+      ],
+      "unbalance_sudden": [
+        "不平衡类",
+        "转子叶片损伤断裂"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承磨损、损伤"
+      ],
+      "bearing_assembly": [
+        "支撑轴承类",
+        "支撑轴承装配、软脚/刚度差异"
+      ]
+    },
+    "发电机": {
+      "sensor_anomaly": [
+        "传感器异常及测量因素类",
+        "晃度"
+      ],
+      "unbalance_stable": [
+        "不平衡类",
+        "转子不平衡"
+      ],
+      "misalignment": [
+        "不对中类",
+        "不对中"
+      ],
+      "bearing_wear": [
+        "支撑轴承类",
+        "支撑轴承异常故障"
+      ],
+      "oil_whirl": [
+        "支撑轴承类",
+        "油膜涡动故障"
+      ],
+      "friction": [
+        "动静摩擦",
+        "动静摩擦类故障"
+      ]
+    }
+  },
+  "actions": {
+    "传感器异常及测量因素类/测温传感器自身因素": {
+      "running": [
+        "复核异常通道接线、前置器和屏蔽接地，确认是否为测量链路问题。"
+      ],
+      "maintenance": [
+        "停机校验或更换探头、延伸电缆、前置器，并检查安装紧固与匹配性。"
+      ]
+    },
+    "传感器故障及测量因素类/测温传感器自身因素": {
+      "running": [
+        "复核异常通道接线、前置器和屏蔽接地，确认是否为测量链路问题。"
+      ],
+      "maintenance": [
+        "停机校验或更换探头、延伸电缆、前置器，并检查安装紧固与匹配性。"
+      ]
+    },
+    "流体扰动类/汽流激振": {
+      "running": [
+        "检查工况与蒸汽参数，避免在敏感负荷区长时间运行。"
+      ],
+      "maintenance": [
+        "结合检修窗口检查密封与流道状态，复核防振和控制参数。"
+      ]
+    },
+    "流体扰动类/汽流扰动": {
+      "running": [
+        "复核蒸汽参数和负荷波动，必要时调整运行点避开不稳定区。"
+      ],
+      "maintenance": [
+        "检修时检查流道、密封和相关控制系统设置。"
+      ]
+    },
+    "流体扰动类/气体激振": {
+      "running": [
+        "调整入口流量或防喘振阀开度，避开流体不稳定工况。"
+      ],
+      "maintenance": [
+        "检修时核查密封、叶轮和防喘振系统状态。"
+      ]
+    },
+    "流体扰动类/气流扰动": {
+      "running": [
+        "复核流量、压力和阀位变化，必要时调整运行点。"
+      ],
+      "maintenance": [
+        "检修时检查流道积垢、密封和控制系统。"
+      ]
+    },
+    "动静摩擦/汽轮机油封漆膜摩擦": {
+      "running": [
+        "适当延长暖机或降低负荷，重点监测振动是否持续恶化。"
+      ],
+      "maintenance": [
+        "停机检查密封间隙、滑销状态和内部摩擦痕迹。"
+      ]
+    },
+    "动静摩擦/油封积垢/结垢摩擦": {
+      "running": [
+        "关注蒸汽参数、负荷和振动联动变化，避免长时间停留在敏感工况。"
+      ],
+      "maintenance": [
+        "停机检查油封积垢、结焦与密封间隙状态，并复核转静件擦碰痕迹。"
+      ]
+    },
+    "动静摩擦/密封摩擦": {
+      "running": [
+        "避免继续提升负荷，监测振动和温度变化。"
+      ],
+      "maintenance": [
+        "停机检查密封间隙、转静件擦碰和对中状态。"
+      ]
+    },
+    "轴位移异常/油封结垢/结焦": {
+      "running": [
+        "关注轴位移、负荷和蒸汽参数变化，必要时避开敏感运行区。"
+      ],
+      "maintenance": [
+        "停机检查油封结垢、结焦和通流部件沉积情况，并复核密封间隙。"
+      ]
+    },
+    "不平衡类/不平衡": {
+      "running": [
+        "在报警联锁门限以下可监护运行，持续观察振动变化。"
+      ],
+      "maintenance": [
+        "检修时复测转子平衡状态并重新做动平衡。"
+      ]
+    },
+    "不平衡类/转子叶片结垢": {
+      "running": [
+        "关注效率、负荷和振动变化，避免长期高振运行。"
+      ],
+      "maintenance": [
+        "检修时清理结垢并复核转子动平衡。"
+      ]
+    },
+    "不平衡类/转子叶轮结垢": {
+      "running": [
+        "关注效率和振动变化，必要时降低负荷。"
+      ],
+      "maintenance": [
+        "停机清理结垢并校验转子动平衡。"
+      ]
+    },
+    "不平衡类/转子叶轮漆膜、结垢": {
+      "running": [
+        "关注振动持续上涨趋势，避免长时间高振运行。"
+      ],
+      "maintenance": [
+        "停机清理漆膜或结垢，并复核平衡状态。"
+      ]
+    },
+    "不平衡类/转子叶片损伤断裂、平衡块脱落": {
+      "running": [
+        "避免继续升负荷，必要时尽快安排停机检查。"
+      ],
+      "maintenance": [
+        "停机检查叶片、平衡块和转子完整性，修复后复做平衡。"
+      ]
+    },
+    "不平衡类/转子叶片损伤断裂、进异物": {
+      "running": [
+        "避免再次剧烈工况波动，评估是否需要立即停机。"
+      ],
+      "maintenance": [
+        "停机检查叶片和流道异物损伤，并复核动平衡。"
+      ]
+    },
+    "不平衡类/临界响应大": {
+      "running": [
+        "优化启停和升速策略，尽量快速通过敏感转速区间。"
+      ],
+      "maintenance": [
+        "检修时复核转子平衡和支撑轴承参数，必要时优化轴承型式。"
+      ]
+    },
+    "不平衡类/联轴器损伤": {
+      "running": [
+        "密切关注联端振动变化，必要时尽早停机。"
+      ],
+      "maintenance": [
+        "停机检查联轴器膜片、螺栓和装配状态，并重新对中。"
+      ]
+    },
+    "不对中类/不对中": {
+      "running": [
+        "监控联端振动变化，若持续恶化应尽早安排停机。"
+      ],
+      "maintenance": [
+        "停机检查联轴器装配、对中和相关紧固件状态。"
+      ]
+    },
+    "支撑轴承类/支撑轴承磨损、损伤": {
+      "running": [
+        "监测振动、GAP 和轴承温度变化，避免持续恶化。"
+      ],
+      "maintenance": [
+        "检修时拆检轴承瓦块与轴颈状态，必要时更换备件。"
+      ]
+    },
+    "支撑轴承类/支撑轴承装配、软脚/刚度差异": {
+      "running": [
+        "可尝试调整油温或进油压力，并持续观察振动变化。"
+      ],
+      "maintenance": [
+        "停机检查轴承间隙、装配过盈和基础刚度差异。"
+      ]
+    },
+    "支撑轴承类/油膜涡动": {
+      "running": [
+        "降低敏感工况波动，重点关注低频和轨迹紊乱是否加剧。"
+      ],
+      "maintenance": [
+        "检修时复核轴承间隙、油膜条件和轴承型式。"
+      ]
+    },
+    "支撑轴承类/轴承瓦块漆膜": {
+      "running": [
+        "监测瓦温、振动和 GAP 的联动变化，必要时优化油温油压。"
+      ],
+      "maintenance": [
+        "停机检查瓦块表面状态及润滑油系统。"
+      ]
+    },
+    "支撑轴承类/轴电流": {
+      "running": [
+        "检查接地和导电回路，必要时降低油温并观察是否缓解。"
+      ],
+      "maintenance": [
+        "停机检查电刷、轴颈和轴承表面电蚀情况。"
+      ]
+    },
+    "推力轴承温度异常/推力轴承装配或设计异常": {
+      "running": [
+        "可适当降低润滑油温度或提高推力轴承支路进油压力，并持续观察温度是否回落。"
+      ],
+      "maintenance": [
+        "停机复测推力瓦块状态、推力间隙、联轴器轴头间距和对中参数，必要时复核设计裕量。"
+      ]
+    },
+    "齿轮类/齿轮啮合不良": {
+      "running": [
+        "监测啮合相关振动变化，避免负荷大幅波动。"
+      ],
+      "maintenance": [
+        "停机检查齿轮啮合状态、接触斑点和装配间隙。"
+      ]
+    },
+    "齿轮类/轮齿损伤断裂": {
+      "running": [
+        "若振动持续恶化应尽早停机，避免二次损伤。"
+      ],
+      "maintenance": [
+        "停机检查齿面、齿根和碎裂情况，修复后复测啮合状态。"
+      ]
+    },
+    "螺杆啮合类/螺杆啮合不良": {
+      "running": [
+        "关注啮合相关振动与负荷变化，必要时降低工况。"
+      ],
+      "maintenance": [
+        "停机检查转子啮合状态、间隙与同步关系。"
+      ]
+    },
+    "螺杆啮合类/进异物导致螺杆啮合偏差": {
+      "running": [
+        "避免继续升负荷，重点监测啮合相关振动和冲击特征是否持续恶化。"
+      ],
+      "maintenance": [
+        "停机检查螺杆流道异物、转子啮合偏差和同步关系，必要时修复受损部件。"
+      ]
+    },
+    "不平衡类/螺杆转子弯曲": {
+      "running": [
+        "在安全范围内监护运行，并关注振动是否继续升高。"
+      ],
+      "maintenance": [
+        "停机检查螺杆转子几何状态并校正或更换。"
+      ]
+    },
+    "转子弯曲类/转子永久性弯曲": {
+      "running": [
+        "在联锁门限以下可短时监护运行，并结合轴位移和 1X 变化持续评估风险。"
+      ],
+      "maintenance": [
+        "停机复测转子弯曲量，必要时调直后重新做动平衡。"
+      ]
+    },
+    "转子弯曲类/测振区晃度": {
+      "running": [
+        "重点监测 1X、轴位移和振动重复性变化，避免继续升负荷。"
+      ],
+      "maintenance": [
+        "停机复核测振区晃度、转子几何状态和探头安装条件，必要时重新校正转子。"
+      ]
+    },
+    "不平衡类/转子轮盘、叶片结垢": {
+      "running": [
+        "关注效率和振动变化，必要时优化工况运行。"
+      ],
+      "maintenance": [
+        "停机清理结垢并重新复核转子平衡状态。"
+      ]
+    },
+    "动静摩擦/轴端密封摩擦": {
+      "running": [
+        "避免继续升负荷，持续监测振动与温度。"
+      ],
+      "maintenance": [
+        "停机检查轴端密封和转静件擦碰痕迹。"
+      ]
+    },
+    "不平衡类/转子不平衡": {
+      "running": [
+        "在安全阈值内可监护运行，重点观察振动趋势。"
+      ],
+      "maintenance": [
+        "停机复测并校正转子平衡。"
+      ]
+    }
+  }
+}

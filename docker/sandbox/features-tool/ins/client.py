@@ -77,13 +77,14 @@ def rsa_encrypt(plaintext: str, public_key_pem: str) -> str:
 
 
 class InsApiClient:
-    def __init__(self, settings: InsSettings) -> None:
+    def __init__(self, settings: InsSettings, access_token: str | None = None) -> None:
         self.settings = settings
         self.http = httpx.AsyncClient(
             headers={"Content-Type": "application/json;charset=utf-8"},
             timeout=30.0,
         )
         self.token: str | None = None
+        self.access_token = (access_token or settings.access_token or "").strip() or None
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -114,6 +115,8 @@ class InsApiClient:
         return self.token
 
     async def ensure_token(self) -> str:
+        if self.access_token:
+            return self.access_token
         if self.token:
             return self.token
         return await self.login()
@@ -129,6 +132,8 @@ class InsApiClient:
         body = response.json()
         code = body.get("code", 0)
         if code == 401:
+            if self.access_token:
+                raise RuntimeError("鉴权失败：Bearer token 无效或已过期")
             self.token = None
             token = await self.login()
             response = await self.http.get(

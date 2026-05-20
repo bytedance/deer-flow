@@ -42,13 +42,16 @@ class InsSettings:
     password: str
     base_url: str
     rsa_public_key: str
+    access_token: str | None = None
 
 
 def load_ins_settings(dotenv_path: str = ".env") -> InsSettings:
     load_dotenv_file(dotenv_path)
+    access_token = os.getenv("INS_ACCESS_TOKEN", "").strip() or None
     return InsSettings(
         username=os.getenv("INS_USERNAME", "").strip(),
         password=os.getenv("INS_PASSWORD", "").strip(),
         base_url=os.getenv("INS_BASE_URL", DEFAULT_INS_BASE_URL).rstrip("/"),
         rsa_public_key=os.getenv("INS_RSA_PUBLIC_KEY", DEFAULT_INS_RSA_PUBLIC_KEY),
+        access_token=access_token,
     )

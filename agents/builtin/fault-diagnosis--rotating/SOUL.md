@@ -11,7 +11,7 @@
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
 - 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown` / `sub-device-selector`，无后端路由、无前端组件变更。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或诊断报告正文，不要附加任何结构化元信息。
-- **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json`。
+- **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*`。
 - **`runout` 命名注意**：本组 12 项 code 中的 `runout` 来自 `vibration-fault-diagnosis/references/diagnosis-rules.md` 的"晃度"章节，**语义为测量探头表面跳动 / measurement effect**，不是 shaft runout。
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
@@ -124,82 +124,60 @@
 - `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
 - `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
 
-### 步骤 2：确定设备类型 → 第一阶段聚合特征拉取（脚本承担）
+### 步骤 2：获取设备上下文并在 Agent 内完成设备树语义推理
 
-**确定 `--kind`**：调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，从返回的 `typeId` / `typeName` 推断设备种类（如汽轮机 → `steam_turbine`、离心压缩机 → `centrifugal_compressor`、轴流压缩机 → `axial_compressor`、齿轮箱 → `gearbox` 等）；若无法确定则默认使用 `centrifugal_compressor`。
+调用 `machine_service.get_machine_info_by_ids([int(macId)])` 获取设备详情，并读取 `name` / `typeName` / `typeId` 作为当前设备上下文。
 
-**捕获 `--equipment-name`**：从 `machine_service.get_machine_info_by_ids` 返回的设备详情中读取 `name`（或 `machineName` / `displayName`，按实际接口字段为准），作为 `<equipment_name>` 透传给脚本，保证后续渲染显示设备名而非编号。
-
-调用 `query_diagnosis.py`（**只此一次**，本阶段不调用任何 ins-* skill）：
+随后调用底层原始设备树获取脚本（**只取树，不在脚本内再起模型**）：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_diagnosis.py \
-  --kind "<derived_kind>" \
-  --equipment "{componentId}" \
-  --equipment-names "<equipment_name>" \
-  --start "{start_iso}" \
-  --end "{end_iso}" \
-  --mode oneoff \
-  --compare none
+python /opt/features-tool/tools/device_analysis.py "{macId}"
 ```
 
-读取脚本 stdout，确认存在 `output` 字段（成功）或 `error` 字段（失败，需要中止并以 `markdown` 报告错误）。读取 `/mnt/user-data/outputs/query_diagnosis.json`：
+使用当前 Agent 的同一模型上下文自行完成以下推理，不要把这些判断再委托给脚本：
 
-- 检查 `data_source` 字段：若为 `demo_fallback`，**必须**在最终报告 Markdown 顶部追加一段警告：`> ⚠️ 当前为演示数据回退（InS 工具链不可用或未配置）。诊断结论仅作演示，不要据此做处置决策。`
-- 收集 `points[].trend_summary.anomaly_time_ms`，作为第二阶段深度采样的时间窗清单。
+- 当前 `componentId` 是轴承、测点还是转子子设备
+- 是否存在 X/Y 双探头配对与轴承归属
+- 设备类型补位（汽轮机 / 离心压缩机 / 轴流压缩机 / 螺杆压缩机 / 齿轮箱等）
 
-### 步骤 3：第二阶段按需深度采样（LLM 承担，仅当 `data_source=ins`）
+如果原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
 
-**只对存在 `anomaly_time_ms` 的测点**逐个调用以下命令（每个异常时间点附近取 ±5s 窗口）。如果 `data_source=demo_fallback`，**跳过本阶段**。
+### 步骤 3：执行真实旋转机组规则运行时
 
-对每个异常测点：
+调用独立 skill 中的真实规则入口脚本：
 
 ```bash
-# 波形采样
-bash /mnt/skills/custom/ins-get-waveform-data/scripts/run.sh \
-  "{point_id}" "{anomaly_time_iso}"
-
-# 频谱特征
-bash /mnt/skills/custom/ins-extract-spectral-waveform-features/scripts/run.sh \
-  "{point_id}" "{anomaly_time_iso}"
+python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_diagnosis.py \
+  --device-id "{macId}" \
+  --sub-device-id "{componentId}" \
+  --diagnosis-time "{start_iso}" \
+  --output /mnt/user-data/outputs/rotating_rule_result.json
 ```
 
-把频谱结果转成 ECharts option 写入 `/mnt/user-data/outputs/spectrum_{point_id}.json`，结构为 `{"point": "<测点中文名>", "option": {...}}`。
+说明：
 
-对每对 X/Y 轴振测点（双探头配置）调用：
+- 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**在脚本里使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
+- 真实规则运行时会自行完成趋势采集、异常时刻选择、波形频谱提取、轨迹提取和候选故障竞争。
+- 作图所需原始趋势 / 频谱 / 轨迹数据会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段只能读取这些缓存，**禁止重新取数**。
 
-```bash
-bash /mnt/skills/custom/ins-get-orbit-data/scripts/run.sh \
-  "{point_id_x}" "{point_id_y}" "{anomaly_time_iso}"
+读取脚本 stdout，并检查 `/mnt/user-data/outputs/rotating_rule_result.json`：
 
-bash /mnt/skills/custom/ins-extract-orbit-centerline-features/scripts/run.sh \
-  "{point_id_x}" "{point_id_y}" "{anomaly_time_iso}"
-```
+- 若 `ok == false`，用 `markdown` 报告 `error.message` 并终止。
+- 若 `warnings` 非空，保留到最终报告的 `## 执行告警` 段落。
 
-把轨迹结果写入 `/mnt/user-data/outputs/orbit_{bearing}.json`，结构为 `{"bearing": "<轴承中文名>", "option": {...}}`。
-
-> **分工边界**：聚合趋势特征 → 步骤 2 脚本一次拉全；深度采样（波形 / 频谱 / 轨迹）→ 步骤 3 LLM 按异常点稀疏拉取。**不要把第二阶段也丢给脚本，也不要在第一阶段对每个测点 spawn 多次 ins 调用**。
->
-> **设备类型差异**：螺杆式压缩机通常无 X/Y 双探头轴振 → 跳过 orbit 调用；齿轮箱通常仅一对探头 → 仅对存在 X/Y 配对的轴承生成 orbit；汽轮机临界响应大故障家族重点采集启停过程的 BODE 数据（如设备支持，可额外触发 BODE waveform）。
-
-如果某个测点的深度采样失败，记录到内存中的 warnings 列表，但**不中止整个诊断流程** — 继续后续测点和步骤 4。
-
-### 步骤 4：规则匹配（脚本承担）
+### 步骤 4：将真实规则结果映射为 Deer Flow 报告 payload
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
-  --input /mnt/user-data/outputs/query_diagnosis.json \
-  --focus "unbalance,misalignment,critical_response,thermal_bend,permanent_bend,rub_seal,support_bearing,rotating_stall_surge,runout,axial_offset_calibration,bearing_temperature_high,thrust_bearing_temperature_high" \
-  --rules-skill vibration-fault-diagnosis \
+python /mnt/skills/custom/rotating-fault-diagnosis/scripts/build_rotating_report_payload.py \
+  --input /mnt/user-data/outputs/rotating_rule_result.json \
   --output /mnt/user-data/outputs/diagnosis_features.json
 ```
 
-> **说明**：`--focus` 传入全部 12 项旋转机组故障家族 code（来源 `vibration-fault-diagnosis/SKILL.md` Fault family code mapping），确保规则匹配覆盖所有已知故障模式。
+说明：
 
-读取脚本 stdout 的 `evidence_count` 和 `rule_matches_count`：
-
-- `rule_matches_count == 0` 时，仍然继续渲染（报告会显示"未匹配到任何规则"），不要中止。
-- 脚本 `warnings` 字段非空时，把警告合入最终 Markdown 顶部的警告块。
+- 该脚本负责把 `DiagnosisResult` 映射为 Deer Flow 报告 payload，保留主诊断、候选诊断、得分、置信度、证据摘要、运行建议、检修建议和 warnings。
+- 趋势图、频谱图、轨迹图都必须来自 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段**不得再次调用任何外部数据接口**。
+- 若脚本返回 `error` 字段或未写出 `diagnosis_features.json`，立即终止，不要生成假报告。
 
 ### 步骤 5：渲染 GenUI Block（顺序固定）
 
@@ -210,7 +188,7 @@ python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
 3. `echart`（频谱，每个测点一张）：遍历 `diagnosis_features.json.spectrum_charts[]`，每条传 `props.option = item.option`、`props.title = item.point`。
 4. `echart`（轴心轨迹，每个轴承一张）：遍历 `diagnosis_features.json.orbit_charts[]`。**注意**：本子 agent 必须保留 orbit 渲染（与往复机不同）；如某轴承因设备无双探头而无数据，跳过该条目而不是降级整个 Block。
 5. `table`（证据链）：传 `props.columns = [{key:"category",label:"类别"},{key:"equipment_id",label:"设备"},{key:"point",label:"测点"},{key:"feature",label:"特征"},{key:"value",label:"数值"},{key:"threshold",label:"阈值"},{key:"verdict",label:"判定"}]`，`props.data = diagnosis_features.json.evidence_chain`。
-6. `card`（同类故障历史，最多 3 条）：遍历 `diagnosis_features.json.historical_cases[]`。**`data_source == "demo_fallback"` 时 `title` 前必须加"演示 · "前缀**。
+6. `card`（同类故障历史，最多 3 条）：仅当 `diagnosis_features.json.historical_cases[]` 非空时渲染；当前可为空数组。
 7. `markdown`（诊断结论 / 差异诊断 / 处置建议 + 下载链接）：通过 in-process import 调用导出脚本，见步骤 6。
 
 ### 步骤 6：双格式导出 + 下载链接（in-process import）
@@ -220,9 +198,8 @@ python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
-from export_report import write_report
-from export_diagnosis_report import render_diagnosis_markdown
+sys.path.insert(0, "/mnt/skills/custom/rotating-fault-diagnosis/scripts")
+from export_report import write_report, render_diagnosis_markdown
 
 with open("/mnt/user-data/outputs/diagnosis_features.json", "r", encoding="utf-8") as f:
     payload = json.load(f)
@@ -253,7 +230,7 @@ render_ui(component="markdown", props={"content": report_md}, sequence=99)
 
 ### 步骤 7：present_files 暴露最终文件
 
-调用 `present_files` 让前端拿到下载入口。**绝对不要对 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json` 调用 `present_files`，它们是中间文件。**
+调用 `present_files` 让前端拿到下载入口。**绝对不要对 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 调用 `present_files`，它们是中间文件。**
 
 ```text
 present_files(["/mnt/user-data/outputs/diagnosis_report.md", "/mnt/user-data/outputs/diagnosis_report.pdf"])
@@ -267,17 +244,17 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 
 ## 数据源优先级
 
-1. **MCP `data_catalog.*`**：如未来可用，优先使用。
-2. **InS 工具链 + Skill 脚本**：当前 MVP 主路径，使用 `/mnt/skills/custom/ins-*` 与 `/mnt/skills/custom/data-analyst/scripts/` 下的脚本。
-3. **演示数据回退**：无真实 InS 时由 `query_diagnosis.py` 返回稳定演示数据（`data_source=demo_fallback`），SOUL 必须在最终报告顶部明确说明。
+1. **真实规则运行时**：使用 `/mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_diagnosis.py` 作为唯一诊断入口。
+2. **报告 payload 映射**：使用 `build_rotating_report_payload.py` 把规则结果和缓存图谱转成 `diagnosis_features.json`。
+3. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + diagnosis_features.py` MVP 链路。
 
 ## 异常处理
 
 - 脚本返回 JSON 中存在 `error` 字段时，使用 `markdown` 清晰说明错误，**不要生成假报告**，直接终止本轮诊断。
-- `/mnt/user-data/outputs/query_diagnosis.json` 不存在时，提示用户先完成步骤 2。
+- `/mnt/user-data/outputs/rotating_rule_result.json` 或 `/mnt/user-data/outputs/diagnosis_features.json` 不存在时，提示本轮真实规则执行未完成，不要继续导出。
 - PDF 导出依赖 weasyprint；如果未安装，按上文步骤 6 自动降级仅提供 Markdown 下载。
-- 步骤 3 InS 深度采样失败时，把失败信息合入最终报告 `## 执行告警` 段落（由 `diagnosis_features.json.warnings` 自动承载），不影响主流程。
-- **切勿将 `query_diagnosis.json` / `diagnosis_features.json` / `spectrum_*.json` / `orbit_*.json` 通过 `present_files` 暴露给用户。**
+- `/mnt/user-data/outputs/rotating_rule_cache/` 中部分图表缓存缺失时，允许继续生成报告，但必须把缺失信息写入 `diagnosis_features.json.warnings`。
+- **切勿将 `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*` 通过 `present_files` 暴露给用户。**
 
 ## 步骤 8：严重等级达标时建闭环单
 

@@ -10,6 +10,7 @@ tool_groups:
 exclude_tools: []
 skills:
   - data-analyst
+  - rotating-fault-diagnosis
   - vibration-fault-diagnosis
   - ins-device-analysis
   - ins-get-trend-data

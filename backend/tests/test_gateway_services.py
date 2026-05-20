@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 
 def test_format_sse_basic():
@@ -79,6 +80,30 @@ def test_normalize_input_passthrough():
 
     result = normalize_input({"custom_key": "value"})
     assert result == {"custom_key": "value"}
+
+
+def test_resolve_request_access_token_prefers_bearer_header():
+    from app.gateway.services import _resolve_request_access_token
+
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer header-token"},
+        cookies={"access_token": "cookie-token"},
+        state=SimpleNamespace(user={"ins_base_token": "state-token"}),
+    )
+
+    assert _resolve_request_access_token(request) == "header-token"
+
+
+def test_resolve_request_access_token_falls_back_to_cookie():
+    from app.gateway.services import _resolve_request_access_token
+
+    request = SimpleNamespace(
+        headers={},
+        cookies={"access_token": "cookie-token"},
+        state=SimpleNamespace(user={}),
+    )
+
+    assert _resolve_request_access_token(request) == "cookie-token"
 
 
 def test_build_run_config_basic():
