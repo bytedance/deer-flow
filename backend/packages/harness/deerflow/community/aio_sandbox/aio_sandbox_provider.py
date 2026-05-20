@@ -165,6 +165,7 @@ class AioSandboxProvider(SandboxProvider):
         idle_timeout = getattr(sandbox_config, "idle_timeout", None)
         replicas = getattr(sandbox_config, "replicas", None)
 
+        exec_no_change_timeout = getattr(sandbox_config, "exec_no_change_timeout", None)
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
             "port": sandbox_config.port or DEFAULT_PORT,
@@ -175,6 +176,8 @@ class AioSandboxProvider(SandboxProvider):
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
+            # Configurable no-output-change timeout forwarded to every exec_command call.
+            "exec_no_change_timeout": exec_no_change_timeout if exec_no_change_timeout is not None else 600,
         }
 
     @staticmethod
@@ -468,7 +471,7 @@ class AioSandboxProvider(SandboxProvider):
             with self._lock:
                 if sandbox_id in self._warm_pool:
                     info, _ = self._warm_pool.pop(sandbox_id)
-                    sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                    sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, no_change_timeout=self._config.get("exec_no_change_timeout", 600))
                     self._sandboxes[sandbox_id] = sandbox
                     self._sandbox_infos[sandbox_id] = info
                     self._last_activity[sandbox_id] = time.time()
@@ -512,7 +515,7 @@ class AioSandboxProvider(SandboxProvider):
                             return existing_id
                     if sandbox_id in self._warm_pool:
                         info, _ = self._warm_pool.pop(sandbox_id)
-                        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, no_change_timeout=self._config.get("exec_no_change_timeout", 600))
                         self._sandboxes[sandbox_id] = sandbox
                         self._sandbox_infos[sandbox_id] = info
                         self._last_activity[sandbox_id] = time.time()
@@ -523,7 +526,7 @@ class AioSandboxProvider(SandboxProvider):
                 # Backend discovery: another process may have created the container.
                 discovered = self._backend.discover(sandbox_id)
                 if discovered is not None:
-                    sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
+                    sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url, no_change_timeout=self._config.get("exec_no_change_timeout", 600))
                     with self._lock:
                         self._sandboxes[discovered.sandbox_id] = sandbox
                         self._sandbox_infos[discovered.sandbox_id] = discovered
@@ -594,7 +597,7 @@ class AioSandboxProvider(SandboxProvider):
             self._backend.destroy(info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, no_change_timeout=self._config.get("exec_no_change_timeout", 600))
         with self._lock:
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info

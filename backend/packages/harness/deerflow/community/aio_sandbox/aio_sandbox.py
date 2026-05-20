@@ -26,19 +26,23 @@ class AioSandbox(Sandbox):
     from corrupting the container's single persistent session (see #1433).
     """
 
-    def __init__(self, id: str, base_url: str, home_dir: str | None = None):
+    def __init__(self, id: str, base_url: str, home_dir: str | None = None, no_change_timeout: int = 600):
         """Initialize the AIO sandbox.
 
         Args:
             id: Unique identifier for this sandbox instance.
             base_url: URL of the sandbox API (e.g., http://localhost:8080).
             home_dir: Home directory inside the sandbox. If None, will be fetched from the sandbox.
+            no_change_timeout: Seconds of no output change before exec_command is interrupted.
+                The AIO sandbox container's built-in default is 120 s; we override it here
+                so that long-running commands are not prematurely killed.
         """
         super().__init__(id)
         self._base_url = base_url
-        self._client = AioSandboxClient(base_url=base_url, timeout=600)
+        self._client = AioSandboxClient(base_url=base_url, timeout=max(no_change_timeout, 600))
         self._home_dir = home_dir
         self._lock = threading.Lock()
+        self._no_change_timeout = no_change_timeout
 
     @property
     def base_url(self) -> str:
@@ -51,12 +55,6 @@ class AioSandbox(Sandbox):
             context = self._client.sandbox.get_context()
             self._home_dir = context.home_dir
         return self._home_dir
-
-    # Default no_change_timeout for exec_command (seconds).  Matches the
-    # client-level timeout so that long-running commands which produce no
-    # output are not prematurely terminated by the sandbox's built-in 120 s
-    # default.
-    _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
     def execute_command(self, command: str) -> str:
         """Execute a shell command in the sandbox.
@@ -76,13 +74,13 @@ class AioSandbox(Sandbox):
         """
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                result = self._client.shell.exec_command(command=command, no_change_timeout=self._no_change_timeout)
                 output = result.data.output if result.data else ""
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output, retrying with a fresh session")
                     fresh_id = str(uuid.uuid4())
-                    result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                    result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._no_change_timeout)
                     output = result.data.output if result.data else ""
 
                 return output if output else "(no output)"
@@ -161,7 +159,7 @@ class AioSandbox(Sandbox):
         """
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._no_change_timeout)
                 output = result.data.output if result.data else ""
                 if output:
                     return [line.strip() for line in output.strip().split("\n") if line.strip()]
