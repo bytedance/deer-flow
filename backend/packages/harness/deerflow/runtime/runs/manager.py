@@ -139,7 +139,7 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
-        await self._persist_to_store(record)
+            await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -341,10 +341,10 @@ class RunManager:
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            await self._persist_to_store(record)
 
         for interrupted_run_id in interrupted_run_ids:
             await self._persist_status(interrupted_run_id, RunStatus.interrupted)
-        await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
