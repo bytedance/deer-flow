@@ -1,0 +1,62 @@
+{
+  "project": "deer-flow",
+  "default_branch": "master",
+  "worktree_root": ".clawdbot/worktrees",
+  "session_prefix": "claw",
+  "notify_on_complete_only": true,
+  "github": {
+    "requires_auth": true,
+    "requires_remote": true,
+    "enabled": false
+  },
+  "roles": {
+    "backend-python": {
+      "path_scope": ["backend"],
+      "default_agent": "codex",
+      "default_model": "gpt-5.4",
+      "checks": [
+        "cd backend && make test",
+        "cd backend && make lint"
+      ]
+    },
+    "frontend-nextjs": {
+      "path_scope": ["frontend"],
+      "default_agent": "claude",
+      "default_model": "claude-sonnet-4-6",
+      "checks": [
+        "cd frontend && pnpm lint",
+        "cd frontend && pnpm typecheck"
+      ]
+    },
+    "docs-sync": {
+      "path_scope": ["README.md", "docs", "backend/CLAUDE.md", "frontend/AGENTS.md", "backend/AGENTS.md"],
+      "default_agent": "claude",
+      "default_model": "claude-sonnet-4-6",
+      "checks": [
+        "git diff --stat"
+      ]
+    },
+    "reviewer": {
+      "path_scope": ["*"],
+      "default_agent": "codex",
+      "default_model": "gpt-5.4",
+      "checks": [
+        "git diff --stat",
+        "git status --short"
+      ]
+    }
+  },
+  "definition_of_done": {
+    "local": [
+      "requested files changed",
+      "role-specific checks pass",
+      "worktree is clean or only intended diffs remain",
+      "summary written by agent"
+    ],
+    "github": [
+      "PR created",
+      "CI green",
+      "review passed"
+    ]
+  }
+}
