@@ -16,9 +16,14 @@ INS_SETTINGS = load_ins_settings()
 ins_client = InsApiClient(INS_SETTINGS)
 
 
-async def _get_orbit_data_impl(machine_id: str, bearing_id: str, time: str) -> dict[str, object]:
+async def _get_orbit_data_impl(
+    machine_id: str,
+    bearing_id: str,
+    time: str,
+    probe_ids: list[str] | None = None,
+) -> dict[str, object]:
     time_ms = datetime_input_to_ms(time)
-    data = await ins_client.get_orbit_data(machine_id, bearing_id, time_ms)
+    data = await ins_client.get_orbit_data(machine_id, bearing_id, time_ms, probe_ids=probe_ids)
     return {
         "machine_id": machine_id,
         "bearing_id": bearing_id,

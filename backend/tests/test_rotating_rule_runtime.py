@@ -308,6 +308,41 @@ def test_build_device_context_artifact_contains_target_info(monkeypatch):
     assert artifact["resolved_context"]["rotor_device_ids"] == ["ROT-1"]
 
 
+def test_collect_orbit_results_prefers_device_context_probe_mapping(monkeypatch):
+    monkeypatch.syspath_prepend(str(FEATURES_TOOL_DIR))
+
+    from diagnosis_rule import workflow as module
+    from models import BearingRef, DeviceContext, ProbeRef
+
+    context = DeviceContext(device_id="MAC-1", device_type="离心式&轴流式压缩机")
+    context.bearing_probe_map["BRG-1"] = ["P-101", "P-102"]
+    context.probe_index["P-101"] = ProbeRef(point_id="P-101", point_name="联端X轴振", point_type="轴振", bearing_id="BRG-1")
+    context.probe_index["P-102"] = ProbeRef(point_id="P-102", point_name="联端Y轴振", point_type="轴振", bearing_id="BRG-1")
+    context.bearing_index["BRG-1"] = BearingRef(bearing_id="BRG-1", bearing_name="联端轴承")
+
+    captured: list[tuple[str, str, str, list[str] | None]] = []
+
+    async def _fake_cached_extract_orbit(root_device_id: str, bearing_id: str, time_ms: str, probe_ids: list[str] | None = None):
+        captured.append((root_device_id, bearing_id, time_ms, probe_ids))
+        return {"bearing_id": bearing_id, "time_ms": time_ms, "probe_ids": probe_ids or []}
+
+    monkeypatch.setattr(module, "cached_extract_orbit", _fake_cached_extract_orbit)
+
+    results, failures = asyncio.run(
+        module._collect_orbit_results(
+            "MAC-1",
+            context,
+            {"bearing_ids": ["BRG-1"]},
+            ["1747731600000"],
+            {"max_orbit_points": 2},
+        )
+    )
+
+    assert not failures
+    assert len(results) == 1
+    assert captured == [("MAC-1", "BRG-1", "1747731600000", ["P-101", "P-102"])]
+
+
 def test_device_analysis_script_returns_raw_tree_only(monkeypatch):
     monkeypatch.syspath_prepend(str(FEATURES_TOOL_DIR))
 

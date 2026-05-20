@@ -72,8 +72,18 @@ async def cached_extract_waveform(component_id: str, time_ms: str) -> dict[str, 
     return payload
 
 
-async def cached_extract_orbit(root_device_id: str, bearing_id: str, time_ms: str) -> dict[str, Any]:
-    orbit_payload = await _get_orbit_data_impl(machine_id=root_device_id, bearing_id=bearing_id, time=time_ms)
+async def cached_extract_orbit(
+    root_device_id: str,
+    bearing_id: str,
+    time_ms: str,
+    probe_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    orbit_payload = await _get_orbit_data_impl(
+        machine_id=root_device_id,
+        bearing_id=bearing_id,
+        time=time_ms,
+        probe_ids=probe_ids,
+    )
     _write_cache("orbit", f"{bearing_id}_{time_ms}", orbit_payload)
     payload = await _extract_orbit_centerline_features_impl(orbit_payload=orbit_payload)
     _write_cache("orbit_features", f"{bearing_id}_{time_ms}", payload)
@@ -781,13 +791,31 @@ async def _collect_waveform_results(target_info: dict[str, Any], times_ms: list[
     return results
 
 
-async def _collect_orbit_results(root_device_id: str, target_info: dict[str, Any], times_ms: list[str], config: dict[str, Any]) -> list[dict[str, Any]]:
+def _bearing_waveform_probe_ids(context: DeviceContext, bearing_id: str) -> list[str]:
+    bearing_probe_ids = [str(item) for item in (context.bearing_probe_map.get(bearing_id) or []) if str(item)]
+    shaft_vibration_ids = [
+        point_id
+        for point_id in bearing_probe_ids
+        if (context.probe_index.get(point_id) and context.probe_index[point_id].point_type == "轴振")
+    ]
+    return shaft_vibration_ids or bearing_probe_ids[:2]
+
+
+async def _collect_orbit_results(
+    root_device_id: str,
+    context: DeviceContext,
+    target_info: dict[str, Any],
+    times_ms: list[str],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     bearing_ids = [str(item) for item in (target_info.get("bearing_ids") or [])]
     max_points = int(_safe_float(config.get("max_orbit_points")) or 2)
     if not root_device_id:
-        return []
+        return [], []
     results: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
     for bearing_id in bearing_ids[:max_points]:
+        probe_ids = _bearing_waveform_probe_ids(context, bearing_id)
         for time_ms in times_ms:
             try:
                 results.append(
@@ -795,11 +823,20 @@ async def _collect_orbit_results(root_device_id: str, target_info: dict[str, Any
                         root_device_id=root_device_id,
                         bearing_id=bearing_id,
                         time_ms=time_ms,
+                        probe_ids=probe_ids,
                     )
                 )
             except Exception as exc:
+                failures.append(
+                    {
+                        "bearing_id": bearing_id,
+                        "time_ms": time_ms,
+                        "probe_ids": ",".join(probe_ids),
+                        "error": str(exc),
+                    }
+                )
                 print(f"[orbit.fail] machine_id={root_device_id} bearing_id={bearing_id} time_ms={time_ms} error={exc}")
-    return results
+    return results, failures
 
 
 def _trend_filter(trends: list[TrendSnapshot], *, point_type: str | None = None, feature: str | None = None) -> list[TrendSnapshot]:
@@ -3207,6 +3244,7 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
     # 每个探头单独解析波形时间戳（不同探头的异常峰值时刻不同）
     waveform_results: list[dict[str, Any]] = []
     all_waveform_times: list[str] = []
+    waveform_failures: list[dict[str, str]] = []
     for probe_id in waveform_probe_ids:
         probe_times = await _resolve_waveform_times([probe_id], trends, time_ms, config)
         for t in probe_times:
@@ -3215,9 +3253,22 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
             try:
                 waveform_results.append(await _extract_spectral_waveform_features_impl(component_id=probe_id, time_ms=t))
             except Exception as exc:
+                waveform_failures.append(
+                    {
+                        "component_id": probe_id,
+                        "time_ms": t,
+                        "error": str(exc),
+                    }
+                )
                 print(f"[waveform.fail] component_id={probe_id} time_ms={t} error={exc}")
     all_waveform_times.sort(key=lambda t: int(t), reverse=True)
-    orbit_results = await _collect_orbit_results(diagnosis_target.root_device_id, target_info, all_waveform_times[:2], config)
+    orbit_results, orbit_failures = await _collect_orbit_results(
+        diagnosis_target.root_device_id,
+        context,
+        target_info,
+        all_waveform_times[:2],
+        config,
+    )
     candidates, score_debug_info = _score_candidates(diagnosis_target, trends, waveform_results, orbit_results, config)
 
     if not candidates:
@@ -3307,12 +3358,17 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
             "reasoning_summary": [
                 f"device_type={context.device_type}",
                 f"target_device_type={diagnosis_target.target_device_type}",
+                f"target_kind={target_info.get('target_kind')}",
                 f"trend_points=1d:{sum(1 for s in trends if s.window=='1d')} 3d:{sum(1 for s in trends if s.window=='3d')} 30d:{sum(1 for s in trends if s.window=='30d')}",
                 f"waveform_cases={len(waveform_results)} orbit_cases={len(orbit_results)}",
-                f"waveform_probes={len(waveform_probe_ids)} waveform_times={all_waveform_times}",
+                f"waveform_probes={len(waveform_probe_ids)} bearing_ids={len([str(item) for item in (target_info.get('bearing_ids') or [])])} waveform_times={all_waveform_times}",
+                f"waveform_failures={len(waveform_failures)} orbit_failures={len(orbit_failures)}",
                 f"active_process_types={active_process_types}",
                 f"top_rules={[item.rule_id for item in selected]}",
             ],
+            "target_info": target_info,
+            "waveform_failures": waveform_failures,
+            "orbit_failures": orbit_failures,
             "process_type_summary": process_type_summary,
             "process_profile": process_profile,
             "feature_counts": score_debug_info.get("feature_counts", {}),

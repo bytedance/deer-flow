@@ -36,4 +36,5 @@
   - 进展：当前 `/Users/gubailin/PycharmProjects/deer-flow-yh/mac-diag-code` 仅保留为临时对照来源，不再作为运行依赖。
   - 未完成：在完成 2~3 组录制 case 对比并确认 Deer Flow 输出一致前，暂不删除该目录，也不勾选本项。
 - [ ] 4.4 补充规则镜像同步、回滚方式和已知限制文档，明确后续如何跟随现场规则更新
-  - 未完成：需补充 `docker/sandbox/features-tool/` 同步流程、旋转 SOUL 回滚路径，以及 `INS_ACCESS_TOKEN` / `INS_BASE_URL` / 缓存仅报告期复用等限制说明。
+  - 进展：已确认波形/轨迹链路比趋势链路更依赖 `device_context.json` 中的探头挂载关系与精确 `timepoint`，并已把轨迹取数切到优先复用规则上下文解析结果，避免再次依赖 InS 原始树挂载。
+  - 未完成：仍需补充 `docker/sandbox/features-tool/` 同步流程、旋转 SOUL 回滚路径，以及 `INS_ACCESS_TOKEN` / `INS_BASE_URL` / 波形/轨迹精确时刻匹配限制、缓存仅报告期复用等说明。

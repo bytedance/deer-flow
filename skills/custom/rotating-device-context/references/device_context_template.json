@@ -19,6 +19,64 @@
   "child_device_list": [
     {
       "id": "...",
+      "name": "机组根节点名称或80级设备名称",
+      "unit_type": 1,
+      "type_num": 1,
+      "children": [
+        {
+          "id": "...",
+          "name": "...",
+          "system": "type_num为80时填写。设备所属系统，可选项：动力部分|传动部分|工作部分",
+          "type": "type_num为80时填写。设备类型，可选项：汽轮机|离心式压缩机|多轴式压缩机|螺杆式压缩机|齿轮箱|烟气轮机|发电机|电机|未知",
+          "unit_type": 2,
+          "type_num": 80,
+          "children": [
+            {
+              "id": "...",
+              "name": "...",
+              "unit_type": 2,
+              "type_num": 70,
+              "direction": "方向，可选项：联端|非联端",
+              "bearing_type": ["轴承类型，多选，可选项：支撑轴承|推力轴承|无法推断"],
+              "children": [
+                {
+                  "id": "...",
+                  "name": "...",
+                  "unit_type": 3,
+                  "type_num": "",
+                  "h_alarm": "",
+                  "hh_alarm": "",
+                  "belongShaftId": "",
+                  "type": "type_num=83，名称不包含波形为轴振，名称包含波形为轴位移波形。type_num=81为键相，type_num=82需根据名称推断，可选项：润滑油温度|防喘振阀开度|压缩机进气参数|出口温度|入口流量|轴承温度|轴位移|其他工艺参数"
+                }
+              ]
+            },
+            {
+              "id": "...",
+              "name": "无法精确落到轴承、但可确定属于当前80设备的测点",
+              "unit_type": 3,
+              "type_num": "",
+              "h_alarm": "",
+              "hh_alarm": "",
+              "belongShaftId": "",
+              "type": "同上"
+            }
+          ]
+        },
+        {
+          "id": "...",
+          "name": "既无法定位70也无法可靠定位80时，才允许留在机组根节点的测点",
+          "unit_type": 3,
+          "type_num": "",
+          "h_alarm": "",
+          "hh_alarm": "",
+          "belongShaftId": "",
+          "type": "同上"
+        }
+      ]
+    },
+    {
+      "id": "...",
       "name": "...",
       "system": "type_num为1时无此项。设备所属系统，可选项：动力部分|传动部分|工作部分",
       "type": "type_num为1时无此项。设备类型，可选项：汽轮机|离心式压缩机|多轴式压缩机|螺杆式压缩机|齿轮箱|烟气轮机|发电机|未知",

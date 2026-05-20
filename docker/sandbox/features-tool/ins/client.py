@@ -207,15 +207,26 @@ class InsApiClient:
             "unit": None,
         }
 
-    async def get_orbit_data(self, machine_id: str, bearing_id: str, time_ms: str) -> dict[str, Any]:
-        components = await self.get_components(machine_id)
-        bearing = find_component_by_id(components, bearing_id)
-        if not bearing:
-            raise RuntimeError(f"未在机组 {machine_id} 的组件树中找到轴承 {bearing_id}")
-        probe_ids = get_shaft_vib_probe_ids(bearing)
-        if not probe_ids:
-            probe_ids = [bearing_id]
-        items = await self._fetch_wave_items(",".join(probe_ids), time_ms)
+    async def get_orbit_data(
+        self,
+        machine_id: str,
+        bearing_id: str,
+        time_ms: str,
+        probe_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_probe_ids = [coerce_id(item) for item in (probe_ids or []) if coerce_id(item)]
+        if not normalized_probe_ids:
+            components = await self.get_components(machine_id)
+            bearing = find_component_by_id(components, bearing_id)
+            if not bearing:
+                raise RuntimeError(f"未在机组 {machine_id} 的组件树中找到轴承 {bearing_id}")
+            normalized_probe_ids = get_shaft_vib_probe_ids(bearing)
+        if not normalized_probe_ids:
+            raise RuntimeError(
+                f"轴承 {bearing_id} 未解析到可用于轴心轨迹的轴振探头，"
+                "请检查 device_context.json 中的 bearing_ids / waveform_probe_ids / 挂载关系。"
+            )
+        items = await self._fetch_wave_items(",".join(normalized_probe_ids), time_ms)
         if not items:
             raise RuntimeError("未获取到轴心轨迹所需波形数据")
         x = items[0]
@@ -238,7 +249,7 @@ class InsApiClient:
             "points_1x": points_1x,
             "points_2x": points_2x,
             "speed": speed,
-            "probe_ids": probe_ids,
+            "probe_ids": normalized_probe_ids,
         }
 
     def _build_orbit_nx_points(
