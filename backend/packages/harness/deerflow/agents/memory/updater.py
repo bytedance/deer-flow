@@ -576,10 +576,17 @@ class MemoryUpdater:
 
         # Enforce max facts limit
         if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
+            # Sort by:
+            # 1. Confidence (descending)
+            # 2. Is Correction (True > False, protects explicit user corrections)
+            # 3. CreatedAt (descending, chronological recency via ISO-8601 strings)
             current_memory["facts"] = sorted(
                 current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
+                key=lambda f: (
+                    float(f.get("confidence", 0) or 0),
+                    f.get("category") == "correction",
+                    str(f.get("createdAt", "") or ""),
+                ),
                 reverse=True,
             )[: config.max_facts]
 

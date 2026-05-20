@@ -427,6 +427,114 @@ def test_update_memory_fact_rejects_invalid_confidence() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# TestMemoryEvictionLogic - Multi-dimensional memory eviction sorting logic
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryEvictionLogic:
+    """Tests for the multi-dimensional memory eviction sorting logic."""
+
+    def test_eviction_prioritizes_confidence(self) -> None:
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {"id": "f1", "content": "Fact 1", "confidence": 0.5, "category": "context", "createdAt": "2026-03-18T10:00:00Z"},
+                {"id": "f2", "content": "Fact 2", "confidence": 0.9, "category": "context", "createdAt": "2026-03-18T10:00:00Z"},
+                {"id": "f3", "content": "Fact 3", "confidence": 0.7, "category": "context", "createdAt": "2026-03-18T10:00:00Z"},
+            ]
+        )
+
+        with patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.1)):
+            result = updater._apply_updates(current_memory, {})
+
+        # Should keep top 2 by confidence: f2 (0.9) and f3 (0.7)
+        kept_ids = [f["id"] for f in result["facts"]]
+        assert kept_ids == ["f2", "f3"]
+
+    def test_eviction_protects_corrections(self) -> None:
+        updater = MemoryUpdater()
+        # All have the same confidence, but one is a correction
+        current_memory = _make_memory(
+            facts=[
+                {"id": "f1", "content": "Generic 1", "confidence": 0.8, "category": "context", "createdAt": "2026-03-18T10:00:00Z"},
+                {"id": "f2", "content": "Important correction", "confidence": 0.8, "category": "correction", "createdAt": "2026-03-18T10:00:00Z"},
+                {"id": "f3", "content": "Generic 2", "confidence": 0.8, "category": "context", "createdAt": "2026-03-18T10:00:00Z"},
+            ]
+        )
+
+        with patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.1)):
+            result = updater._apply_updates(current_memory, {})
+
+        # Should keep f2 (correction) and one of the others
+        kept_ids = [f["id"] for f in result["facts"]]
+        assert "f2" in kept_ids
+        assert len(kept_ids) == 2
+        # Verify f2 is sorted to the very top due to correction flag
+        assert result["facts"][0]["id"] == "f2"
+
+    def test_eviction_uses_recency_as_tie_breaker(self) -> None:
+        updater = MemoryUpdater()
+        # All have same confidence and same category, differing only by createdAt
+        current_memory = _make_memory(
+            facts=[
+                {"id": "oldest", "content": "Fact 1", "confidence": 0.8, "category": "context", "createdAt": "2026-01-01T00:00:00Z"},
+                {"id": "newest", "content": "Fact 2", "confidence": 0.8, "category": "context", "createdAt": "2026-03-18T00:00:00Z"},
+                {"id": "middle", "content": "Fact 3", "confidence": 0.8, "category": "context", "createdAt": "2026-02-15T00:00:00Z"},
+            ]
+        )
+
+        with patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.1)):
+            result = updater._apply_updates(current_memory, {})
+
+        # Should keep newest and middle, evicting the oldest
+        kept_ids = [f["id"] for f in result["facts"]]
+        assert kept_ids == ["newest", "middle"]
+
+    def test_eviction_complex_multi_dimensional_sort(self) -> None:
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            facts=[
+                {"id": "f1", "confidence": 0.9, "category": "context", "createdAt": "2026-01-01T00:00:00Z"},  # High conf, old
+                {"id": "f2", "confidence": 0.8, "category": "correction", "createdAt": "2026-01-01T00:00:00Z"},  # Med conf, correction, old
+                {"id": "f3", "confidence": 0.8, "category": "correction", "createdAt": "2026-03-18T00:00:00Z"},  # Med conf, correction, new
+                {"id": "f4", "confidence": 0.8, "category": "context", "createdAt": "2026-03-18T00:00:00Z"},  # Med conf, context, new
+                {"id": "f5", "confidence": 0.7, "category": "context", "createdAt": "2026-03-18T00:00:00Z"},  # Low conf, new
+            ]
+        )
+
+        with patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=4, fact_confidence_threshold=0.1)):
+            result = updater._apply_updates(current_memory, {})
+
+        # Expected order before truncation:
+        # 1. f1 (conf: 0.9)
+        # 2. f3 (conf: 0.8, is_corr: True, newest)
+        # 3. f2 (conf: 0.8, is_corr: True, oldest)
+        # 4. f4 (conf: 0.8, is_corr: False)
+        # 5. f5 (conf: 0.7) -> EVICTED
+        kept_ids = [f["id"] for f in result["facts"]]
+        assert kept_ids == ["f1", "f3", "f2", "f4"]
+
+    def test_eviction_gracefully_handles_missing_or_empty_created_at(self) -> None:
+        updater = MemoryUpdater()
+        # Test backward compatibility with legacy facts that might lack createdAt or have empty strings
+        # Empty string "" is lexically smaller than any ISO-8601 string, so it should sort last (be evicted first)
+        current_memory = _make_memory(
+            facts=[
+                {"id": "missing", "content": "Fact 1", "confidence": 0.8, "category": "context"},  # Missing createdAt
+                {"id": "empty", "content": "Fact 2", "confidence": 0.8, "category": "context", "createdAt": ""},  # Empty createdAt
+                {"id": "valid", "content": "Fact 3", "confidence": 0.8, "category": "context", "createdAt": "2026-03-18T00:00:00Z"},
+            ]
+        )
+
+        with patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=1, fact_confidence_threshold=0.1)):
+            result = updater._apply_updates(current_memory, {})
+
+        # Should keep the only one with a valid ISO-8601 string, evicting the empty/missing ones
+        kept_ids = [f["id"] for f in result["facts"]]
+        assert kept_ids == ["valid"]
+
+
 class TestExtractText:
     """_extract_text should normalize all content shapes to plain text."""
 
