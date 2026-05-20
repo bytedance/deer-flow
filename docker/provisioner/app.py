@@ -32,11 +32,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 
 import urllib3
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import APIKeyHeader
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
@@ -74,6 +76,31 @@ KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 # services on the host Kubernetes node.  On Docker Desktop for macOS this
 # is ``host.docker.internal``; on Linux it may be the host's LAN IP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+
+# API key for protecting the provisioner endpoints.
+# Authentication is enforced by default; set PROVISIONER_AUTH_DISABLED=true to explicitly opt out.
+# Set PROVISIONER_API_KEY to the expected secret key value.
+PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
+PROVISIONER_AUTH_DISABLED = os.environ.get("PROVISIONER_AUTH_DISABLED", "").lower() == "true"
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _require_api_key(api_key: str | None = Depends(_api_key_header)) -> None:
+    """Reject requests that do not supply the correct API key.
+
+    Authentication is enforced by default.  To disable it (e.g. in a
+    fully-private network), set PROVISIONER_AUTH_DISABLED=true explicitly.
+    Uses constant-time comparison to prevent timing side-channel attacks.
+    """
+    if PROVISIONER_AUTH_DISABLED:
+        return
+    if not PROVISIONER_API_KEY:
+        raise HTTPException(
+            status_code=401, detail="Provisioner API key not configured; set PROVISIONER_API_KEY"
+        )
+    if not api_key or not secrets.compare_digest(api_key, PROVISIONER_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -430,7 +457,7 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/sandboxes", response_model=SandboxResponse)
+@app.post("/api/sandboxes", response_model=SandboxResponse, dependencies=[Depends(_require_api_key)])
 async def create_sandbox(req: CreateSandboxRequest):
     """Create a sandbox Pod + NodePort Service for *sandbox_id*.
 
@@ -502,7 +529,7 @@ async def create_sandbox(req: CreateSandboxRequest):
     )
 
 
-@app.delete("/api/sandboxes/{sandbox_id}")
+@app.delete("/api/sandboxes/{sandbox_id}", dependencies=[Depends(_require_api_key)])
 async def destroy_sandbox(sandbox_id: str):
     """Destroy a sandbox Pod + Service."""
     errors: list[str] = []
@@ -531,7 +558,7 @@ async def destroy_sandbox(sandbox_id: str):
     return {"ok": True, "sandbox_id": sandbox_id}
 
 
-@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
+@app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse, dependencies=[Depends(_require_api_key)])
 async def get_sandbox(sandbox_id: str):
     """Return current status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
@@ -545,7 +572,7 @@ async def get_sandbox(sandbox_id: str):
     )
 
 
-@app.get("/api/sandboxes")
+@app.get("/api/sandboxes", dependencies=[Depends(_require_api_key)])
 async def list_sandboxes():
     """List every sandbox currently managed in the namespace."""
     try:
