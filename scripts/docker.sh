@@ -16,6 +16,7 @@ CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox-features-tool:latest"
 
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
+COMPOSE_BACKEND_DEV_CMD="docker compose -p deer-flow-dev-backend -f docker-compose-dev-backend.yaml"
 
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
@@ -317,6 +318,115 @@ start() {
     echo ""
 }
 
+# Start Docker with frontend (production/dist) + backend (development/hot-reload)
+start-backend-dev() {
+    local sandbox_mode
+    local services
+
+    echo "=========================================="
+    echo "  Starting DeerFlow Docker (Frontend: Prod + Backend: Dev)"
+    echo "=========================================="
+    echo ""
+
+    sandbox_mode="$(detect_sandbox_mode)"
+    SANDBOX_IMAGE="$(get_configured_sandbox_image)"
+
+    services="frontend gateway nginx"
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        services="frontend gateway provisioner nginx"
+    fi
+
+    echo -e "${BLUE}Frontend: Production (pre-built dist)${NC}"
+    echo -e "${BLUE}Backend:  Development (hot-reload)${NC}"
+    echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"
+    fi
+    if [ "$sandbox_mode" = "aio" ] || [ "$sandbox_mode" = "provisioner" ]; then
+        echo -e "${BLUE}Sandbox image: $SANDBOX_IMAGE${NC}"
+    fi
+    echo ""
+
+    # Set DEER_FLOW_ROOT for provisioner if not already set
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+        echo ""
+    fi
+    export SANDBOX_IMAGE
+
+    # Ensure config.yaml exists before starting.
+    if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
+        if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
+            cp "$PROJECT_ROOT/config.example.yaml" "$PROJECT_ROOT/config.yaml"
+            echo ""
+            echo -e "${YELLOW}============================================================${NC}"
+            echo -e "${YELLOW}  config.yaml has been created from config.example.yaml.${NC}"
+            echo -e "${YELLOW}  Please edit config.yaml to set your API keys and model   ${NC}"
+            echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
+            echo -e "${YELLOW}============================================================${NC}"
+            echo ""
+            echo -e "${YELLOW}  Recommended: run 'make setup' before starting Docker.    ${NC}"
+            echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
+            echo -e "${YELLOW}  Then run:        make docker-start-backend-dev${NC}"
+            echo ""
+            exit 0
+        else
+            echo -e "${YELLOW}✗ config.yaml not found and no config.example.yaml to copy from.${NC}"
+            exit 1
+        fi
+    fi
+
+    # Ensure extensions_config.json exists as a file before mounting.
+    if [ ! -f "$PROJECT_ROOT/extensions_config.json" ]; then
+        if [ -f "$PROJECT_ROOT/extensions_config.example.json" ]; then
+            cp "$PROJECT_ROOT/extensions_config.example.json" "$PROJECT_ROOT/extensions_config.json"
+            echo -e "${BLUE}Created extensions_config.json from example${NC}"
+        else
+            echo "{}" > "$PROJECT_ROOT/extensions_config.json"
+            echo -e "${BLUE}Created empty extensions_config.json${NC}"
+        fi
+    fi
+
+    if [ "$sandbox_mode" = "aio" ] || [ "$sandbox_mode" = "provisioner" ]; then
+        if ! ensure_sandbox_image_ready "$SANDBOX_IMAGE"; then
+            if [ "$SANDBOX_IMAGE" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+                echo -e "${YELLOW}✗ Failed to build configured custom sandbox image: $SANDBOX_IMAGE${NC}"
+                exit 1
+            fi
+        fi
+    fi
+
+    echo "Building and starting containers..."
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD up -d --remove-orphans $services
+    echo ""
+    echo "=========================================="
+    echo "  DeerFlow Docker is starting!"
+    echo "=========================================="
+    echo ""
+    echo "  🌐 Application: http://localhost:2026"
+    echo "  📡 API Gateway: http://localhost:2026/api/*"
+    echo "  🖥  Frontend:    Production (dist)"
+    echo "  🔧 Backend:     Development (hot-reload)"
+    echo ""
+    echo "  📋 View logs: make docker-logs-backend-dev"
+    echo "  🛑 Stop:      make docker-stop-backend-dev"
+    echo ""
+}
+
+# Build frontend dist image only (no start)
+build-frontend-dist() {
+    echo "=========================================="
+    echo "  Building Frontend Dist Image"
+    echo "=========================================="
+    echo ""
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD build --no-cache frontend
+    echo ""
+    echo -e "${GREEN}✓ Frontend dist image built${NC}"
+    echo ""
+    echo -e "${YELLOW}Next step: make docker-start-backend-dev${NC}"
+}
+
 # View Docker development logs
 logs() {
     local service=""
@@ -351,6 +461,40 @@ logs() {
     cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
 }
 
+# View Docker backend-dev logs
+logs-backend-dev() {
+    local service=""
+
+    case "$1" in
+        --frontend)
+            service="frontend"
+            echo -e "${BLUE}Viewing frontend logs...${NC}"
+            ;;
+        --gateway)
+            service="gateway"
+            echo -e "${BLUE}Viewing gateway logs...${NC}"
+            ;;
+        --nginx)
+            service="nginx"
+            echo -e "${BLUE}Viewing nginx logs...${NC}"
+            ;;
+        --provisioner)
+            service="provisioner"
+            echo -e "${BLUE}Viewing provisioner logs...${NC}"
+            ;;
+        "")
+            echo -e "${BLUE}Viewing all logs...${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}Unknown option: $1${NC}"
+            echo "Usage: $0 logs-backend-dev [--frontend|--gateway|--nginx|--provisioner]"
+            exit 1
+            ;;
+    esac
+
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD logs -f $service
+}
+
 # Stop Docker development environment
 stop() {
     # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
@@ -363,6 +507,18 @@ stop() {
     echo "Cleaning up sandbox containers..."
     "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
     echo -e "${GREEN}✓ Docker services stopped${NC}"
+}
+
+# Stop Docker backend-dev environment
+stop-backend-dev() {
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
+    echo "Stopping Docker backend-dev services..."
+    cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD down
+    echo "Cleaning up sandbox containers..."
+    "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
+    echo -e "${GREEN}✓ Docker backend-dev services stopped${NC}"
 }
 
 # Restart Docker development environment
@@ -390,13 +546,17 @@ help() {
     echo "Commands:"
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
+    echo "  start-backend-dev - Start with frontend (production/dist) + backend (development/hot-reload)"
+    echo "  build-frontend-dist - Build frontend dist image only (run before start-backend-dev)"
     echo "  restart           - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
     echo "                  --provisioner View provisioner logs only"
+    echo "  logs-backend-dev [option] - View backend-dev logs (same options as logs)"
     echo "  stop          - Stop Docker development services"
+    echo "  stop-backend-dev - Stop Docker backend-dev services"
     echo "  help          - Show this help message"
     echo ""
 }
@@ -411,14 +571,26 @@ main() {
             shift
             start "$@"
             ;;
+        start-backend-dev)
+            start-backend-dev
+            ;;
+        build-frontend-dist)
+            build-frontend-dist
+            ;;
         restart)
             restart
             ;;
         logs)
             logs "$2"
             ;;
+        logs-backend-dev)
+            logs-backend-dev "$2"
+            ;;
         stop)
             stop
+            ;;
+        stop-backend-dev)
+            stop-backend-dev
             ;;
         help|--help|-h|"")
             help

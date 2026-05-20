@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-start-backend-dev docker-build-frontend-dist docker-stop docker-stop-backend-dev docker-logs docker-logs-frontend docker-logs-gateway docker-logs-backend-dev
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -37,12 +37,16 @@ help:
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Prepare the sandbox image (build custom image or pull configured image)"
-	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
-	@echo "  make docker-stop     - Stop Docker development services"
-	@echo "  make docker-logs     - View Docker development logs"
-	@echo "  make docker-logs-frontend - View Docker frontend logs"
-	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo "  make docker-init              - Prepare the sandbox image (build custom image or pull configured image)"
+	@echo "  make docker-start             - Start Docker services (mode-aware from config.yaml, localhost:2026)"
+	@echo "  make docker-start-backend-dev - Start with frontend (production/dist) + backend (development/hot-reload)"
+	@echo "  make docker-build-frontend-dist - Build frontend dist image (run before docker-start-backend-dev)"
+	@echo "  make docker-stop              - Stop Docker development services"
+	@echo "  make docker-stop-backend-dev  - Stop Docker backend-dev services"
+	@echo "  make docker-logs              - View Docker development logs"
+	@echo "  make docker-logs-frontend     - View Docker frontend logs"
+	@echo "  make docker-logs-gateway      - View Docker gateway logs"
+	@echo "  make docker-logs-backend-dev  - View Docker backend-dev logs"
 
 ## Setup & Diagnosis
 setup:
@@ -156,9 +160,21 @@ docker-init:
 docker-start:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start
 
+# Start Docker with frontend (production/dist) + backend (development/hot-reload)
+docker-start-backend-dev:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start-backend-dev
+
+# Build frontend dist image only (run before docker-start-backend-dev when frontend code changed)
+docker-build-frontend-dist:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh build-frontend-dist
+
 # Stop Docker development environment
 docker-stop:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop
+
+# Stop Docker backend-dev environment
+docker-stop-backend-dev:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop-backend-dev
 
 # View Docker development logs
 docker-logs:
@@ -169,6 +185,10 @@ docker-logs-frontend:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
+
+# View Docker backend-dev logs
+docker-logs-backend-dev:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs-backend-dev
 
 # ==========================================
 # Production Docker Commands
