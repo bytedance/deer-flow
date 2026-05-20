@@ -50,10 +50,9 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(*, app_config: AppConfig) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    resolved_app_config = app_config or get_app_config()
-    config = resolved_app_config.summarization
+    config = app_config.summarization
 
     if not config.enabled:
         return None
@@ -74,9 +73,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=app_config)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=app_config)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -93,13 +92,13 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled:
+    if app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
+    skills_container_path = app_config.skills.container_path or "/mnt/skills"
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,
@@ -243,7 +242,7 @@ def _build_middlewares(
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig,
 ):
     """Build middleware chain based on runtime configuration.
 
@@ -255,8 +254,7 @@ def _build_middlewares(
     Returns:
         List of middleware instances.
     """
-    resolved_app_config = app_config or get_app_config()
-    middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+    middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=True)
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
@@ -265,7 +263,7 @@ def _build_middlewares(
     middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+    summarization_middleware = _create_summarization_middleware(app_config=app_config)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -277,23 +275,23 @@ def _build_middlewares(
         middlewares.append(todo_list_middleware)
 
     # Add TokenUsageMiddleware when token_usage tracking is enabled
-    if resolved_app_config.token_usage.enabled:
+    if app_config.token_usage.enabled:
         middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
-    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
+    middlewares.append(TitleMiddleware(app_config=app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
-    model_config = resolved_app_config.get_model_config(model_name) if model_name else None
+    model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
-    if resolved_app_config.tool_search.enabled:
+    if app_config.tool_search.enabled:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware())
@@ -305,7 +303,7 @@ def _build_middlewares(
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    loop_detection_config = resolved_app_config.loop_detection
+    loop_detection_config = app_config.loop_detection
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 

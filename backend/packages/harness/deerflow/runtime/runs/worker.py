@@ -21,7 +21,7 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, Required, TypedDict, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 
@@ -41,12 +41,21 @@ logger = logging.getLogger(__name__)
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
 
+class DeerFlowRuntimeContext(TypedDict, total=False):
+    """Typed shape of the runtime context dict passed to ``ToolRuntime.context``."""
+
+    thread_id: Required[str]
+    run_id: Required[str]
+    app_config: NotRequired[AppConfig]
+    agent_name: NotRequired[str]
+
+
 def _build_runtime_context(
     thread_id: str,
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
-) -> dict[str, Any]:
+) -> DeerFlowRuntimeContext:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
     Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
@@ -59,7 +68,7 @@ def _build_runtime_context(
     under ``config['configurable']['__pregel_runtime']`` — see
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
-    runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    runtime_ctx: DeerFlowRuntimeContext = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
             runtime_ctx.setdefault(key, value)
@@ -85,7 +94,7 @@ class RunContext:
     app_config: AppConfig | None = field(default=None)
 
 
-def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
+def _install_runtime_context(config: dict, runtime_context: DeerFlowRuntimeContext) -> None:
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -216,7 +225,7 @@ async def run_agent(
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
         _install_runtime_context(config, runtime_ctx)
-        runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
+        runtime = Runtime(context=cast(Any, runtime_ctx), store=store)  # TODO(#2687): cast retained because Runtime.context expects Any and TypedDict is not assignable without it
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.

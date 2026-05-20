@@ -230,7 +230,13 @@ class DeerFlowClient:
         kwargs: dict[str, Any] = {
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
+            "middleware": _build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=self._agent_name,
+                custom_middlewares=self._middlewares,
+                app_config=self._app_config,
+            ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
