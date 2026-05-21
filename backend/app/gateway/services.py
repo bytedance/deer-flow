@@ -84,17 +84,28 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
     ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
     hand-rolled version only forwarded ``content`` and collapsed every role to
     ``HumanMessage``, which silently stripped frontend-supplied attachments.
+
+    Malformed message dicts (missing ``role``/``type``/``content``, unsupported
+    role, etc.) raise ``HTTPException(400)`` with the offending index, instead
+    of bubbling up as a 500.  The gateway is a system boundary, so per-entry
+    validation errors are the right shape for clients to retry against.
     """
     if raw_input is None:
         return {}
     messages = raw_input.get("messages")
     if messages and isinstance(messages, list):
         converted: list[Any] = []
-        for msg in messages:
+        for index, msg in enumerate(messages):
             if isinstance(msg, BaseMessage):
                 converted.append(msg)
             elif isinstance(msg, dict):
-                converted.extend(convert_to_messages([msg]))
+                try:
+                    converted.extend(convert_to_messages([msg]))
+                except (ValueError, TypeError, NotImplementedError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid message at input.messages[{index}]: {exc}",
+                    ) from exc
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}

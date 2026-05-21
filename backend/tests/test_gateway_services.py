@@ -124,6 +124,25 @@ def test_normalize_input_passes_through_basemessage_instances():
     assert result["messages"][0] is msg
 
 
+def test_normalize_input_rejects_malformed_message_with_400():
+    """Boundary validation: ``convert_to_messages`` raises ``ValueError`` when a
+    message dict is missing ``role``/``type``/``content``.  ``normalize_input``
+    runs inside the gateway HTTP boundary, so a malformed payload should surface
+    as a 400 referencing the offending entry — not bubble up as a 500.
+
+    Raised after the Copilot review on PR #3136.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
+    assert excinfo.value.status_code == 400
+    assert "input.messages[1]" in excinfo.value.detail
+
+
 def test_normalize_input_handles_non_human_roles():
     """The previous implementation collapsed every role to HumanMessage with a
     `# TODO: handle other message types` comment.  Resuming a thread with prior
