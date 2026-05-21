@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,9 @@ class DbRunEventStore(RunEventStore):
         d["metadata"] = d.pop("event_metadata", {})
         val = d.get("created_at")
         if isinstance(val, datetime):
-            d["created_at"] = val.isoformat()
+            # SQLite drops tzinfo on read despite ``DateTime(timezone=True)``;
+            # ``coerce_iso`` normalizes naive datetimes as UTC.
+            d["created_at"] = coerce_iso(val)
         d.pop("id", None)
         # Restore structured content that was JSON-serialized on write.
         raw = d.get("content", "")
