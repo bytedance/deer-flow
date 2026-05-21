@@ -184,6 +184,8 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path changes or the file's mtime increases. This keeps Gateway and LangGraph reads aligned with `config.yaml` edits without requiring a manual process restart.
 
+**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. Infrastructure fields that the gateway captures once at startup are **restart-required**: `database.*`, `checkpointer.*` (including SQLite WAL/journal settings), `run_events.*`, `stream_bridge.*`, `sandbox.use`, `log_level`, and the `channels.*` IM platform credentials. Changing those without restart leaves the live process bound to the old engines.
+
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_CONFIG_PATH` environment variable

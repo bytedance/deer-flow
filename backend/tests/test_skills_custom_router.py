@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
@@ -38,7 +39,8 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
 
 def _make_test_app(config) -> FastAPI:
     app = FastAPI()
-    app.state.config = config
+    app.state.config = config  # kept for any startup-style reads
+    app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
     return app
 

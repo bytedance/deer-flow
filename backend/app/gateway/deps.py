@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
@@ -30,12 +30,22 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-def get_config(request: Request) -> AppConfig:
-    """Return the app-scoped ``AppConfig`` stored on ``app.state``."""
-    config = getattr(request.app.state, "config", None)
-    if config is None:
-        raise HTTPException(status_code=503, detail="Configuration not available")
-    return config
+def get_config(request: Request) -> AppConfig:  # noqa: ARG001 - kept for FastAPI Depends signature
+    """Return the freshest ``AppConfig`` for the current request.
+
+    Routes through :func:`deerflow.config.app_config.get_app_config`, which
+    honours runtime ``ContextVar`` overrides and reloads ``config.yaml`` from
+    disk when its mtime changes. ``app.state.config`` is no longer consulted
+    on the request hot path — it is set at startup only for one-shot infra
+    bootstrap (logging level, IM channels, ``langgraph_runtime`` engines).
+    Reading from ``get_app_config`` here closes the bytedance/deer-flow
+    issue #3107 BUG-001 split-brain where the worker / lead-agent thread saw
+    a stale startup snapshot.
+    """
+    try:
+        return get_app_config()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="Configuration not available") from exc
 
 
 @asynccontextmanager
