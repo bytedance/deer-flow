@@ -15,7 +15,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage
+from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.utils import sanitize_log_param
@@ -76,21 +77,24 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
 
 
 def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert LangGraph Platform input format to LangChain state dict."""
+    """Convert LangGraph Platform input format to LangChain state dict.
+
+    Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
+    so that ``additional_kwargs`` (e.g. uploaded-file metadata — gh #3132), ``id``,
+    ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
+    hand-rolled version only forwarded ``content`` and collapsed every role to
+    ``HumanMessage``, which silently stripped frontend-supplied attachments.
+    """
     if raw_input is None:
         return {}
     messages = raw_input.get("messages")
     if messages and isinstance(messages, list):
-        converted = []
+        converted: list[Any] = []
         for msg in messages:
-            if isinstance(msg, dict):
-                role = msg.get("role", msg.get("type", "user"))
-                content = msg.get("content", "")
-                if role in ("user", "human"):
-                    converted.append(HumanMessage(content=content))
-                else:
-                    # TODO: handle other message types (system, ai, tool)
-                    converted.append(HumanMessage(content=content))
+            if isinstance(msg, BaseMessage):
+                converted.append(msg)
+            elif isinstance(msg, dict):
+                converted.extend(convert_to_messages([msg]))
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
