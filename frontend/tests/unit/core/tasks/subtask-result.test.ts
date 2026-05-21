@@ -44,6 +44,42 @@ describe("parseSubtaskResult", () => {
     expect(parsed.error).toContain("polling timed out");
   });
 
+  it("recognises polling-timed-out with different durations", () => {
+    // `task_tool` emits `Task polling timed out after {N} minutes` where N
+    // varies with the configured subagent timeout. Guard against the regex
+    // accidentally being pinned to a specific number.
+    for (const n of [1, 5, 60]) {
+      const parsed = parseSubtaskResult(
+        `Task polling timed out after ${n} minutes. Status: RUNNING`,
+      );
+      expect(parsed.status).toBe("failed");
+    }
+  });
+
+  it("trims whitespace around cancelled and polling-timed-out prefixes", () => {
+    // Streaming chunks sometimes arrive with leading/trailing newlines.
+    expect(parseSubtaskResult("  Task cancelled by user.  \n").status).toBe(
+      "failed",
+    );
+    expect(
+      parseSubtaskResult("\n\nTask polling timed out after 3 minutes").status,
+    ).toBe("failed");
+  });
+
+  it("recognises task_tool pre-execution Error: returns via the wrapper", () => {
+    // `task_tool.py` returns three `Error:` strings for unknown subagent
+    // type, host-bash disabled, and "task disappeared". They share the
+    // ERROR_WRAPPER_PATTERN, not a dedicated prefix, so this guards
+    // against a refactor splitting them off.
+    for (const text of [
+      "Error: Unknown subagent type 'foo'. Available: bash, general-purpose",
+      "Error: Host bash subagent is disabled by configuration",
+      "Error: Task 1234 disappeared from background tasks",
+    ]) {
+      expect(parseSubtaskResult(text).status).toBe("failed");
+    }
+  });
+
   it("treats middleware-wrapped tool errors as terminal failures", () => {
     // bytedance/deer-flow issue #3107 BUG-007: the parent-visible ToolMessage
     // produced by ToolErrorHandlingMiddleware never matches the three legacy

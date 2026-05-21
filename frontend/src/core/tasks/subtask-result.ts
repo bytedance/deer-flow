@@ -19,6 +19,12 @@ export interface SubtaskResultUpdate {
  * (wrapper for tool exceptions). Any change here must be paired with the
  * matching backend change. Exported so a future structured-status migration
  * can reference the same values from one place.
+ *
+ * `task_tool.py` also emits three `Error:` strings for pre-execution failures
+ * — unknown subagent type, host-bash disabled, and "task disappeared from
+ * background tasks". They are handled by {@link ERROR_WRAPPER_PATTERN}
+ * rather than dedicated prefixes because the wrapper already produces
+ * exactly the right `terminal failed` shape.
  */
 export const SUCCESS_PREFIX = "Task Succeeded. Result:";
 export const FAILURE_PREFIX = "Task failed.";
