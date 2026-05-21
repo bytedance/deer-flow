@@ -19,6 +19,7 @@ import asyncio
 import copy
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
@@ -224,6 +227,19 @@ async def run_agent(
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
+
+        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
+        # can lift session_id / user_id / trace_name / tags onto the root trace.
+        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
+        # in sync; caller-provided metadata wins via setdefault inside the helper.
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=record.assistant_id,
+            model_name=record.model_name,
+            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
