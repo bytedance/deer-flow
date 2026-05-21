@@ -36,6 +36,7 @@ raises ``HttpProviderError`` immediately.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import math
 import os
 import sys
@@ -103,20 +104,30 @@ _RM_RC_POSITION_TYPES = _RM_POSITION_TYPES + _RC_POSITION_TYPES
 
 _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
     # ---- 2K vibration (multi-feature, machine 4 = PUMP) ----
+    # PositionType 22 carries temperature ("当前值"), 23-30 carry vibration.
     "vibration_velocity_rms": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "v_rms",
         "expected_series": "2k",
         "derivation": "mean",
     },
     "vibration_acceleration_peak": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "a_peak",
         "expected_series": "2k",
         "derivation": "mean",
     },
     "kurtosis_index": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "kurtosis",
         "expected_series": "2k",
         "derivation": "mean",
@@ -146,14 +157,19 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
         "position_types_by_type": {
             "rotating_machinery": _RM_POSITION_TYPES,
             "reciprocating_machinery": _RC_POSITION_TYPES,
+            "pump": (22,),
         },
         "feature": "value",
         "feature_aliases": ["temperature"],
         "name_keywords": ["轴承"],
+        "name_keywords_by_type": {
+            "pump": [],
+        },
         "expected_series": ("8k", "9k"),
         "expected_series_by_type": {
             "rotating_machinery": "8k",
             "reciprocating_machinery": "9k",
+            "pump": "2k",
         },
         "derivation": "mean",
     },
@@ -312,7 +328,7 @@ def _select_points_for_kpi(
         raise HttpProviderError(f"unmappable KPI key: {kpi_key!r}")
 
     pos_filter = _position_filter_for_spec(spec, eq_type)
-    name_keywords: list[str] = spec.get("name_keywords") or []
+    name_keywords: list[str] = _name_keywords_for_spec(spec, eq_type)
     expected = _expected_series_for_spec(spec, eq_type)
     allowed_series: tuple[str, ...] = (
         (expected,) if isinstance(expected, str) else tuple(expected)
@@ -364,6 +380,11 @@ def _select_points_for_kpi(
 def _position_filter_for_spec(spec: dict[str, Any], eq_type: str):
     by_type = spec.get("position_types_by_type") or {}
     return by_type.get(eq_type, spec.get("position_types"))
+
+
+def _name_keywords_for_spec(spec: dict[str, Any], eq_type: str) -> list[str]:
+    by_type = spec.get("name_keywords_by_type") or {}
+    return by_type.get(eq_type, spec.get("name_keywords") or [])
 
 
 def _expected_series_for_spec(spec: dict[str, Any], eq_type: str):
@@ -729,13 +750,114 @@ async def _async_fetch_payload(
     return result
 
 
+async def _async_fetch_daily_series_payload(
+    *,
+    start_date: str,
+    day_count: int,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str,
+    equipment_meta: dict[str, dict] | None,
+) -> list[dict[str, Any]]:
+    """Fetch consecutive day payloads while reusing one InS client + cache.
+
+    Weekly reports need seven day-level payloads for the trend chart. Reusing
+    one client avoids seven separate TCP/login handshakes, which lowers the
+    chance of ConnectTimeout compared with routing through fetch_daily_payload()
+    repeatedly.
+    """
+    if not _FEATURES_TOOL_AVAILABLE:
+        raise HttpProviderError(
+            f"features-tool not available (root={_FEATURES_TOOL_ROOT}); "
+            f"import error: {_FEATURES_TOOL_IMPORT_ERROR}"
+        )
+
+    settings = load_ins_settings()
+    client = InsApiClient(settings)
+    components_cache: dict[str, list[dict[str, Any]]] = {}
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+
+    try:
+        daily_entries: list[dict[str, Any]] = []
+        for offset in range(day_count):
+            date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            start_ms, end_ms = _date_to_ms_range(date_str)
+
+            per_equipment_kpis: dict[str, dict[str, Any]] = {}
+            per_equipment_speed_rows: dict[str, list[dict[str, Any]]] = {}
+            for eid in equipment_ids:
+                kpis, speed_rows = await _fetch_kpi_for_equipment(
+                    client,
+                    eid,
+                    kpi_keys,
+                    start_ms,
+                    end_ms,
+                    components_cache,
+                    eq_type=eq_type,
+                )
+                per_equipment_kpis[eid] = kpis
+                per_equipment_speed_rows[eid] = speed_rows
+
+            aggregated_kpis: dict[str, Any] = {}
+            for kpi_key in kpi_keys:
+                spec = _KPI_FEATURE_MAP[kpi_key]
+                values = [
+                    per_equipment_kpis[eid][kpi_key]
+                    for eid in equipment_ids
+                    if per_equipment_kpis[eid].get(kpi_key) is not None
+                ]
+                if not values:
+                    aggregated_kpis[kpi_key] = None
+                elif spec["derivation"] in {"alarm_count", "downtime_count"}:
+                    aggregated_kpis[kpi_key] = int(sum(values))
+                else:
+                    aggregated_kpis[kpi_key] = round(sum(values) / len(values), 4)
+
+            daily_entries.append(
+                {
+                    "date": date_str,
+                    "kpis": aggregated_kpis,
+                    "kpi_units": _kpi_units_for(kpi_keys),
+                    "alarms": [],
+                }
+            )
+
+        return daily_entries
+    finally:
+        await client.close()
+
+
+def _load_query_daily_module():
+    module = sys.modules.get("query_daily")
+    if module is not None:
+        return module
+    qd_path = Path(__file__).parent / "query_daily.py"
+    if not qd_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("query_daily", qd_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["query_daily"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("query_daily") is module:
+            del sys.modules["query_daily"]
+        return None
+    return module
+
+
 def _kpi_units_for(kpi_keys: list[str]) -> dict[str, str]:
     """Reuse ``query_daily.KPI_UNITS`` if importable; otherwise empty strings."""
     try:
-        from query_daily import KPI_UNITS  # type: ignore[import-not-found]
-        return {k: KPI_UNITS.get(k, "") for k in kpi_keys}
+        module = _load_query_daily_module()
+        if module is not None:
+            kpi_units = getattr(module, "KPI_UNITS", {})
+            return {k: kpi_units.get(k, "") for k in kpi_keys}
     except Exception:
-        return {k: "" for k in kpi_keys}
+        pass
+    return {k: "" for k in kpi_keys}
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +894,26 @@ def fetch_daily_payload(
             eq_type=eq_type,
             equipment_meta=equipment_meta,
             include_per_equipment=include_per_equipment,
+        )
+    )
+
+
+def fetch_daily_series_payload(
+    start_date: str,
+    day_count: int,
+    equipment_ids: list[str],
+    kpi_keys: list[str],
+    eq_type: str = "all",
+    equipment_meta: dict[str, dict] | None = None,
+) -> list[dict[str, Any]]:
+    return _run_async(
+        _async_fetch_daily_series_payload(
+            start_date=start_date,
+            day_count=day_count,
+            equipment_ids=equipment_ids,
+            kpi_keys=kpi_keys,
+            eq_type=eq_type,
+            equipment_meta=equipment_meta,
         )
     )
 

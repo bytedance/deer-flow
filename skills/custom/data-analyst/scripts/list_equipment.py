@@ -76,8 +76,8 @@ EQUIPMENT_TYPE_KPIS: dict[str, list[str]] = {
         "energy_consumption",
     ],
     "pump": [
-        "runtime_rate", "flow_rate", "outlet_pressure", "energy_consumption",
-        "alarm_count",
+        "vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp",
+        "kurtosis_index",
     ],
     "reciprocating_machinery": [
         "runtime_rate", "vibration_level", "valve_temp", "downtime_count",
@@ -98,6 +98,9 @@ KPI_DEFINITIONS: dict[str, dict[str, str]] = {
     "flow_rate": {"name": "流量", "unit": "m³/h"},
     "outlet_pressure": {"name": "出口压力", "unit": "MPa"},
     "valve_temp": {"name": "阀温", "unit": "℃"},
+    "vibration_velocity_rms": {"name": "振动速度有效值", "unit": "mm/s"},
+    "vibration_acceleration_peak": {"name": "振动加速度峰值", "unit": "m/s²"},
+    "kurtosis_index": {"name": "峭度指标", "unit": "—"},
 }
 
 SUB_TYPES: dict[str, list[str]] = {
@@ -307,7 +310,9 @@ def _build_available_kpis(eq_type: str) -> list[dict]:
         result.append({
             "key": key,
             "name": defn["name"],
+            "label": defn["name"],
             "unit": defn["unit"],
+            "description": defn["unit"],
             "default": idx < 3,
         })
     return result

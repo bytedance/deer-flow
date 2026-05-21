@@ -59,6 +59,9 @@ KPI_UNITS = {
     "flow_rate": "m³/h",
     "outlet_pressure": "MPa",
     "valve_temp": "℃",
+    "vibration_velocity_rms": "mm/s",
+    "vibration_acceleration_peak": "m/s²",
+    "kurtosis_index": "—",
 }
 
 

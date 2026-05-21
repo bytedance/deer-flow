@@ -87,8 +87,10 @@ def test_available_kpis_for_rotating_machinery(list_equipment):
 def test_available_kpis_for_pump(list_equipment):
     result = list_equipment.query_equipment("pump", "all", "")
     kpi_keys = [k["key"] for k in result["available_kpis"]]
-    assert "flow_rate" in kpi_keys
-    assert "outlet_pressure" in kpi_keys
+    assert "vibration_velocity_rms" in kpi_keys
+    assert "vibration_acceleration_peak" in kpi_keys
+    assert "bearing_temp" in kpi_keys
+    assert "kurtosis_index" in kpi_keys
 
 
 def test_available_kpis_for_reciprocating(list_equipment):

@@ -13,9 +13,9 @@
   },
   "parameters": {
     "week_start": "2026-05-12",
-    "equipment_type": "pump",
-    "equipment_ids": ["P-001", "P-002", "P-003"],
-    "kpi_keys": ["runtime_rate", "alarm_count", "vibration_avg"],
+    "equipment_type": "rotating_machinery",
+    "equipment_ids": ["RM-001", "RM-002", "RM-003"],
+    "kpi_keys": ["runtime_rate", "vibration_level", "bearing_temp"],
     "compare_with": "previous_week"
   },
   "sections": [
@@ -24,7 +24,7 @@
       "component": "markdown",
       "title": "本周运行概览",
       "props": {
-        "content": "2026-05-12 至 2026-05-18，3 台机泵周运行率 94.7%（环比 +0.8pp），告警合计 28 条（环比 -6）。"
+        "content": "2026-05-12 至 2026-05-18，3 台旋转机组周平均运行率 94.7%，整体状态平稳，共发现 5 条需要跟踪的告警。"
       }
     },
     {
@@ -33,9 +33,9 @@
       "title": "核心 KPI 周统计",
       "props": {
         "items": [
-          {"title": "周运行率", "value": "94.7%", "delta": "+0.8pp", "trend": "up"},
-          {"title": "周告警数", "value": "28", "delta": "-6", "trend": "down"},
-          {"title": "周振动均值", "value": "0.43 mm/s", "delta": "+0.02", "trend": "up"}
+          { "title": "周运行率", "value": "94.7%", "delta": "+0.8pp", "trend": "up" },
+          { "title": "周振动水平", "value": "3.4 mm/s", "delta": "-0.2", "trend": "down" },
+          { "title": "周轴承温度", "value": "67.8 ℃", "delta": "+1.1", "trend": "up" }
         ]
       }
     },
@@ -45,11 +45,11 @@
       "title": "每日趋势",
       "props": {
         "option": {
-          "xAxis": {"type": "category", "data": ["05-12", "05-13", "05-14", "05-15", "05-16", "05-17", "05-18"]},
-          "yAxis": {"type": "value"},
+          "xAxis": { "type": "category", "data": ["05-12", "05-13", "05-14", "05-15", "05-16", "05-17", "05-18"] },
+          "yAxis": [{ "type": "value", "name": "%" }, { "type": "value", "name": "mm/s" }],
           "series": [
-            {"name": "运行率", "type": "line", "data": [0.94, 0.95, 0.93, 0.96, 0.94, 0.95, 0.95]},
-            {"name": "告警数", "type": "bar", "data": [4, 3, 5, 4, 6, 3, 3]}
+            { "name": "运行率", "type": "line", "yAxisIndex": 0, "data": [0.95, 0.94, 0.96, 0.93, 0.95, 0.94, 0.96] },
+            { "name": "振动水平", "type": "bar", "yAxisIndex": 1, "data": [3.5, 3.3, 3.2, 3.7, 3.4, 3.3, 3.1] }
           ]
         }
       }
@@ -60,26 +60,32 @@
       "title": "异常 TopN",
       "props": {
         "columns": [
-          {"key": "equipment", "label": "设备"},
-          {"key": "metric", "label": "指标"},
-          {"key": "peak", "label": "周峰值"},
-          {"key": "occurrences", "label": "次数"}
+          { "key": "equipment", "label": "设备" },
+          { "key": "level", "label": "级别" },
+          { "key": "count", "label": "次数" },
+          { "key": "latest_time", "label": "最近一次" },
+          { "key": "dominant_message", "label": "主导原因" }
         ],
         "data": [
-          {"equipment": "P-001", "metric": "振动", "peak": "0.83", "occurrences": 4},
-          {"equipment": "P-003", "metric": "电流", "peak": "32.1A", "occurrences": 2}
+          { "equipment": "RM-001", "level": "critical", "count": 3, "latest_time": "2026-05-17 14:20", "dominant_message": "轴承温度持续偏高" },
+          { "equipment": "RM-003", "level": "warning", "count": 2, "latest_time": "2026-05-18 09:10", "dominant_message": "振动水平波动增大" }
         ]
       }
     },
     {
-      "id": "compare",
-      "component": "card_group",
-      "title": "与上一周对比",
+      "id": "alarms",
+      "component": "table",
+      "title": "告警流水",
       "props": {
-        "items": [
-          {"title": "运行率环比", "value": "+0.8pp", "trend": "up"},
-          {"title": "告警数环比", "value": "-6", "trend": "down"},
-          {"title": "停机时长环比", "value": "-1.2h", "trend": "down"}
+        "columns": [
+          { "key": "time", "label": "时间" },
+          { "key": "equipment", "label": "设备" },
+          { "key": "level", "label": "级别" },
+          { "key": "message", "label": "描述" }
+        ],
+        "data": [
+          { "time": "2026-05-17 14:20", "equipment": "RM-001", "level": "critical", "message": "轴承温度持续偏高" },
+          { "time": "2026-05-18 09:10", "equipment": "RM-003", "level": "warning", "message": "振动水平波动增大" }
         ]
       }
     },
@@ -88,7 +94,7 @@
       "component": "markdown",
       "title": "下周关注重点",
       "props": {
-        "content": "1. 持续监控 P-001 振动趋势，必要时安排停机点检。\n2. 复核 P-003 电流偏高的工艺背景。"
+        "content": "1. 优先排查 RM-001 轴承温度偏高的工况与润滑状态。\n2. 持续跟踪 RM-003 振动波动，必要时安排专项诊断。"
       }
     }
   ]

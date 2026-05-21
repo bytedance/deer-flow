@@ -1,13 +1,13 @@
 {
   "scope": {
     "week_start": "2026-05-12",
-    "equipment_type": "pump",
+    "equipment_type": "rotating_machinery",
     "compare_with": "previous_week"
   },
   "equipment": {
-    "equipment_ids": ["P-001", "P-002", "P-003"]
+    "equipment_ids": ["RM-001", "RM-002", "RM-003"]
   },
   "kpis": {
-    "kpi_keys": ["runtime_rate", "alarm_count", "vibration_avg"]
+    "kpi_keys": ["runtime_rate", "vibration_level", "bearing_temp"]
   }
 }
