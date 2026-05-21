@@ -128,6 +128,7 @@ def create_auth_middleware():
 
             if access_token:
                 try:
+                    from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError
                     from app.gateway.deps import get_ins_base_provider
                     ins_provider = get_ins_base_provider()
                     if ins_provider is not None:
@@ -154,6 +155,9 @@ def create_auth_middleware():
                                 return await call_next(request)
                             finally:
                                 reset_tenant_id(ctx_token)
+                except AuthProviderUnavailableError:
+                    logger.exception("InsBase auth provider unavailable for path=%s", request.url.path)
+                    return _json_error(503, "Authentication service unavailable")
                 except Exception:
                     logger.exception("InsBase token verification failed for path=%s", request.url.path)
 

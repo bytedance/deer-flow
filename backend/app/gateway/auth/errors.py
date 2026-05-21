@@ -19,6 +19,7 @@ class AuthErrorCode(StrEnum):
     USER_NOT_FOUND = "user_not_found"
     EMAIL_ALREADY_EXISTS = "email_already_exists"
     PROVIDER_NOT_FOUND = "provider_not_found"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
     TENANT_SELECTION_REQUIRED = "tenant_selection_required"

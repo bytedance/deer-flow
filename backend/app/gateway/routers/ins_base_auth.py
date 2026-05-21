@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from app.gateway.auth.ins_base_provider import RpcNotConfiguredError
+from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError, RpcNotConfiguredError
 from app.gateway.deps import get_ins_base_provider
 from app.gateway.csrf_middleware import is_secure_request
 from deerflow.config.auth_config import get_auth_config
@@ -170,7 +170,13 @@ async def authenticate(request: Request):
             detail="ins-base-rpc authentication provider is not configured",
         )
 
-    user = await provider.get_user(access_token)
+    try:
+        user = await provider.get_user(access_token)
+    except AuthProviderUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

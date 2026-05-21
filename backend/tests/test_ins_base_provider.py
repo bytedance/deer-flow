@@ -7,7 +7,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.gateway.auth.ins_base_provider import InsBaseAuthProvider, RpcNotConfiguredError
+from app.gateway.auth.ins_base_provider import (
+    AuthProviderUnavailableError,
+    InsBaseAuthProvider,
+    RpcNotConfiguredError,
+)
+from deerflow.rpc.rpc_client import RpcConnectionError
 
 
 @pytest.fixture(scope="module")
@@ -191,6 +196,14 @@ class TestInsBaseAuthProvider:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_get_user_rpc_error_raises_provider_unavailable(self, provider, mock_rpc_client):
+        """Transport failures surface as provider-unavailable, not invalid-token."""
+        mock_rpc_client.call_raw.side_effect = RpcConnectionError("Connection refused")
+
+        with pytest.raises(AuthProviderUnavailableError):
+            await provider.get_user("token")
+
+    @pytest.mark.asyncio
     async def test_get_user_empty_token(self, provider):
         """Empty token returns None without calling RPC."""
         result = await provider.get_user("")
@@ -342,4 +355,3 @@ class TestInsBaseAuthProvider:
         await provider.get_user("token-Z")
 
         assert mock_rpc_client.call_raw.call_count == first_calls + 1
-

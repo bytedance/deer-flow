@@ -9,7 +9,7 @@ import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import jwt as pyjwt
@@ -549,3 +549,31 @@ def test_csrf_cookie_not_secure_on_http():
     assert csrf_cookies, "csrf_token cookie not set on HTTP auth POST"
     csrf_header = csrf_cookies[0]
     assert "secure" not in csrf_header.lower().replace("samesite", "")
+
+
+def test_get_current_user_ins_base_provider_unavailable_returns_503():
+    """ins-base transport failures surface as 503 provider_unavailable."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError
+    from app.gateway.deps import get_current_user_from_request
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"enabled": True, "provider": "ins_base", "jwt_secret": _TEST_SECRET})
+    mock_request = SimpleNamespace(
+        cookies={"access_token": "ins-base-token"},
+        url=SimpleNamespace(path="/api/v1/auth/me"),
+    )
+    provider = SimpleNamespace(
+        get_user=AsyncMock(side_effect=AuthProviderUnavailableError("ins-base auth service unavailable"))
+    )
+
+    with patch("app.gateway.deps.get_ins_base_provider", return_value=provider):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(get_current_user_from_request(mock_request))
+
+    assert exc_info.value.status_code == 503
+    detail = exc_info.value.detail
+    assert detail["code"] == "provider_unavailable"

@@ -190,6 +190,28 @@ async def test_ins_base_authenticate_failure():
 
 
 @pytest.mark.asyncio
+async def test_ins_base_authenticate_upstream_unavailable_returns_503():
+    """Upstream auth transport failures return 503 instead of 401."""
+    from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError
+
+    _setup_config()
+    client = _make_client()
+
+    mock_provider = MagicMock()
+    mock_provider.get_user = AsyncMock(
+        side_effect=AuthProviderUnavailableError("ins-base auth service unavailable")
+    )
+
+    with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
+        client.cookies = {"access_token": "invalid-token"}
+        response = client.post(
+            "/api/v1/auth/ins-base/authenticate",
+        )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_ins_base_authenticate_no_token():
     """Missing token returns 401."""
     _setup_config()

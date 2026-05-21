@@ -440,6 +440,7 @@ async def get_current_user_from_request(request: Request):
 
     config = get_auth_config()
     if config.provider == "ins_base":
+        from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError
         from app.gateway.deps import get_ins_base_provider
 
         ins_provider = get_ins_base_provider()
@@ -449,7 +450,16 @@ async def get_current_user_from_request(request: Request):
                 detail=AuthErrorResponse(code=AuthErrorCode.PROVIDER_NOT_FOUND, message="ins-base auth provider not available").model_dump(),
             )
 
-        user = await ins_provider.get_user(access_token)
+        try:
+            user = await ins_provider.get_user(access_token)
+        except AuthProviderUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.PROVIDER_UNAVAILABLE,
+                    message="ins-base authentication service unavailable",
+                ).model_dump(),
+            ) from exc
         if user is None:
             raise HTTPException(
                 status_code=401,

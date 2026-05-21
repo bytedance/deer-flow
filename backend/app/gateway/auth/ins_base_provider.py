@@ -14,7 +14,7 @@ from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.rsa_utils import rsa_encrypt
 from deerflow.config.auth_config import get_auth_config
 from deerflow.rpc.ins_base_auth_service import InsBaseAuthServiceClient
-from deerflow.rpc.rpc_client import RpcClient
+from deerflow.rpc.rpc_client import RpcClient, RpcConnectionError, RpcTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,10 @@ _TENANT_CACHE_MAX_SIZE = 4096
 
 class RpcNotConfiguredError(Exception):
     """Raised when the RPC client is not configured."""
+
+
+class AuthProviderUnavailableError(Exception):
+    """Raised when the ins-base upstream auth service is unavailable."""
 
 
 def _map_system_role(username: str) -> str:
@@ -156,6 +160,9 @@ class InsBaseAuthProvider(AuthProvider):
         try:
             org_client = InsBaseOrgServiceClient(rpc_client=self._rpc_client)
             parent_orgs = await org_client.get_all_parent_org(int(org_id))
+        except (RpcConnectionError, RpcTimeoutError) as e:
+            logger.exception("getAllParentOrg RPC transport failed for orgId=%s", org_id)
+            raise AuthProviderUnavailableError("ins-base organization service unavailable") from e
         except Exception as e:
             logger.exception("getAllParentOrg RPC call failed for orgId=%s", org_id)
             raise RuntimeError(f"获取组织信息失败，无法完成登录") from e
@@ -272,6 +279,9 @@ class InsBaseAuthProvider(AuthProvider):
             response = await self._auth_service.login(encoded_user, encoded_pass)
         except RpcNotConfiguredError:
             raise
+        except (RpcConnectionError, RpcTimeoutError) as e:
+            logger.exception("ins-base-rpc /auth/login transport failed")
+            raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
         except Exception as e:
             logger.exception("ins-base-rpc /auth/login call failed")
             raise RuntimeError(f"登录服务调用失败: {e}") from e
@@ -288,7 +298,11 @@ class InsBaseAuthProvider(AuthProvider):
         # Resolve tenant_id from user's orgId by calling authentication endpoint
         tenant_id = "default"
         if token:
-            auth_response = await self._auth_service.authenticate(token)
+            try:
+                auth_response = await self._auth_service.authenticate(token)
+            except (RpcConnectionError, RpcTimeoutError) as e:
+                logger.exception("ins-base-rpc /auth/authentication transport failed during login")
+                raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
             if auth_response.get("code") == 200:
                 user_data = auth_response.get("user") or auth_response.get("data", {}).get("user") or {}
                 org_id = self._extract_org_id(user_data)
@@ -333,6 +347,9 @@ class InsBaseAuthProvider(AuthProvider):
 
         try:
             response = await self._auth_service.authenticate(user_id)
+        except (RpcConnectionError, RpcTimeoutError) as e:
+            logger.exception("ins-base-rpc /auth/authentication transport failed")
+            raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
         except Exception as e:
             logger.exception("ins-base-rpc /auth/authentication call failed")
             return None

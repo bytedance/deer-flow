@@ -1,5 +1,8 @@
 """Tests for the global AuthMiddleware (fail-closed safety net)."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -376,6 +379,21 @@ class TestJwtAuth:
         client = TestClient(_make_app())
         resp = client.get("/api/protected", headers={"Authorization": f"Bearer {refresh}"})
         assert resp.status_code == 401
+
+    def test_ins_base_provider_unavailable_returns_503(self):
+        from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError
+
+        load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret", "provider": "ins_base"})
+        client = TestClient(_make_app())
+        provider = SimpleNamespace(
+            get_user=AsyncMock(side_effect=AuthProviderUnavailableError("ins-base auth service unavailable"))
+        )
+
+        with patch("app.gateway.deps.get_ins_base_provider", return_value=provider):
+            resp = client.get("/api/protected", headers={"Authorization": "Bearer ins-base-token"})
+
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Authentication service unavailable"
 
 
 class TestApiKeyAuth:
