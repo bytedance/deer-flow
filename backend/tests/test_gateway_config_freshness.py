@@ -111,6 +111,52 @@ def test_get_config_respects_test_set_app_config():
     assert client.get("/probe").json() == {"log_level": "warning"}
 
 
+def test_run_context_app_config_reflects_yaml_edit(tmp_path, monkeypatch):
+    """``RunContext.app_config`` must follow live `config.yaml` edits.
+
+    BUG-001 review feedback: the run-context that feeds worker / lead-agent
+    factories must observe the same mtime reload that `get_config()` does;
+    otherwise stale config slips back in through the run path even after the
+    request dependency is fixed.
+    """
+    from unittest.mock import MagicMock
+
+    from app.gateway.deps import get_run_context
+
+    config_file = tmp_path / "config.yaml"
+    _write_config_yaml(config_file, log_level="info")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_file))
+
+    app = FastAPI()
+    # Sentinel values for the rest of the RunContext wiring — we only care
+    # about ``ctx.app_config`` for this assertion.
+    app.state.checkpointer = MagicMock()
+    app.state.store = MagicMock()
+    app.state.run_event_store = MagicMock()
+    app.state.run_events_config = {"frozen": "startup"}
+    app.state.thread_store = MagicMock()
+
+    @app.get("/run-ctx-log-level")
+    def probe(ctx=Depends(get_run_context)):
+        return {
+            "log_level": ctx.app_config.log_level,
+            "run_events_config": ctx.run_events_config,
+        }
+
+    client = TestClient(app)
+    first = client.get("/run-ctx-log-level").json()
+    assert first == {"log_level": "info", "run_events_config": {"frozen": "startup"}}
+
+    _write_config_yaml(config_file, log_level="debug")
+    future_mtime = config_file.stat().st_mtime + 5
+    os.utime(config_file, (future_mtime, future_mtime))
+
+    second = client.get("/run-ctx-log-level").json()
+    # app_config follows the edit; run_events_config stays frozen to the
+    # startup snapshot we wrote onto app.state above.
+    assert second == {"log_level": "debug", "run_events_config": {"frozen": "startup"}}
+
+
 @pytest.mark.parametrize(
     "exception",
     [
