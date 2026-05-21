@@ -33,6 +33,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 
 from .manager import RunManager, RunRecord
+from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
@@ -224,11 +225,25 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
+        # Resolve after runtime context installation so context/configurable reflect
+        # the agent name that this run will actually execute.
+        config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:
             agent = agent_factory(config=runnable_config)
+
+        # Capture the effective (resolved) model name from the agent's metadata.
+        # _resolve_model_name in agent.py may return the default model if the
+        # requested name is not in the allowlist — this update ensures the
+        # persisted model_name reflects the actual model used.
+        if record.model_name is not None:
+            resolved = getattr(agent, "metadata", {}) or {}
+            if isinstance(resolved, dict):
+                effective = resolved.get("model_name")
+                if effective and effective != record.model_name:
+                    await run_manager.update_model_name(record.run_id, effective)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:

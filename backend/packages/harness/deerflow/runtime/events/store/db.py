@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
@@ -33,26 +34,39 @@ class DbRunEventStore(RunEventStore):
         if isinstance(val, datetime):
             d["created_at"] = val.isoformat()
         d.pop("id", None)
-        # Restore dict content that was JSON-serialized on write
+        # Restore structured content that was JSON-serialized on write.
         raw = d.get("content", "")
-        if isinstance(raw, str) and d.get("metadata", {}).get("content_is_dict"):
+        metadata = d.get("metadata", {})
+        if isinstance(raw, str) and (metadata.get("content_is_json") or metadata.get("content_is_dict")):
             try:
                 d["content"] = json.loads(raw)
             except (json.JSONDecodeError, ValueError):
-                # Content looked like JSON (content_is_dict flag) but failed to parse;
+                # Content looked like JSON but failed to parse;
                 # keep the raw string as-is.
                 logger.debug("Failed to deserialize content as JSON for event seq=%s", d.get("seq"))
         return d
 
-    def _truncate_trace(self, category: str, content: str | dict, metadata: dict | None) -> tuple[str | dict, dict]:
+    def _truncate_trace(self, category: str, content: Any, metadata: dict | None) -> tuple[Any, dict]:
         if category == "trace":
-            text = json.dumps(content, default=str, ensure_ascii=False) if isinstance(content, dict) else content
+            text = content if isinstance(content, str) else json.dumps(content, default=str, ensure_ascii=False)
             encoded = text.encode("utf-8")
             if len(encoded) > self._max_trace_content:
                 # Truncate by bytes, then decode back (may cut a multi-byte char, so use errors="ignore")
                 content = encoded[: self._max_trace_content].decode("utf-8", errors="ignore")
                 metadata = {**(metadata or {}), "content_truncated": True, "original_byte_length": len(encoded)}
         return content, metadata or {}
+
+    @staticmethod
+    def _content_to_db(content: Any, metadata: dict | None) -> tuple[str, dict]:
+        metadata = metadata or {}
+        if isinstance(content, str):
+            return content, metadata
+
+        db_content = json.dumps(content, default=str, ensure_ascii=False)
+        metadata = {**metadata, "content_is_json": True}
+        if isinstance(content, dict):
+            metadata["content_is_dict"] = True
+        return db_content, metadata
 
     @staticmethod
     def _user_id_from_context() -> str | None:
@@ -72,6 +86,28 @@ class DbRunEventStore(RunEventStore):
         user = get_current_user()
         return str(user.id) if user is not None else None
 
+    @staticmethod
+    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+        """Return the current max seq while serializing writers per thread.
+
+        PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
+        results are not lockable rows. As a release-safe workaround, take a
+        transaction-level advisory lock keyed by thread_id before reading the
+        aggregate. Other dialects keep the existing row-locking statement.
+        """
+        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        bind = session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "postgresql":
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
+                {"thread_id": thread_id},
+            )
+            return await session.scalar(stmt)
+
+        return await session.scalar(stmt.with_for_update())
+
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
         """Write a single event — low-frequency path only.
 
@@ -82,18 +118,11 @@ class DbRunEventStore(RunEventStore):
         the initial ``human_message`` event (once per run).
         """
         content, metadata = self._truncate_trace(category, content, metadata)
-        if isinstance(content, dict):
-            db_content = json.dumps(content, default=str, ensure_ascii=False)
-            metadata = {**(metadata or {}), "content_is_dict": True}
-        else:
-            db_content = content
+        db_content, metadata = self._content_to_db(content, metadata)
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Use FOR UPDATE to serialize seq assignment within a thread.
-                # NOTE: with_for_update() on aggregates is a no-op on SQLite;
-                # the UNIQUE(thread_id, seq) constraint catches races there.
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                max_seq = await self._max_seq_for_thread(session, thread_id)
                 seq = (max_seq or 0) + 1
                 row = RunEventRow(
                     thread_id=thread_id,
@@ -116,10 +145,8 @@ class DbRunEventStore(RunEventStore):
         async with self._sf() as session:
             async with session.begin():
                 # Get max seq for the thread (assume all events in batch belong to same thread).
-                # NOTE: with_for_update() on aggregates is a no-op on SQLite;
-                # the UNIQUE(thread_id, seq) constraint catches races there.
                 thread_id = events[0]["thread_id"]
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                max_seq = await self._max_seq_for_thread(session, thread_id)
                 seq = max_seq or 0
                 rows = []
                 for e in events:
@@ -128,11 +155,7 @@ class DbRunEventStore(RunEventStore):
                     category = e.get("category", "trace")
                     metadata = e.get("metadata")
                     content, metadata = self._truncate_trace(category, content, metadata)
-                    if isinstance(content, dict):
-                        db_content = json.dumps(content, default=str, ensure_ascii=False)
-                        metadata = {**(metadata or {}), "content_is_dict": True}
-                    else:
-                        db_content = content
+                    db_content, metadata = self._content_to_db(content, metadata)
                     row = RunEventRow(
                         thread_id=e["thread_id"],
                         run_id=e["run_id"],

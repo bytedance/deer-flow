@@ -155,7 +155,6 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
-    - AI messages with tool_calls but no text content
     """
     if isinstance(result, list):
         messages = result
@@ -773,13 +772,22 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        try:
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+                multitask_strategy="reject",
+            )
+        except Exception as exc:
+            if _is_thread_busy_error(exc):
+                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                return
+            else:
+                raise
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)
@@ -983,7 +991,11 @@ class ChannelManager:
 
         try:
             async with httpx.AsyncClient() as http:
-                resp = await http.get(f"{self._gateway_url}{path}", timeout=10)
+                resp = await http.get(
+                    f"{self._gateway_url}{path}",
+                    timeout=10,
+                    headers=create_internal_auth_headers(),
+                )
                 resp.raise_for_status()
                 data = resp.json()
         except Exception:

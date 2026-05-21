@@ -114,6 +114,7 @@ def test_build_run_config_custom_agent_injects_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
     assert config["configurable"]["agent_name"] == "finalis"
+    assert config["run_name"] == "finalis"
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -122,6 +123,7 @@ def test_build_run_config_lead_agent_no_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id="lead_agent")
     assert "agent_name" not in config["configurable"]
+    assert "run_name" not in config
 
 
 def test_build_run_config_none_assistant_id_no_agent_name():
@@ -130,6 +132,7 @@ def test_build_run_config_none_assistant_id_no_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id=None)
     assert "agent_name" not in config["configurable"]
+    assert "run_name" not in config
 
 
 def test_build_run_config_explicit_agent_name_not_overwritten():
@@ -143,6 +146,7 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["run_name"] == "explicit-agent"
 
 
 def test_build_run_config_context_custom_agent_injects_agent_name():
@@ -322,6 +326,21 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["is_plan_mode"] is False
     # New values should be added
     assert config["configurable"]["subagent_enabled"] is True
+
+
+def test_inject_authenticated_user_context_overrides_client_user_id():
+    """Run context should carry the authenticated user, not client-supplied user_id."""
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"user_id": "spoofed-client"}
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="auth-user-42")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "auth-user-42"
 
 
 # ---------------------------------------------------------------------------

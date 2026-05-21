@@ -38,7 +38,7 @@ services:
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
-      # USERDATA_PVC_NAME uses subPath (threads/{thread_id}/user-data) automatically.
+      # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
       # - SKILLS_PVC_NAME=deer-flow-skills-pvc
       # - USERDATA_PVC_NAME=deer-flow-userdata-pvc
       - KUBECONFIG_PATH=/root/.kube/config
@@ -143,8 +143,15 @@ services:
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     container_name: deer-flow-gateway
-    command: sh -c "{ cd backend && (uv sync || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync)) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
+    # Startup logic lives in docker/dev-entrypoint.sh — UV_EXTRAS validation,
+    # `uv sync --all-packages`, .venv self-heal, and uvicorn handoff. Keeps
+    # this file readable and lets the script be linted (shellcheck-clean).
+    # See PR #2767 / Issue #2754.
+    command: ["sh", "/usr/local/bin/dev-entrypoint.sh"]
     volumes:
+      # Mount the dev entrypoint as a read-only file so edits to the script
+      # take effect on `make docker-restart` without requiring an image rebuild.
+      - ./dev-entrypoint.sh:/usr/local/bin/dev-entrypoint.sh:ro
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/
       # directory above would otherwise shadow it with the (empty) host directory.
