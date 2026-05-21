@@ -205,7 +205,8 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
-            return count
+        self._write_locks.pop(thread_id, None)
+        return count
 
     async def delete_by_run(self, thread_id, run_id):
         async with self._get_write_lock(thread_id):

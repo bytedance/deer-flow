@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -129,6 +130,29 @@ async def test_ensure_seq_loaded_recovers_from_disk():
 
 
 # ---------------------------------------------------------------------------
+# asyncio.to_thread regression guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_put_offloads_write_via_to_thread():
+    """Regression guard: put() must call asyncio.to_thread for _write_record."""
+    original = asyncio.to_thread
+    calls: list[str] = []
+
+    async def spy(*args, **kwargs):
+        calls.append(args[0].__name__ if callable(args[0]) else repr(args[0]))
+        return await original(*args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        with patch("asyncio.to_thread", new=spy):
+            await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace", content="x")
+
+    assert "_write_record" in calls, f"Expected asyncio.to_thread(_write_record, ...) — got: {calls}"
+
+
+# ---------------------------------------------------------------------------
 # Read methods are non-blocking (asyncio.to_thread path exercised)
 # ---------------------------------------------------------------------------
 
@@ -162,12 +186,13 @@ async def test_count_messages_accurate_after_concurrent_writes():
 
 
 @pytest.mark.anyio
-async def test_delete_by_thread_clears_seq_counter():
+async def test_delete_by_thread_clears_seq_counter_and_lock():
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(Path(tmp))
         await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace")
         await store.delete_by_thread("t1")
         assert "t1" not in store._seq_counters
+        assert "t1" not in store._write_locks
 
 
 @pytest.mark.anyio
