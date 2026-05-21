@@ -1290,9 +1290,7 @@ def test_write_file_tool_handles_sandbox_init_failure(monkeypatch) -> None:
         raise SandboxError("sandbox missing")
 
     runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized", raise_sandbox_error
-    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", raise_sandbox_error)
     monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
 
     result = write_file_tool.func(
