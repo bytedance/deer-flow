@@ -328,3 +328,43 @@ async def test_session_pool_tool_default_scope():
 
     pool = get_session_pool()
     assert ("server", "default") in pool._entries
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_get_config_fallback():
+    """When runtime is None, get_config() provides thread_id as fallback."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        x: int = Field(..., description="x")
+
+    original_tool = StructuredTool(
+        name="server_tool",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    fake_config = {"configurable": {"thread_id": "from-langgraph-config"}}
+
+    with (
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch("deerflow.mcp.tools.get_config", return_value=fake_config),
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
+
+        # runtime=None — get_config() fallback should provide thread_id
+        await wrapped.coroutine(runtime=None, x=1)
+
+    pool = get_session_pool()
+    assert ("server", "from-langgraph-config") in pool._entries

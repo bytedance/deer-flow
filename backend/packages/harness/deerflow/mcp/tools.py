@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Any
 
-from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.client import build_servers_config
@@ -13,22 +14,26 @@ from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_h
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.reflection import resolve_variable
 from deerflow.tools.sync import make_sync_tool_wrapper
+from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_thread_id(runtime: Any) -> str:
-    """Extract thread_id from the injected tool runtime."""
+def _extract_thread_id(runtime: Runtime | None) -> str:
+    """Extract thread_id from the injected tool runtime or LangGraph config."""
     if runtime is not None:
-        ctx = getattr(runtime, "context", None) or {}
-        tid = ctx.get("thread_id")
+        tid = runtime.context.get("thread_id") if runtime.context else None
         if tid is not None:
             return str(tid)
-        config = getattr(runtime, "config", None) or {}
+        config = runtime.config or {}
         tid = config.get("configurable", {}).get("thread_id")
         if tid is not None:
             return str(tid)
-    return "default"
+
+    try:
+        return str(get_config().get("configurable", {}).get("thread_id"))
+    except RuntimeError:
+        return "default"
 
 
 def _make_session_pool_tool(
@@ -51,7 +56,7 @@ def _make_session_pool_tool(
     pool = get_session_pool()
 
     async def call_with_persistent_session(
-        runtime: Annotated[object | None, InjectedToolArg()] = None,
+        runtime: Runtime | None = None,
         **arguments: dict[str, Any],
     ) -> Any:
         thread_id = _extract_thread_id(runtime)
