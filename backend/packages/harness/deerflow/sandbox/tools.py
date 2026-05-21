@@ -457,17 +457,18 @@ def _format_write_file_error(
     error: Exception,
     runtime: Runtime | None = None,
     *,
+    message: str | None = None,
     max_chars: int = _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
 ) -> str:
     """Return a bounded, sanitized error string for write_file failures."""
-    header = f"Error: Failed to write file '{requested_path}': "
+    header = message or f"Error: Failed to write file '{requested_path}'"
     detail = _sanitize_error(error, runtime)
     if max_chars == 0:
-        return f"{header}{detail}"
-    detail_budget = max_chars - len(header)
+        return f"{header}: {detail}"
+    detail_budget = max_chars - len(header) - 2
     if detail_budget <= 0:
-        return _truncate_write_file_error_detail(f"{header}{detail}", max_chars)
-    return f"{header}{_truncate_write_file_error_detail(detail, detail_budget)}"
+        return _truncate_write_file_error_detail(f"{header}: {detail}", max_chars)
+    return f"{header}: {_truncate_write_file_error_detail(detail, detail_budget)}"
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -1564,9 +1565,19 @@ def write_file_tool(
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
     except PermissionError as e:
-        return _format_write_file_error(requested_path, e, runtime)
+        return _format_write_file_error(
+            requested_path,
+            e,
+            runtime,
+            message=f"Error: Permission denied writing to file: {requested_path}",
+        )
     except IsADirectoryError as e:
-        return _format_write_file_error(requested_path, e, runtime)
+        return _format_write_file_error(
+            requested_path,
+            e,
+            runtime,
+            message=f"Error: Path is a directory, not a file: {requested_path}",
+        )
     except OSError as e:
         return _format_write_file_error(requested_path, e, runtime)
     except Exception as e:
