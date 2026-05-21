@@ -191,4 +191,52 @@ describe("formatThreadAsJSON", () => {
     expect(raw).not.toContain("internal trace");
     expect(raw).not.toContain("tool_calls");
   });
+
+  it("strips inline <think>...</think> wrappers from content", () => {
+    // bytedance/deer-flow#3131 review: JSON export must run the same
+    // sanitiser the Markdown path uses so inline reasoning never leaks
+    // even when `includeReasoning` is left at its default false.
+    const message = ai("<think>internal monologue</think>visible answer", {
+      id: "ai-1",
+    } as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).not.toContain("internal monologue");
+    expect(raw).not.toContain("<think>");
+    expect(raw).toContain("visible answer");
+  });
+
+  it("strips content-array thinking blocks from content", () => {
+    const message = ai("placeholder", {
+      id: "ai-2",
+      content: [
+        { type: "thinking", thinking: "hidden reasoning step" },
+        { type: "text", text: "final visible text" },
+      ],
+    } as unknown as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).not.toContain("hidden reasoning step");
+    expect(raw).toContain("final visible text");
+  });
+
+  it("strips <uploaded_files> markers from content", () => {
+    const message = human(
+      "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+      { id: "h-clean" } as Partial<Message>,
+    );
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).not.toContain("<uploaded_files>");
+    expect(raw).not.toContain("secret.pdf");
+    expect(raw).toContain("real prompt");
+  });
+
+  it("drops AI messages that sanitise to empty content", () => {
+    // Pure-reasoning AI fragments (no visible text, no tool calls) should
+    // not survive as `{content: ""}` rows in the export.
+    const message = ai("<think>only thinking, no answer</think>", {
+      id: "ai-3",
+    } as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    const parsed = JSON.parse(raw) as { messages: unknown[] };
+    expect(parsed.messages).toHaveLength(0);
+  });
 });

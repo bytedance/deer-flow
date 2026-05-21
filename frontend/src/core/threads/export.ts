@@ -122,6 +122,51 @@ export function formatThreadAsMarkdown(
   return lines.join("\n").trimEnd() + "\n";
 }
 
+interface JSONExportMessage {
+  type: Message["type"];
+  id: string | undefined;
+  content: string;
+  reasoning?: string;
+  tool_calls?: unknown;
+}
+
+function buildJSONMessage(
+  msg: Message,
+  options: ExportOptions,
+): JSONExportMessage | null {
+  // Run the same sanitiser the Markdown path uses so the JSON `content`
+  // field never carries inline `<think>...</think>` wrappers, content-array
+  // thinking blocks, `<uploaded_files>` markers, or other internal payloads.
+  const content = formatMessageContent(msg);
+  const reasoning =
+    options.includeReasoning && msg.type === "ai"
+      ? (extractReasoningContentFromMessage(msg) ?? undefined)
+      : undefined;
+  const toolCalls =
+    options.includeToolCalls &&
+    msg.type === "ai" &&
+    "tool_calls" in msg &&
+    msg.tool_calls?.length
+      ? msg.tool_calls
+      : undefined;
+
+  // Drop rows with no exportable payload (empty content + no opted-in
+  // reasoning / tool_calls). This matches the Markdown path's `continue`
+  // on `!content && !toolCalls && !reasoning` so the two formats agree on
+  // which AI fragments are visible to the user.
+  if (!content && reasoning === undefined && toolCalls === undefined) {
+    return null;
+  }
+
+  return {
+    type: msg.type,
+    id: msg.id,
+    content,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {}),
+  };
+}
+
 export function formatThreadAsJSON(
   thread: AgentThread,
   messages: Message[],
@@ -132,16 +177,9 @@ export function formatThreadAsJSON(
     thread_id: thread.thread_id,
     created_at: thread.created_at,
     exported_at: new Date().toISOString(),
-    messages: visibleMessages(messages, options).map((msg) => ({
-      type: msg.type,
-      id: msg.id,
-      content: msg.content,
-      ...(options.includeToolCalls &&
-      msg.type === "ai" &&
-      msg.tool_calls?.length
-        ? { tool_calls: msg.tool_calls }
-        : {}),
-    })),
+    messages: visibleMessages(messages, options)
+      .map((msg) => buildJSONMessage(msg, options))
+      .filter((m): m is JSONExportMessage => m !== null),
   };
   return JSON.stringify(exportData, null, 2);
 }
