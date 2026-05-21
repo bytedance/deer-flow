@@ -1549,9 +1549,9 @@ def write_file_tool(
         append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
     """
     try:
+        requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)

@@ -1280,6 +1280,33 @@ def test_write_file_tool_formats_all_other_failure_branches(
     assert "[write_file error truncated:" not in result
 
 
+def test_write_file_tool_handles_sandbox_init_failure(monkeypatch) -> None:
+    """Regression for #3133 review: SandboxError raised during sandbox
+    initialization (before the local `requested_path` assignment) must still
+    surface as a bounded tool error rather than an UnboundLocalError.
+    """
+
+    def raise_sandbox_error(runtime):
+        raise SandboxError("sandbox missing")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized", raise_sandbox_error
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="sandbox 初始化失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "SandboxError: sandbox missing" in result
+    assert "[write_file error truncated:" not in result
+
+
 def test_file_operation_lock_memory_cleanup() -> None:
     """Verify that released locks are eventually cleaned up by WeakValueDictionary.
 
