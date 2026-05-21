@@ -160,7 +160,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         prompt, user_msg = self._build_title_prompt(state)
 
         try:
-            model_kwargs = {"thinking_enabled": False}
+            # attach_tracing=False because ``_get_runnable_config()`` inherits
+            # the graph-level RunnableConfig (set in ``_make_lead_agent``) whose
+            # callbacks already carry tracing handlers; binding them again at
+            # the model level would emit duplicate spans.
+            model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
             if config.model_name:
