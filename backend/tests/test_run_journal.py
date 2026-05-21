@@ -340,6 +340,99 @@ class TestConvenienceFields:
         assert data["first_human_message"] == "What is AI?"
 
     @pytest.mark.anyio
+    async def test_completion_data_counts_human_ai_and_tool_messages(self, journal_setup):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        j, _ = journal_setup
+        j.on_chat_model_start({}, [[HumanMessage(content="Question")]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_tool_end(ToolMessage(content="Tool result", tool_call_id="call_1", name="search"), run_id=uuid4())
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 3
+        assert data["first_human_message"] == "Question"
+        assert data["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_tool_call_only_ai_does_not_clear_last_ai_message(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Useful answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_1", "name": "search", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 2
+        assert data["last_ai_message"] == "Useful answer"
+
+    @pytest.mark.anyio
+    async def test_last_ai_message_extracts_mixed_content_without_extra_newlines(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(
+            _make_llm_response(
+                [
+                    {"type": "text", "text": "First "},
+                    {"type": "text", "content": "second"},
+                    " third",
+                    {"type": "image", "url": "ignored"},
+                ]
+            ),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "First second third"
+
+    @pytest.mark.anyio
+    async def test_last_ai_message_extracts_mapping_content(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response({"content": "Nested answer"}), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "Nested answer"
+
+    @pytest.mark.anyio
+    async def test_duplicate_llm_run_id_does_not_double_count_message_summary(self, journal_setup):
+        j, _ = journal_setup
+        run_id = uuid4()
+
+        j.on_llm_end(_make_llm_response("Answer", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response("Answer", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 1
+        assert data["last_ai_message"] == "Answer"
+        assert data["total_tokens"] == 15
+
+    @pytest.mark.anyio
+    async def test_subagent_ai_does_not_overwrite_lead_last_ai_message(self, journal_setup):
+        j, _ = journal_setup
+        j.on_llm_end(_make_llm_response("Lead answer"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Subagent detail"), run_id=uuid4(), parent_run_id=None, tags=["subagent:research"])
+
+        data = j.get_completion_data()
+
+        assert data["message_count"] == 2
+        assert data["last_ai_message"] == "Lead answer"
+
+    @pytest.mark.anyio
     async def test_get_completion_data(self, journal_setup):
         j, _ = journal_setup
         j._total_tokens = 100
@@ -381,6 +474,244 @@ class TestMiddlewareEvents:
         event_types = {e["event_type"] for e in events}
         assert "middleware:title" in event_types
         assert "middleware:guardrail" in event_types
+
+
+class TestCallerBucketing:
+    """Tests for caller-bucketed token accumulation (lead_agent / subagent / middleware)."""
+
+    def test_lead_agent_bucketing(self, journal_setup):
+        j, _ = journal_setup
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j._lead_agent_tokens == 15
+        assert j._subagent_tokens == 0
+        assert j._middleware_tokens == 0
+
+    def test_subagent_bucketing(self, journal_setup):
+        j, _ = journal_setup
+        usage = {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}
+        j.on_llm_end(_make_llm_response("B", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["subagent:research"])
+        assert j._subagent_tokens == 30
+        assert j._lead_agent_tokens == 0
+        assert j._middleware_tokens == 0
+
+    def test_middleware_bucketing(self, journal_setup):
+        j, _ = journal_setup
+        usage = {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        j.on_llm_end(_make_llm_response("C", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["middleware:summarize"])
+        assert j._middleware_tokens == 7
+        assert j._lead_agent_tokens == 0
+        assert j._subagent_tokens == 0
+
+    def test_mixed_callers_sum_independently(self, journal_setup):
+        j, _ = journal_setup
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("B", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["subagent:bash"])
+        j.on_llm_end(_make_llm_response("C", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["middleware:title"])
+        assert j._lead_agent_tokens == 15
+        assert j._subagent_tokens == 15
+        assert j._middleware_tokens == 15
+        assert j._total_tokens == 45
+
+    def test_get_completion_data_includes_buckets(self, journal_setup):
+        j, _ = journal_setup
+        j._lead_agent_tokens = 100
+        j._subagent_tokens = 200
+        j._middleware_tokens = 50
+        data = j.get_completion_data()
+        assert data["lead_agent_tokens"] == 100
+        assert data["subagent_tokens"] == 200
+        assert data["middleware_tokens"] == 50
+
+    def test_dedup_same_run_id(self, journal_setup):
+        """Same langchain run_id in on_llm_end must not double-count."""
+        j, _ = journal_setup
+        run_id = uuid4()
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert j._total_tokens == 15
+        assert j._lead_agent_tokens == 15
+        assert j._llm_call_count == 1
+
+    def test_first_no_usage_second_with_usage(self, journal_setup):
+        """First callback with no usage must not block second callback with usage for same run_id."""
+        j, _ = journal_setup
+        run_id = uuid4()
+        j.on_llm_end(_make_llm_response("A", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert str(run_id) not in j._counted_llm_run_ids
+        # Second callback for the same run_id with actual usage must still count
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        assert j._total_tokens == 15
+        assert j._lead_agent_tokens == 15
+
+    def test_track_token_usage_false_skips_buckets(self):
+        """When token tracking is disabled, caller buckets stay at 0."""
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, track_token_usage=False, flush_threshold=100)
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("X", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["subagent:research"])
+        assert j._subagent_tokens == 0
+        assert j._lead_agent_tokens == 0
+
+    def test_default_no_tags_buckets_as_lead_agent(self, journal_setup):
+        """LLM calls without explicit tags default to lead_agent bucket."""
+        j, _ = journal_setup
+        usage = {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}
+        j.on_llm_end(_make_llm_response("Hi", usage=usage), run_id=uuid4(), parent_run_id=None)
+        assert j._lead_agent_tokens == 10
+        assert j._subagent_tokens == 0
+        assert j._middleware_tokens == 0
+
+    def test_unknown_tag_buckets_as_lead_agent(self, journal_setup):
+        """Calls with unrecognized tags (not lead_agent/subagent:/middleware:) go to lead_agent."""
+        j, _ = journal_setup
+        usage = {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}
+        j.on_llm_end(_make_llm_response("Hi", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["some_random_tag"])
+        assert j._lead_agent_tokens == 10
+
+
+class TestExternalUsageRecords:
+    """Tests for record_external_llm_usage_records."""
+
+    def test_records_added_to_subagent_bucket(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "ext-1",
+                "caller": "subagent:general-purpose",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._subagent_tokens == 150
+        assert j._total_tokens == 150
+        assert j._total_input_tokens == 100
+        assert j._total_output_tokens == 50
+
+    def test_records_added_to_middleware_bucket(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "ext-2",
+                "caller": "middleware:summarize",
+                "input_tokens": 30,
+                "output_tokens": 10,
+                "total_tokens": 40,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._middleware_tokens == 40
+        assert j._lead_agent_tokens == 0
+        assert j._subagent_tokens == 0
+
+    def test_records_added_to_lead_agent_bucket(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "ext-3",
+                "caller": "lead_agent",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._lead_agent_tokens == 15
+
+    def test_dedup_same_source_run_id(self, journal_setup):
+        """Same source_run_id must not be double-counted."""
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "dup-1",
+                "caller": "subagent:research",
+                "input_tokens": 50,
+                "output_tokens": 25,
+                "total_tokens": 75,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        j.record_external_llm_usage_records(records)
+        assert j._subagent_tokens == 75
+        assert j._total_tokens == 75
+
+    def test_total_tokens_missing_computed_from_input_output(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "ext-4",
+                "caller": "subagent:bash",
+                "input_tokens": 200,
+                "output_tokens": 100,
+                "total_tokens": 0,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._subagent_tokens == 300
+        assert j._total_tokens == 300
+
+    def test_total_tokens_zero_no_count(self, journal_setup):
+        """Records with zero total and zero input+output must not be counted."""
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "ext-5",
+                "caller": "subagent:research",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._total_tokens == 0
+        assert j._subagent_tokens == 0
+
+    def test_empty_source_run_id_skipped(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {
+                "source_run_id": "",
+                "caller": "subagent:research",
+                "input_tokens": 50,
+                "output_tokens": 25,
+                "total_tokens": 75,
+            }
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._total_tokens == 0
+
+    def test_multiple_records_in_single_call(self, journal_setup):
+        j, _ = journal_setup
+        records = [
+            {"source_run_id": "r1", "caller": "subagent:gp", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            {"source_run_id": "r2", "caller": "subagent:bash", "input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._subagent_tokens == 45
+        assert j._total_tokens == 45
+
+    def test_external_records_coexist_with_inline_callbacks(self, journal_setup):
+        """External records and inline on_llm_end must not interfere."""
+        j, _ = journal_setup
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("A", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.record_external_llm_usage_records([{"source_run_id": "ext-6", "caller": "subagent:gp", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150}])
+        assert j._lead_agent_tokens == 15
+        assert j._subagent_tokens == 150
+        assert j._total_tokens == 165
+
+    def test_track_token_usage_false_skips_external_records(self):
+        """When token tracking is disabled, external records must not accumulate."""
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, track_token_usage=False, flush_threshold=100)
+        j.record_external_llm_usage_records([{"source_run_id": "ext-7", "caller": "subagent:gp", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150}])
+        assert j._total_tokens == 0
+        assert j._subagent_tokens == 0
 
 
 class TestChatModelStartHumanMessage:

@@ -699,6 +699,92 @@ def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(mo
     load_acp_config_from_dict({})
 
 
+def test_get_available_tools_sync_invoke_acp_agent_preserves_thread_workspace(monkeypatch, tmp_path):
+    from deerflow.config import paths as paths_module
+    from deerflow.runtime import user_context as uc_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(uc_module, "get_effective_user_id", lambda: None)
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    monkeypatch.setattr("deerflow.tools.tools.is_host_bash_allowed", lambda config=None: True)
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        @property
+        def collected_text(self) -> str:
+            return "ok"
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s1")
+
+        async def prompt(self, **kwargs):
+            pass
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["cwd"] = cwd
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            TextContentBlock=type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)}),
+        ),
+    )
+
+    explicit_config = SimpleNamespace(
+        tools=[],
+        models=[],
+        tool_search=SimpleNamespace(enabled=False),
+        skill_evolution=SimpleNamespace(enabled=False),
+        sandbox=SimpleNamespace(),
+        get_model_config=lambda name: None,
+        acp_agents={"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")},
+    )
+    tools = get_available_tools(include_mcp=False, subagent_enabled=False, app_config=explicit_config)
+    tool = next(tool for tool in tools if tool.name == "invoke_acp_agent")
+
+    thread_id = "thread-sync-123"
+    tool.invoke(
+        {"agent": "codex", "prompt": "Do something"},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert captured["cwd"] == str(tmp_path / "threads" / thread_id / "acp-workspace")
+
+
 def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch):
     explicit_agents = {"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")}
     explicit_config = SimpleNamespace(

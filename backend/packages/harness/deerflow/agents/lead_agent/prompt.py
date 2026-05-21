@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -20,6 +19,7 @@ logger = logging.getLogger(__name__)
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
+_enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -84,6 +84,7 @@ def _invalidate_enabled_skills_cache() -> threading.Event:
     _get_cached_skills_prompt_section.cache_clear()
     with _enabled_skills_lock:
         _enabled_skills_cache = None
+        _enabled_skills_by_config_cache.clear()
         _enabled_skills_refresh_version += 1
         _enabled_skills_refresh_event.clear()
         if _enabled_skills_refresh_active:
@@ -107,6 +108,15 @@ def warm_enabled_skills_cache(timeout_seconds: float = _ENABLED_SKILLS_REFRESH_W
 
 
 def _get_enabled_skills():
+    return get_cached_enabled_skills()
+
+
+def get_cached_enabled_skills() -> list[Skill]:
+    """Return the cached enabled-skills list, kicking off a background refresh on miss.
+
+    Safe to call from request paths: never blocks on disk I/O. Returns an empty
+    list on cache miss; the next call will see the warmed result.
+    """
     with _enabled_skills_lock:
         cached = _enabled_skills_cache
 
@@ -117,17 +127,29 @@ def _get_enabled_skills():
     return []
 
 
-def _get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[Skill]:
+def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[Skill]:
     """Return enabled skills using the caller's config source.
 
-    When a concrete ``app_config`` is supplied, bypass the global enabled-skills
-    cache so the skill list and skill paths are resolved from the same config
-    object. This keeps request-scoped config injection consistent even while the
-    release branch still supports global fallback paths.
+    When a concrete ``app_config`` is supplied, cache the loaded skills by that
+    config object's identity so request-scoped config injection still resolves
+    skill paths from the matching config without rescanning storage on every
+    agent factory call.
     """
     if app_config is None:
         return _get_enabled_skills()
-    return list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
+
+    cache_key = id(app_config)
+    with _enabled_skills_lock:
+        cached = _enabled_skills_by_config_cache.get(cache_key)
+        if cached is not None:
+            cached_config, cached_skills = cached
+            if cached_config is app_config:
+                return list(cached_skills)
+
+    skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
+    with _enabled_skills_lock:
+        _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+    return list(skills)
 
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
@@ -344,8 +366,7 @@ You are {agent_name}, an open-source super agent.
 </role>
 
 {soul}
-{memory_context}
-
+{self_update_section}
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
 - Break down the task: What is clear? What is ambiguous? What is missing?
@@ -604,7 +625,7 @@ You have access to skills that provide optimized workflows for specific tasks. E
 
 def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_config: AppConfig | None = None) -> str:
     """Generate the skills prompt section with available skills list."""
-    skills = _get_enabled_skills_for_config(app_config)
+    skills = get_enabled_skills_for_config(app_config)
 
     if app_config is None:
         try:
@@ -641,6 +662,26 @@ def get_agent_soul(agent_name: str | None) -> str:
     if soul:
         return f"<soul>\n{soul}\n</soul>\n" if soul else ""
     return ""
+
+
+def _build_self_update_section(agent_name: str | None) -> str:
+    """Prompt block that teaches the custom agent to persist self-updates via update_agent."""
+    if not agent_name:
+        return ""
+    return f"""<self_update>
+You are running as the custom agent **{agent_name}** with a persisted SOUL.md and config.yaml.
+
+When the user asks you to update your own description, personality, behaviour, skill set, tool groups, or default model,
+you MUST persist the change with the `update_agent` tool. Do NOT use `bash`, `write_file`, or any sandbox tool to edit
+SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace and the changes will be lost on the next turn.
+
+Rules:
+- Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
+- Only pass the fields that should change. Omit the others to preserve them.
+- Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
+- After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
+</self_update>
+"""
 
 
 def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) -> str:
@@ -732,9 +773,6 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
 ) -> str:
-    # Get memory context
-    memory_context = _get_memory_context(agent_name, app_config=app_config)
-
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
     subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
@@ -768,17 +806,18 @@ def apply_prompt_template(
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
-    # Format the prompt with dynamic skills and memory
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    # Build and return the fully static system prompt.
+    # Memory and current date are injected per-turn via DynamicContextMiddleware
+    # as a <system-reminder> in the first HumanMessage, keeping this prompt
+    # identical across users and sessions for maximum prefix-cache reuse.
+    return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
+        self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
-        memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
-
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

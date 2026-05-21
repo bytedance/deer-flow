@@ -23,8 +23,7 @@ make dev
 
 | 服务        | 端口 | 描述                    |
 | ----------- | ---- | ----------------------- |
-| LangGraph   | 2024 | DeerFlow Harness 运行时 |
-| Gateway API | 8001 | FastAPI 后端            |
+| Gateway API | 8001 | FastAPI 后端 + 嵌入式 Agent 运行时 |
 | 前端        | 3000 | Next.js 界面            |
 | nginx       | 2026 | 统一反向代理            |
 
@@ -36,13 +35,12 @@ make dev
 make stop
 ```
 
-停止所有四个服务。即使某个服务没有运行也可以安全执行。
+停止所有服务。即使某个服务没有运行也可以安全执行。
 
   </Tabs.Tab>
   <Tabs.Tab>
 ```
-logs/langgraph.log   # Agent 运行时日志
-logs/gateway.log     # API Gateway 日志
+logs/gateway.log     # API Gateway 和 Agent 运行时日志
 logs/frontend.log    # Next.js 开发服务器日志
 logs/nginx.log       # nginx 访问/错误日志
 ```
@@ -50,7 +48,7 @@ logs/nginx.log       # nginx 访问/错误日志
 实时追踪日志：
 
 ```bash
-tail -f logs/langgraph.log
+tail -f logs/gateway.log
 ```
 
   </Tabs.Tab>
@@ -96,7 +94,7 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 
 ### 数据持久化
 
-线程数据存储在 `backend/.deer-flow/threads/`。在 Docker 部署中，此目录被绑定挂载到 langgraph 容器中。
+线程数据存储在 `backend/.deer-flow/threads/`。在 Docker 部署中，此目录会绑定挂载到 gateway 容器中。
 
 为避免容器重建时数据丢失：
 
@@ -156,14 +154,7 @@ SKILLS_PVC_NAME=deer-flow-skills-pvc
 
 ### nginx 配置
 
-nginx 路由所有流量，控制路由的关键环境变量：
-
-| 变量                 | 默认值           | 描述                          |
-| -------------------- | ---------------- | ----------------------------- |
-| `LANGGRAPH_UPSTREAM` | `langgraph:2024` | LangGraph 服务地址            |
-| `LANGGRAPH_REWRITE`  | `/`              | LangGraph 路由的 URL 重写前缀 |
-
-这些在 Docker Compose 环境中设置，并在容器启动时由 `envsubst` 处理。
+nginx 将流量路由到前端或 Gateway。`/api/langgraph/*` 会被重写到 Gateway 的 LangGraph-compatible `/api/*` 路由，因此不需要单独的 LangGraph upstream。
 
 ### 认证配置
 
@@ -181,8 +172,7 @@ openssl rand -base64 32
 
 | 服务                      | 最低配置         | 推荐配置         |
 | ------------------------- | ---------------- | ---------------- |
-| LangGraph（Agent 运行时） | 2 vCPU、4 GB RAM | 4 vCPU、8 GB RAM |
-| Gateway                   | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
+| Gateway + Agent 运行时    | 2 vCPU、4 GB RAM | 4 vCPU、8 GB RAM |
 | 前端                      | 0.5 vCPU、512 MB | 1 vCPU、1 GB     |
 | 沙箱容器（每会话）        | 1 vCPU、1 GB     | 2 vCPU、2 GB     |
 
@@ -193,9 +183,6 @@ openssl rand -base64 32
 ```bash
 # 检查 Gateway 健康状态
 curl http://localhost:8001/health
-
-# 检查 LangGraph 健康状态
-curl http://localhost:2024/ok
 
 # 通过 nginx 列出配置的模型（验证完整代理链）
 curl http://localhost:2026/api/models

@@ -106,7 +106,7 @@ export function InputBox({
   status = "ready",
   context,
   extraHeader,
-  isNewThread,
+  isWelcomeMode,
   threadId,
   initialValue,
   onContextChange,
@@ -126,7 +126,12 @@ export function InputBox({
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
   extraHeader?: React.ReactNode;
-  isNewThread?: boolean;
+  /**
+   * Whether to render the input in welcome layout (vertically centered,
+   * with hero + quick action suggestions).  This is purely a visual flag,
+   * decoupled from "the backend has created the thread" — see issue #2746.
+   */
+  isWelcomeMode?: boolean;
   threadId: string;
   initialValue?: string;
   onContextChange?: (
@@ -139,7 +144,7 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void;
+  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -248,12 +253,12 @@ export function InputBox({
   );
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
         return;
       }
-      if (!message.text) {
+      if (!message.text.trim() && message.files.length === 0) {
         return;
       }
       setFollowups([]);
@@ -271,11 +276,14 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => onSubmit?.(message), 0);
-        return;
+        return new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+          }, 0);
+        });
       }
 
-      onSubmit?.(message);
+      return onSubmit?.(message);
     },
     [
       context,
@@ -341,27 +349,21 @@ export function InputBox({
 
   const showFollowups =
     !disabled &&
-    !isNewThread &&
+    !isWelcomeMode &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
-  const followupsVisibilityChangeRef = useRef(onFollowupsVisibilityChange);
+  useEffect(() => {
+    onFollowupsVisibilityChange?.(showFollowups);
+  }, [onFollowupsVisibilityChange, showFollowups]);
 
   useEffect(() => {
-    followupsVisibilityChangeRef.current = onFollowupsVisibilityChange;
+    return () => onFollowupsVisibilityChange?.(false);
   }, [onFollowupsVisibilityChange]);
-
-  useEffect(() => {
-    followupsVisibilityChangeRef.current?.(showFollowups);
-  }, [showFollowups]);
 
   useEffect(() => {
     messagesRef.current = thread.messages;
   }, [thread.messages]);
-
-  useEffect(() => {
-    return () => followupsVisibilityChangeRef.current?.(false);
-  }, []);
 
   useEffect(() => {
     const streaming = status === "streaming";
@@ -437,26 +439,33 @@ export function InputBox({
   }, [context.model_name, disabled, isMock, status, threadId]);
 
   return (
-    <div ref={promptRootRef} className="relative flex flex-col gap-4">
+    <div
+      ref={promptRootRef}
+      className={cn(
+        "relative flex flex-col",
+        isWelcomeMode ? "gap-4" : "gap-2",
+      )}
+    >
       {showFollowups && (
-        <div className="flex items-center justify-center pb-2">
+        <div className="flex items-center justify-center pb-1">
           <div className="flex items-center gap-2">
             {followupsLoading ? (
-              <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-2 text-xs backdrop-blur-sm">
+              <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-1.5 text-xs backdrop-blur-sm">
                 {t.inputBox.followupLoading}
               </div>
             ) : (
-              <Suggestions className="min-h-16 w-fit items-start">
+              <Suggestions className="w-fit items-center">
                 {followups.map((s) => (
                   <Suggestion
                     key={s}
+                    className="py-1.5"
                     suggestion={s}
                     onClick={() => handleFollowupClick(s)}
                   />
                 ))}
                 <Button
                   aria-label={t.common.close}
-                  className="text-muted-foreground cursor-pointer rounded-full px-3 text-xs font-normal"
+                  className="text-muted-foreground h-auto cursor-pointer rounded-full px-2.5 py-1.5 text-xs font-normal"
                   variant="outline"
                   size="sm"
                   type="button"
@@ -846,12 +855,12 @@ export function InputBox({
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {!isNewThread && (
+        {!isWelcomeMode && (
           <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
         )}
       </PromptInput>
 
-      {isNewThread && searchParams.get("mode") !== "skill" && (
+      {isWelcomeMode && searchParams.get("mode") !== "skill" && (
         <div className="flex items-center justify-center pt-2">
           <SuggestionList />
         </div>

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -86,11 +87,11 @@ def _require_agents_api_enabled() -> None:
         )
 
 
-def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
+def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
     if include_soul:
-        soul = load_agent_soul(agent_cfg.name) or ""
+        soul = load_agent_soul(agent_cfg.name, user_id=user_id) or ""
 
     return AgentResponse(
         name=agent_cfg.name,
@@ -116,9 +117,10 @@ async def list_agents() -> AgentsListResponse:
     """
     _require_agents_api_enabled()
 
+    user_id = get_effective_user_id()
     try:
-        agents = list_custom_agents()
-        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True) for a in agents])
+        agents = list_custom_agents(user_id=user_id)
+        return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -144,7 +146,12 @@ async def check_agent_name(name: str) -> dict:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
-    available = not get_paths().agent_dir(normalized).exists()
+    user_id = get_effective_user_id()
+    paths = get_paths()
+    # Treat the name as taken if either the per-user path or the legacy shared
+    # path holds an agent — picking a name that collides with an unmigrated
+    # legacy agent would shadow the legacy entry once migration runs.
+    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
     return {"available": available, "name": normalized}
 
 
@@ -169,10 +176,11 @@ async def get_agent(name: str) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -202,10 +210,13 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
+    user_id = get_effective_user_id()
+    paths = get_paths()
 
-    agent_dir = get_paths().agent_dir(normalized_name)
+    agent_dir = paths.user_agent_dir(user_id, normalized_name)
+    legacy_dir = paths.agent_dir(normalized_name)
 
-    if agent_dir.exists():
+    if agent_dir.exists() or legacy_dir.exists():
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
 
     try:
@@ -232,8 +243,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
 
-        agent_cfg = load_agent_config(normalized_name)
-        return _agent_config_to_response(agent_cfg, include_soul=True)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     except HTTPException:
         raise
@@ -267,13 +278,20 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name)
+        agent_cfg = load_agent_config(name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    agent_dir = get_paths().agent_dir(name)
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
+    if not agent_dir.exists() and paths.agent_dir(name).exists():
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
+        )
 
     try:
         # Update config if any config fields changed
@@ -314,8 +332,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
         logger.info(f"Updated agent '{name}'")
 
-        refreshed_cfg = load_agent_config(name)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True)
+        refreshed_cfg = load_agent_config(name, user_id=user_id)
+        return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
 
     except HTTPException:
         raise
@@ -402,15 +420,22 @@ async def delete_agent(name: str) -> None:
         name: The agent name.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if no per-user copy exists; 409 if only a legacy
+            shared copy exists (suggesting the migration script).
     """
     _require_agents_api_enabled()
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
-
-    agent_dir = get_paths().agent_dir(name)
+    user_id = get_effective_user_id()
+    paths = get_paths()
+    agent_dir = paths.user_agent_dir(user_id, name)
 
     if not agent_dir.exists():
+        if paths.agent_dir(name).exists():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
+            )
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     try:

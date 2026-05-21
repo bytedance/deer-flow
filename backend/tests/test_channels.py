@@ -372,6 +372,37 @@ class TestExtractResponseText:
         # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
         assert _extract_response_text(result) == ""
 
+    def test_does_not_publish_loop_warning_on_tool_calling_ai_message(self):
+        """Loop-detection warning text on a tool-calling AI message is middleware-authored."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "search the repo"},
+                {
+                    "type": "ai",
+                    "content": "[LOOP DETECTED] You are repeating the same tool calls.",
+                    "tool_calls": [{"name": "grep", "args": {"pattern": "TODO"}, "id": "call_1"}],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == ""
+
+    def test_preserves_visible_text_when_stripping_loop_warning(self):
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "prepare the report"},
+                {
+                    "type": "ai",
+                    "content": "Here is the report.\n\n[LOOP DETECTED] You are repeating the same tool calls.",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}, "id": "call_1"}],
+                },
+            ]
+        }
+        assert _extract_response_text(result) == "Here is the report."
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
@@ -434,6 +465,47 @@ class TestChannelManager:
         assert csrf_token
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
+
+    def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "default"}]}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return MockResponse()
+
+        calls = []
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+
+            reply = await manager._fetch_gateway("/api/models", "models")
+
+            assert reply == "Available models:\n• default"
+            assert calls[0]["url"] == "http://gateway:8001/api/models"
+            assert calls[0]["timeout"] == 10
+            assert calls[0]["headers"]["X-DeerFlow-Internal-Token"]
+
+        _run(go())
 
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
@@ -689,7 +761,7 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context):
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None):
                 del assistant_id, context  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")

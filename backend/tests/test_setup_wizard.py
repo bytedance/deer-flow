@@ -313,7 +313,7 @@ class TestWriteConfigYaml:
                 {
                     "config_version": 5,
                     "log_level": "info",
-                    "token_usage": {"enabled": False},
+                    "token_usage": {"enabled": True},
                     "tool_groups": [{"name": "web"}, {"name": "file:read"}, {"name": "file:write"}, {"name": "bash"}],
                     "tools": [
                         {
@@ -361,7 +361,7 @@ class TestWriteConfigYaml:
             data = yaml.safe_load(f)
 
         assert data["log_level"] == "info"
-        assert data["token_usage"]["enabled"] is False
+        assert data["token_usage"]["enabled"] is True
         assert data["tool_groups"][0]["name"] == "web"
         assert data["summarization"]["max_tokens"] == 2048
         assert any(tool["name"] == "image_search" and tool["max_results"] == 5 for tool in data["tools"])

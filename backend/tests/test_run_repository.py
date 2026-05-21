@@ -3,9 +3,13 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+import re
+
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
+from deerflow.runtime import RunManager, RunStatus
 
 
 async def _make_repo(tmp_path):
@@ -167,6 +171,61 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "success-run",
+            status="success",
+            total_input_tokens=70,
+            total_output_tokens=30,
+            total_tokens=100,
+            lead_agent_tokens=80,
+            subagent_tokens=15,
+            middleware_tokens=5,
+        )
+        await repo.put("error-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "error-run",
+            status="error",
+            total_input_tokens=20,
+            total_output_tokens=30,
+            total_tokens=50,
+            lead_agent_tokens=40,
+            subagent_tokens=10,
+        )
+        await repo.put("running-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "running-run",
+            status="running",
+            total_input_tokens=900,
+            total_output_tokens=99,
+            total_tokens=999,
+            lead_agent_tokens=999,
+        )
+        await repo.put("other-thread-run", thread_id="t2", status="running")
+        await repo.update_run_completion(
+            "other-thread-run",
+            status="success",
+            total_tokens=888,
+            lead_agent_tokens=888,
+        )
+
+        agg = await repo.aggregate_tokens_by_thread("t1")
+
+        assert agg["total_tokens"] == 150
+        assert agg["total_input_tokens"] == 90
+        assert agg["total_output_tokens"] == 60
+        assert agg["total_runs"] == 2
+        assert agg["by_model"] == {"unknown": {"tokens": 150, "runs": 2}}
+        assert agg["by_caller"] == {
+            "lead_agent": 120,
+            "subagent": 25,
+            "middleware": 5,
+        }
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_thread_ordered_desc(self, tmp_path):
         """list_by_thread returns newest first."""
         repo = await _make_repo(tmp_path)
@@ -193,4 +252,180 @@ class TestRunRepository:
         await repo.put("r2", thread_id="t1", user_id="bob")
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_model_name_persistence(self, tmp_path):
+        """RunRepository should persist, normalize, and truncate model_name correctly via SQL."""
+        from deerflow.persistence.engine import get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        repo = RunRepository(get_session_factory())
+
+        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o")
+        row = await repo.get("run-1")
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+
+        long_name = "a" * 200
+        await repo.put("run-2", thread_id="thread-1", model_name=long_name)
+        row2 = await repo.get("run-2")
+        assert row2["model_name"] == "a" * 128
+
+        await repo.put("run-3", thread_id="thread-1", model_name=123)
+        row3 = await repo.get("run-3")
+        assert row3["model_name"] == "123"
+
+        await repo.put("run-4", thread_id="thread-1", model_name=None)
+        row4 = await repo.get("run-4")
+        assert row4["model_name"] is None
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_reuses_shared_model_name_expression(self):
+        captured = []
+
+        class FakeResult:
+            def all(self):
+                return []
+
+        class FakeSession:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return FakeResult()
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        repo = RunRepository(lambda: FakeSessionContext())
+
+        agg = await repo.aggregate_tokens_by_thread("t1")
+        assert agg == {
+            "total_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_runs": 0,
+            "by_model": {},
+            "by_caller": {"lead_agent": 0, "subagent": 0, "middleware": 0},
+        }
+        assert len(captured) == 1
+
+        stmt = captured[0]
+        compiled_sql = str(stmt.compile(dialect=postgresql.dialect()))
+        select_sql, group_by_sql = compiled_sql.split(" GROUP BY ", maxsplit=1)
+        model_expr_pattern = r"coalesce\(runs\.model_name, %\(([^)]+)\)s\)"
+
+        select_match = re.search(model_expr_pattern + r" AS model", select_sql)
+        group_by_match = re.fullmatch(model_expr_pattern, group_by_sql.strip())
+
+        assert select_match is not None
+        assert group_by_match is not None
+        assert select_match.group(1) == group_by_match.group(1)
+
+    @pytest.mark.anyio
+    async def test_run_manager_hydrates_store_only_run_from_sql(self, tmp_path):
+        """RunManager should hydrate historical runs from SQL-backed store."""
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "sql-store-only",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            status="success",
+            metadata={"source": "sql"},
+            kwargs={"input": "value"},
+            model_name="model-a",
+        )
+        manager = RunManager(store=repo)
+
+        record = await manager.get("sql-store-only")
+        rows = await manager.list_by_thread("thread-1")
+
+        assert record is not None
+        assert record.run_id == "sql-store-only"
+        assert record.status == RunStatus.success
+        assert record.metadata == {"source": "sql"}
+        assert record.kwargs == {"input": "value"}
+        assert record.model_name == "model-a"
+        assert [run.run_id for run in rows] == ["sql-store-only"]
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_cancel_persists_interrupted_status_to_sql(self, tmp_path):
+        """RunManager.cancel should write interrupted status to SQL-backed store."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+        await manager.set_status(record.run_id, RunStatus.running)
+
+        cancelled = await manager.cancel(record.run_id)
+        row = await repo.get(record.run_id)
+
+        assert cancelled is True
+        assert row is not None
+        assert row["status"] == "interrupted"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name(self, tmp_path):
+        """RunRepository.update_model_name should update model_name for existing run."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", "updated-model")
+        row = await repo.get("r1")
+        assert row["model_name"] == "updated-model"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_normalizes_value(self, tmp_path):
+        """RunRepository.update_model_name should normalize and truncate model_name."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        long_name = "a" * 200
+        await repo.update_model_name("r1", long_name)
+        row = await repo.get("r1")
+        assert row["model_name"] == "a" * 128
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_to_none(self, tmp_path):
+        """RunRepository.update_model_name should allow setting model_name to None."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", None)
+        row = await repo.get("r1")
+        assert row["model_name"] is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_persists_to_sql(self, tmp_path):
+        """RunManager.update_model_name should persist to SQL-backed store without integrity error."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "gpt-4o")
+
+        row = await repo.get(record.run_id)
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_twice(self, tmp_path):
+        """RunManager.update_model_name should support multiple updates."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "model-1")
+        await manager.update_model_name(record.run_id, "model-2")
+
+        row = await repo.get(record.run_id)
+        assert row["model_name"] == "model-2"
         await _cleanup()
