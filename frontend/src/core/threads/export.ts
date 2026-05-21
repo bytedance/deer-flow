@@ -6,7 +6,7 @@ import {
   hasContent,
   hasToolCalls,
   isHiddenFromUIMessage,
-  stripUploadedFilesTag,
+  stripInternalMarkers,
 } from "../messages/utils";
 
 import type { AgentThread } from "./types";
@@ -48,7 +48,10 @@ function visibleMessages(
 function formatMessageContent(message: Message): string {
   const text = extractContentFromMessage(message);
   if (!text) return "";
-  return stripUploadedFilesTag(text);
+  // Defence-in-depth: even if a middleware-injected marker slipped through
+  // the `hide_from_ui` filter, scrub every known internal tag before the
+  // content lands in a user-visible export file.
+  return stripInternalMarkers(text);
 }
 
 function formatToolCalls(message: Message): string {
@@ -151,10 +154,11 @@ function buildJSONMessage(
       : undefined;
 
   // Drop rows with no exportable payload (empty content + no opted-in
-  // reasoning / tool_calls). This matches the Markdown path's `continue`
-  // on `!content && !toolCalls && !reasoning` so the two formats agree on
-  // which AI fragments are visible to the user.
-  if (!content && reasoning === undefined && toolCalls === undefined) {
+  // reasoning / tool_calls). Uses falsy semantics so `reasoning: ""` (the
+  // empty string ``extractReasoningContentFromMessage`` can hand back) is
+  // treated the same way Markdown's `!reasoning` continue does — otherwise
+  // an opted-in but empty reasoning field would leak as `{reasoning: ""}`.
+  if (!content && !reasoning && !toolCalls) {
     return null;
   }
 

@@ -239,4 +239,79 @@ describe("formatThreadAsJSON", () => {
     const parsed = JSON.parse(raw) as { messages: unknown[] };
     expect(parsed.messages).toHaveLength(0);
   });
+
+  it("strips <system-reminder>/<memory>/<current_date> as defence in depth", () => {
+    // Primary protection is `isHiddenFromUIMessage` filtering the whole
+    // hidden HumanMessage. If a regression strips the `hide_from_ui` flag
+    // (or the marker leaks into an otherwise-visible message), the
+    // sanitiser must still scrub the payload before export.
+    const leaky = human("real user text", {
+      id: "leak-1",
+      content:
+        "<system-reminder>\n<memory>secret fact A</memory>\n<current_date>2026-01-01, Tuesday</current_date>\n</system-reminder>\nreal user text",
+      // Deliberately *not* setting hide_from_ui to model the regression
+      // case the defence-in-depth strip is guarding against.
+    } as unknown as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [leaky]);
+    expect(raw).not.toContain("<system-reminder>");
+    expect(raw).not.toContain("<memory>");
+    expect(raw).not.toContain("<current_date>");
+    expect(raw).not.toContain("secret fact A");
+    expect(raw).toContain("real user text");
+  });
+
+  it("sanitises tool message content when includeToolMessages is true", () => {
+    const message = {
+      id: "t-leak",
+      type: "tool",
+      content:
+        "Task Succeeded. Result: payload\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+      name: "task",
+      tool_call_id: "call-leak",
+    } as unknown as Message;
+
+    const raw = formatThreadAsJSON(makeThread(), [message], {
+      includeToolMessages: true,
+    });
+    expect(raw).toContain("Task Succeeded");
+    expect(raw).not.toContain("<uploaded_files>");
+    expect(raw).not.toContain("secret.pdf");
+  });
+
+  it("preserves text and image_url parts in mixed content arrays", () => {
+    // `extractContentFromMessage` keeps `text` and `image_url` parts and
+    // drops `thinking` parts. The JSON export must agree with that
+    // contract.
+    const message = ai("placeholder", {
+      id: "ai-mixed",
+      content: [
+        { type: "thinking", thinking: "internal reasoning" },
+        { type: "text", text: "user-visible answer" },
+        {
+          type: "image_url",
+          image_url: { url: "https://example.invalid/cat.png" },
+        },
+      ],
+    } as unknown as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).toContain("user-visible answer");
+    expect(raw).toContain("https://example.invalid/cat.png");
+    expect(raw).not.toContain("internal reasoning");
+  });
+
+  it("drops opted-in empty reasoning rather than emit reasoning: ''", () => {
+    // `extractReasoningContentFromMessage` can legitimately hand back ""
+    // for an AI message that has no reasoning content. The export must
+    // mirror the Markdown path's `!reasoning` `continue` and drop the row
+    // instead of leaking `{reasoning: ""}`.
+    const message = ai("", {
+      id: "ai-empty-reasoning",
+      additional_kwargs: { reasoning_content: "" },
+    } as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message], {
+      includeReasoning: true,
+    });
+    const parsed = JSON.parse(raw) as { messages: unknown[] };
+    expect(parsed.messages).toHaveLength(0);
+  });
 });
