@@ -184,7 +184,17 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path changes or the file's mtime increases. This keeps Gateway and LangGraph reads aligned with `config.yaml` edits without requiring a manual process restart.
 
-**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. Infrastructure fields that the gateway captures once at startup are **restart-required**: `database.*`, `checkpointer.*` (including SQLite WAL/journal settings), `run_events.*`, `stream_bridge.*`, `sandbox.use`, `log_level`, and the `channels.*` IM platform credentials. Changing those without restart leaves the live process bound to the old engines.
+**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. Infrastructure fields that the gateway captures once at startup are **restart-required**:
+
+| Field | Why a restart is required |
+|---|---|
+| `database.*` | `init_engine_from_config()` runs once during `langgraph_runtime()` startup; the SQLAlchemy engine holds the connection pool. |
+| `checkpointer.*` (including SQLite WAL/journal settings) | `make_checkpointer()` binds the persistent checkpointer once at startup. |
+| `run_events.*` | `make_run_event_store()` selects memory- vs. SQL-backed implementation at startup. |
+| `stream_bridge.*` | `make_stream_bridge()` constructs the bridge object once. |
+| `sandbox.use` | `get_sandbox_provider()` caches the provider singleton (`_default_sandbox_provider`); a new class path takes effect only on next process start. |
+| `log_level` | `apply_logging_level()` is called only in `app.py` startup; it mutates the root logger's level, and `get_app_config()` returning a fresh `AppConfig` does not retrigger it. |
+| `channels.*` IM platform credentials | `start_channel_service()` is invoked once during startup; live channels are not rebuilt on config change. |
 
 Configuration priority:
 1. Explicit `config_path` argument

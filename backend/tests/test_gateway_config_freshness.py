@@ -20,6 +20,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway import deps as gateway_deps
 from app.gateway.deps import get_config
 from deerflow.config.app_config import (
     AppConfig,
@@ -108,3 +109,35 @@ def test_get_config_respects_test_set_app_config():
     app = _build_app()
     client = TestClient(app)
     assert client.get("/probe").json() == {"log_level": "warning"}
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        FileNotFoundError("config.yaml not found"),
+        PermissionError("config.yaml not readable"),
+        ValueError("invalid config"),
+        RuntimeError("yaml parse error"),
+    ],
+)
+def test_get_config_returns_503_on_any_load_failure(monkeypatch, exception):
+    """Any failure to materialise the config must surface as 503, not 500.
+
+    Bytedance/deer-flow issue #3107 BUG-001 review: the original snapshot
+    contract returned 503 when ``app.state.config is None``. The first cut of
+    this fix only mapped ``FileNotFoundError`` to 503, which left
+    ``PermissionError`` / ``yaml.YAMLError`` / ``ValidationError`` etc. bubbling
+    up as 500. Catch every load failure at the request boundary.
+    """
+
+    def _broken_get_app_config():
+        raise exception
+
+    monkeypatch.setattr(gateway_deps, "get_app_config", _broken_get_app_config)
+
+    app = _build_app()
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/probe")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Configuration not available"}

@@ -8,6 +8,7 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -21,6 +22,8 @@ from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -30,7 +33,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-def get_config(request: Request) -> AppConfig:  # noqa: ARG001 - kept for FastAPI Depends signature
+def get_config() -> AppConfig:
     """Return the freshest ``AppConfig`` for the current request.
 
     Routes through :func:`deerflow.config.app_config.get_app_config`, which
@@ -41,10 +44,16 @@ def get_config(request: Request) -> AppConfig:  # noqa: ARG001 - kept for FastAP
     Reading from ``get_app_config`` here closes the bytedance/deer-flow
     issue #3107 BUG-001 split-brain where the worker / lead-agent thread saw
     a stale startup snapshot.
+
+    Any failure to materialise the config (missing file, permission denied,
+    YAML parse error, validation error) is reported as 503 — semantically
+    "the gateway cannot serve requests without a usable configuration" — and
+    logged with the original exception so operators have something to debug.
     """
     try:
         return get_app_config()
-    except FileNotFoundError as exc:
+    except Exception as exc:  # noqa: BLE001 - request boundary: log and degrade gracefully
+        logger.exception("Failed to load AppConfig at request time")
         raise HTTPException(status_code=503, detail="Configuration not available") from exc
 
 
@@ -151,7 +160,7 @@ def get_run_context(request: Request) -> RunContext:
 
     Returns a *base* context with infrastructure dependencies.
     """
-    config = get_config(request)
+    config = get_config()
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
