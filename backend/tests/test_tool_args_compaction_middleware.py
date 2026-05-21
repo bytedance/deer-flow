@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+    SYNTHETIC_DANGLING_TOOL_RESULT_KEY,
+    DanglingToolCallMiddleware,
+)
 from deerflow.agents.middlewares.tool_args_compaction_middleware import (
     ToolArgsCompactionMiddleware,
 )
@@ -76,6 +80,20 @@ class TestBuildCompactedMessages:
         msgs = [_ai_with_tool_calls([_write_file_tool_call(content="x" * 3000)])]
 
         assert mw._build_compacted_messages(msgs) is None
+
+    def test_does_not_treat_synthetic_dangling_tool_result_as_completed(self):
+        dangling_mw = DanglingToolCallMiddleware()
+        compact_mw = ToolArgsCompactionMiddleware()
+        large_content = "x" * 3000
+        msgs = [_ai_with_tool_calls([_write_file_tool_call(content=large_content)])]
+
+        patched_by_dangling = dangling_mw._build_patched_messages(msgs)
+
+        assert patched_by_dangling is not None
+        synthetic_tool_msg = patched_by_dangling[1]
+        assert isinstance(synthetic_tool_msg, ToolMessage)
+        assert synthetic_tool_msg.additional_kwargs[SYNTHETIC_DANGLING_TOOL_RESULT_KEY] is True
+        assert compact_mw._build_compacted_messages(patched_by_dangling) is None
 
     def test_marker_omits_original_content_preview(self):
         mw = ToolArgsCompactionMiddleware(write_file_max_chars=20)

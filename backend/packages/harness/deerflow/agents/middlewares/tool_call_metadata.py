@@ -27,13 +27,9 @@ def _clone_raw_tool_call_with_updated_args(raw_tool_call: dict[str, Any], args: 
     if isinstance(function, dict):
         cloned_function = dict(function)
         if "arguments" in cloned_function:
-            cloned_function["arguments"] = (
-                json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["arguments"], str) else dict(args)
-            )
+            cloned_function["arguments"] = json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["arguments"], str) else dict(args)
         elif "args" in cloned_function:
-            cloned_function["args"] = (
-                json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["args"], str) else dict(args)
-            )
+            cloned_function["args"] = json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["args"], str) else dict(args)
         cloned["function"] = cloned_function
 
     return cloned
@@ -48,9 +44,7 @@ def _build_message_update(
 ) -> dict[str, Any]:
     """Build a model_copy update dict while keeping raw provider tool metadata in sync."""
     kept_ids = {tc["id"] for tc in tool_calls if isinstance(tc.get("id"), str) and tc["id"]}
-    tool_calls_by_id = {
-        tc["id"]: tc for tc in tool_calls if isinstance(tc.get("id"), str) and tc["id"] and isinstance(tc.get("args"), dict)
-    }
+    tool_calls_by_id = {tc["id"]: tc for tc in tool_calls if isinstance(tc.get("id"), str) and tc["id"] and isinstance(tc.get("args"), dict)}
 
     update: dict[str, Any] = {"tool_calls": tool_calls}
     if content is not None:

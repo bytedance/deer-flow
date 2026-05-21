@@ -10,6 +10,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import SYNTHETIC_DANGLING_TOOL_RESULT_KEY
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_updated_tool_calls
 
 _DEFAULT_WRITE_FILE_CONTEXT_MAX_CHARS = 2000
@@ -17,6 +18,10 @@ _DEFAULT_WRITE_FILE_CONTEXT_MAX_CHARS = 2000
 
 def _omitted_write_file_content_marker(length: int) -> str:
     return f"[write_file content omitted in model context: {length} chars]"
+
+
+def _is_synthetic_dangling_tool_result(message: ToolMessage) -> bool:
+    return bool((getattr(message, "additional_kwargs", None) or {}).get(SYNTHETIC_DANGLING_TOOL_RESULT_KEY))
 
 
 class ToolArgsCompactionMiddleware(AgentMiddleware[AgentState]):
@@ -29,11 +34,7 @@ class ToolArgsCompactionMiddleware(AgentMiddleware[AgentState]):
         if self._write_file_max_chars <= 0:
             return None
 
-        completed_tool_call_ids = {
-            msg.tool_call_id
-            for msg in messages
-            if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and msg.tool_call_id
-        }
+        completed_tool_call_ids = {msg.tool_call_id for msg in messages if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and msg.tool_call_id and not _is_synthetic_dangling_tool_result(msg)}
         if not completed_tool_call_ids:
             return None
 

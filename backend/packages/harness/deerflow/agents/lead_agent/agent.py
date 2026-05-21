@@ -34,8 +34,8 @@ from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitM
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState

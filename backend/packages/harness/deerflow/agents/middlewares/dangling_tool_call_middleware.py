@@ -26,6 +26,8 @@ from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
 
+SYNTHETIC_DANGLING_TOOL_RESULT_KEY = "deerflow_synthetic_dangling_tool_result"
+
 
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """Inserts placeholder ToolMessages for dangling tool calls before model invocation.
@@ -150,6 +152,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                             tool_call_id=tc_id,
                             name=tc.get("name", "unknown"),
                             status="error",
+                            additional_kwargs={SYNTHETIC_DANGLING_TOOL_RESULT_KEY: True},
                         )
                     )
                     patch_count += 1
