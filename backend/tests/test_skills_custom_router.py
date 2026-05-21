@@ -37,8 +37,10 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
 
 
 def _make_test_app(config) -> FastAPI:
+    from app.gateway.deps import get_config
+
     app = FastAPI()
-    app.state.config = config
+    app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
     return app
 

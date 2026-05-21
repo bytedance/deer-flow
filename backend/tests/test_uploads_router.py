@@ -627,10 +627,12 @@ def test_upload_limits_endpoint_reads_uploads_config():
 
 
 def test_upload_limits_endpoint_requires_thread_access():
+    from app.gateway.deps import get_config
+
     cfg = MagicMock()
     cfg.uploads = {}
     app = make_authed_test_app(owner_check_passes=False)
-    app.state.config = cfg
+    app.dependency_overrides[get_config] = lambda: cfg
     app.include_router(uploads.router)
 
     with TestClient(app) as client:

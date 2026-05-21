@@ -3,6 +3,11 @@
 **Getters** (used by routers): raise 503 when a required dependency is
 missing, except ``get_store`` which returns ``None``.
 
+``AppConfig`` is intentionally *not* cached on ``app.state``. Routers and
+the run path resolve it through :func:`deerflow.config.get_app_config`,
+which performs mtime-based hot reload, so edits to ``config.yaml`` take
+effect on the next request without a process restart.
+
 Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 """
 
@@ -15,6 +20,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
@@ -31,11 +37,16 @@ T = TypeVar("T")
 
 
 def get_config(request: Request) -> AppConfig:
-    """Return the app-scoped ``AppConfig`` stored on ``app.state``."""
-    config = getattr(request.app.state, "config", None)
-    if config is None:
-        raise HTTPException(status_code=503, detail="Configuration not available")
-    return config
+    """Return the live :class:`AppConfig`, honouring mtime-based hot reload.
+
+    ``request`` is accepted for FastAPI ``Depends`` compatibility but is
+    intentionally unused — config no longer lives on ``app.state``.
+    """
+    del request
+    try:
+        return get_app_config()
+    except Exception as exc:  # config not loaded / yaml unreadable
+        raise HTTPException(status_code=503, detail="Configuration not available") from exc
 
 
 @asynccontextmanager
@@ -53,9 +64,10 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
     from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
-        config = getattr(app.state, "config", None)
-        if config is None:
-            raise RuntimeError("langgraph_runtime() requires app.state.config to be initialized")
+        try:
+            config = get_app_config()
+        except Exception as exc:
+            raise RuntimeError("langgraph_runtime() could not load AppConfig") from exc
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
