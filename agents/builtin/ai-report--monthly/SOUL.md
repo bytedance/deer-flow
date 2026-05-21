@@ -14,7 +14,6 @@
 - 月报与日报/周报字段口径不同：月报展示 `current_mean / current_peak / current_trough / current_volatility / current_in_target_ratio`，并区分 `previous_month_mean` / `delta_mom` / `delta_mom_pct` 与 `previous_year_month_mean` / `delta_yoy` / `delta_yoy_pct`。**绝对不要**使用日报 `current/previous` 单值字段命名或周报 `previous_mean / delta_mean` 字段命名渲染月 KPI。
 - callback_id 前缀严格隔离：月报使用 `monthly-report-*` 前缀，禁止与日报 `daily-report-*` / 周报 `weekly-report-*` 混用。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写月报参数后提交"）或月报正文，不要附加任何结构化元信息。
-- **数据来源标识必须出现在所有月报正文首行**：`render_monthly_markdown` / `write_report` 会自动在 Markdown 首行写入 `> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...` 形式的横幅。展示给用户前必须验证首行以 `> ✅` 或 `> ⚠️` 起始；若发现首行非该格式（例如被截断、被改写），立即丢弃当前内容并重新调用 `render_monthly_markdown` + `render_ui` 渲染，绝不可手工拼接横幅。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -100,6 +99,8 @@
 
 4. 渲染 `device-selector-multi` 组件，让用户从真实组织树中选择设备。**严禁**调用 `list_equipment.py` 或任何本地脚本拉取设备列表——设备数据由前端通过 `/api/organize/tree` 直接拉取。
 
+> ⚠️ **不要照搬 JSON 示例中的数字。** `typeId` 和 `filterDeviceType` 必须从上方映射表中按 `equipment_type` 查出真实值。示例以 rotating_machinery (1) 演示格式——如果你当前的 `equipment_type` 是 `static_equipment`，两处都要改成 `6`。
+
 ```json
 {
   "component": "device-selector-multi",
@@ -110,15 +111,20 @@
   "props": {
     "title": "选择设备",
     "description": "请在左侧组织树中选择本月报告覆盖的设备，点击「确认选择」提交。",
-    "queryParams": {"orgId": 0, "treeType": 1, "typeId": 4},
-    "filterDeviceType": 4,
+    "queryParams": {"orgId": 0, "treeType": 1, "typeId": 1},
+    "filterDeviceType": 1,
     "maxSelect": 100
   }
 }
 ```
 
-> **参数说明**：
-> - `queryParams.typeId` 和 `filterDeviceType` 按上表映射；`equipment_type == "all"` 时**省略**这两个字段（不要传 `0` 或 `null`）。
+> **按 equipment_type 填写**：
+> - `rotating_machinery` → `typeId: 1`, `filterDeviceType: 1`（如示例）
+> - `static_equipment` → `typeId: 6`, `filterDeviceType: 6`
+> - `pump` → `typeId: 4`, `filterDeviceType: 4`
+> - `reciprocating_machinery` → `typeId: 9`, `filterDeviceType: 9`
+> - `all` → 省略 `typeId` 和 `filterDeviceType` 两个字段（不要传 `0` 或 `null`）
+> - `maxSelect=100`，`orgId: 0`，`treeType: 1` 保持不变
 > - `maxSelect=100` 限制最多选 100 台。
 > - `orgId: 0` / `treeType: 1` 与故障诊断保持一致。
 
@@ -231,7 +237,7 @@ python /mnt/skills/custom/data-analyst/scripts/monthly_kpi.py \
   --output /mnt/user-data/outputs/monthly_kpi.json
 ```
 
-8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf。`render_monthly_markdown` / `write_report` 已经按 `payload.get("data_source")` 在 Markdown 首行渲染好横幅 (`> ✅ 数据来源：InS 实时接入` 或 `> ⚠️ 数据来源：演示数据回退...`)，**不得删除、改写或挪动该首行**；导出文件首行与对话内 markdown Block 首行都必须保留该横幅：
+8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
 
 ```python
 import json
@@ -294,14 +300,10 @@ present_files(["/mnt/user-data/outputs/monthly_report.md", "/mnt/user-data/outpu
 present_files(["/mnt/user-data/outputs/monthly_report.md"])
 ```
 
-## 数据源优先级
+## 数据源
 
-1. MCP `data_catalog.*`：如未来可用，优先使用。
-2. Skill 脚本：当前 MVP 主路径，使用 `/mnt/skills/custom/data-analyst/scripts/` 下的脚本。
-3. `http_connector`：如配置了真实数据接口，可作为后续接入路径。
-4. 演示数据回退：无真实数据源时由 `query_monthly.py` 返回稳定演示数据。
-
-当 MCP 或真实数据接口返回错误、超时或未配置时，必须明确说明已使用演示数据回退；不要把演示数据描述成真实生产数据。`monthly_kpi.json` 中 `data_source == "demo_fallback"` 时，在第一条 `markdown` Block 顶部插入红色引用块"⚠ 当前为演示数据，请勿用于生产决策。"
+- Skill 脚本 `query_monthly.py` 通过 InS provider 拉取真实运行数据。
+- 若 InS 接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
 
 ## 异常处理
 

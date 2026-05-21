@@ -174,15 +174,11 @@ WARN  http_connector retry connector_name=list_datasets tenant_id=default status
 
 ## 设备日/周/月报真数据（InS）
 
-设备日报、周报、月报支持通过 InS（神固云）实时拉取数据。该链路只在 data-analyst 脚本内生效，不会改变其它 `http_connector` 的调用方式。
+设备日报、周报、月报通过 InS（神固云）实时拉取数据。该链路只在 data-analyst 脚本内生效，不会改变其它 `http_connector` 的调用方式。
 
-### 启用方式
+### 配置方式
 
-启用真数据只需要设置：
-
-```bash
-export DEER_FLOW_DATA_PROVIDER="ins"
-```
+设备日/周/月报的 data provider 固定为 `ins`，不再通过 `DEER_FLOW_DATA_PROVIDER` 切换。
 
 可选覆盖项：
 
@@ -190,7 +186,6 @@ export DEER_FLOW_DATA_PROVIDER="ins"
 export INS_FACTORY_ID="FAC-001"
 ```
 
-- `DEER_FLOW_DATA_PROVIDER=ins`：切换 daily / weekly / monthly 三类设备报表脚本到 InS provider
 - `INS_FACTORY_ID`：可选工厂维度透传；未设置时不会附加 `factoryId` 参数
 
 ### 四类 endpoint series
@@ -248,21 +243,20 @@ OpenSpec change `wire-equipment-reports-real-data` §11 引入 10 个新 skill�
 - 静设备腐蚀诊断走 `ins-*-6k` 三件套 + `static-equipment-corrosion-diagnosis`；
 - 默认旋转机组（MAC / RM, positionType 81..83）继续走原 8k 默认 skill（`ins-get-trend-data` / `ins-extract-trend-features` / `ins-device-analysis`）。
 
-### 回退触发条件
+### 失败处理
 
-当以下任一情况发生时，脚本会自动回退到 demo 数据，并在输出里写入 `data_source="demo_fallback"` 与 `data_notes[]`：
+当以下任一情况发生时，脚本会以失败收尾（`{"error": "HttpProviderError: ..."}` 写到 stdout），**不再回退演示数据**，由上层 SOUL 负责给出明确的错误提示：
 
 - 网络失败 / 超时 / 401 / 其它 InS 请求异常
 - KPI 无法映射到 InS 测点
 - 设备不存在或找不到可用测点
 - features-tool 不可用
-- 对比区间与当前区间来源不一致，需要统一降级
 
 成功走 InS 时，输出为 `data_source="ins"` 且 `data_notes=[]`。
 
 ### Docker sandbox 约束
 
-这条链路依赖 `FEATURES_TOOL_ROOT` 指向的 features-tool 与 `ins` 客户端，因此默认面向 Docker sandbox 运行环境设计。脱离该环境时，provider 会显式报错并触发 demo fallback，而不是返回不完整真数据。
+这条链路依赖 `FEATURES_TOOL_ROOT` 指向的 features-tool 与 `ins` 客户端，因此默认面向 Docker sandbox 运行环境设计。脱离该环境时 provider 会显式失败，**不会**返回不完整的演示数据。
 
 更多开发约束见 [backend/CLAUDE.md](../CLAUDE.md)。
 

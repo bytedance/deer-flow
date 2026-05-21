@@ -315,15 +315,15 @@ MCP servers and skill states in a single file:
 
 ### InS-backed equipment reports
 
-The data-analyst daily / weekly / monthly equipment report scripts can switch from deterministic demo data to InS real data.
+The data-analyst daily / weekly / monthly equipment report scripts always go through the InS provider — there is no demo-data fallback.
 
-- Set `DEER_FLOW_DATA_PROVIDER=ins` to enable the InS provider for report queries.
+- The provider for these three reports is fixed to `ins` and ignores the `DEER_FLOW_DATA_PROVIDER` env var.
 - Set `INS_FACTORY_ID` only when the downstream InS deployment requires a factory-scoped `factoryId` parameter.
-- Report payloads now carry top-level provenance fields: `data_source` (`ins` or `demo_fallback`) and `data_notes[]`.
+- Successful runs emit top-level provenance fields: `data_source="ins"` and `data_notes=[]`.
 - The InS adapter handles four endpoint series: `2k` (legacy vibration, nested name-based rows), `6k` (corrosion monitoring, nested key-based rows), `8k` (default rotating machinery, flat rows), and `9k` (high-end rotating / reciprocating machinery, flat rows).
-- When the InS path is unavailable or partially inconsistent, query scripts fall back to demo data and preserve the reason in `data_notes[]` so KPI/export layers can render the warning banner.
+- When the InS path is unavailable (network/auth/missing point/features-tool unavailable), the query script writes `{"error": "HttpProviderError: ..."}` to stdout and exits; the calling SOUL must surface that error rather than generating a fake report.
 
-See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for the detailed enablement, fallback, and threshold mapping notes.
+See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for failure handling and threshold mapping notes.
 
 ### LangSmith Tracing
 

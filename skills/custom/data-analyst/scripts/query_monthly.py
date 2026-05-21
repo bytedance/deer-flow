@@ -16,9 +16,13 @@ Shape::
       "compare_periods": {<basis>: {start, end}},
       "current": {weekly[], aggregated, maintenance, alarms, critical_events, improvement_tracking},
       "compare": {<basis>: {weekly, aggregated, maintenance, alarms} | null},
-      "data_source": "demo_fallback",
+      "data_source": "ins",
       "compare_warning": "..." | null,
     }
+
+Data is fetched from the InS-backed daily provider on a per-day basis and
+aggregated into the monthly shape. Any failure (``HttpProviderError``)
+propagates as ``{"error": ...}`` on stdout.
 
 Key contracts (see design doc + sprint plan):
 - Uses ``calendar.monthrange(year, month)`` for day_count (handles 2/29).
@@ -29,8 +33,6 @@ Key contracts (see design doc + sprint plan):
 - ``maintenance.total_uptime_hours`` is computed as
   ``day_count * 24 - total_downtime_minutes / 60`` and is emitted by this
   script (not derived downstream).
-- Demo improvement_tracking always returns 3 entries spanning
-  ``done`` / ``in_progress`` / ``delayed`` states.
 """
 
 from __future__ import annotations
@@ -343,24 +345,22 @@ def fetch_month_with_provenance(
     eq_type: str = "all",
     aggregate: bool = False,
     equipment_meta: dict[str, dict] | None = None,
-    provider_mode: str | None = None,
 ) -> tuple[dict, str, list[str]]:
     """Provider-aware variant of :func:`fetch_month`.
 
     Composes the month from per-day calls to
     :func:`query_daily.fetch_day_with_provenance` so the existing weekly
     bucketing + aggregation logic keeps owning the rich monthly shape
-    (``weekly[]`` / ``aggregated`` / ``maintenance`` / ``critical_events``)
-    while data_source/notes propagate up unchanged. If any day falls back
-    to demo, the entire month is reported as ``demo_fallback`` to keep
-    the report internally consistent.
+    (``weekly[]`` / ``aggregated`` / ``maintenance`` / ``critical_events``).
+    Per-day calls resolve to the InS-backed daily provider; any
+    ``HttpProviderError`` propagates so the CLI surfaces the failure
+    instead of masking it with synthetic output.
     """
     query_daily = _load_query_daily()
     year, month = _parse_report_month(report_month)
     month_start, month_end, day_count = _month_bounds(year, month)
     week_buckets = _build_week_buckets(month_start, day_count)
 
-    # Generate daily series first (provider-aware via fetch_day_with_provenance).
     start_dt = datetime.strptime(month_start, "%Y-%m-%d")
     daily_entries: list[dict] = []
     sources: set[str] = set()
@@ -374,7 +374,6 @@ def fetch_month_with_provenance(
             eq_type,
             False,
             equipment_meta,
-            provider_mode,
         )
         sources.add(day_src)
         for note in day_notes:
@@ -427,7 +426,7 @@ def fetch_month_with_provenance(
             "equipment": a.get("equipment", ""),
             "level": a.get("level", "critical"),
             "message": a.get("message", ""),
-            # Demo defaults; real CMMS will overwrite both.
+            # Maintenance dataset placeholder; real CMMS will overwrite both.
             "duration_minutes": _deterministic_int(
                 f"crit|{a.get('time', '')}|{a.get('equipment_id', a.get('equipment', ''))}", 30, 180
             ),
@@ -459,14 +458,12 @@ def fetch_month_with_provenance(
     # without re-scanning daily list.
     current["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
 
-    if len(sources) == 1:
-        data_source = next(iter(sources))
-    else:
-        notes.append(
-            f"per-day data_source mismatch ({sorted(sources)}); "
-            "downgraded month to demo_fallback for consistency"
+    if len(sources) != 1:
+        raise RuntimeError(
+            f"unexpected per-day data_source mismatch ({sorted(sources)}); "
+            "InS provider should always tag results as 'ins'"
         )
-        data_source = "demo_fallback"
+    data_source = next(iter(sources))
     return current, data_source, notes
 
 
@@ -561,37 +558,13 @@ def build_result(
         }
 
     notes: list[str] = list(current_notes) + compare_notes_all
-    data_source = current_src
     all_sources = {current_src, *compare_sources.values()}
     if len(all_sources) > 1:
-        notes.append(
-            f"data_source mismatch (current={current_src}, compare={compare_sources}); "
-            "downgraded all blocks to demo_fallback for consistency"
+        raise RuntimeError(
+            f"unexpected data_source mismatch (current={current_src}, compare={compare_sources}); "
+            "InS provider should always tag results as 'ins'"
         )
-        if current_src != "demo_fallback":
-            current, _, _ = fetch_month_with_provenance(
-                report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
-            )
-        for basis in list(compare_block.keys()):
-            if compare_block[basis] is None or compare_sources.get(basis) == "demo_fallback":
-                continue
-            py, pm = _compare_month_bounds(year, month, basis)
-            prev_payload, _, _ = fetch_month_with_provenance(
-                f"{py:04d}-{pm:02d}",
-                equipment_ids,
-                kpi_keys,
-                eq_type,
-                auto_aggregate,
-                equipment_meta,
-                "demo",
-            )
-            compare_block[basis] = {
-                "weekly": [],
-                "aggregated": prev_payload.get("aggregated", {}),
-                "maintenance": prev_payload.get("maintenance", {}),
-                "alarms": [],
-            }
-        data_source = "demo_fallback"
+    data_source = current_src
 
     equipment_names: dict[str, str] = {}
     if equipment_meta:

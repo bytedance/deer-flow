@@ -145,6 +145,8 @@ def slim_component(
     if is_point_like:
         series = _resolve_endpoint_series(position_type, parent_machine_type)
         result["endpoint_series"] = series
+        if position_type is not None:
+            result["position_type"] = position_type
         if series == "2k":
             thresholds = _extract_2k_alarm_thresholds(node, config_info)
             if thresholds:
@@ -646,7 +648,27 @@ def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
     if data is None:
         return []
     if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
+        items = [item for item in data if isinstance(item, dict)]
+        # Live 2k/6k payloads wrap the per-sample rows inside the component
+        # envelope: ``data=[{gpid, posName, value:[{datatime, value:[...]}, ...]}]``.
+        # Detect this shape (``value`` is the sample list, ``datatime`` lives on
+        # children) and flatten before handing off to ``parse_trend_response``.
+        flattened: list[dict[str, Any]] = []
+        for item in items:
+            inner = item.get("value")
+            if (
+                isinstance(inner, list)
+                and inner
+                and all(
+                    isinstance(child, dict) and "datatime" in child and "value" in child
+                    for child in inner
+                )
+            ):
+                for child in inner:
+                    flattened.append(child)
+            else:
+                flattened.append(item)
+        return flattened
     if isinstance(data, dict):
         for key in ("dataArr", "list", "trendData", "trend_data", "data"):
             block = data.get(key)

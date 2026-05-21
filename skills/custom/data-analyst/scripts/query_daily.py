@@ -19,16 +19,18 @@ Output contract (design doc §6.1): writes JSON to
         "per_equipment": {<id>: {kpis, hourly_runtime_rate}} (only when >20 devices)
       },
       "compare": <same as current> | null,
+      "data_source": "ins",
+      "data_notes": [],
     }
 
-If no real data API is configured the script returns deterministic
-demo data so the agent pipeline can be exercised end-to-end.
+Data is always fetched from the InS-backed provider. Any failure
+(``HttpProviderError`` from missing features-tool / KPI mapping gap /
+empty trend / auth) propagates as ``{"error": ...}`` on stdout.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -59,112 +61,9 @@ KPI_UNITS = {
     "valve_temp": "℃",
 }
 
-KPI_DEMO_RANGES: dict[str, tuple[float, float]] = {
-    "runtime_rate": (0.75, 0.98),
-    "downtime_count": (0, 6),
-    "alarm_count": (0, 10),
-    "output": (800, 1500),
-    "energy_consumption": (200.0, 600.0),
-    "corrosion_rate": (0.01, 0.5),
-    "thickness_loss": (0.0, 2.0),
-    "vibration_level": (0.5, 15.0),
-    "bearing_temp": (35.0, 90.0),
-    "flow_rate": (50.0, 500.0),
-    "outlet_pressure": (0.3, 2.5),
-    "valve_temp": (40.0, 120.0),
-}
-
-KPI_INTEGER_KEYS = {"downtime_count", "alarm_count", "output"}
-
-TYPE_ALARM_MESSAGES: dict[str, list[str]] = {
-    "all": ["温度异常", "压力波动", "传感器离线", "通信中断"],
-    "static_equipment": ["腐蚀速率超标", "壁厚不足", "泄漏检测", "法兰密封异常"],
-    "rotating_machinery": ["振动超标", "轴承温度过高", "不平衡", "转速异常"],
-    "pump": ["气蚀检测", "密封泄漏", "效率下降", "出口压力异常"],
-    "reciprocating_machinery": ["阀片磨损", "气缸温度异常", "振动异常", "活塞杆磨损"],
-}
-
 
 def _output_dir() -> Path:
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
-
-
-def _deterministic_float(seed: str, low: float, high: float) -> float:
-    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
-    ratio = int(digest[:8], 16) / 0xFFFFFFFF
-    return round(low + ratio * (high - low), 4)
-
-
-def _deterministic_int(seed: str, low: int, high: int) -> int:
-    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
-    ratio = int(digest[:8], 16) / 0xFFFFFFFF
-    return int(low + ratio * (high - low + 1))
-
-
-def _demo_kpis(date_str: str, equipment_ids: list[str], kpi_keys: list[str]) -> dict:
-    seed_prefix = f"{date_str}|{','.join(sorted(equipment_ids))}"
-    kpis: dict = {}
-    for key in kpi_keys:
-        seed = f"{seed_prefix}|{key}"
-        low, high = KPI_DEMO_RANGES.get(key, (0.0, 100.0))
-        if key in KPI_INTEGER_KEYS:
-            kpis[key] = _deterministic_int(seed, int(low), int(high))
-        else:
-            kpis[key] = _deterministic_float(seed, low, high)
-    return kpis
-
-
-def _demo_kpis_single(date_str: str, equipment_id: str, kpi_keys: list[str]) -> dict:
-    """Generate demo KPIs for a single device (unique per device)."""
-    kpis: dict = {}
-    for key in kpi_keys:
-        seed = f"{date_str}|{equipment_id}|{key}"
-        low, high = KPI_DEMO_RANGES.get(key, (0.0, 100.0))
-        if key in KPI_INTEGER_KEYS:
-            kpis[key] = _deterministic_int(seed, int(low), int(high))
-        else:
-            kpis[key] = _deterministic_float(seed, low, high)
-    return kpis
-
-
-def _demo_hourly(date_str: str, equipment_ids: list[str]) -> list[float]:
-    seed_prefix = f"hourly|{date_str}|{','.join(sorted(equipment_ids))}"
-    return [_deterministic_float(f"{seed_prefix}|{h}", 0.6, 1.0) for h in range(24)]
-
-
-def _demo_hourly_single(date_str: str, equipment_id: str) -> list[float]:
-    """Generate demo hourly runtime for a single device."""
-    return [_deterministic_float(f"hourly|{date_str}|{equipment_id}|{h}", 0.6, 1.0) for h in range(24)]
-
-
-def _demo_alarms(
-    date_str: str,
-    equipment_ids: list[str],
-    eq_type: str = "all",
-    equipment_names: dict[str, str] | None = None,
-) -> list[dict]:
-    alarm_count = _deterministic_int(f"alarms|{date_str}|{','.join(sorted(equipment_ids))}", 0, 3)
-    levels = ["info", "warning", "high"]
-    messages = TYPE_ALARM_MESSAGES.get(eq_type, TYPE_ALARM_MESSAGES["all"])
-    name_map = equipment_names or {}
-    alarms = []
-    for i in range(alarm_count):
-        seed = f"alarm|{date_str}|{i}"
-        hour = _deterministic_int(seed + "|h", 0, 23)
-        level_idx = _deterministic_int(seed + "|l", 0, len(levels) - 1)
-        msg_idx = _deterministic_int(seed + "|m", 0, len(messages) - 1)
-        eq_idx = _deterministic_int(seed + "|e", 0, len(equipment_ids) - 1) if equipment_ids else 0
-        eid = equipment_ids[eq_idx] if equipment_ids else "unknown"
-        alarms.append(
-            {
-                "time": f"{date_str} {hour:02d}:00",
-                "equipment_id": eid,
-                "equipment": name_map.get(eid, eid),
-                "level": levels[level_idx],
-                "message": messages[msg_idx],
-            }
-        )
-    return alarms
 
 
 def fetch_day(
@@ -175,12 +74,11 @@ def fetch_day(
     include_per_equipment: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
-    """Return one-day payload via the active provider with demo fallback.
+    """Return one-day payload via the InS provider.
 
-    Backward-compatible signature: weekly/monthly aggregators and existing
-    tests call this and treat the return value as a flat dict. To capture
-    ``data_source`` / ``data_notes`` for the report banner use
-    :func:`fetch_day_with_provenance` instead.
+    Backward-compatible signature for weekly/monthly aggregators and tests
+    that treat the return value as a flat dict. To capture ``data_source``
+    / ``data_notes`` use :func:`fetch_day_with_provenance` instead.
     """
     data, _, _ = fetch_day_with_provenance(
         date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
@@ -195,16 +93,14 @@ def fetch_day_with_provenance(
     eq_type: str = "all",
     include_per_equipment: bool = False,
     equipment_meta: dict[str, dict] | None = None,
-    provider_mode: str | None = None,
 ) -> tuple[dict, str, list[str]]:
     """Provider-aware variant of :func:`fetch_day`.
 
-    Routes through the registered ``daily`` provider (``demo`` or ``ins``)
-    via ``fetch_with_fallback``. Returns ``(payload, data_source, notes)``
-    so :func:`build_result` can stamp the banner.
+    Calls the registered ``daily`` provider (``InsDailyProvider``) directly.
+    Any ``HttpProviderError`` propagates so the CLI surfaces it as
+    ``{"error": "HttpProviderError: ..."}`` instead of masking with demo
+    output.
     """
-    # Lazy import to avoid pulling provider impls when the script is exec'd
-    # purely for its demo helpers (e.g. weekly/monthly aggregation paths).
     import importlib.util as _ilu
     import sys as _sys
     from pathlib import Path as _Path
@@ -230,53 +126,18 @@ def fetch_day_with_provenance(
     dp = _load_script_module("_data_providers")
     _load_script_module("_data_provider_impls")
 
-    result = dp.fetch_with_fallback(
-        source="daily",
-        fetch_args=dict(
-            date_str=date_str,
-            equipment_ids=equipment_ids,
-            kpi_keys=kpi_keys,
-            eq_type=eq_type,
-            include_per_equipment=include_per_equipment,
-            equipment_meta=equipment_meta,
-        ),
-        mode=provider_mode,
+    provider = dp.get_provider("daily")
+    result = provider.fetch(
+        date_str=date_str,
+        equipment_ids=equipment_ids,
+        kpi_keys=kpi_keys,
+        eq_type=eq_type,
+        include_per_equipment=include_per_equipment,
+        equipment_meta=equipment_meta,
     )
+    if not isinstance(result, dp.ProviderResult):
+        raise TypeError(f"daily provider returned non-ProviderResult: {type(result)}")
     return result.data, result.data_source, list(result.notes)
-
-
-def _demo_day(
-    date_str: str,
-    equipment_ids: list[str],
-    kpi_keys: list[str],
-    eq_type: str = "all",
-    include_per_equipment: bool = False,
-    equipment_meta: dict[str, dict] | None = None,
-) -> dict:
-    kpis = _demo_kpis(date_str, equipment_ids, kpi_keys)
-    name_map: dict[str, str] = {}
-    if equipment_meta:
-        name_map = {eid: meta.get("name", eid) for eid, meta in equipment_meta.items()}
-    result: dict = {
-        "kpis": kpis,
-        "kpi_units": {k: KPI_UNITS.get(k, "") for k in kpi_keys},
-        "hourly_runtime_rate": _demo_hourly(date_str, equipment_ids),
-        "alarms": _demo_alarms(date_str, equipment_ids, eq_type, name_map),
-    }
-    if include_per_equipment:
-        meta = equipment_meta or {}
-        per_eq: dict = {}
-        for eid in equipment_ids:
-            entry: dict = {
-                "kpis": _demo_kpis_single(date_str, eid, kpi_keys),
-                "hourly_runtime_rate": _demo_hourly_single(date_str, eid),
-            }
-            if eid in meta:
-                entry["name"] = meta[eid].get("name", eid)
-                entry["area"] = meta[eid].get("area", "")
-            per_eq[eid] = entry
-        result["per_equipment"] = per_eq
-    return result
 
 
 def _compare_date(date_str: str, compare: str) -> str | None:
@@ -337,22 +198,10 @@ def build_result(
     else:
         compare_block, compare_src, compare_notes = None, None, []
 
-    # If the two blocks ended up with different sources (e.g. current=ins,
-    # compare=demo_fallback after a transient backend hiccup), downgrade the
-    # whole payload to demo to keep the report internally consistent.
     notes: list[str] = list(current_notes)
     if compare_src is not None:
         notes.extend(compare_notes)
     data_source = current_src
-    if compare_src is not None and current_src != compare_src:
-        notes.append(
-            f"data_source mismatch (current={current_src}, compare={compare_src}); "
-            "downgraded both blocks to demo_fallback for consistency"
-        )
-        # Re-call demo for both blocks deterministically.
-        current = _demo_day(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
-        compare_block = _demo_day(compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta)
-        data_source = "demo_fallback"
 
     equipment_names: dict[str, str] = {}
     if equipment_meta:

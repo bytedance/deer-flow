@@ -270,6 +270,24 @@ _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
     "monthly": {},
 }
 
+INS_ONLY_SOURCES = {"daily", "weekly", "monthly"}
+
+
+def _resolve_mode(source: str, mode: str | None) -> str:
+    """Resolve the provider mode for ``source``.
+
+    Equipment report sources (``daily`` / ``weekly`` / ``monthly``) are
+    pinned to the InS backend — they ignore ``DEER_FLOW_DATA_PROVIDER`` and
+    always resolve to ``ins``. All other sources fall back to the env var
+    (default ``demo``).
+    """
+    if mode is not None:
+        return mode.lower()
+    if source in INS_ONLY_SOURCES:
+        return "ins"
+    env_mode = (os.environ.get("DEER_FLOW_DATA_PROVIDER") or "").lower()
+    return env_mode or "demo"
+
 
 def register_provider(source: str, mode: str, factory: Callable[[], Any]) -> None:
     """Register a provider factory for (source, mode).
@@ -289,14 +307,19 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
 
     Mode resolution order:
         1. Explicit ``mode`` argument.
-        2. ``DEER_FLOW_DATA_PROVIDER`` env var (``demo`` / ``http`` / ``ins``).
-        3. Default ``demo``.
+        2. For ``daily`` / ``weekly`` / ``monthly``: always ``ins``.
+        3. ``DEER_FLOW_DATA_PROVIDER`` env var.
+        4. Default ``demo``.
+
+    Equipment report sources (``daily`` / ``weekly`` / ``monthly``) are
+    pinned to the InS backend; ``DEER_FLOW_DATA_PROVIDER`` is ignored for
+    those sources.
 
     Raises ``KeyError`` if the requested mode has no registered provider.
     """
     if source not in _PROVIDER_FACTORIES:
         raise ValueError(f"unknown data source: {source!r}")
-    chosen = (mode or os.environ.get("DEER_FLOW_DATA_PROVIDER") or "demo").lower()
+    chosen = _resolve_mode(source, mode)
     factories = _PROVIDER_FACTORIES[source]
     if chosen not in factories:
         raise KeyError(

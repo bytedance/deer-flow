@@ -39,7 +39,7 @@ def export_report(tmp_path, monkeypatch):
     return _load_export()
 
 
-def _weekly_payload(*, with_alarms: bool = True, demo: bool = True, compare: bool = True):
+def _weekly_payload(*, with_alarms: bool = True, compare: bool = True):
     payload = {
         "report_period": {"week_start": "2026-05-11", "week_end": "2026-05-17", "day_count": 7},
         "compare_type": "previous_week" if compare else "none",
@@ -76,7 +76,7 @@ def _weekly_payload(*, with_alarms: bool = True, demo: bool = True, compare: boo
             {"time": "2026-05-13 14:02", "equipment": "RM-002", "level": "critical", "message": "轴承温度超限"},
         ] if with_alarms else [],
         "next_week_focus": ["RM-002 轴承温度持续异常,建议安排诊断"],
-        "data_source": "demo_fallback" if demo else "ins",
+        "data_source": "ins",
         "week_start_warning": None,
         "compare_warning": None,
     }
@@ -91,11 +91,10 @@ def test_render_weekly_markdown_has_seven_sections(export_report):
         assert section in md, f"missing section: {section}"
 
 
-def test_weekly_markdown_demo_banner(export_report):
-    md = export_report.render_weekly_markdown(_weekly_payload(demo=True))
-    assert "演示数据" in md
-    md2 = export_report.render_weekly_markdown(_weekly_payload(demo=False))
-    assert "演示数据" not in md2
+def test_weekly_markdown_no_demo_banner(export_report):
+    """After demo removal, the weekly markdown never contains demo banner text."""
+    md = export_report.render_weekly_markdown(_weekly_payload())
+    assert "演示数据" not in md
 
 
 def test_weekly_markdown_kpi_table_uses_weekly_headers(export_report):
@@ -124,8 +123,7 @@ def test_write_report_weekly_writes_correct_filename(export_report, tmp_path):
     assert out.name == "weekly_report.md"
     assert out.parent == tmp_path
     body = out.read_text(encoding="utf-8")
-    assert body.startswith("> ⚠️ 当前使用演示数据（fallback）。原因：未配置真实数据源（DEER_FLOW_DATA_PROVIDER 未设置为 ins）")
-    assert "\n\n# 设备运行周报\n" in body
+    assert "# 设备运行周报" in body
 
 
 def test_write_report_daily_default_unchanged(export_report, tmp_path):

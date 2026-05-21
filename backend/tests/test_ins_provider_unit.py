@@ -112,6 +112,26 @@ def _machine_8k() -> list[dict]:
     ]
 
 
+def _machine_8k_bearing() -> list[dict]:
+    return [
+        {
+            "id": "M8KBT",
+            "name": "C001-bearing",
+            "type_num": 1,
+            "points": [
+                {
+                    "id": "P_8K_BT",
+                    "name": "压缩机驱动端支撑轴承温度",
+                    "type_num": 82,
+                    "endpoint_series": "8k",
+                    "h_alarm": 80.0,
+                    "hh_alarm": 90.0,
+                },
+            ],
+        }
+    ]
+
+
 def _machine_6k() -> list[dict]:
     return [
         {
@@ -242,7 +262,7 @@ def test_2k_kpis_aggregate_to_expected_values(provider, monkeypatch):
 def test_8k_rotating_kpis_aggregate_to_expected_values(provider, monkeypatch):
     rows = [
         {"component_id": "P_8K_1", "time_ms": str(1700000000000 + i * 60_000), "time": "t",
-         "values": {"pressure": 1.0 + 0.25 * i}}
+         "values": {"value": 1.0 + 0.25 * i}}
         for i in range(5)
     ]
     fake = _FakeClient(
@@ -260,6 +280,32 @@ def test_8k_rotating_kpis_aggregate_to_expected_values(provider, monkeypatch):
     # mean of 1.0, 1.25, 1.5, 1.75, 2.0 = 1.5
     assert result["kpis"]["outlet_pressure"] == pytest.approx(1.5)
     assert fake.trend_calls[0]["kwargs"]["endpoint_series"] == "8k"
+    assert "value" in fake.trend_calls[0]["features"]
+
+
+def test_8k_bearing_temp_uses_value_field_when_temperature_missing(provider, monkeypatch):
+    rows = [
+        {"component_id": "P_8K_BT", "time_ms": str(1700000000000 + i * 60_000), "time": "t",
+         "values": {"value": v}}
+        for i, v in enumerate([62.2, 62.0, 61.8, 62.4])
+    ]
+    fake = _FakeClient(
+        components={"M8KBT": _machine_8k_bearing()},
+        trend_table={("P_8K_BT", "8k"): rows},
+    )
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M8KBT"],
+        kpi_keys=["bearing_temp"],
+        eq_type="rotating_machinery",
+    )
+
+    assert result["kpis"]["bearing_temp"] == pytest.approx((62.2 + 62.0 + 61.8 + 62.4) / 4)
+    requested = fake.trend_calls[0]["features"]
+    assert "value" in requested
+    assert "temperature" in requested
 
 
 def test_6k_corrosion_kpis_skip_none_values(provider, monkeypatch):
@@ -297,7 +343,7 @@ def test_mixed_kpi_list_issues_one_call_per_endpoint_series_bucket(provider, mon
     rows_6k = [{"component_id": "PMX_6K", "time_ms": "1700000000000", "time": "t",
                 "values": {"corrosionRate": 0.1}}]
     rows_8k = [{"component_id": "PMX_8K", "time_ms": "1700000000000", "time": "t",
-                "values": {"pressure": 2.0}}]
+                "values": {"value": 2.0}}]
     fake = _FakeClient(
         components={"MMIX": _machine_mixed()},
         trend_table={
@@ -407,7 +453,7 @@ def test_factory_id_env_threads_through_to_get_trend_data(monkeypatch):
     monkeypatch.setenv("INS_FACTORY_ID", "FACTORY_42")
     provider = _load_provider(monkeypatch)
     rows = [{"component_id": "P_8K_1", "time_ms": "1700000000000", "time": "t",
-             "values": {"pressure": 2.0}}]
+             "values": {"value": 2.0}}]
     fake = _FakeClient(
         components={"M8K": _machine_8k()},
         trend_table={("P_8K_1", "8k"): rows},
@@ -427,7 +473,7 @@ def test_factory_id_absent_when_env_unset(provider, monkeypatch):
         components={"M8K": _machine_8k()},
         trend_table={
             ("P_8K_1", "8k"): [{"component_id": "P_8K_1", "time_ms": "1700000000000", "time": "t",
-                                "values": {"pressure": 2.0}}]
+                                "values": {"value": 2.0}}]
         },
     )
     _patch_client(monkeypatch, provider, fake)
@@ -444,7 +490,7 @@ def test_close_clients_called(provider, monkeypatch):
         components={"M8K": _machine_8k()},
         trend_table={
             ("P_8K_1", "8k"): [{"component_id": "P_8K_1", "time_ms": "1700000000000", "time": "t",
-                                "values": {"pressure": 2.0}}]
+                                "values": {"value": 2.0}}]
         },
     )
     _patch_client(monkeypatch, provider, fake)
@@ -459,7 +505,7 @@ def test_close_clients_called(provider, monkeypatch):
 def test_weekly_payload_shape_matches_daily(provider, monkeypatch):
     rows = [
         {"component_id": "P_8K_1", "time_ms": str(1700000000000 + i * 86_400_000), "time": "t",
-         "values": {"pressure": 1.5 + 0.1 * i}}
+         "values": {"value": 1.5 + 0.1 * i}}
         for i in range(7)
     ]
     fake = _FakeClient(
@@ -568,3 +614,239 @@ def test_iter_points_handles_non_dict_entries_gracefully(provider):
     ]
     yielded_ids = {n["id"] for n in provider._iter_points(components)}
     assert yielded_ids == {"L1", "L2"}
+
+
+# ---------------------------------------------------------------------------
+# 9k reciprocating-machine KPI regression — fixes the bug where
+# vibration_level / runtime_rate / alarm_count / downtime_count silently
+# returned None for any device whose points routed to the 9k endpoint
+# (e.g. 循环氢压缩机 type_num=9, positionType 91..99). Root cause was
+# expected_series being a hardcoded "8k" string in _KPI_FEATURE_MAP, while
+# _select_points_for_kpi compared by strict equality.
+# ---------------------------------------------------------------------------
+
+
+def _machine_9k() -> list[dict]:
+    """RC compressor (machineType=9, positionType 91..99) with a vibration point."""
+    return [
+        {
+            "id": "M9K",
+            "name": "循环氢压缩机1400-C-101",
+            "type_num": 9,
+            "points": [
+                {
+                    "id": "P_9K_1",
+                    "name": "驱动端水平振动",
+                    "type_num": 92,
+                    "endpoint_series": "9k",
+                    "h_alarm": 50.0,
+                    "hh_alarm": 80.0,
+                },
+            ],
+        }
+    ]
+
+
+def test_9k_vibration_level_aggregates(provider, monkeypatch):
+    """vibration_level on a 9k RC device must aggregate, not return None.
+
+    Regression: device 210623112850726 (循环氢压缩机1400-C-101) returned
+    vibration_level=null even though data_source="ins" — because
+    expected_series was the literal string "8k" and 9k points were filtered out.
+    """
+    rows = [
+        {"component_id": "P_9K_1", "time_ms": str(1700000000000 + i * 60_000), "time": "t",
+         "values": {"pp_value": v}}
+        for i, v in enumerate([10.0, 12.0, 14.0, 16.0])
+    ]
+    fake = _FakeClient(
+        components={"M9K": _machine_9k()},
+        trend_table={("P_9K_1", "9k"): rows},
+    )
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M9K"],
+        kpi_keys=["vibration_level"],
+    )
+
+    # mean of 10,12,14,16 = 13.0 — not None
+    assert result["kpis"]["vibration_level"] == pytest.approx(13.0)
+    # The endpoint call must use 9k, not 8k
+    assert fake.trend_calls[0]["kwargs"]["endpoint_series"] == "9k"
+
+
+def test_8k_and_9k_vibration_level_merge_across_series(provider, monkeypatch):
+    """A device with both 8k and 9k vibration points must merge values from both."""
+    components = {
+        "MIX89": [
+            {
+                "id": "MIX89",
+                "name": "Mixed-8k-9k",
+                "type_num": 1,
+                "points": [
+                    {
+                        "id": "P_8K_X",
+                        "name": "驱动端振动",
+                        "type_num": 82,
+                        "endpoint_series": "8k",
+                    },
+                    {
+                        "id": "P_9K_X",
+                        "name": "驱动端振动",
+                        "type_num": 92,
+                        "endpoint_series": "9k",
+                    },
+                ],
+            }
+        ]
+    }
+    trend_table = {
+        ("P_8K_X", "8k"): [
+            {"component_id": "P_8K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 10.0}},
+        ],
+        ("P_9K_X", "9k"): [
+            {"component_id": "P_9K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 20.0}},
+        ],
+    }
+    fake = _FakeClient(components=components, trend_table=trend_table)
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["MIX89"],
+        kpi_keys=["vibration_level"],
+    )
+
+    # Each point produces one mean (10.0 and 20.0 respectively).
+    # The per-equipment reduce step averages them → 15.0.
+    assert result["kpis"]["vibration_level"] == pytest.approx(15.0)
+    series_calls = sorted(c["kwargs"]["endpoint_series"] for c in fake.trend_calls)
+    assert series_calls == ["8k", "9k"]
+
+
+def test_rotating_machinery_vibration_level_only_uses_8k(provider, monkeypatch):
+    """Business split: rotating_machinery must narrow shared KPIs to 8k only."""
+    components = {
+        "MIX89": [
+            {
+                "id": "MIX89",
+                "name": "Mixed-8k-9k",
+                "type_num": 1,
+                "points": [
+                    {
+                        "id": "P_8K_X",
+                        "name": "驱动端振动",
+                        "type_num": 82,
+                        "endpoint_series": "8k",
+                    },
+                    {
+                        "id": "P_9K_X",
+                        "name": "驱动端振动",
+                        "type_num": 92,
+                        "endpoint_series": "9k",
+                    },
+                ],
+            }
+        ]
+    }
+    trend_table = {
+        ("P_8K_X", "8k"): [
+            {"component_id": "P_8K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 10.0}},
+        ],
+        ("P_9K_X", "9k"): [
+            {"component_id": "P_9K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 20.0}},
+        ],
+    }
+    fake = _FakeClient(components=components, trend_table=trend_table)
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["MIX89"],
+        kpi_keys=["vibration_level"],
+        eq_type="rotating_machinery",
+    )
+
+    assert result["kpis"]["vibration_level"] == pytest.approx(10.0)
+    series_calls = [c["kwargs"]["endpoint_series"] for c in fake.trend_calls]
+    assert series_calls == ["8k"]
+
+
+def test_reciprocating_machinery_vibration_level_only_uses_9k(provider, monkeypatch):
+    """Business split: reciprocating_machinery must narrow shared KPIs to 9k only."""
+    components = {
+        "MIX89": [
+            {
+                "id": "MIX89",
+                "name": "Mixed-8k-9k",
+                "type_num": 9,
+                "points": [
+                    {
+                        "id": "P_8K_X",
+                        "name": "驱动端振动",
+                        "type_num": 82,
+                        "endpoint_series": "8k",
+                    },
+                    {
+                        "id": "P_9K_X",
+                        "name": "驱动端振动",
+                        "type_num": 92,
+                        "endpoint_series": "9k",
+                    },
+                ],
+            }
+        ]
+    }
+    trend_table = {
+        ("P_8K_X", "8k"): [
+            {"component_id": "P_8K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 10.0}},
+        ],
+        ("P_9K_X", "9k"): [
+            {"component_id": "P_9K_X", "time_ms": "1700000000000", "time": "t",
+             "values": {"pp_value": 20.0}},
+        ],
+    }
+    fake = _FakeClient(components=components, trend_table=trend_table)
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["MIX89"],
+        kpi_keys=["vibration_level"],
+        eq_type="reciprocating_machinery",
+    )
+
+    assert result["kpis"]["vibration_level"] == pytest.approx(20.0)
+    series_calls = [c["kwargs"]["endpoint_series"] for c in fake.trend_calls]
+    assert series_calls == ["9k"]
+
+
+def test_9k_runtime_rate_uses_9k_endpoint(provider, monkeypatch):
+    """runtime_rate derives from ``speed`` and must also work on 9k devices."""
+    rows = [
+        {"component_id": "P_9K_1", "time_ms": str(1700000000000 + i * 60_000), "time": "t",
+         "values": {"speed": v}}
+        for i, v in enumerate([0.0, 1000.0, 1200.0, 0.0])
+    ]
+    fake = _FakeClient(
+        components={"M9K": _machine_9k()},
+        trend_table={("P_9K_1", "9k"): rows},
+    )
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M9K"],
+        kpi_keys=["runtime_rate"],
+    )
+
+    # 2 of 4 samples have speed>0 → 0.5
+    assert result["kpis"]["runtime_rate"] == pytest.approx(0.5)
+    assert fake.trend_calls[0]["kwargs"]["endpoint_series"] == "9k"

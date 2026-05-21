@@ -107,7 +107,7 @@ def _base_payload(**overrides) -> dict:
                 "alarms": [],
             },
         },
-        "data_source": "demo_fallback",
+        "data_source": "ins",
         "compare_warning": None,
     }
     payload.update(overrides)
@@ -270,7 +270,7 @@ def test_overall_status_single_line_summary(monthly_kpi):
 
 def test_data_source_passthrough(monthly_kpi):
     result = monthly_kpi.compute(_base_payload())
-    assert result["data_source"] == "demo_fallback"
+    assert result["data_source"] == "ins"
 
 
 def test_next_month_plan_mechanically_generated(monthly_kpi):

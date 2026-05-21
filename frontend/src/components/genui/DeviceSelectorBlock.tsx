@@ -6,6 +6,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
 
 import type { DeviceQueryParams, OrgTreeNode, SelectedDevice } from "./device-selector-types";
+import { collectDevices } from "./device-selector-utils";
 import OrgTreePanel from "./OrgTreePanel";
 
 interface DeviceSelectorBlockProps {
@@ -24,23 +25,6 @@ interface DeviceSelectorBlockProps {
       blockId?: string,
     ) => void;
   };
-}
-
-function collectDevices(node: OrgTreeNode, filterDeviceType?: number): OrgTreeNode[] {
-  const devices: OrgTreeNode[] = [];
-  if (node.children) {
-    for (const child of node.children) {
-      if (child.type < 10) {
-        if (filterDeviceType == null || child.type === filterDeviceType) {
-          devices.push(child);
-        }
-      }
-      if (child.children) {
-        devices.push(...collectDevices(child, filterDeviceType));
-      }
-    }
-  }
-  return devices.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
 }
 
 const DEVICE_TYPE_LABELS: Record<number, string> = {

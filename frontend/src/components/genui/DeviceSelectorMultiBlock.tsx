@@ -6,6 +6,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
 
 import type { DeviceQueryParams, OrgTreeNode, SelectedDevice } from "./device-selector-types";
+import { collectDevices } from "./device-selector-utils";
 import OrgTreePanel from "./OrgTreePanel";
 
 interface DeviceSelectorMultiBlockProps {
@@ -27,21 +28,12 @@ interface DeviceSelectorMultiBlockProps {
   };
 }
 
-function collectDevices(node: OrgTreeNode, filterDeviceType?: number): OrgTreeNode[] {
-  const devices: OrgTreeNode[] = [];
-  if (node.children) {
-    for (const child of node.children) {
-      if (child.type < 10) {
-        if (filterDeviceType == null || child.type === filterDeviceType) {
-          devices.push(child);
-        }
-      }
-      if (child.children) {
-        devices.push(...collectDevices(child, filterDeviceType));
-      }
-    }
+function getBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return ((window as any).__NEXT_PUBLIC_BACKEND_BASE_URL as string) ?? "";
   }
-  return devices.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+  return process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
 }
 
 const DEVICE_TYPE_LABELS: Record<number, string> = {
@@ -50,14 +42,6 @@ const DEVICE_TYPE_LABELS: Record<number, string> = {
   6: "静设备",
   9: "往复机组",
 };
-
-function getBaseUrl(): string {
-  if (typeof window !== "undefined") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return ((window as any).__NEXT_PUBLIC_BACKEND_BASE_URL as string) ?? "";
-  }
-  return process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
-}
 
 export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiBlockProps) {
   const { block_id, props, callback_id, interactionState, onInteraction } = block;

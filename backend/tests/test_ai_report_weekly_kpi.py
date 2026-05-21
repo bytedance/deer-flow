@@ -38,11 +38,40 @@ def weekly_kpi(tmp_path, monkeypatch):
     return _load(WEEKLY_KPI_PATH, "weekly_kpi")
 
 
+def _stub_query_weekly(module):
+    """Patch fetch_week_with_provenance to return InS-tagged synthetic data."""
+    from datetime import datetime, timedelta
+
+    def fake_fetch(week_start, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
+        start_dt = datetime.strptime(week_start, "%Y-%m-%d")
+        daily = []
+        for offset in range(7):
+            date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            daily.append({
+                "date": date_str,
+                "kpis": {key: 0.5 for key in kpi_keys},
+                "kpi_units": {key: "%" for key in kpi_keys},
+                "alarms": [],
+            })
+        agg: dict = {"kpis_mean": {}, "kpis_max": {}, "kpis_min": {}, "kpis_std": {}}
+        for key in kpi_keys:
+            agg["kpis_mean"][key] = 0.5
+            agg["kpis_max"][key] = 0.5
+            agg["kpis_min"][key] = 0.5
+            agg["kpis_std"][key] = 0.0
+        result: dict = {"daily": daily, "aggregated": agg, "alarms": [], "kpi_units": {key: "%" for key in kpi_keys}}
+        return result, "ins", []
+
+    module.fetch_week_with_provenance = fake_fetch
+
+
 @pytest.fixture()
 def query_weekly(tmp_path, monkeypatch):
     monkeypatch.setenv("WEEKLY_REPORT_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
-    return _load(QUERY_WEEKLY_PATH, "query_weekly")
+    module = _load(QUERY_WEEKLY_PATH, "query_weekly")
+    _stub_query_weekly(module)
+    return module
 
 
 def _make_aggregated(mean=0.93, peak=0.96, trough=0.90, std=0.02):
@@ -79,7 +108,7 @@ def test_compute_basic_shape(weekly_kpi):
             "aggregated": _make_aggregated(mean=0.91),
             "alarms": [],
         },
-        "data_source": "demo_fallback",
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     assert result["report_period"]["week_start"] == "2026-05-11"
@@ -112,6 +141,7 @@ def test_compute_no_compare(weekly_kpi):
             "alarms": [],
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     summary = result["kpi_summary"][0]
@@ -150,6 +180,7 @@ def test_compute_zero_previous_mean_returns_null_pct(weekly_kpi):
             },
             "alarms": [],
         },
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     summary = result["kpi_summary"][0]
@@ -177,6 +208,7 @@ def test_daily_trend_chart_seven_x_labels(weekly_kpi):
             "alarms": [],
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     chart = result["daily_trend_chart"]
@@ -207,6 +239,7 @@ def test_anomaly_top_n_sort_and_limit(weekly_kpi):
             "alarms": alarms,
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     top = result["anomaly_top_n"]
@@ -224,6 +257,7 @@ def test_anomaly_top_n_empty(weekly_kpi):
         "kpi_keys": ["runtime_rate"],
         "current": {"daily": [], "aggregated": _make_aggregated(), "alarms": []},
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     assert result["anomaly_top_n"] == []
@@ -242,6 +276,7 @@ def test_overall_status_critical_when_high_alarms(weekly_kpi):
             ],
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     assert result["overall_status"]["level"] == "critical"
@@ -258,6 +293,7 @@ def test_overall_status_warning_when_low_runtime(weekly_kpi):
             "alarms": [],
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     assert result["overall_status"]["level"] == "warning"
@@ -274,6 +310,7 @@ def test_next_week_focus_includes_top_anomaly(weekly_kpi):
         "kpi_keys": ["runtime_rate"],
         "current": {"daily": [], "aggregated": _make_aggregated(), "alarms": alarms},
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     focus = result["next_week_focus"]
@@ -287,6 +324,7 @@ def test_next_week_focus_never_empty(weekly_kpi):
         "kpi_keys": ["runtime_rate"],
         "current": {"daily": [], "aggregated": _make_aggregated(), "alarms": []},
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     assert len(result["next_week_focus"]) >= 1
@@ -308,6 +346,7 @@ def test_volatility_uses_std_over_mean(weekly_kpi):
             "alarms": [],
         },
         "compare": None,
+        "data_source": "ins",
     }
     result = weekly_kpi.compute(payload)
     summary = result["kpi_summary"][0]

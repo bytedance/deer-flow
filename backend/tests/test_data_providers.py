@@ -126,6 +126,44 @@ def test_unknown_source_raises_value_error(providers):
 
 
 # ---------------------------------------------------------------------------
+# Daily / Weekly / Monthly are InS-only (DEER_FLOW_DATA_PROVIDER ignored)
+# ---------------------------------------------------------------------------
+
+
+def test_daily_weekly_monthly_only_register_ins(providers):
+    registered = providers.list_registered()
+    for source in ("daily", "weekly", "monthly"):
+        assert source in registered, f"source {source!r} missing from registry"
+        assert registered[source] == ["ins"], (
+            f"source {source!r} has modes {registered[source]}, expected ['ins']"
+        )
+
+
+def test_daily_weekly_monthly_ignore_env_var_demo(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect daily/weekly/monthly."""
+    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "demo")
+    for source in ("daily", "weekly", "monthly"):
+        p = providers.get_provider(source)
+        assert "Ins" in type(p).__name__, (
+            f"get_provider({source!r}) returned {type(p).__name__}, expected Ins*Provider"
+        )
+
+
+def test_daily_weekly_monthly_reject_explicit_demo_mode(providers):
+    for source in ("daily", "weekly", "monthly"):
+        with pytest.raises(KeyError, match="demo"):
+            providers.get_provider(source, mode="demo")
+
+
+def test_daily_weekly_monthly_ignore_env_var_http(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=http must NOT affect daily/weekly/monthly."""
+    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
+    for source in ("daily", "weekly", "monthly"):
+        p = providers.get_provider(source)
+        assert "Ins" in type(p).__name__
+
+
+# ---------------------------------------------------------------------------
 # Fallback path
 # ---------------------------------------------------------------------------
 

@@ -93,11 +93,6 @@ transforms:
       monthly_kpi: monthly_kpi.json
 
 sections:
-  - id: data_source_banner
-    title: ""
-    component: markdown
-    source: $.steps.monthly_kpi.monthly_kpi.data_source_banner
-
   - id: overview
     title: 月度总览
     component: markdown

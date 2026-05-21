@@ -17,15 +17,14 @@ Output contract (design doc §6.1): writes JSON to
         "alarms": [...],                                    # union of daily alarms
       },
       "compare": <same shape as current> | null,
-      "data_source": "demo_fallback",
+      "data_source": "ins",
       "week_start_warning": "..." | null,
       "compare_warning": "..." | null,
     }
 
-If no real data API is configured the script returns deterministic
-demo data so the agent pipeline can be exercised end-to-end. Demo data
-is delegated to query_daily.fetch_day so 7-day shape is consistent with
-the daily KPI semantics defined in the daily design doc.
+Data is fetched from the InS-backed daily provider on a per-day basis and
+aggregated into the weekly shape. Any failure (``HttpProviderError``)
+propagates as ``{"error": ...}`` on stdout.
 """
 
 from __future__ import annotations
@@ -162,16 +161,14 @@ def fetch_week_with_provenance(
     eq_type: str = "all",
     aggregate: bool = False,
     equipment_meta: dict[str, dict] | None = None,
-    provider_mode: str | None = None,
 ) -> tuple[dict, str, list[str]]:
     """Provider-aware variant of :func:`fetch_week`.
 
     Composes the 7-day window from per-day calls to
     :func:`query_daily.fetch_day_with_provenance` so the existing weekly
-    aggregation logic keeps owning the shape (``daily[]`` + ``aggregated``)
-    while data_source/notes propagate up unchanged. If any of the 7 days
-    falls back to demo, the entire week is reported as ``demo_fallback``
-    to keep the report internally consistent.
+    aggregation logic keeps owning the shape (``daily[]`` + ``aggregated``).
+    Each per-day call resolves to the InS-backed daily provider; any
+    ``HttpProviderError`` propagates so the CLI surfaces the failure.
     """
     query_daily = _load_query_daily()
     start_dt = datetime.strptime(week_start, "%Y-%m-%d")
@@ -189,7 +186,6 @@ def fetch_week_with_provenance(
             eq_type,
             False,
             equipment_meta,
-            provider_mode,
         )
         sources.add(day_src)
         for note in day_notes:
@@ -216,14 +212,15 @@ def fetch_week_with_provenance(
         # can render units without re-scanning daily list.
         result["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
 
-    if len(sources) == 1:
-        data_source = next(iter(sources))
-    else:
-        notes.append(
-            f"per-day data_source mismatch ({sorted(sources)}); "
-            "downgraded week to demo_fallback for consistency"
+    # All days come from the same InS provider; mismatch can only happen if
+    # one of the days returns no `data_source` at all, which would be a
+    # programming bug — surface it loudly rather than silently coercing.
+    if len(sources) != 1:
+        raise RuntimeError(
+            f"unexpected per-day data_source mismatch ({sorted(sources)}); "
+            "InS provider should always tag results as 'ins'"
         )
-        data_source = "demo_fallback"
+    data_source = next(iter(sources))
     return result, data_source, notes
 
 
@@ -308,24 +305,6 @@ def build_result(
     if compare_src is not None:
         notes.extend(f"[compare] {note}" for note in compare_notes)
     data_source = current_src
-    if compare_src is not None and current_src != compare_src:
-        notes.append(
-            f"data_source mismatch (current={current_src}, compare={compare_src}); "
-            "downgraded both blocks to demo_fallback for consistency"
-        )
-        if prev_range is None:
-            raise RuntimeError(
-                "prev_range must be set when compare_src is not None; this is a programming bug"
-            )
-        if current_src != "demo_fallback":
-            current, _, _ = fetch_week_with_provenance(
-                week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
-            )
-        if compare_src != "demo_fallback":
-            compare_block, _, _ = fetch_week_with_provenance(
-                prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta, "demo"
-            )
-        data_source = "demo_fallback"
 
     equipment_names: dict[str, str] = {}
     if equipment_meta:

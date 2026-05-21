@@ -22,7 +22,6 @@ _SCRIPT_MODULES = (
     "_data_providers",
     "_data_provider_impls",
     "_ins_provider",
-    "_data_banner",
 )
 
 
@@ -280,12 +279,7 @@ def raw_rows_8k_pressures(values: list[float], start_ms: int = 1700000000000) ->
             "component_id": "P_8K_1",
             "time_ms": str(start_ms + index * 60_000),
             "time": "t",
-            "values": {"pressure": value},
+            "values": {"value": value},
         }
         for index, value in enumerate(values)
     ]
-
-
-def assert_fallback_note(notes: list[str], expected_fragment: str) -> None:
-    assert notes
-    assert expected_fragment in notes[0] or any(expected_fragment in note for note in notes)

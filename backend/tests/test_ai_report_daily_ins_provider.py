@@ -16,7 +16,6 @@ sys.modules.setdefault("_ai_report_ins_test_helpers", _helpers)
 _spec.loader.exec_module(_helpers)
 
 FakeClient = _helpers.FakeClient
-assert_fallback_note = _helpers.assert_fallback_note
 clear_script_modules = _helpers.clear_script_modules
 configure_report_env = _helpers.configure_report_env
 load_script = _helpers.load_script
@@ -38,33 +37,13 @@ def _clear_modules():
     clear_script_modules()
 
 
-def _load_query_daily(monkeypatch, tmp_path, *, provider_mode: str = "ins", factory_id: str = "FAC-001"):
-    configure_report_env(monkeypatch, tmp_path, provider_mode=provider_mode, factory_id=factory_id)
+def _load_query_daily(monkeypatch, tmp_path, *, factory_id: str = "FAC-001"):
+    configure_report_env(monkeypatch, tmp_path, provider_mode=None, factory_id=factory_id)
     return load_script("query_daily")
 
 
 def _load_daily_kpi():
     return load_script("daily_kpi")
-
-
-def _load_export_report():
-    return load_script("export_report")
-
-
-def test_daily_query_defaults_to_demo_when_provider_not_enabled(monkeypatch, tmp_path):
-    query_daily = _load_query_daily(monkeypatch, tmp_path, provider_mode="demo", factory_id="FAC-001")
-
-    result = query_daily.build_result(
-        date_str="2026-05-01",
-        equipment_ids=["EQ-1"],
-        kpi_keys=["vibration_level"],
-        compare="none",
-        eq_type="all",
-        include_per_equipment=False,
-    )
-
-    assert result["data_source"] == "demo_fallback"
-    assert result["data_notes"] == []
 
 
 def test_daily_query_uses_ins_for_2k_payload(monkeypatch, tmp_path):
@@ -123,7 +102,57 @@ def test_daily_query_uses_ins_for_8k_payload(monkeypatch, tmp_path):
     assert result["current"]["kpis"]["outlet_pressure"] == pytest.approx(1.8, abs=1e-4)
     call = fake.trend_calls[0]
     assert call["kwargs"]["endpoint_series"] == "8k"
-    assert "pressure" in call["features"]
+    assert "value" in call["features"]
+
+
+def test_daily_query_uses_value_field_for_8k_bearing_temp(monkeypatch, tmp_path):
+    components = {
+        "EQ-8K-BT": [
+            {
+                "id": "EQ-8K-BT",
+                "name": "C001-bearing",
+                "type_num": 1,
+                "points": [
+                    {
+                        "id": "P_8K_BT",
+                        "name": "压缩机驱动端支撑轴承温度",
+                        "type_num": 82,
+                        "endpoint_series": "8k",
+                        "h_alarm": 80.0,
+                        "hh_alarm": 90.0,
+                    }
+                ],
+            }
+        ]
+    }
+    rows = [
+        {
+            "component_id": "P_8K_BT",
+            "time_ms": str(1700000000000 + index * 60_000),
+            "time": "t",
+            "values": {"value": value},
+        }
+        for index, value in enumerate([62.2, 62.0, 61.8, 62.4])
+    ]
+    fake = FakeClient(
+        components=components,
+        trend_table={("P_8K_BT", "8k"): rows},
+    )
+    patch_ins_provider(monkeypatch, fake_client=fake, features_available=True, factory_id="FAC-001")
+    query_daily = _load_query_daily(monkeypatch, tmp_path)
+
+    result = query_daily.build_result(
+        date_str="2026-05-01",
+        equipment_ids=["EQ-8K-BT"],
+        kpi_keys=["bearing_temp"],
+        compare="none",
+        eq_type="rotating_machinery",
+        include_per_equipment=False,
+    )
+
+    assert result["data_source"] == "ins"
+    assert result["current"]["kpis"]["bearing_temp"] == pytest.approx((62.2 + 62.0 + 61.8 + 62.4) / 4, abs=1e-4)
+    assert "value" in fake.trend_calls[0]["features"]
 
 
 def test_daily_query_uses_ins_for_6k_payload(monkeypatch, tmp_path):
@@ -181,28 +210,29 @@ def test_daily_query_groups_mixed_endpoint_series(monkeypatch, tmp_path):
     assert series == {"2k", "6k", "8k"}
 
 
-def test_daily_query_falls_back_when_features_tool_unavailable(monkeypatch, tmp_path):
+def test_daily_query_raises_when_features_tool_unavailable(monkeypatch, tmp_path):
     fake = FakeClient(
         components={"EQ-2K": machine_2k()},
         trend_table={("P_2K_1", "2k"): raw_rows_2k((1.2, 5.5))},
     )
-    patch_ins_provider(monkeypatch, fake_client=fake, features_available=False, factory_id="FAC-001")
+    provider = patch_ins_provider(
+        monkeypatch, fake_client=fake, features_available=False, factory_id="FAC-001"
+    )
     query_daily = _load_query_daily(monkeypatch, tmp_path)
 
-    result = query_daily.build_result(
-        date_str="2026-05-01",
-        equipment_ids=["EQ-2K"],
-        kpi_keys=["vibration_velocity_rms"],
-        compare="none",
-        eq_type="all",
-        include_per_equipment=False,
-    )
+    with pytest.raises(provider.HttpProviderError) as excinfo:
+        query_daily.build_result(
+            date_str="2026-05-01",
+            equipment_ids=["EQ-2K"],
+            kpi_keys=["vibration_velocity_rms"],
+            compare="none",
+            eq_type="all",
+            include_per_equipment=False,
+        )
+    assert "features-tool" in str(excinfo.value).lower()
 
-    assert result["data_source"] == "demo_fallback"
-    assert_fallback_note(result["data_notes"], "features-tool")
 
-
-def test_daily_query_falls_back_when_ins_client_errors(monkeypatch, tmp_path):
+def test_daily_query_raises_when_ins_client_errors(monkeypatch, tmp_path):
     fake = FakeClient(
         components={"EQ-2K": machine_2k()},
         trend_table={("P_2K_1", "2k"): RuntimeError("socket timeout")},
@@ -210,38 +240,74 @@ def test_daily_query_falls_back_when_ins_client_errors(monkeypatch, tmp_path):
     patch_ins_provider(monkeypatch, fake_client=fake, features_available=True, factory_id="FAC-001")
     query_daily = _load_query_daily(monkeypatch, tmp_path)
 
-    result = query_daily.build_result(
-        date_str="2026-05-01",
-        equipment_ids=["EQ-2K"],
-        kpi_keys=["vibration_velocity_rms"],
-        compare="none",
-        eq_type="all",
-        include_per_equipment=False,
-    )
+    with pytest.raises(Exception) as excinfo:
+        query_daily.build_result(
+            date_str="2026-05-01",
+            equipment_ids=["EQ-2K"],
+            kpi_keys=["vibration_velocity_rms"],
+            compare="none",
+            eq_type="all",
+            include_per_equipment=False,
+        )
+    assert "socket timeout" in str(excinfo.value)
 
-    assert result["data_source"] == "demo_fallback"
-    assert_fallback_note(result["data_notes"], "socket timeout")
 
-
-def test_daily_query_falls_back_when_kpi_cannot_map_to_ins_point(monkeypatch, tmp_path):
+def test_daily_query_raises_when_kpi_cannot_map_to_ins_point(monkeypatch, tmp_path):
     fake = FakeClient(
         components={"EQ-8K": machine_8k()},
         trend_table={("P_8K_1", "8k"): raw_rows_8k_pressures([1.2, 1.8])},
     )
+    provider = patch_ins_provider(
+        monkeypatch, fake_client=fake, features_available=True, factory_id="FAC-001"
+    )
+    query_daily = _load_query_daily(monkeypatch, tmp_path)
+
+    with pytest.raises(provider.HttpProviderError):
+        query_daily.build_result(
+            date_str="2026-05-01",
+            equipment_ids=["EQ-8K"],
+            kpi_keys=["totally_made_up_kpi_xyz"],
+            compare="none",
+            eq_type="all",
+            include_per_equipment=False,
+        )
+
+
+def test_daily_query_main_emits_error_json_for_ins_failure(monkeypatch, tmp_path, capsys):
+    """End-to-end: an InS failure makes `query_daily.main` write a JSON error to stdout."""
+    fake = FakeClient(
+        components={"EQ-8K": machine_8k()},
+        trend_table={("P_8K_1", "8k"): RuntimeError("upstream 503")},
+    )
     patch_ins_provider(monkeypatch, fake_client=fake, features_available=True, factory_id="FAC-001")
     query_daily = _load_query_daily(monkeypatch, tmp_path)
 
-    result = query_daily.build_result(
-        date_str="2026-05-01",
-        equipment_ids=["EQ-8K"],
-        kpi_keys=["totally_made_up_kpi_xyz"],
-        compare="none",
-        eq_type="all",
-        include_per_equipment=False,
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "query_daily.py",
+            "--date",
+            "2026-05-01",
+            "--equipment",
+            "EQ-8K",
+            "--kpis",
+            "outlet_pressure",
+            "--compare",
+            "none",
+            "--type",
+            "all",
+        ],
     )
 
-    assert result["data_source"] == "demo_fallback"
-    assert result["data_notes"]
+    rc = query_daily.main()
+    out = capsys.readouterr().out.strip()
+    import json
+
+    payload = json.loads(out)
+    assert rc == 0
+    assert "error" in payload
+    assert "HttpProviderError" in payload["error"]
+    assert not (tmp_path / "daily_data.json").exists()
 
 
 def test_daily_query_counts_2k_alarm_threshold_crossings(monkeypatch, tmp_path):
@@ -293,58 +359,21 @@ def test_daily_kpi_preserves_provenance_from_query_payload(monkeypatch, tmp_path
     assert payload["data_notes"] == []
     assert result["data_source"] == "ins"
     assert result["data_notes"] == []
-    assert result["data_source_banner"] == "> ✅ 数据来源：InS 实时接入"
+    assert "data_source_banner" not in result
 
 
-@pytest.mark.parametrize(
-    ("data_source", "data_notes", "expected_first_line"),
-    [
-        (
-            "demo_fallback",
-            [],
-            "> ⚠️ 当前使用演示数据（fallback）。原因：未配置真实数据源（DEER_FLOW_DATA_PROVIDER 未设置为 ins）",
-        ),
-        (
-            "demo_fallback",
-            ["HTTP provider failed, fell back to demo: socket timeout"],
-            "> ⚠️ 当前使用演示数据（fallback）。原因：HTTP provider failed, fell back to demo: socket timeout",
-        ),
-        ("ins", [], "> ✅ 数据来源：InS 实时接入"),
-    ],
-)
-def test_daily_export_banner_is_first_line_and_idempotent(
-    monkeypatch,
-    tmp_path,
-    data_source,
-    data_notes,
-    expected_first_line,
-):
-    _load_query_daily(monkeypatch, tmp_path)
-    export_report = _load_export_report()
+def test_daily_kpi_missing_data_source_raises_key_error():
+    daily_kpi = load_script("daily_kpi")
 
     payload = {
         "report_date": "2026-05-01",
-        "summary": {"total_equipment": 1},
-        "overall_status": {"level": "good", "summary": "ok"},
-        "kpi_summary": [],
-        "trend_chart": {},
-        "alarm_table": [],
-        "recommendations": [],
-        "data_source": data_source,
-        "data_notes": data_notes,
+        "equipment_ids": ["EQ-1"],
+        "kpi_keys": ["outlet_pressure"],
+        "current": {"kpis": {"outlet_pressure": 1.0}, "kpi_units": {}, "alarms": []},
+        "compare": None,
+        # NOTE: data_source intentionally omitted
+        "data_notes": [],
     }
 
-    first = export_report.render_markdown(payload)
-    assert first.splitlines()[0] == expected_first_line
-
-    same = export_report.render_markdown(payload)
-    assert same == first
-
-    second = export_report.render_markdown(
-        {
-            **payload,
-            "data_source": "ins" if data_source == "demo_fallback" else "demo_fallback",
-            "data_notes": [] if data_source == "demo_fallback" else ["forced fallback for rerender"],
-        }
-    )
-    assert second.splitlines()[0] != "# 设备运行日报"
+    with pytest.raises(KeyError):
+        daily_kpi.compute(payload)

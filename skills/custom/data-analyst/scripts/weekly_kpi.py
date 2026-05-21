@@ -18,7 +18,6 @@ Key differences from daily_kpi.py:
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -28,25 +27,6 @@ DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "weekly_data.json"
 OUTPUT_FILENAME = "weekly_kpi.json"
 
-
-def _load_data_banner():
-    """Lazy-load the sibling _data_banner module (no package layout)."""
-    module = sys.modules.get("_data_banner")
-    if module is not None:
-        return module
-    script_dir = Path(__file__).parent
-    spec = importlib.util.spec_from_file_location("_data_banner", script_dir / "_data_banner.py")
-    if spec is None or spec.loader is None:
-        raise ImportError("failed to load _data_banner module")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_data_banner"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get("_data_banner") is module:
-            del sys.modules["_data_banner"]
-        raise
-    return module
 
 KPI_DISPLAY_NAMES = {
     "runtime_rate": "运行率",
@@ -312,9 +292,8 @@ def compute(payload: dict) -> dict:
     overall = _build_overall_status(kpi_summary, alarms)
     next_week_focus = _build_next_week_focus(kpi_summary, anomaly_top_n, overall)
 
-    data_source = payload.get("data_source", "demo_fallback")
+    data_source = payload["data_source"]
     data_notes = list(payload.get("data_notes") or [])
-    data_source_banner = _load_data_banner().format_banner(data_source, data_notes)
 
     return {
         "report_period": period,
@@ -330,7 +309,6 @@ def compute(payload: dict) -> dict:
         "next_week_focus": next_week_focus,
         "data_source": data_source,
         "data_notes": data_notes,
-        "data_source_banner": data_source_banner,
         "week_start_warning": payload.get("week_start_warning"),
         "compare_warning": payload.get("compare_warning"),
     }
