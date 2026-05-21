@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import { ContextActions } from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -171,6 +172,7 @@ export default function AgentChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
+              {!isNewThread && <ContextActions threadId={threadId} />}
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>

@@ -17,7 +17,15 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
+import {
+  clearThreadContext,
+  compactThreadContext,
+  fetchThreadTokenUsage,
+} from "./api";
+import type {
+  ClearContextResponse,
+  CompactContextResponse,
+} from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -973,6 +981,36 @@ export function useRenameThread() {
           });
         },
       );
+    },
+  });
+}
+
+export function useClearContext() {
+  const queryClient = useQueryClient();
+  return useMutation<ClearContextResponse, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => clearThreadContext(threadId),
+    onSettled: (_data, _error, { threadId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", "state", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: threadTokenUsageQueryKey(threadId),
+      });
+    },
+  });
+}
+
+export function useCompactContext() {
+  const queryClient = useQueryClient();
+  return useMutation<CompactContextResponse, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => compactThreadContext(threadId),
+    onSettled: (_data, _error, { threadId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["threads", "state", threadId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: threadTokenUsageQueryKey(threadId),
+      });
     },
   });
 }
