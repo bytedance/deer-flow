@@ -164,7 +164,11 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
 
     def mock_post(url: str, json: dict, timeout: int):
         assert url == "http://provisioner:8002/api/sandboxes"
-        assert json == {"sandbox_id": "anon123", "thread_id": None}
+        assert json == {
+            "sandbox_id": "anon123",
+            "thread_id": None,
+            "user_id": "test-user-autouse",
+        }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "anon123", "sandbox_url": "http://k3s:31002"})
 

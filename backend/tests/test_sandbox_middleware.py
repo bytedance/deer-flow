@@ -36,6 +36,9 @@ class _SandboxStub(Sandbox):
     def read_file(self, path: str) -> str:
         return "content"
 
+    def download_file(self, path: str) -> bytes:
+        return b"content"
+
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         return ["/mnt/user-data/workspace/file.txt"]
 
