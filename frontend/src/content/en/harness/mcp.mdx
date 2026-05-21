@@ -29,11 +29,6 @@ The default location is the project root (same directory as `config.yaml`). The 
       "args": ["-y", "@my-org/my-mcp-server"],
       "enabled": true
     },
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-      "enabled": true
-    },
     "sqlite": {
       "command": "uvx",
       "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
@@ -42,6 +37,16 @@ The default location is the project root (same directory as `config.yaml`). The 
   }
 }
 ```
+
+<Callout type="warning">
+  Do not add an MCP filesystem server for DeerFlow workspace files. DeerFlow
+  already provides built-in file tools for thread-scoped workspace access, and
+  overlapping file tools with different path semantics can make LLM tool
+  selection and file access behavior unstable. DeerFlow does not currently
+  adapt MCP Roots mode for filesystem servers: it does not publish per-thread
+  MCP roots or map sandbox paths such as <code>/mnt/user-data/...</code> to
+  paths accepted by <code>@modelcontextprotocol/server-filesystem</code>.
+</Callout>
 
 Each server entry supports:
 
