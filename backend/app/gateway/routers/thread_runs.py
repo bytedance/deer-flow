@@ -87,6 +87,8 @@ class ThreadTokenUsageResponse(BaseModel):
     total_runs: int = 0
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------

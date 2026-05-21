@@ -221,6 +221,8 @@ class TestStreamUsageIntegration:
             "input_tokens": 300,
             "output_tokens": 80,
             "total_tokens": 380,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
         }
 
     def test_stream_no_usage_metadata_no_usage_in_events(self):

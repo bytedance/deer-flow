@@ -4,6 +4,8 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
 }
 
 /**
@@ -14,16 +16,35 @@ export function getUsageMetadata(message: Message): TokenUsage | null {
   if (message.type !== "ai") {
     return null;
   }
-  const usage = (message as Record<string, unknown>).usage_metadata as
-    | { input_tokens?: number; output_tokens?: number; total_tokens?: number }
+  const usageMeta = (message as Record<string, unknown>).usage_metadata as
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+        cache_read_tokens?: number;
+        cache_creation_tokens?: number;
+        /** OpenAI stores cache counts nested: input_token_details.cache_read */
+        input_token_details?: {
+          cache_read?: number;
+          cache_creation?: number;
+        };
+      }
     | undefined;
-  if (!usage) {
+  if (!usageMeta) {
     return null;
   }
   return {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-    totalTokens: usage.total_tokens ?? 0,
+    inputTokens: usageMeta.input_tokens ?? 0,
+    outputTokens: usageMeta.output_tokens ?? 0,
+    totalTokens: usageMeta.total_tokens ?? 0,
+    // Prefer flat fields (already normalized by backend), fall back to
+    // nested input_token_details shape used by LangChain OpenAI provider.
+    cacheReadTokens:
+      (usageMeta.cache_read_tokens ?? 0) ||
+      (usageMeta.input_token_details?.cache_read ?? 0),
+    cacheCreationTokens:
+      (usageMeta.cache_creation_tokens ?? 0) ||
+      (usageMeta.input_token_details?.cache_creation ?? 0),
   };
 }
 
@@ -40,6 +61,8 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
   };
   let hasUsage = false;
   const countedMessageIds = new Set<string>();
@@ -61,6 +84,8 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
     cumulative.inputTokens += usage.inputTokens;
     cumulative.outputTokens += usage.outputTokens;
     cumulative.totalTokens += usage.totalTokens;
+    cumulative.cacheReadTokens += usage.cacheReadTokens;
+    cumulative.cacheCreationTokens += usage.cacheCreationTokens;
   }
   return hasUsage ? cumulative : null;
 }
@@ -71,7 +96,11 @@ export function hasNonZeroUsage(
   return (
     usage !== null &&
     usage !== undefined &&
-    (usage.inputTokens > 0 || usage.outputTokens > 0 || usage.totalTokens > 0)
+    (usage.inputTokens > 0 ||
+      usage.outputTokens > 0 ||
+      usage.totalTokens > 0 ||
+      usage.cacheReadTokens > 0 ||
+      usage.cacheCreationTokens > 0)
   );
 }
 
@@ -80,6 +109,8 @@ export function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
     inputTokens: base.inputTokens + delta.inputTokens,
     outputTokens: base.outputTokens + delta.outputTokens,
     totalTokens: base.totalTokens + delta.totalTokens,
+    cacheReadTokens: base.cacheReadTokens + delta.cacheReadTokens,
+    cacheCreationTokens: base.cacheCreationTokens + delta.cacheCreationTokens,
   };
 }
 

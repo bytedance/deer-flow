@@ -39,6 +39,9 @@ class RunRow(Base):
     lead_agent_tokens: Mapped[int] = mapped_column(default=0)
     subagent_tokens: Mapped[int] = mapped_column(default=0)
     middleware_tokens: Mapped[int] = mapped_column(default=0)
+    # Cache token tracking (OpenAI input_token_details.cache_read, Anthropic cache_*)
+    cache_read_tokens: Mapped[int] = mapped_column(default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(default=0)
 
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))

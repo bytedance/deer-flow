@@ -306,6 +306,9 @@ export const enUS: Translations = {
     input: "Input",
     output: "Output",
     total: "Total",
+    cache: "Cache",
+    cacheRead: "Read",
+    cacheCreation: "Create",
     view: "Display",
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",

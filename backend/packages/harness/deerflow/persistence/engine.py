@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -161,6 +162,24 @@ async def init_engine(
                 await conn.run_sync(Base.metadata.create_all)
         else:
             raise
+
+    # Run Alembic migrations to apply incremental schema changes.
+    # ``create_all`` only creates missing tables; Alembic handles
+    # column additions, index changes, and other ALTER operations
+    # for existing tables — essential for production upgrades.
+    _alembic_ini = Path(__file__).parent / "migrations" / "alembic.ini"
+    if _alembic_ini.exists():
+        try:
+            from alembic import command
+            from alembic.config import Config as AlembicConfig
+
+            cfg = AlembicConfig(str(_alembic_ini))
+            cfg.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False))
+            async with _engine.begin() as _mig_conn:
+                await _mig_conn.run_sync(lambda sync_conn: command.upgrade(cfg, "head"))
+            logger.info("Alembic migrations applied successfully")
+        except Exception as exc:
+            logger.warning("Alembic migration skipped (%s); create_all will handle fresh installs", exc)
 
     logger.info("Persistence engine initialized: backend=%s", backend)
 
