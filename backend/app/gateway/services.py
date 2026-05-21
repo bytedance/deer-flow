@@ -32,6 +32,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.runtime.runs.naming import resolve_root_run_name
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +236,7 @@ def build_run_config(
             target = config.setdefault("configurable", {})
         if target is not None and "agent_name" not in target:
             target["agent_name"] = normalized
+        config.setdefault("run_name", resolve_root_run_name(config, normalized))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config

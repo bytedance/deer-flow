@@ -50,6 +50,8 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 
 Detects when the agent is making the same tool call repeatedly without making progress. When a loop is detected, the middleware intervenes to break the cycle and prevents the agent from burning turns indefinitely.
 
+Warning interventions are queued per thread and run, then drained on the next model call as a single hidden `HumanMessage(name="loop_warning")` appended after existing tool results. This keeps provider tool-call pairing valid. Run start/end hooks clear stale or undelivered warnings, and hard stops still strip tool calls before forcing a final text response.
+
 **Configuration**: built-in, no user configuration.
 
 ---

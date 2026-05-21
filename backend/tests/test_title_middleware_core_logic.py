@@ -93,7 +93,7 @@ class TestTitleMiddlewareCoreLogic:
         assert middleware._should_generate_title(state) is False
 
     def test_generate_title_uses_async_model_and_respects_max_chars(self, monkeypatch):
-        _set_test_title_config(max_chars=12)
+        _set_test_title_config(max_chars=12, model_name=None)
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="短标题"))

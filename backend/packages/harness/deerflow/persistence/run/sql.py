@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.time import coerce_iso
 
 
 class RunRepository(RunStore):
@@ -68,11 +69,13 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
-        # Convert datetime to ISO string for consistency with MemoryRunStore
+        # Convert datetime to ISO string for consistency with MemoryRunStore.
+        # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
+        # ``coerce_iso`` normalizes naive datetimes as UTC.
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
-                d[key] = val.isoformat()
+                d[key] = coerce_iso(val)
         return d
 
     async def put(
@@ -149,6 +152,11 @@ class RunRepository(RunStore):
             values["error"] = error
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            await session.commit()
+
+    async def update_model_name(self, run_id, model_name):
+        async with self._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def delete(

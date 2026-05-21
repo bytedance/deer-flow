@@ -454,7 +454,6 @@ class TestAStream:
 
     @pytest.mark.asyncio
     async def test_with_tools_emits_tool_call_chunk(self):
-
         tool_calls = [{"name": "fn", "args": {}, "id": "c1"}]
         with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_ag.return_value = _make_chat_result("ok", tool_calls=tool_calls)

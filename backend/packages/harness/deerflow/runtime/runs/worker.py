@@ -36,6 +36,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
+from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
@@ -240,6 +241,9 @@ async def run_agent(
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
         )
 
+        # Resolve after runtime context installation so context/configurable reflect
+        # the agent name that this run will actually execute.
+        config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)

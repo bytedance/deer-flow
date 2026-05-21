@@ -110,6 +110,7 @@ export function InputBox({
   threadId,
   initialValue,
   onContextChange,
+  onFollowupsVisibilityChange,
   onSubmit,
   onStop,
   ...props
@@ -142,7 +143,8 @@ export function InputBox({
       reasoning_effort?: "minimal" | "low" | "medium" | "high";
     },
   ) => void;
-  onSubmit?: (message: PromptInputMessage) => void;
+  onFollowupsVisibilityChange?: (visible: boolean) => void;
+  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -251,12 +253,12 @@ export function InputBox({
   );
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    (message: PromptInputMessage) => {
       if (status === "streaming") {
         onStop?.();
         return;
       }
-      if (!message.text) {
+      if (!message.text.trim() && message.files.length === 0) {
         return;
       }
       setFollowups([]);
@@ -274,11 +276,14 @@ export function InputBox({
             selectedModel?.supports_thinking ?? false,
           ),
         });
-        setTimeout(() => onSubmit?.(message), 0);
-        return;
+        return new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+          }, 0);
+        });
       }
 
-      onSubmit?.(message);
+      return onSubmit?.(message);
     },
     [
       context,
@@ -347,6 +352,14 @@ export function InputBox({
     !isWelcomeMode &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
+
+  useEffect(() => {
+    onFollowupsVisibilityChange?.(showFollowups);
+  }, [onFollowupsVisibilityChange, showFollowups]);
+
+  useEffect(() => {
+    return () => onFollowupsVisibilityChange?.(false);
+  }, [onFollowupsVisibilityChange]);
 
   useEffect(() => {
     messagesRef.current = thread.messages;

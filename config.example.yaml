@@ -1029,6 +1029,14 @@ run_events:
 #     client_secret: $DINGTALK_CLIENT_SECRET
 #     allowed_users: []               # empty = allow all
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
+#
+#   discord:
+#     enabled: false
+#     bot_token: $DISCORD_BOT_TOKEN
+#     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
+#     mention_only: false             # If true, only respond when the bot is mentioned
+#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     thread_mode: false               # If true, group a channel conversation into a thread
 
 # ============================================================================
 # Guardrails Configuration

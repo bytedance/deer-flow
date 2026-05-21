@@ -20,7 +20,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id` and `thread_id`.
+1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
@@ -70,9 +70,12 @@ Create a new sandbox Pod + Service.
 ```json
 {
   "sandbox_id": "abc-123",
-  "thread_id": "thread-456"
+  "thread_id": "thread-456",
+  "user_id": "user-789"
 }
 ```
+
+`user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
 
 **Response**:
 ```json
@@ -138,10 +141,24 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
-| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: threads/{thread_id}/user-data` |
+| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+
+### PVC User-Data Upgrade Note
+
+Older provisioner versions mounted PVC user-data from `threads/{thread_id}/user-data`. The user-scoped layout mounts from `deer-flow/users/{user_id}/threads/{thread_id}/user-data`.
+
+If an existing deployment already has PVC-backed user-data under the legacy layout, migrate the DeerFlow data directory before relying on the new PVC subPath. Mount the same PVC path that the gateway uses as its DeerFlow base directory, then run the existing user-isolation migration script:
+
+```bash
+cd backend
+PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
+PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
+```
+
+This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
 
 ### Important: K8S_API_SERVER Override
 
@@ -213,7 +230,7 @@ curl http://localhost:8002/health
 # Create a sandbox (via provisioner container for internal DNS)
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
   -H "Content-Type: application/json" \
-  -d '{"sandbox_id":"test-001","thread_id":"thread-001"}'
+  -d '{"sandbox_id":"test-001","thread_id":"thread-001","user_id":"user-001"}'
 
 # Check sandbox status
 docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
