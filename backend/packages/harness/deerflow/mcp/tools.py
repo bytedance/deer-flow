@@ -59,6 +59,7 @@ def _convert_call_tool_result(call_tool_result: Any) -> Any:
         if isinstance(call_tool_result, Command):
             return call_tool_result, None
     except ImportError:
+        # langgraph is optional; if unavailable, continue with standard MCP content conversion.
         pass
 
     # Convert MCP content blocks to LangChain content blocks.
