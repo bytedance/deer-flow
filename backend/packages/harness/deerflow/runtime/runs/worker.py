@@ -33,22 +33,13 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 
 from .manager import RunManager, RunRecord
+from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
-
-
-def _resolve_root_run_name(config: dict[str, Any], assistant_id: str | None) -> str:
-    for container_name in ("context", "configurable"):
-        container = config.get(container_name)
-        if isinstance(container, dict):
-            agent_name = container.get("agent_name")
-            if isinstance(agent_name, str) and agent_name.strip():
-                return agent_name
-    return assistant_id or "lead_agent"
 
 
 def _build_runtime_context(
@@ -234,7 +225,9 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
-        config.setdefault("run_name", _resolve_root_run_name(config, record.assistant_id))
+        # Resolve after runtime context installation so context/configurable reflect
+        # the agent name that this run will actually execute.
+        config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
