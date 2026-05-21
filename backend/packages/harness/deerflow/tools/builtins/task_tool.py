@@ -102,10 +102,16 @@ def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: 
 def _find_usage_recorder(runtime: Any) -> Any | None:
     """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config.
 
-    LangChain may pass ``config["callbacks"]`` as either a plain list of handlers
-    or as a ``BaseCallbackManager`` instance (e.g. ``AsyncCallbackManager`` on
-    async tool runs). Callback managers are not iterable; unwrap their
-    ``handlers`` list before searching.
+    LangChain may pass ``config["callbacks"]`` in three different shapes:
+
+    - ``None`` (no callbacks registered): no recorder.
+    - A plain ``list[BaseCallbackHandler]``: iterate it directly.
+    - A ``BaseCallbackManager`` instance (e.g. ``AsyncCallbackManager`` on async
+      tool runs): managers are not iterable, so we unwrap ``.handlers`` first.
+
+    Any other shape (e.g. a single handler object accidentally passed without a
+    list wrapper) cannot be iterated safely; treat it as "no recorder" rather
+    than raise.
     """
     if runtime is None:
         return None
@@ -116,6 +122,8 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
     if isinstance(callbacks, BaseCallbackManager):
         callbacks = callbacks.handlers
     if not callbacks:
+        return None
+    if not isinstance(callbacks, list):
         return None
     for cb in callbacks:
         if hasattr(cb, "record_external_llm_usage_records"):
