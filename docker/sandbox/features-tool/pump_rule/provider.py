@@ -8,7 +8,7 @@ from typing import Any
 
 class PumpDataProvider(ABC):
     @abstractmethod
-    async def get_device_tree(self, machine_id: str) -> dict[str, Any]:
+    async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -28,8 +28,9 @@ class JsonFixturePumpDataProvider(PumpDataProvider):
         self.fixture_path = Path(fixture_path)
         self.payload = json.loads(self.fixture_path.read_text(encoding="utf-8"))
 
-    async def get_device_tree(self, machine_id: str) -> dict[str, Any]:
-        return self.payload.get("device_tree") or {"device_id": machine_id, "child_device_list": []}
+    async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
+        _ = machine_id
+        return self.payload.get("point_configs") or {"vibPointConfig": [], "staPointConfig": []}
 
     async def get_trend_data(self, point_ids: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
         _ = (start, end)
@@ -46,11 +47,13 @@ class InsPumpDataProvider(PumpDataProvider):
     def __init__(self) -> None:
         self._clients: list[Any] = []
 
-    async def get_device_tree(self, machine_id: str) -> dict[str, Any]:
-        from tools.device_analysis import close_clients, get_device_children
+    async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
+        from ins.client import InsApiClient
+        from ins.config import load_ins_settings
 
-        self._clients.append(close_clients)
-        return await get_device_children(machine_id)
+        client = InsApiClient(load_ins_settings())
+        self._clients.append(client.close)
+        return await client.get_point_configs(machine_id, 4)
 
     async def get_trend_data(self, point_ids: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
         from tools.get_trend_data_2k_tool import close_clients, _get_trend_data_impl

@@ -1,52 +1,42 @@
 {
-  "device_tree": {
-    "device_id": "PUMP1",
-    "child_device_list": [
+  "point_configs": {
+    "vibPointConfig": [
       {
-        "id": "PUMP1",
-        "name": "P-101A",
-        "type_num": 4,
-        "children": [
-          {
-            "id": "BRG1",
-            "name": "驱动端轴承",
-            "type_num": 70,
-            "points": [
-              {
-                "id": "VIB1",
-                "name": "驱动端 X 轴振",
-                "unit_type": 3,
-                "endpoint_series": "2k",
-                "position_type": 22,
-                "alarm_thresholds": {
-                  "v_rms": {
-                    "B": 3.0,
-                    "C": 4.0,
-                    "D": 7.0
-                  }
-                },
-                "config": {
-                  "cValue": 4.0,
-                  "vRmsCValue": 4.0,
-                  "bearingOuterRaceRatio": "3.0,3.6",
-                  "bpfRatio": "6"
-                }
-              },
-              {
-                "id": "TEMP1",
-                "name": "驱动端轴承温度",
-                "unit_type": 3,
-                "endpoint_series": "2k",
-                "position_type": 29,
-                "config": {
-                  "hAlarm": 80
-                }
-              }
-            ]
-          }
-        ]
+        "posId": "VIB1",
+        "posName": "驱动端 X 轴振",
+        "machineId": "PUMP1",
+        "componentId": "BRG1",
+        "type": 27,
+        "position": "P-101A/驱动端轴承",
+        "dcChannelId": "SX",
+        "config": "{\"bValue\":3.0,\"cValue\":4.0,\"dValue\":7.0,\"vRmsBValue\":3.0,\"vRmsCValue\":4.0,\"vRmsDValue\":7.0,\"bearingOuterRaceRatio\":\"3.0,3.6\",\"bpfRatio\":\"6\",\"isUsing\":1}",
+        "displayOrder": 1
+      },
+      {
+        "posId": "IGNORED_PROCESS",
+        "posName": "驱动端工艺量",
+        "machineId": "PUMP1",
+        "componentId": "BRG1",
+        "type": 99,
+        "position": "P-101A/驱动端轴承",
+        "config": "{}",
+        "displayOrder": 2
       }
-    ]
+    ],
+    "staPointConfig": [
+      {
+        "posId": "TEMP1",
+        "posName": "驱动端轴承温度",
+        "machineId": "PUMP1",
+        "componentId": "BRG1",
+        "type": 28,
+        "position": "P-101A/驱动端轴承",
+        "dcChannelId": "T",
+        "config": "{\"tempH\":80,\"tempHH\":90,\"isUsing\":1}",
+        "displayOrder": 3
+      }
+    ],
+    "magneticFluxPointConfig": []
   },
   "trends": {
     "VIB1": [

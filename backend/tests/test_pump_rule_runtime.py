@@ -24,6 +24,51 @@ def _load_script(filename: str, module_name: str):
     return module
 
 
+def test_builds_target_context_from_point_configs():
+    from pump_rule.context import build_target_context_from_point_configs
+
+    context = build_target_context_from_point_configs(
+        "PUMP1",
+        "BRG1",
+        {
+            "vibPointConfig": [
+                {
+                    "posId": "VIB27",
+                    "posName": "驱动端_水平",
+                    "componentId": "BRG1",
+                    "type": 27,
+                    "position": "P-101A/驱动端",
+                    "config": "{\"vRmsCValue\":4.5,\"cValue\":4.5}",
+                },
+                {
+                    "posId": "PROCESS",
+                    "posName": "非振动量",
+                    "componentId": "BRG1",
+                    "type": 99,
+                    "config": "{}",
+                },
+            ],
+            "staPointConfig": [
+                {
+                    "posId": "TEMP1",
+                    "posName": "驱动端_温度",
+                    "componentId": "BRG1",
+                    "type": 28,
+                    "position": "P-101A/驱动端",
+                    "config": "{\"tempH\":75,\"tempHH\":80}",
+                }
+            ],
+        },
+    )
+
+    assert context.target_name == "驱动端"
+    assert [point.point_id for point in context.points] == ["VIB27", "TEMP1"]
+    assert context.points[0].point_kind == "vibration"
+    assert context.points[0].thresholds["rms_c"] == 4.5
+    assert context.points[1].point_kind == "temperature"
+    assert context.points[1].thresholds["temp_h"] == 75
+
+
 @pytest.fixture(autouse=True)
 def _path(monkeypatch):
     monkeypatch.setenv("FEATURES_TOOL_ROOT", str(FEATURES_TOOL_DIR))

@@ -30,6 +30,14 @@
 - Agent SOUL：`agents/builtin/fault-diagnosis--pump/SOUL.md`
 - 单测和 fixtures：`backend/tests/test_pump_rule_runtime.py`、`backend/tests/fixtures/pump_rule/`
 
+## 测点获取
+
+- 机泵运行时通过 `/ins-os-manage/organize/getPointConfigs?nodeId={machineId}&nodeType=4` 获取测点配置。
+- 振动测点来自返回值 `data.vibPointConfig`，仅纳入 `type` 为 `23`、`24`、`26`、`27` 的测点。
+- 温度测点来自 `data.staPointConfig`，用于温度健康规则。
+- 子设备筛选使用 `componentId` 匹配；如果输入本身是 `posId`，则使用该测点所属 `componentId` 下的同组测点。
+- `config` 字段按 JSON 字符串解析，提取 `bValue`、`cValue`、`dValue`、`vRmsBValue`、`vRmsCValue`、`vRmsDValue`、`tempH`、`tempHH` 等门限。
+
 ## 回滚
 
 若需要回滚到旧 MVP 链路：
@@ -40,7 +48,7 @@
 
 ## 已知限制
 
-- 当前真实 InS 取数依赖现有 2K 设备树、趋势和波形工具返回字段，字段缺失时 runtime 会返回 warning 或结构化错误。
-- 当所选 `componentId` 是单个测点时，runtime 会优先在该目标及其关联节点内解析测点；无法定位关联测点时不会生成无依据结论。
+- 当前真实 InS 取数依赖 `getPointConfigs`、趋势和波形工具返回字段，字段缺失时 runtime 会返回 warning 或结构化错误。
+- 当所选 `componentId` 或测点 `posId` 无法定位关联测点时，不会生成无依据结论。
 - 报告图表只允许使用规则阶段缓存数据，不在报告阶段重新采样。
 - 现场参考 `/malfunction` 对比需要真实样例或录制数据；没有样例时不能标记对比完成。
