@@ -189,6 +189,21 @@ def rsa_encrypt(plaintext: str, public_key_pem: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
+def _safe_error_detail(response: Any) -> str | None:
+    """Extract error detail from a non-2xx response body without raising."""
+    try:
+        body = response.json()
+    except Exception:
+        try:
+            text = response.text
+            return text[:500] if text else None
+        except Exception:
+            return None
+    if isinstance(body, dict):
+        return str(body.get("msg") or body.get("message") or body)[:500]
+    return str(body)[:500]
+
+
 class InsApiClient:
     def __init__(self, settings: InsSettings, access_token: str | None = None) -> None:
         self.settings = settings
@@ -241,7 +256,12 @@ class InsApiClient:
             headers={"Authorization": f"Bearer {token}"},
             params=params,
         )
-        response.raise_for_status()
+        if response.is_error:
+            detail = _safe_error_detail(response)
+            raise RuntimeError(
+                f"InS {response.request.method} {response.request.url} "
+                f"→ {response.status_code}{f': {detail}' if detail else ''}"
+            )
         body = response.json()
         code = body.get("code", 0)
         if code == 401:
@@ -254,7 +274,12 @@ class InsApiClient:
                 headers={"Authorization": f"Bearer {token}"},
                 params=params,
             )
-            response.raise_for_status()
+            if response.is_error:
+                detail = _safe_error_detail(response)
+                raise RuntimeError(
+                    f"InS {response.request.method} {response.request.url} "
+                    f"→ {response.status_code}{f': {detail}' if detail else ''}"
+                )
             body = response.json()
             code = body.get("code", 0)
         if code != 200:
@@ -667,6 +692,9 @@ def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
             ):
                 for child in inner:
                     flattened.append(child)
+            elif isinstance(inner, list) and not inner:
+                # Empty value array → no data samples for this 2k/6k point.
+                pass
             else:
                 flattened.append(item)
         return flattened
