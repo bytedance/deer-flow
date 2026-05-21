@@ -218,6 +218,34 @@ class TestBuildPatchedMessagesPatching:
 
         assert mw._build_patched_messages(msgs) is None
 
+    def test_reused_tool_call_ids_across_ai_turns_keep_their_own_tool_results(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            HumanMessage(content="summary", name="summary", additional_kwargs={"hide_from_ui": True}),
+            _ai_with_tool_calls(
+                [
+                    _tc("web_search", "web_search:11"),
+                    _tc("web_search", "web_search:12"),
+                    _tc("web_search", "web_search:13"),
+                ]
+            ),
+            _tool_msg("web_search:11", "web_search"),
+            _tool_msg("web_search:12", "web_search"),
+            _tool_msg("web_search:13", "web_search"),
+            _ai_with_tool_calls(
+                [
+                    _tc("web_search", "web_search:9"),
+                    _tc("web_search", "web_search:10"),
+                    _tc("web_search", "web_search:11"),
+                ]
+            ),
+            _tool_msg("web_search:9", "web_search"),
+            _tool_msg("web_search:10", "web_search"),
+            _tool_msg("web_search:11", "web_search"),
+        ]
+
+        assert mw._build_patched_messages(msgs) is None
+
     def test_tool_results_are_grouped_with_their_own_ai_turn_across_multiple_ai_messages(self):
         mw = DanglingToolCallMiddleware()
         msgs = [
