@@ -2,13 +2,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from langchain.agents.middleware.types import ModelRequest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
-from deerflow.agents.middlewares.skill_activation_middleware import (
-    SkillActivationMiddleware,
-    is_slash_skill_activation_reminder,
-)
+from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 from deerflow.skills.slash import ORIGINAL_USER_CONTENT_KEY, parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -38,10 +35,11 @@ def _make_storage(tmp_path: Path, skills: list[Skill]):
     )
 
 
-def _make_model_request(messages: list[HumanMessage]) -> ModelRequest:
+def _make_model_request(messages: list[HumanMessage], system_message: SystemMessage | None = None) -> ModelRequest:
     return ModelRequest(
         model=object(),
         messages=messages,
+        system_message=system_message,
         state={"messages": list(messages)},
         runtime=None,
     )
@@ -88,29 +86,30 @@ def test_resolve_slash_skill_rejects_disabled_skills(tmp_path):
     assert resolve_slash_skill("/data-analysis run", [skill]) is None
 
 
-def test_skill_activation_middleware_injects_hidden_skill_context_for_model_call(monkeypatch, tmp_path):
+def test_skill_activation_middleware_injects_skill_context_into_system_message(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
     middleware = SkillActivationMiddleware()
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
-    request = _make_model_request([original])
+    request = _make_model_request([original], system_message=SystemMessage(content="Base system prompt."))
     captured = {}
 
     def handler(model_request: ModelRequest):
         captured["messages"] = model_request.messages
+        captured["system_message"] = model_request.system_message
         return AIMessage(content="ok")
 
     result = middleware.wrap_model_call(request, handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
-    activation_msg, user_msg = captured["messages"]
-    assert is_slash_skill_activation_reminder(activation_msg)
-    assert activation_msg.additional_kwargs["hide_from_ui"] is True
-    assert "Use pandas." in activation_msg.content
-    assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in activation_msg.content
-    assert user_msg.content == original.content
+    assert captured["messages"] == [original]
+    system_message = captured["system_message"]
+    assert isinstance(system_message, SystemMessage)
+    assert system_message.content.startswith("Base system prompt.")
+    assert "Use pandas." in system_message.content
+    assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in system_message.content
     assert request.state["messages"] == [original]
 
 
@@ -128,18 +127,19 @@ def test_skill_activation_middleware_uses_original_user_content_when_uploads_are
 
     def handler(model_request: ModelRequest):
         captured["messages"] = model_request.messages
+        captured["system_message"] = model_request.system_message
         return AIMessage(content="ok")
 
     result = middleware.wrap_model_call(_make_model_request([original]), handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
-    activation_msg, user_msg = captured["messages"]
-    assert is_slash_skill_activation_reminder(activation_msg)
-    assert "Use pandas." in activation_msg.content
-    assert "<user_request>\n分析这个文档\n</user_request>" in activation_msg.content
-    assert user_msg.content == original.content
-    assert user_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis分析这个文档"
+    assert captured["messages"] == [original]
+    system_message = captured["system_message"]
+    assert isinstance(system_message, SystemMessage)
+    assert "Use pandas." in system_message.content
+    assert "<user_request>\n分析这个文档\n</user_request>" in system_message.content
+    assert original.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis分析这个文档"
 
 
 def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(monkeypatch, tmp_path):

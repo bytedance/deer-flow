@@ -25,6 +25,8 @@ from deerflow.skills.types import Skill
 
 logger = logging.getLogger(__name__)
 
+_BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
+
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
     """Merge legacy configurable options with LangGraph runtime context."""
@@ -328,7 +330,7 @@ def _build_middlewares(
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if is_bootstrap:
-        return {"bootstrap"}
+        return set(_BOOTSTRAP_SKILL_NAMES)
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
@@ -420,6 +422,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
+        # Keep the bootstrap skill set intentionally narrow so agent creation
+        # remains deterministic before the custom agent's own config exists.
         tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config),
@@ -427,13 +431,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             middleware=_build_middlewares(
                 config,
                 model_name=model_name,
-                available_skills=set(["bootstrap"]),
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
-                available_skills=set(["bootstrap"]),
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
             ),
             state_schema=ThreadState,

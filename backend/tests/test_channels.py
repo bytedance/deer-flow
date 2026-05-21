@@ -1174,7 +1174,7 @@ class TestChannelManager:
 
         monkeypatch.setattr(
             "app.channels.manager._is_enabled_slash_skill_command",
-            lambda text, available_skills=None: text.startswith("/data-analysis") and (available_skills is None or "data-analysis" in available_skills),
+            lambda text, available_skills=None, storage=None: text.startswith("/data-analysis") and (available_skills is None or "data-analysis" in available_skills),
         )
 
         async def go():
@@ -1216,7 +1216,7 @@ class TestChannelManager:
 
         monkeypatch.setattr(
             "app.channels.manager._is_enabled_slash_skill_command",
-            lambda text, available_skills=None: text.startswith("/data-analysis") and (available_skills is None or "data-analysis" in available_skills),
+            lambda text, available_skills=None, storage=None: text.startswith("/data-analysis") and (available_skills is None or "data-analysis" in available_skills),
         )
         monkeypatch.setattr("app.channels.manager.load_agent_config", lambda name: SimpleNamespace(skills=["frontend-design"]))
 
@@ -1253,6 +1253,46 @@ class TestChannelManager:
 
             mock_client.runs.wait.assert_not_called()
             assert outbound_received[0].text.startswith("Unknown command: /data-analysis.")
+
+        _run(go())
+
+    def test_handle_command_slash_skill_resolution_error_is_reported(self, monkeypatch):
+        from app.channels.manager import ChannelManager, SlashSkillCommandResolutionError
+
+        def fail_resolution(text, available_skills=None, storage=None):
+            raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.")
+
+        monkeypatch.setattr("app.channels.manager._is_enabled_slash_skill_command", fail_resolution)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text == "Failed to resolve slash skill command. Please check the skill configuration."
 
         _run(go())
 
