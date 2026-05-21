@@ -43,7 +43,7 @@ from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
-from deerflow.tracing import build_langfuse_trace_metadata, build_tracing_callbacks
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -125,6 +125,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        environment: str | None = None,
     ):
         """Initialize the client.
 
@@ -142,6 +143,12 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            environment: Deployment environment label that ends up in
+                ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
+                When ``None`` the worker/client falls back to the
+                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                explicit value for programmatic callers that do not want
+                env-var coupling.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -158,6 +165,7 @@ class DeerFlowClient:
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
+        self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -590,18 +598,14 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         configurable = config.get("configurable") or {}
-        langfuse_metadata = build_langfuse_trace_metadata(
+        inject_langfuse_metadata(
+            config,
             thread_id=thread_id,
             user_id=get_effective_user_id(),
             assistant_id=self._agent_name or "lead-agent",
             model_name=configurable.get("model_name") or self._model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
         )
-        if langfuse_metadata:
-            merged_metadata = dict(config.get("metadata") or {})
-            for key, value in langfuse_metadata.items():
-                merged_metadata.setdefault(key, value)
-            config["metadata"] = merged_metadata
 
         self._ensure_agent(config)
 

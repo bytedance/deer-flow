@@ -32,13 +32,13 @@ class _FakeAgent:
 
 @pytest.fixture(autouse=True)
 def _clear_langfuse_env(monkeypatch):
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
     for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     yield
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
 
 def _stub_agent_creation(monkeypatch, fake_agent: _FakeAgent) -> dict[str, Any]:
@@ -74,6 +74,7 @@ def _make_client(_monkeypatch) -> DeerFlowClient:
     client._checkpointer = None
     client._agent = None
     client._agent_config_key = None
+    client._environment = None
     return client
 
 
@@ -81,9 +82,9 @@ def test_stream_injects_langfuse_metadata_when_enabled(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
     class _SentinelHandler:
         pass
@@ -127,9 +128,9 @@ def test_stream_preserves_caller_metadata_overrides(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     monkeypatch.setattr("deerflow.client.build_tracing_callbacks", lambda: [])
 
     fake_agent = _FakeAgent()

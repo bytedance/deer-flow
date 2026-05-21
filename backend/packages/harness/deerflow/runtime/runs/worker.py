@@ -33,7 +33,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.tracing import build_langfuse_trace_metadata
+from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
 from .schemas import RunStatus
@@ -229,20 +229,16 @@ async def run_agent(
 
         # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
         # can lift session_id / user_id / trace_name / tags onto the root trace.
-        # Caller-provided metadata wins via setdefault so external overrides
-        # (e.g. a frontend-supplied session_id) are preserved.
-        langfuse_metadata = build_langfuse_trace_metadata(
+        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
+        # in sync; caller-provided metadata wins via setdefault inside the helper.
+        inject_langfuse_metadata(
+            config,
             thread_id=thread_id,
             user_id=get_effective_user_id(),
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
         )
-        if langfuse_metadata:
-            merged_metadata = dict(config.get("metadata") or {})
-            for key, value in langfuse_metadata.items():
-                merged_metadata.setdefault(key, value)
-            config["metadata"] = merged_metadata
 
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):

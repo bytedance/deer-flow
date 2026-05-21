@@ -190,8 +190,7 @@ def _restore_title_config_singleton():
     independent regardless of order.
     """
     try:
-        from deerflow.config import title_config as title_module
-        from deerflow.config.title_config import TitleConfig
+        from deerflow.config.title_config import reset_title_config
     except ImportError:
         yield
         return
@@ -199,7 +198,7 @@ def _restore_title_config_singleton():
     try:
         yield
     finally:
-        title_module._title_config = TitleConfig()
+        reset_title_config()
 
 
 @pytest.fixture(autouse=True)

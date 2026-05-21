@@ -1,3 +1,23 @@
+"""Lead agent factory.
+
+INVARIANT — tracing callback placement
+======================================
+
+Tracing callbacks (Langfuse, LangSmith) are attached at the **graph
+invocation root** in :func:`_make_lead_agent` (see the
+``build_tracing_callbacks()`` block that appends to ``config["callbacks"]``).
+Every ``create_chat_model(...)`` call inside this module — and inside any
+middleware reachable from this graph (e.g. ``TitleMiddleware``) — MUST pass
+``attach_tracing=False``.
+
+Forgetting that flag emits duplicate spans (one rooted at the graph, one at
+the model) AND prevents the Langfuse handler's ``propagate_attributes``
+path from firing, so ``session_id`` / ``user_id`` never reach the trace.
+The four current sites are: bootstrap agent, default agent, summarization
+middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
+``create_chat_model`` call must add to this list and pass the flag.
+"""
+
 import logging
 
 from langchain.agents import create_agent

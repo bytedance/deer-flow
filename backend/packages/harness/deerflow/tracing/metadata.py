@@ -68,3 +68,38 @@ def build_langfuse_trace_metadata(
         metadata["langfuse_tags"] = tags
 
     return metadata
+
+
+def inject_langfuse_metadata(
+    config: dict,
+    *,
+    thread_id: str | None,
+    user_id: str | None = None,
+    assistant_id: str | None = None,
+    model_name: str | None = None,
+    environment: str | None = None,
+) -> None:
+    """Merge Langfuse trace-attribute metadata into ``config["metadata"]``.
+
+    Shared by the gateway worker (``runtime/runs/worker.py``) and the
+    embedded client (``client.py``) so the two paths cannot drift apart.
+
+    Caller-supplied metadata wins via ``setdefault`` — an upstream value
+    for e.g. ``langfuse_session_id`` set by the frontend stays untouched.
+    The ``config`` dict is mutated in place; the call is a no-op when
+    Langfuse is not in the enabled tracing providers.
+    """
+    langfuse_metadata = build_langfuse_trace_metadata(
+        thread_id=thread_id,
+        user_id=user_id,
+        assistant_id=assistant_id,
+        model_name=model_name,
+        environment=environment,
+    )
+    if not langfuse_metadata:
+        return
+
+    merged_metadata = dict(config.get("metadata") or {})
+    for key, value in langfuse_metadata.items():
+        merged_metadata.setdefault(key, value)
+    config["metadata"] = merged_metadata

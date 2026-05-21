@@ -61,14 +61,14 @@ class _FakeBridge:
 
 
 @pytest.fixture(autouse=True)
-def reset_tracing_config(monkeypatch):
-    from deerflow.config import tracing_config as tracing_module
+def _clear_tracing_env(monkeypatch):
+    from deerflow.config.tracing_config import reset_tracing_config
 
     for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     yield
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
 
 @pytest.mark.asyncio
@@ -76,9 +76,9 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
     fake_agent = _FakeAgent()
 
@@ -130,11 +130,11 @@ async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
     from deerflow.runtime.runs import worker as worker_module
     from deerflow.runtime.user_context import DEFAULT_USER_ID
 
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     monkeypatch.setattr(worker_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
 
     fake_agent = _FakeAgent()
@@ -172,9 +172,9 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
     fake_agent = _FakeAgent()
 

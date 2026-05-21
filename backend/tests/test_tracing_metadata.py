@@ -8,8 +8,8 @@ from deerflow.tracing import metadata as tracing_metadata
 
 
 @pytest.fixture(autouse=True)
-def reset_tracing_config(monkeypatch):
-    from deerflow.config import tracing_config as tracing_module
+def _clear_tracing_env(monkeypatch):
+    from deerflow.config.tracing_config import reset_tracing_config
 
     for name in (
         "LANGFUSE_TRACING",
@@ -23,9 +23,9 @@ def reset_tracing_config(monkeypatch):
         "LANGCHAIN_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     yield
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
 
 def _enable_langfuse(monkeypatch):
