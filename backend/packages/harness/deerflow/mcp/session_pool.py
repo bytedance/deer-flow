@@ -27,6 +27,7 @@ class MCPSessionPool:
     """Manages persistent MCP sessions scoped by ``(server_name, scope_key)``."""
 
     MAX_SESSIONS = 256
+    SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session via run_coroutine_threadsafe
 
     def __init__(self) -> None:
         self._entries: OrderedDict[
@@ -166,7 +167,7 @@ class MCPSessionPool:
                 if loop.is_running():
                     # Schedule on the owning loop from this (different) thread.
                     future = asyncio.run_coroutine_threadsafe(cm.__aexit__(None, None, None), loop)
-                    future.result(timeout=5.0)
+                    future.result(timeout=self.SESSION_CLOSE_TIMEOUT)
                 else:
                     loop.run_until_complete(cm.__aexit__(None, None, None))
             except Exception:
