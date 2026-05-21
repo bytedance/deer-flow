@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -143,6 +142,8 @@ async def test_put_offloads_write_via_to_thread():
     async def spy(*args, **kwargs):
         calls.append(args[0].__name__ if callable(args[0]) else repr(args[0]))
         return await original(*args, **kwargs)
+
+    from unittest.mock import patch
 
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(Path(tmp))
