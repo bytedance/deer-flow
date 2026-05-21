@@ -343,6 +343,30 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert len(middlewares) > 0 and isinstance(middlewares[-3], MagicMock)
 
 
+def test_build_middlewares_inserts_tool_args_compaction_after_summarization(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: "summary-mw")
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+    monkeypatch.setattr(lead_agent_module, "ToolArgsCompactionMiddleware", lambda: "compact-mw")
+    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config: "title-mw")
+    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-mw")
+
+    middlewares = lead_agent_module._build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    summary_idx = middlewares.index("summary-mw")
+    compact_idx = middlewares.index("compact-mw")
+    title_idx = middlewares.index("title-mw")
+    memory_idx = middlewares.index("memory-mw")
+    assert summary_idx < compact_idx < title_idx < memory_idx
+
+
 def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     captured: dict[str, object] = {}

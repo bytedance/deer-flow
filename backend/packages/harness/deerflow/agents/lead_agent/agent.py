@@ -34,6 +34,7 @@ from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitM
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
@@ -294,6 +295,10 @@ def _build_middlewares(
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
+
+    # Compact oversized historical write_file tool-call args in the model-bound
+    # request view without mutating persisted conversation state.
+    middlewares.append(ToolArgsCompactionMiddleware())
 
     # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
