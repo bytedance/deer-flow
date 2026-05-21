@@ -57,6 +57,7 @@ class _RunController:
     def __init__(self) -> None:
         self.started = threading.Event()
         self.checkpoint_written = threading.Event()
+        self.blocked = threading.Event()
         self.cancelled = threading.Event()
         self.release = threading.Event()
         self.instances: list[_ScriptedAgent] = []
@@ -109,6 +110,7 @@ class _ScriptedAgent:
         yield _stream_item_for_mode(stream_mode, state)
 
         if self.block_after_first_chunk:
+            self.controller.blocked.set()
             try:
                 while not self.controller.release.is_set():
                     await asyncio.sleep(0.05)
@@ -560,6 +562,7 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         assert created.status_code == 200, created.text
         run_id = created.json()["run_id"]
         assert controller.started.wait(5), "fake agent never started"
+        assert controller.blocked.wait(5), "fake agent never entered its cancellable wait"
 
         cancelled = client.post(
             f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
@@ -665,6 +668,7 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         assert created.status_code == 200, created.text
         run_id = created.json()["run_id"]
         assert controller.checkpoint_written.wait(5), "fake agent did not write in-run checkpoint"
+        assert controller.blocked.wait(5), "fake agent never entered its cancellable wait"
 
         during = client.get(f"/api/threads/{thread_id}/state")
         assert during.status_code == 200, during.text
