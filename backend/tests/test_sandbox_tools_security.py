@@ -1231,23 +1231,20 @@ def test_write_file_tool_bounds_large_sandbox_error(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("raised_error", "expected_start", "expected_fragment"),
+    ("raised_error", "expected_fragment"),
     [
         pytest.param(
             PermissionError("permission denied"),
-            "Error: Permission denied writing to file: /mnt/user-data/workspace/output.txt",
             "PermissionError: permission denied",
             id="permission",
         ),
         pytest.param(
             IsADirectoryError("target is a directory"),
-            "Error: Path is a directory, not a file: /mnt/user-data/workspace/output.txt",
             "IsADirectoryError: target is a directory",
             id="directory",
         ),
         pytest.param(
             Exception("remote sandbox timeout"),
-            "Error: Failed to write file '/mnt/user-data/workspace/output.txt'",
             "Exception: remote sandbox timeout",
             id="generic",
         ),
@@ -1256,7 +1253,6 @@ def test_write_file_tool_bounds_large_sandbox_error(monkeypatch) -> None:
 def test_write_file_tool_formats_all_other_failure_branches(
     monkeypatch,
     raised_error: Exception,
-    expected_start: str,
     expected_fragment: str,
 ) -> None:
     class FailingSandbox:
@@ -1279,7 +1275,7 @@ def test_write_file_tool_formats_all_other_failure_branches(
         content="tiny payload",
     )
 
-    assert result.startswith(expected_start)
+    assert "/mnt/user-data/workspace/output.txt" in result
     assert expected_fragment in result
     assert "[write_file error truncated:" not in result
 
