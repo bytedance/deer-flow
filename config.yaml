@@ -213,8 +213,8 @@ content_safety:
     use: deerflow.content_safety.builtin:RegexPIIProvider
     config:
       action: mask
-      detect_credit_cards: true
-      detect_phones: true
+      detect_credit_cards: false
+      detect_phones: false
       detect_emails: true
       detect_chinese_ids: true
 rag:

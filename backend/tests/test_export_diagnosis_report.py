@@ -211,6 +211,28 @@ def test_render_markdown_single_match_says_no_differential(export_diagnosis):
     assert "未发现替代候选" in md
 
 
+def test_render_markdown_shows_multiple_faults(export_diagnosis):
+    md = export_diagnosis.render_diagnosis_markdown(_diagnosis_payload())
+    assert "并发故障候选" in md
+    assert "cavitation" in md
+
+
+def test_render_markdown_normal_when_threshold_filters_all_faults(export_diagnosis):
+    payload = _diagnosis_payload()
+    payload["rule_matches"] = []
+    payload["recommendations"] = []
+    payload["result_summary"] = {
+        "overall_verdict": "normal",
+        "primary_fault": "机组正常",
+        "confidence": "low",
+        "score": 0.0,
+        "evidence_summary": [],
+    }
+    md = export_diagnosis.render_diagnosis_markdown(payload)
+    assert "机组正常" in md
+    assert "无需要展示的故障候选" in md
+
+
 # --- Integration with export_report.write_report ---
 
 

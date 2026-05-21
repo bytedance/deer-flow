@@ -55,8 +55,8 @@ class RegexPIIProvider:
     def __init__(
         self,
         *,
-        detect_credit_cards: bool = True,
-        detect_phones: bool = True,
+        detect_credit_cards: bool = False,
+        detect_phones: bool = False,
         detect_chinese_ids: bool = True,
         detect_emails: bool = True,
         detect_ips: bool = False,

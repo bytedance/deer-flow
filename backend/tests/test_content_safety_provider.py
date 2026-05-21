@@ -14,22 +14,22 @@ class TestRegexPIIProvider:
         assert decision.flagged_categories == []
 
     def test_detects_credit_card(self):
-        provider = RegexPIIProvider()
-        decision = provider.evaluate(ContentSafetyRequest(text="My card is 4532015112830366", role="user"))
+        provider = RegexPIIProvider(detect_credit_cards=True)
+        decision = provider.evaluate(ContentSafetyRequest(text="My card is 4111111111111111", role="user"))
         assert "credit_card" in decision.flagged_categories
 
     def test_masks_credit_card(self):
-        provider = RegexPIIProvider(action="mask")
-        decision = provider.evaluate(ContentSafetyRequest(text="Use card 4532015112830366 please", role="user"))
+        provider = RegexPIIProvider(action="mask", detect_credit_cards=True)
+        decision = provider.evaluate(ContentSafetyRequest(text="Use card 4111111111111111 please", role="user"))
         assert "[CREDIT_CARD]" in (decision.sanitized_text or "")
 
     def test_detects_chinese_phone(self):
-        provider = RegexPIIProvider()
+        provider = RegexPIIProvider(detect_phones=True)
         decision = provider.evaluate(ContentSafetyRequest(text="Call me at 13812345678", role="user"))
         assert "phone" in decision.flagged_categories
 
     def test_masks_phone(self):
-        provider = RegexPIIProvider(action="mask")
+        provider = RegexPIIProvider(action="mask", detect_phones=True)
         decision = provider.evaluate(ContentSafetyRequest(text="My number is 13812345678 thanks", role="user"))
         assert "[PHONE]" in (decision.sanitized_text or "")
 
@@ -49,8 +49,8 @@ class TestRegexPIIProvider:
         assert "[EMAIL]" in (decision.sanitized_text or "")
 
     def test_block_action_denies(self):
-        provider = RegexPIIProvider(action="block")
-        decision = provider.evaluate(ContentSafetyRequest(text="My card 4532015112830366", role="user"))
+        provider = RegexPIIProvider(action="block", detect_credit_cards=True)
+        decision = provider.evaluate(ContentSafetyRequest(text="My card 4111111111111111", role="user"))
         assert decision.allowed is False
 
     def test_disabled_detectors_skip(self):

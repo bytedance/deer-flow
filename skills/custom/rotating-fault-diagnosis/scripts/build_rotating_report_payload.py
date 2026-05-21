@@ -11,6 +11,7 @@ from typing import Any
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 RULES_SKILL = "vibration-fault-diagnosis"
+FAULT_DISPLAY_SCORE_THRESHOLD = 0.5
 
 
 def _output_dir() -> Path:
@@ -74,6 +75,10 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
     return result
 
 
+def _displayable_score(score: Any) -> float:
+    return round(_safe_float(score) or 0.0, 4)
+
+
 def _cache_dir(result_payload: dict[str, Any]) -> Path:
     artifacts = result_payload.get("artifacts") or {}
     raw = artifacts.get("cache_dir")
@@ -118,6 +123,9 @@ def _collect_rule_rows(
         fault_type = str(candidate.get("fault_type") or "").strip()
         if not fault_type:
             return
+        score = _displayable_score(candidate.get("score"))
+        if score < FAULT_DISPLAY_SCORE_THRESHOLD:
+            return
 
         supporting_indices: list[int] = []
         for condition in candidate.get("matched_conditions") or []:
@@ -128,7 +136,7 @@ def _collect_rule_rows(
                     "equipment_id": device_id,
                     "point": sub_device_id,
                     "feature": str(condition),
-                    "value": round(_safe_float(candidate.get("score")) or 0.0, 4),
+                    "value": score,
                     "threshold": "matched",
                     "verdict": "exceed",
                 }
@@ -154,7 +162,7 @@ def _collect_rule_rows(
                 "fault_family": fault_type,
                 "fault_subtype": candidate.get("fault_subtype") or None,
                 "confidence": confidence or _confidence_from_score(candidate.get("score")),
-                "score": round(_safe_float(candidate.get("score")) or 0.0, 4),
+                "score": score,
                 "supporting_evidence_indices": supporting_indices,
                 "marginal_evidence_indices": [],
                 "missing_evidence": [str(item) for item in (candidate.get("missing_evidence") or []) if str(item).strip()],
@@ -276,124 +284,6 @@ def _orbit_rows(device_id: str, payloads: list[dict[str, Any]]) -> list[dict[str
     return rows[:12]
 
 
-def _build_trend_chart(cache_payloads: list[dict[str, Any]], warnings: list[str]) -> dict[str, Any]:
-    if not cache_payloads:
-        warnings.append("缺少趋势缓存，趋势图已跳过")
-        return {"title": {"text": "真实规则趋势数据"}, "series": []}
-
-    best_payload = max(
-        cache_payloads,
-        key=lambda item: sum(len(series or []) for series in (item.get("data") or {}).values()),
-    )
-    data = best_payload.get("data") or {}
-    if not isinstance(data, dict):
-        warnings.append("趋势缓存格式异常，趋势图已跳过")
-        return {"title": {"text": "真实规则趋势数据"}, "series": []}
-
-    series_list: list[dict[str, Any]] = []
-    for component_id, items in data.items():
-        if not isinstance(items, list):
-            continue
-        sample = next((item for item in items if isinstance(item, dict) and isinstance(item.get("values"), dict) and item.get("values")), None)
-        if sample is None:
-            continue
-        for feature in list((sample.get("values") or {}).keys())[:2]:
-            pairs: list[list[Any]] = []
-            for point in items:
-                if not isinstance(point, dict):
-                    continue
-                value = _safe_float((point.get("values") or {}).get(feature))
-                if value is None:
-                    continue
-                label = _iso_from_ms(point.get("time_ms")) or str(point.get("time_ms") or "")
-                if not label:
-                    continue
-                pairs.append([label, round(value, 6)])
-            if pairs:
-                series_list.append(
-                    {
-                        "name": f"{component_id}:{feature}",
-                        "type": "line",
-                        "showSymbol": False,
-                        "smooth": True,
-                        "data": pairs,
-                    }
-                )
-        if len(series_list) >= 8:
-            break
-
-    if not series_list:
-        warnings.append("趋势缓存中没有可绘制的数据点")
-    return {
-        "title": {"text": "真实规则趋势数据"},
-        "tooltip": {"trigger": "axis"},
-        "legend": {"type": "scroll"},
-        "xAxis": {"type": "category"},
-        "yAxis": {"type": "value"},
-        "series": series_list[:8],
-    }
-
-
-def _build_spectrum_charts(payloads: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
-    charts: list[dict[str, Any]] = []
-    for payload in payloads:
-        component_id = str(payload.get("component_id") or "").strip()
-        time_ms = str(payload.get("time_ms") or "").strip()
-        data = payload.get("data") or {}
-        spec_x = data.get("spec_x") or []
-        spec_y = data.get("spec_y") or []
-        pairs = [
-            [round(float(x), 6), round(float(y), 6)]
-            for x, y in zip(spec_x, spec_y)
-            if isinstance(x, (int, float)) and isinstance(y, (int, float))
-        ]
-        if not pairs:
-            warnings.append(f"频谱缓存缺少有效数据: {component_id or 'unknown'}@{time_ms or 'unknown'}")
-            continue
-        charts.append(
-            {
-                "point": component_id or "unknown",
-                "option": {
-                    "title": {"text": f"频谱图 · {component_id}"},
-                    "tooltip": {"trigger": "axis"},
-                    "xAxis": {"type": "value", "name": "Hz"},
-                    "yAxis": {"type": "value", "name": "Amplitude"},
-                    "series": [{"name": "spectrum", "type": "line", "showSymbol": False, "data": pairs}],
-                },
-            }
-        )
-    return charts
-
-
-def _build_orbit_charts(payloads: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
-    charts: list[dict[str, Any]] = []
-    for payload in payloads:
-        bearing_id = str(payload.get("bearing_id") or "").strip()
-        data = payload.get("data") or {}
-        points = data.get("points") or []
-        pairs = [
-            [round(float(item[0]), 6), round(float(item[1]), 6)]
-            for item in points
-            if isinstance(item, list) and len(item) >= 2 and isinstance(item[0], (int, float)) and isinstance(item[1], (int, float))
-        ]
-        if not pairs:
-            warnings.append(f"轨迹缓存缺少有效数据: {bearing_id or 'unknown'}")
-            continue
-        charts.append(
-            {
-                "bearing": bearing_id or "unknown",
-                "option": {
-                    "title": {"text": f"轴心轨迹 · {bearing_id}"},
-                    "tooltip": {"trigger": "axis"},
-                    "xAxis": {"type": "value", "name": "X"},
-                    "yAxis": {"type": "value", "name": "Y", "scale": True},
-                    "series": [{"name": "orbit", "type": "line", "showSymbol": False, "data": pairs}],
-                },
-            }
-        )
-    return charts
-
-
 def build_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
     if not result_payload.get("ok"):
         error = result_payload.get("error") or {}
@@ -403,11 +293,8 @@ def build_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
     cache_dir = _cache_dir(result_payload)
     warnings = [str(item) for item in (result_payload.get("warnings") or []) if str(item).strip()]
 
-    trend_raw = _iter_cache(cache_dir, "trend")
     trend_features = _iter_cache(cache_dir, "trend_features")
-    waveform_raw = _iter_cache(cache_dir, "waveform")
     waveform_features = _iter_cache(cache_dir, "waveform_features")
-    orbit_raw = _iter_cache(cache_dir, "orbit")
     orbit_features = _iter_cache(cache_dir, "orbit_features")
 
     evidence_rows, rule_matches = _collect_rule_rows(
@@ -420,15 +307,14 @@ def build_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
     evidence_rows.extend(_waveform_rows(str(result_payload.get("device_id") or ""), waveform_features))
     evidence_rows.extend(_orbit_rows(str(result_payload.get("device_id") or ""), orbit_features))
 
-    trend_chart = _build_trend_chart(trend_raw, warnings)
-    spectrum_charts = _build_spectrum_charts(waveform_raw, warnings)
-    orbit_charts = _build_orbit_charts(orbit_raw, warnings)
-
     diagnostic_recommendations = _dedupe_keep_order(
         [str(item) for item in (rule_result.get("running_actions") or [])]
         + [str(item) for item in (rule_result.get("maintenance_actions") or [])]
         + [str(item) for item in (rule_result.get("rule_optimization_conclusion") or [])]
     )
+
+    if not rule_matches:
+        diagnostic_recommendations = []
 
     max_row = next(
         (
@@ -438,9 +324,13 @@ def build_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
         ),
         None,
     )
-    alarm_status = "warning" if any(row.get("verdict") == "exceed" for row in evidence_rows) else "info"
-    if not any(row.get("verdict") in {"exceed", "marginal"} for row in evidence_rows):
+    alarm_status = "warning" if rule_matches and any(row.get("verdict") == "exceed" for row in evidence_rows) else "info"
+    if not rule_matches or not any(row.get("verdict") in {"exceed", "marginal"} for row in evidence_rows):
         alarm_status = "ok"
+
+    top_score = max([_displayable_score(match.get("score")) for match in rule_matches], default=_displayable_score(rule_result.get("score")))
+    is_normal = not rule_matches or top_score < FAULT_DISPLAY_SCORE_THRESHOLD
+    primary_fault = "机组正常" if is_normal else str(rule_matches[0].get("fault_family") or "")
 
     payload = {
         "report_meta": {
@@ -465,31 +355,18 @@ def build_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
             }
         ],
         "evidence_chain": evidence_rows,
-        "trend_chart": trend_chart,
-        "spectrum_charts": spectrum_charts,
-        "orbit_charts": orbit_charts,
-        "rule_matches": rule_matches
-        or [
-            {
-                "equipment_id": str(result_payload.get("device_id") or ""),
-                "kind": _extract_kind(rule_result),
-                "fault_family": str(rule_result.get("fault_type") or "unknown"),
-                "fault_subtype": rule_result.get("fault_subtype") or None,
-                "confidence": str(rule_result.get("confidence") or "low"),
-                "score": round(_safe_float(rule_result.get("score")) or 0.0, 4),
-                "supporting_evidence_indices": [],
-                "marginal_evidence_indices": [],
-                "missing_evidence": [],
-                "rule_section": "rotating-rule-runtime",
-            }
-        ],
+        "trend_chart": {},
+        "spectrum_charts": [],
+        "orbit_charts": [],
+        "rule_matches": rule_matches,
         "historical_cases": [],
         "recommendations": diagnostic_recommendations,
         "warnings": _dedupe_keep_order(warnings),
         "result_summary": {
-            "primary_fault": str(rule_result.get("fault_type") or ""),
-            "confidence": str(rule_result.get("confidence") or ""),
-            "score": round(_safe_float(rule_result.get("score")) or 0.0, 4),
+            "overall_verdict": "normal" if is_normal else "fault",
+            "primary_fault": primary_fault,
+            "confidence": "low" if is_normal else str(rule_matches[0].get("confidence") or rule_result.get("confidence") or ""),
+            "score": 0.0 if is_normal else top_score,
             "evidence_summary": [str(item) for item in (rule_result.get("evidence_summary") or []) if str(item).strip()],
         },
     }

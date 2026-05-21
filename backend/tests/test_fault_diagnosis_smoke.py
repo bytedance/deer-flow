@@ -10,7 +10,7 @@ Story S1-8 acceptance (initial) + Story S2-6 expansion (full coverage):
    historical_cases are tagged so the SOUL can prefix "演示".
 5. The four forbidden structured-summary headings never appear as Markdown
    headings in any of the new SOUL files.
-6. Rotating SOUL renders orbit blocks via cached report payloads;
+6. Rotating SOUL does not render any chart blocks in the final report;
    reciprocating SOUL skips orbit.
 7. Pump / reciprocating SOULs declare the expected ``focus_*`` field names;
    rotating SOUL now uses the two-step real-rule form flow instead of a focus form.
@@ -312,12 +312,14 @@ def test_reciprocating_soul_skips_orbit_calls():
     )
 
 
-def test_rotating_soul_keeps_orbit_pipeline():
-    """Rotating SOUL must keep orbit rendering in the report payload flow."""
+def test_rotating_soul_removes_all_chart_rendering():
+    """Rotating SOUL must not render trend / spectrum / orbit charts."""
     soul = _read_soul("fault-diagnosis--rotating")
-    assert "orbit_charts[]" in soul
-    assert "轴心轨迹" in soul
-    assert "跳过该条目而不是降级整个 Block" in soul
+    assert "render_ui(component=\"echart\"" not in soul
+    assert "trend_chart" not in soul
+    assert "spectrum_charts[]" not in soul
+    assert "orbit_charts[]" not in soul
+    assert "最终报告彻底不要图谱" in soul
 
 
 def test_pump_soul_keeps_orbit_pipeline():

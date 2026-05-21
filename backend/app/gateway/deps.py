@@ -414,6 +414,22 @@ async def get_current_user_from_request(request: Request):
     logger = logging.getLogger(__name__)
     request_path = getattr(getattr(request, "url", None), "path", "<unknown>")
 
+    # When auth is disabled, return a minimal default user so callers
+    # (knowledge-bases, tenant agents, etc.) don't 401 just because
+    # there is no access_token cookie.
+    if not get_auth_config().enabled:
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        class _DefaultUser:
+            __slots__ = ("id", "tenant_id", "system_role")
+
+            def __init__(self) -> None:
+                self.id = get_effective_user_id()
+                self.tenant_id = "default"
+                self.system_role = "admin"
+
+        return _DefaultUser()
+
     access_token = request.cookies.get("access_token")
     if not access_token:
         logger.warning("get_current_user_from_request: no access_token cookie for path=%s", request_path)

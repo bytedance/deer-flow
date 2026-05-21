@@ -244,14 +244,15 @@ start() {
     fi
     echo ""
     
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
-        echo ""
-    fi
+    # Always export DEER_FLOW_ROOT so docker-compose can resolve ${DEER_FLOW_ROOT}
+    # in the YAML. Without this, it can resolve to an empty string, making
+    # DEER_FLOW_HOST_BASE_DIR point to a wrong path and causing Docker bind mount
+    # failures in the sandbox provider.
+    export DEER_FLOW_ROOT="${DEER_FLOW_ROOT:-$PROJECT_ROOT}"
+    echo -e "${BLUE}Using DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    echo ""
     export SANDBOX_IMAGE
-    
+
     # Ensure config.yaml exists before starting.
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
         if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
@@ -347,12 +348,13 @@ start-backend-dev() {
     fi
     echo ""
 
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
-        echo ""
-    fi
+    # Always export DEER_FLOW_ROOT so docker-compose can resolve ${DEER_FLOW_ROOT}
+    # in the YAML. Without this, it can resolve to an empty string, making
+    # DEER_FLOW_HOST_BASE_DIR point to a wrong path and causing Docker bind mount
+    # failures in the sandbox provider.
+    export DEER_FLOW_ROOT="${DEER_FLOW_ROOT:-$PROJECT_ROOT}"
+    echo -e "${BLUE}Using DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    echo ""
     export SANDBOX_IMAGE
 
     # Ensure config.yaml exists before starting.
@@ -510,11 +512,9 @@ logs-backend-dev() {
 
 # Stop Docker development environment
 stop() {
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
-    # running compose down to suppress "variable is not set" warnings.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
+    # DEER_FLOW_ROOT is referenced in docker-compose YAML; always export it
+    # before running compose down to suppress "variable is not set" warnings.
+    export DEER_FLOW_ROOT="${DEER_FLOW_ROOT:-$PROJECT_ROOT}"
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down
     echo "Cleaning up sandbox containers..."
@@ -524,9 +524,7 @@ stop() {
 
 # Stop Docker backend-dev environment
 stop-backend-dev() {
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
+    export DEER_FLOW_ROOT="${DEER_FLOW_ROOT:-$PROJECT_ROOT}"
     echo "Stopping Docker backend-dev services..."
     cd "$DOCKER_DIR" && $COMPOSE_BACKEND_DEV_CMD down
     echo "Cleaning up sandbox containers..."

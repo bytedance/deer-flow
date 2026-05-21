@@ -166,7 +166,7 @@ export default function SubDeviceSelectorBlock({ block }: SubDeviceSelectorBlock
     if (callback_id && onInteraction) {
       onInteraction(
         callback_id,
-        { selected: { id: sub.id, name: sub.name, type: sub.type, machineId: sub.machineId } },
+        { selected: { componentId: sub.id, name: sub.name, type: sub.type, machineId: sub.machineId } },
         block_id,
       );
     }
