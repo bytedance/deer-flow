@@ -12,3 +12,8 @@ class SkillEvolutionConfig(BaseModel):
         default=None,
         description="Optional model name for skill security moderation. Defaults to the primary chat model.",
     )
+    creation_nudge_interval: int = Field(
+        default=10,
+        ge=1,
+        description="Number of tool-call iterations before triggering a background skill review.",
+    )

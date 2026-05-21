@@ -177,6 +177,11 @@ After completing a task, consider creating or updating a skill when:
 If you used a skill and encountered issues not covered by it, patch it immediately.
 Prefer patch over edit. Before creating a new skill, confirm with the user first.
 Skip simple one-off tasks.
+
+Skills are also periodically reviewed in the background — the system will automatically
+identify reusable patterns from your conversations. Focus on using existing skills well
+rather than worrying about when to create new ones. If you notice a skill is outdated or
+incomplete during use, patch it right away.
 """
 
 
