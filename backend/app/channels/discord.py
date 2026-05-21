@@ -15,6 +15,7 @@ from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMes
 logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
+_DISCORD_THREAD_MAPPING_TOPIC_ID = "__discord_channel_thread__"
 
 
 class DiscordChannel(Channel):
@@ -46,18 +47,17 @@ class DiscordChannel(Channel):
         for channel_id in config.get("allowed_channels", []):
             self._allowed_channels.add(str(channel_id))
 
-        # Session tracking: channel_id -> Discord thread_id (in-memory, persisted to JSON).
-        # Uses a dedicated JSON file separate from ChannelStore, which maps IM
-        # conversations to DeerFlow thread IDs — a different concern.
+        # Session tracking: channel_id -> Discord thread_id. ChannelService
+        # injects ChannelStore so these mappings survive server restarts.
         self._active_threads: dict[str, str] = {}
         # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
         self._active_thread_ids: set[str] = set()
-        # Lock protecting _active_threads and the JSON file from concurrent access.
+        # Lock protecting _active_threads and persistence from concurrent access.
         # _run_client (Discord loop thread) and the main thread both read/write.
         self._thread_store_lock = threading.Lock()
-        store = config.get("channel_store")
-        if store is not None:
-            self._thread_store_path = store._path.parent / "discord_threads.json"
+        self._channel_store = config.get("channel_store")
+        if self._channel_store is not None:
+            self._thread_store_path = self._channel_store._path.parent / "discord_threads.json"
         else:
             self._thread_store_path = Path.home() / ".deer-flow" / "channels" / "discord_threads.json"
 
@@ -110,40 +110,76 @@ class DiscordChannel(Channel):
         logger.info("Discord channel started")
 
     def _load_active_threads(self) -> None:
-        """Restore Discord thread mappings from the dedicated JSON file on startup."""
+        """Restore Discord thread mappings from ChannelStore on startup."""
         with self._thread_store_lock:
             try:
-                if not self._thread_store_path.exists():
-                    logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
-                    return
-                data = json.loads(self._thread_store_path.read_text())
                 self._active_threads.clear()
                 self._active_thread_ids.clear()
-                for channel_id, thread_id in data.items():
-                    self._active_threads[channel_id] = thread_id
-                    self._active_thread_ids.add(thread_id)
+
+                if self._channel_store is not None:
+                    for entry in self._channel_store.list_entries(channel_name=self.name):
+                        if entry.get("topic_id") != _DISCORD_THREAD_MAPPING_TOPIC_ID:
+                            continue
+                        channel_id = str(entry.get("chat_id") or "")
+                        thread_id = str(entry.get("thread_id") or "")
+                        if channel_id and thread_id:
+                            self._active_threads[channel_id] = thread_id
+                            self._active_thread_ids.add(thread_id)
+
+                self._load_legacy_thread_file_locked()
                 if self._active_threads:
-                    logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+                    logger.info("[Discord] restored %d thread mappings from persistent storage", len(self._active_threads))
             except Exception:
                 logger.exception("[Discord] failed to load thread mappings")
 
     def _save_thread(self, channel_id: str, thread_id: str) -> None:
-        """Persist a Discord thread mapping to the dedicated JSON file."""
+        """Persist a Discord thread mapping to ChannelStore."""
         with self._thread_store_lock:
             try:
-                data: dict[str, str] = {}
-                if self._thread_store_path.exists():
-                    data = json.loads(self._thread_store_path.read_text())
-                old_id = data.get(channel_id)
-                data[channel_id] = thread_id
-                # Update reverse-lookup set
+                old_id = self._active_threads.get(channel_id)
+                self._active_threads[channel_id] = thread_id
                 if old_id:
                     self._active_thread_ids.discard(old_id)
                 self._active_thread_ids.add(thread_id)
-                self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                self._thread_store_path.write_text(json.dumps(data, indent=2))
+                if self._channel_store is not None:
+                    self._channel_store.set_thread_id(
+                        self.name,
+                        channel_id,
+                        thread_id,
+                        topic_id=_DISCORD_THREAD_MAPPING_TOPIC_ID,
+                    )
+                else:
+                    self._save_legacy_thread_file_locked()
             except Exception:
                 logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
+
+    def _load_legacy_thread_file_locked(self) -> None:
+        """Migrate mappings from the pre-ChannelStore JSON file if it exists."""
+        data: dict[str, str] = {}
+        if not self._thread_store_path.exists():
+            logger.debug("[Discord] no legacy thread mappings file at %s", self._thread_store_path)
+            return
+
+        data = json.loads(self._thread_store_path.read_text())
+        for channel_id, thread_id in data.items():
+            channel_id = str(channel_id)
+            thread_id = str(thread_id)
+            if channel_id in self._active_threads:
+                continue
+            self._active_threads[channel_id] = thread_id
+            self._active_thread_ids.add(thread_id)
+            if self._channel_store is not None:
+                self._channel_store.set_thread_id(
+                    self.name,
+                    channel_id,
+                    thread_id,
+                    topic_id=_DISCORD_THREAD_MAPPING_TOPIC_ID,
+                )
+
+    def _save_legacy_thread_file_locked(self) -> None:
+        """Fallback persistence for tests or standalone channel construction."""
+        self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
+        self._thread_store_path.write_text(json.dumps(self._active_threads, indent=2))
 
     async def stop(self) -> None:
         self._running = False
