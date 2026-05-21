@@ -189,6 +189,7 @@ export interface Translations {
     compactContextTooltip: string;
     compactContextSuccess: string;
     compactContextError: string;
+    compactSummary: string;
   };
 
   // Chats

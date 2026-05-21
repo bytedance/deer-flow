@@ -9,7 +9,11 @@ import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
-import { ContextActions } from "@/components/workspace/context-actions";
+import {
+  ContextActions,
+  ContextEventDivider,
+  ContextEventProvider,
+} from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -128,6 +132,7 @@ export default function AgentChatPage() {
 
   return (
     <ThreadContext.Provider value={{ thread }}>
+      <ContextEventProvider>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
@@ -229,6 +234,7 @@ export default function AgentChatPage() {
                   </div>
                 )}
 
+                <ContextEventDivider />
                 <InputBox
                   className={cn(
                     "bg-background/5 w-full",
@@ -268,6 +274,7 @@ export default function AgentChatPage() {
           </main>
         </div>
       </ChatBox>
+      </ContextEventProvider>
     </ThreadContext.Provider>
   );
 }

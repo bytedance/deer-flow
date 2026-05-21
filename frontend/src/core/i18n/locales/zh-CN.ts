@@ -247,6 +247,7 @@ export const zhCN: Translations = {
     compactContextTooltip: "用摘要替换历史以缩短上下文",
     compactContextSuccess: "已压缩上下文",
     compactContextError: "压缩上下文失败",
+    compactSummary: "查看摘要",
   },
 
   // Chats

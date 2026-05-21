@@ -261,6 +261,7 @@ export const enUS: Translations = {
       "Summarize history so the agent sees a shorter context",
     compactContextSuccess: "Context compacted",
     compactContextError: "Failed to compact context",
+    compactSummary: "Show summary",
   },
 
   // Chats
