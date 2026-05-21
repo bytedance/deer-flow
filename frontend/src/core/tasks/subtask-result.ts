@@ -8,9 +8,22 @@ export interface SubtaskResultUpdate {
   error?: string;
 }
 
-const SUCCESS_PREFIX = "Task Succeeded. Result:";
-const FAILURE_PREFIX = "Task failed.";
-const TIMEOUT_PREFIX = "Task timed out";
+/**
+ * Prefix strings the backend `task` tool writes into its result `content`.
+ *
+ * These values are not user-facing copy — they are part of the
+ * backend↔frontend contract defined in
+ * `backend/packages/harness/deerflow/tools/builtins/task_tool.py` (returned
+ * from the tool body) and in
+ * `backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py`
+ * (wrapper for tool exceptions). Any change here must be paired with the
+ * matching backend change. Exported so a future structured-status migration
+ * can reference the same values from one place.
+ */
+export const SUCCESS_PREFIX = "Task Succeeded. Result:";
+export const FAILURE_PREFIX = "Task failed.";
+export const TIMEOUT_PREFIX = "Task timed out";
+export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
 
 /**
  * Map a `task` tool result string to a {@link SubtaskStatus}.
@@ -20,6 +33,13 @@ const TIMEOUT_PREFIX = "Task timed out";
  * `ToolErrorHandlingMiddleware` wraps an exception as
  * `Error: Tool 'task' failed ...`). Treat any leading `Error:` token as a
  * terminal failure so subtask cards stop being stuck on "in_progress".
+ *
+ * Returning `in_progress` is the **deliberate** fallback for content that
+ * matches none of the known prefixes. LangChain only ever emits a
+ * `ToolMessage` once the tool itself has returned (success or wrapped
+ * exception), so an unknown shape means "the contract changed underneath us"
+ * — surfacing it as still-running prompts the operator to investigate, where
+ * eagerly marking it terminal-failed would mask the drift.
  */
 export function parseSubtaskResult(text: string): SubtaskResultUpdate {
   const trimmed = text.trim();
@@ -44,7 +64,7 @@ export function parseSubtaskResult(text: string): SubtaskResultUpdate {
 
   // ToolErrorHandlingMiddleware-style wrapper, or any other terminal error
   // signal the backend forwards to the lead agent.
-  if (/^Error\b/i.test(trimmed)) {
+  if (ERROR_WRAPPER_PATTERN.test(trimmed)) {
     return { status: "failed", error: trimmed };
   }
 
