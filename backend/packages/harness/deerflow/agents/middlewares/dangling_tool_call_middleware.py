@@ -8,6 +8,11 @@ This middleware intercepts the model call to detect and patch such gaps by
 inserting synthetic ToolMessages with an error indicator immediately after the
 AIMessage that made the tool calls, ensuring correct message ordering.
 
+The final normalization step delegates to
+:func:`~deerflow.agents.middlewares.tool_call_transcript.normalize_tool_call_transcript`
+which is a standalone, pure-function validator/normalizer with its own regression
+tests (see ``tests/test_tool_call_transcript.py``, issue #3029).
+
 Note: Uses wrap_model_call instead of before_model to ensure patches are inserted
 at the correct positions (immediately after each dangling AIMessage), not appended
 to the end of the message list as before_model + add_messages reducer would do.
@@ -108,56 +113,54 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
+
+        Uses the standalone :func:`normalize_tool_call_transcript` as the final
+        normalization pass, with middleware-specific synthetic content for invalid
+        tool calls.
         """
-        tool_messages_by_id: dict[str, ToolMessage] = {}
-        for msg in messages:
-            if isinstance(msg, ToolMessage):
-                tool_messages_by_id.setdefault(msg.tool_call_id, msg)
+        from deerflow.agents.middlewares.tool_call_transcript import normalize_tool_call_transcript
 
-        tool_call_ids: set[str] = set()
-        for msg in messages:
-            if getattr(msg, "type", None) != "ai":
-                continue
-            for tc in self._message_tool_calls(msg):
-                tc_id = tc.get("id")
-                if tc_id:
-                    tool_call_ids.add(tc_id)
+        # First pass: use the standalone normalizer for structural repair.
+        # It handles grouping, adjacency, and inserts generic synthetic messages
+        # for missing results.
+        result = normalize_tool_call_transcript(messages)
 
-        patched: list = []
-        consumed_tool_msg_ids: set[str] = set()
-        patch_count = 0
-        for msg in messages:
-            if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
-                continue
-
-            patched.append(msg)
-            if getattr(msg, "type", None) != "ai":
-                continue
-
-            for tc in self._message_tool_calls(msg):
-                tc_id = tc.get("id")
-                if not tc_id or tc_id in consumed_tool_msg_ids:
-                    continue
-
-                existing_tool_msg = tool_messages_by_id.get(tc_id)
-                if existing_tool_msg is not None:
-                    patched.append(existing_tool_msg)
-                    consumed_tool_msg_ids.add(tc_id)
-                else:
-                    patched.append(
-                        ToolMessage(
-                            content=self._synthetic_tool_message_content(tc),
-                            tool_call_id=tc_id,
-                            name=tc.get("name", "unknown"),
-                            status="error",
-                        )
-                    )
-                    consumed_tool_msg_ids.add(tc_id)
-                    patch_count += 1
-
-        if patched == messages:
+        if result is messages:
             return None
 
+        # Second pass: replace generic synthetic messages with middleware-specific
+        # content for invalid tool calls (better error messages).
+        patched: list = []
+        for msg in result:
+            if (
+                isinstance(msg, ToolMessage)
+                and getattr(msg, "status", None) == "error"
+                and msg.content == "[Tool call was interrupted and did not return a result.]"
+            ):
+                # Check if this corresponds to an invalid tool call from a preceding AI.
+                # Find the AI message that owns this tool_call_id.
+                for candidate in result:
+                    if getattr(candidate, "type", None) != "ai":
+                        continue
+                    for tc in self._message_tool_calls(candidate):
+                        if tc.get("id") == msg.tool_call_id and tc.get("invalid"):
+                            msg = ToolMessage(
+                                content=self._synthetic_tool_message_content(tc),
+                                tool_call_id=msg.tool_call_id,
+                                name=msg.name,
+                                status="error",
+                            )
+                            break
+                    else:
+                        continue
+                    break
+            patched.append(msg)
+
+        patch_count = sum(
+            1
+            for m in patched
+            if isinstance(m, ToolMessage) and getattr(m, "status", None) == "error"
+        )
         if patch_count:
             logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
         return patched
