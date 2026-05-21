@@ -103,6 +103,11 @@ KPI_DEFINITIONS: dict[str, dict[str, str]] = {
     "kurtosis_index": {"name": "峭度指标", "unit": "—"},
 }
 
+# Per-type KPI name overrides (e.g. pump temperature is not necessarily bearing temp).
+KPI_NAME_OVERRIDES: dict[str, dict[str, str]] = {
+    "pump": {"bearing_temp": "温度"},
+}
+
 SUB_TYPES: dict[str, list[str]] = {
     "static_equipment": ["换热器", "冷却器", "塔器", "容器", "反应器"],
     "rotating_machinery": ["压缩机", "汽轮机", "发电机", "风机"],
@@ -304,13 +309,15 @@ def _filter_by_scope(
 
 def _build_available_kpis(eq_type: str) -> list[dict]:
     kpi_keys = EQUIPMENT_TYPE_KPIS.get(eq_type, EQUIPMENT_TYPE_KPIS["all"])
+    overrides = KPI_NAME_OVERRIDES.get(eq_type, {})
     result: list[dict] = []
     for idx, key in enumerate(kpi_keys):
         defn = KPI_DEFINITIONS.get(key, {"name": key, "unit": ""})
+        display_name = overrides.get(key, defn["name"])
         result.append({
             "key": key,
-            "name": defn["name"],
-            "label": defn["name"],
+            "name": display_name,
+            "label": display_name,
             "unit": defn["unit"],
             "description": defn["unit"],
             "default": idx < 3,

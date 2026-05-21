@@ -153,7 +153,7 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
         "derivation": "mean",
     },
     "bearing_temp": {
-        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types": (22,) + _RM_RC_POSITION_TYPES,
         "position_types_by_type": {
             "rotating_machinery": _RM_POSITION_TYPES,
             "reciprocating_machinery": _RC_POSITION_TYPES,
@@ -163,9 +163,10 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
         "feature_aliases": ["temperature"],
         "name_keywords": ["轴承"],
         "name_keywords_by_type": {
+            "all": [],  # when type is undetermined, don't filter by name
             "pump": [],
         },
-        "expected_series": ("8k", "9k"),
+        "expected_series": ("2k", "8k", "9k"),
         "expected_series_by_type": {
             "rotating_machinery": "8k",
             "reciprocating_machinery": "9k",

@@ -56,6 +56,13 @@ def _output_dir() -> Path:
     return Path(os.environ.get("WEEKLY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
+def _runtime_data_dir(output_dir: str | None) -> Path | None:
+    """Map runtime ``--output-dir`` roots to the platform's ``data/`` subdir."""
+    if not output_dir:
+        return None
+    return Path(output_dir) / "data"
+
+
 def _load_ins_provider():
     """Load the sibling InS provider module by file path."""
     module = sys.modules.get("_ins_provider")
@@ -99,6 +106,34 @@ def _load_list_equipment():
             del sys.modules["list_equipment"]
         raise
     return module
+
+
+def _detect_equipment_type(equipment_ids: list[str]) -> str:
+    """Derive ``eq_type`` from the org tree so per-type KPI mappings apply.
+
+    See :func:`query_daily._detect_equipment_type` for rationale.
+    """
+    if not equipment_ids:
+        return "all"
+    module = _load_list_equipment()
+    if module is None:
+        return "all"
+    user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
+    if not user_id:
+        return "all"
+    try:
+        org_result = module._query_from_org_tree(user_id, "all", "specific", ",".join(equipment_ids))
+    except Exception:
+        return "all"
+    if org_result is None:
+        return "all"
+    devices = org_result.get("equipment", [])
+    if not devices:
+        return "all"
+    org_types = {d.get("org_type") for d in devices}
+    if len(org_types) == 1:
+        return org_types.pop()
+    return "all"
 
 
 def _is_monday(date_str: str) -> bool:
@@ -317,8 +352,8 @@ def build_result(
     return result
 
 
-def write_payload(result: dict) -> Path:
-    out_dir = _output_dir()
+def write_payload(result: dict, output_dir: Path | None = None) -> Path:
+    out_dir = output_dir or _output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / OUTPUT_FILENAME
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -388,6 +423,11 @@ def main() -> int:
     parser.add_argument("--scope", default=None, help="Scope: all/area/specific")
     parser.add_argument("--scope-filter", default="", help="Area names or equipment IDs for scope")
     parser.add_argument("--aggregate", action="store_true", help="Force aggregate mode (skip per-day detail)")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional runtime output root; payload is written under <output-dir>/data/",
+    )
     args = parser.parse_args()
 
     try:
@@ -424,6 +464,12 @@ def main() -> int:
                     for i, eid in enumerate(equipment_ids)
                 }
             is_scope_mode = False
+            # When --type is not explicitly overridden, derive it from the org
+            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
+            if getattr(args, "type") == "all":
+                detected = _detect_equipment_type(equipment_ids)
+                if detected != "all":
+                    eq_type = detected
 
         kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or list(DEFAULT_KPIS))
         kpi_error = _validate_kpi_keys(kpi_keys)
@@ -440,7 +486,7 @@ def main() -> int:
             is_scope_mode=is_scope_mode,
             equipment_meta=equipment_meta,
         )
-        out_path = write_payload(result)
+        out_path = write_payload(result, _runtime_data_dir(args.output_dir))
         print(
             json.dumps(
                 {

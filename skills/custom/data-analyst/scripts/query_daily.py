@@ -31,6 +31,7 @@ empty trend / auth) propagates as ``{"error": ...}`` on stdout.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -154,29 +155,71 @@ def _compare_date(date_str: str, compare: str) -> str | None:
 def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
     """Resolve equipment from type+scope+filter using list_equipment logic.
 
-    Returns full equipment dicts (id, name, area, sub_type) so callers
+    Returns full equipment dicts (id, name, area, sub_type, org_type) so callers
     can propagate metadata into per_equipment entries.
     """
+    module = _load_list_equipment()
+    if module is None:
+        return []
+    result = module.query_equipment(eq_type, scope, scope_filter, limit=10000)
+    return result.get("equipment", [])
+
+
+def _load_list_equipment():
     script_dir = Path(__file__).parent
     list_eq_path = script_dir / "list_equipment.py"
     if not list_eq_path.exists():
-        return []
+        return None
     module = sys.modules.get("list_equipment")
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location("list_equipment", list_eq_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["list_equipment"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get("list_equipment") is module:
+            del sys.modules["list_equipment"]
+        return None
+    return module
+
+
+def _detect_equipment_type(equipment_ids: list[str]) -> str:
+    """Derive ``eq_type`` from the org tree so pump/temperature KPI mappings apply.
+
+    When the user passes ``--equipment`` directly, the CLI defaults to
+    ``eq_type="all"``, which causes KPI specs (e.g. ``bearing_temp``) to use
+    their generic position_type/series filters. For pumps, those generic
+    filters point to 8k/9k rotating-machinery points while the actual
+    temperature data lives in 2k — the pump-specific overrides never engage.
+
+    Returns the common ``org_type`` when all given equipment share it,
+    otherwise ``"all"``.
+    """
+    if not equipment_ids:
+        return "all"
+    module = _load_list_equipment()
     if module is None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("list_equipment", list_eq_path)
-        if spec is None or spec.loader is None:
-            raise ImportError("failed to load list_equipment module")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["list_equipment"] = module
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            if sys.modules.get("list_equipment") is module:
-                del sys.modules["list_equipment"]
-            raise
-    result = module.query_equipment(eq_type, scope, scope_filter, limit=10000)
-    return result.get("equipment", [])
+        return "all"
+    user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
+    if not user_id:
+        return "all"
+    try:
+        org_result = module._query_from_org_tree(user_id, "all", "specific", ",".join(equipment_ids))
+    except Exception:
+        return "all"
+    if org_result is None:
+        return "all"
+    devices = org_result.get("equipment", [])
+    if not devices:
+        return "all"
+    org_types = {d.get("org_type") for d in devices}
+    if len(org_types) == 1:
+        return org_types.pop()
+    return "all"
 
 
 def build_result(
@@ -338,6 +381,12 @@ def main() -> int:
                 }
             include_per_equipment = False
             is_scope_mode = False
+            # When --type is not explicitly overridden, derive it from the org
+            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
+            if getattr(args, "type") == "all":
+                detected = _detect_equipment_type(equipment_ids)
+                if detected != "all":
+                    eq_type = detected
 
         kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or ["runtime_rate", "downtime_count", "alarm_count"])
         kpi_error = _validate_kpi_keys(kpi_keys)

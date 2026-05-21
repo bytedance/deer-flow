@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import os
 from datetime import datetime
 from typing import Any
 
@@ -47,6 +49,48 @@ _ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
     "8k": "ins-os-view/sg8kData/getTrendDataHis",
     "9k": "ins-os-view/sg9kData/getTrendDataHis",
 }
+# ---------------------------------------------------------------------------
+# Retry policy for transient network errors during HTTP calls.
+# ConnectTimeout / ConnectError / ReadTimeout / RemoteProtocolError are
+# retried up to INCLUDE_RETRIES times with exponential backoff (1s → 2s → 4s).
+# 4xx/5xx responses are NOT retried — those are server-side logical errors.
+# ---------------------------------------------------------------------------
+_MAX_RETRIES = 3
+_RETRY_DELAY_BASE = 1.0  # seconds
+_RETRIABLE_EXCEPTIONS = (
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+
+
+def _timeout_from_env() -> httpx.Timeout:
+    """Build httpx.Timeout from environment variables.
+
+    Reads (with defaults):
+      INS_CONNECT_TIMEOUT  → 10s  (TCP handshake)
+      INS_READ_TIMEOUT     → 240s (first byte / idle between chunks)
+      INS_WRITE_TIMEOUT    → 10s  (send request body)
+      INS_POOL_TIMEOUT     → 5s   (acquire connection from pool)
+    """
+    return httpx.Timeout(
+        connect=_env_float("INS_CONNECT_TIMEOUT", 10.0),
+        read=_env_float("INS_READ_TIMEOUT", 240.0),
+        write=_env_float("INS_WRITE_TIMEOUT", 10.0),
+        pool=_env_float("INS_POOL_TIMEOUT", 5.0),
+    )
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
 
 _TWO_K_NAME_KEY_MAP: dict[str, str] = {
     "速度有效值": "v_rms",
@@ -189,12 +233,27 @@ def rsa_encrypt(plaintext: str, public_key_pem: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
+def _safe_error_detail(response: Any) -> str | None:
+    """Extract error detail from a non-2xx response body without raising."""
+    try:
+        body = response.json()
+    except Exception:
+        try:
+            text = response.text
+            return text[:500] if text else None
+        except Exception:
+            return None
+    if isinstance(body, dict):
+        return str(body.get("msg") or body.get("message") or body)[:500]
+    return str(body)[:500]
+
+
 class InsApiClient:
     def __init__(self, settings: InsSettings, access_token: str | None = None) -> None:
         self.settings = settings
         self.http = httpx.AsyncClient(
             headers={"Content-Type": "application/json;charset=utf-8"},
-            timeout=30.0,
+            timeout=_timeout_from_env(),
         )
         self.token: str | None = None
         self.access_token = (access_token or settings.access_token or "").strip() or None
@@ -236,12 +295,13 @@ class InsApiClient:
 
     async def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         token = await self.ensure_token()
-        response = await self.http.get(
-            f"{self.settings.base_url}/{path.lstrip('/')}",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params,
-        )
-        response.raise_for_status()
+        response = await self._get_with_retry(path, params, token)
+        if response.is_error:
+            detail = _safe_error_detail(response)
+            raise RuntimeError(
+                f"InS {response.request.method} {response.request.url} "
+                f"→ {response.status_code}{f': {detail}' if detail else ''}"
+            )
         body = response.json()
         code = body.get("code", 0)
         if code == 401:
@@ -249,17 +309,37 @@ class InsApiClient:
                 raise RuntimeError("鉴权失败：Bearer token 无效或已过期")
             self.token = None
             token = await self.login()
-            response = await self.http.get(
-                f"{self.settings.base_url}/{path.lstrip('/')}",
-                headers={"Authorization": f"Bearer {token}"},
-                params=params,
-            )
-            response.raise_for_status()
+            response = await self._get_with_retry(path, params, token)
+            if response.is_error:
+                detail = _safe_error_detail(response)
+                raise RuntimeError(
+                    f"InS {response.request.method} {response.request.url} "
+                    f"→ {response.status_code}{f': {detail}' if detail else ''}"
+                )
             body = response.json()
             code = body.get("code", 0)
         if code != 200:
             raise RuntimeError(body.get("msg") or f"请求失败，code={code}")
         return body
+
+    async def _get_with_retry(
+        self, path: str, params: dict[str, str], token: str
+    ) -> Any:
+        """Single HTTP GET with retry on transient errors."""
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return await self.http.get(
+                    f"{self.settings.base_url}/{path.lstrip('/')}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params,
+                )
+            except _RETRIABLE_EXCEPTIONS as exc:
+                last_error = exc
+                if attempt < _MAX_RETRIES - 1:
+                    delay = _RETRY_DELAY_BASE * (2 ** attempt)
+                    await asyncio.sleep(delay)
+        raise last_error  # type: ignore[misc]
 
     async def get_components(self, device_id: str) -> list[dict[str, Any]]:
         body = await self._get_json(
@@ -675,6 +755,9 @@ def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
             ):
                 for child in inner:
                     flattened.append(child)
+            elif isinstance(inner, list) and not inner:
+                # Empty value array → no data samples for this 2k/6k point.
+                pass
             else:
                 flattened.append(item)
         return flattened
