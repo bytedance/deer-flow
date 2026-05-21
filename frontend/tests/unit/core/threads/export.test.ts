@@ -104,6 +104,66 @@ describe("formatThreadAsMarkdown", () => {
   });
 });
 
+describe("formatThreadAsMarkdown opt-in flags", () => {
+  it("emits reasoning when includeReasoning is true", () => {
+    const message = ai("final answer", {
+      additional_kwargs: {
+        reasoning_content: "step-by-step chain of thought",
+      },
+    } as Partial<Message>);
+    const md = formatThreadAsMarkdown(makeThread(), [message], {
+      includeReasoning: true,
+    });
+    expect(md).toContain("step-by-step chain of thought");
+    expect(md).toContain("Thinking");
+  });
+
+  it("emits tool call rows when includeToolCalls is true", () => {
+    const message = ai("ok", {
+      tool_calls: [{ id: "1", name: "task", args: { description: "do work" } }],
+    } as Partial<Message>);
+    const md = formatThreadAsMarkdown(makeThread(), [message], {
+      includeToolCalls: true,
+    });
+    expect(md).toContain("**Tool:**");
+    expect(md).toContain("`task`");
+  });
+
+  it("keeps hidden messages when includeHidden is true", () => {
+    const hidden = human("internal reminder", {
+      additional_kwargs: { hide_from_ui: true },
+    } as Partial<Message>);
+    const md = formatThreadAsMarkdown(makeThread(), [hidden], {
+      includeHidden: true,
+    });
+    expect(md).toContain("internal reminder");
+  });
+});
+
+describe("formatThreadAsJSON opt-in flags", () => {
+  it("emits tool_calls field when includeToolCalls is true", () => {
+    const message = ai("ok", {
+      tool_calls: [{ id: "1", name: "task", args: { description: "x" } }],
+    } as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [message], {
+      includeToolCalls: true,
+    });
+    expect(raw).toContain("tool_calls");
+    expect(raw).toContain('"task"');
+  });
+
+  it("keeps tool messages when includeToolMessages is true", () => {
+    const raw = formatThreadAsJSON(
+      makeThread(),
+      [toolMsg("Task Succeeded. Result: keep me")],
+      { includeToolMessages: true },
+    );
+    const parsed = JSON.parse(raw) as { messages: { type: string }[] };
+    expect(parsed.messages.some((m) => m.type === "tool")).toBe(true);
+    expect(raw).toContain("keep me");
+  });
+});
+
 describe("formatThreadAsJSON", () => {
   it("strips hidden messages, tool messages, reasoning, and tool calls", () => {
     const messages = [

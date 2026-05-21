@@ -15,12 +15,13 @@ import { titleOfThread } from "./utils";
 /**
  * Optional debug switches for advanced exports.
  *
- * Bytedance/deer-flow issue #3107 BUG-006: by default, the user-facing chat
- * export must include only the visible transcript. Internal payloads —
- * `hide_from_ui` messages, reasoning content, tool calls, and tool result
- * messages — stay out unless the caller explicitly opts in. There is no UI
- * surface for this today; the flags exist so a future "debug export" can
- * reuse the same formatter instead of forking it.
+ * Bytedance/deer-flow issue #3107 BUG-006 explicitly prescribes that the
+ * default export includes only the user-visible transcript and excludes
+ * thinking/reasoning content, tool calls, tool results, hidden messages,
+ * memory injection, and `<system-reminder>` payloads. These options let a
+ * future "debug export" surface re-include any of those categories without
+ * forking the formatter. They are not currently wired to any UI control —
+ * callers that want them must construct the options object explicitly.
  */
 export interface ExportOptions {
   includeReasoning?: boolean;
@@ -134,7 +135,7 @@ export function formatThreadAsJSON(
     messages: visibleMessages(messages, options).map((msg) => ({
       type: msg.type,
       id: msg.id,
-      content: typeof msg.content === "string" ? msg.content : msg.content,
+      content: msg.content,
       ...(options.includeToolCalls &&
       msg.type === "ai" &&
       msg.tool_calls?.length
