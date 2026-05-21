@@ -10,6 +10,8 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
+from deerflow.config.extensions_config import get_extensions_config
+from deerflow.reflection import resolve_variable
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -211,6 +213,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down API Gateway")
 
 
+def _load_http_middlewares(app: FastAPI) -> None:
+    """Register plugin HTTP middlewares from extensions_config.json.
+
+    Format: "httpMiddlewares": ["pkg.module:build_middleware", ...]
+    Each entry is a dotted path to a builder function that returns a
+    Starlette-compatible middleware class.  The builder is called with no
+    arguments; the returned class is passed to ``app.add_middleware()``.
+
+    Errors are logged and skipped so that a broken middleware path does
+    not prevent the application from starting.
+    """
+    extensions_config = get_extensions_config()
+    if extensions_config is None:
+        return
+
+    raw_paths = (extensions_config.model_extra or {}).get("httpMiddlewares")
+    if raw_paths is None:
+        return
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    elif not isinstance(raw_paths, list):
+        logger.warning(f"httpMiddlewares must be a list of strings, got {type(raw_paths).__name__}; skipping")
+        return
+
+    for middleware_path in raw_paths:
+        try:
+            builder = resolve_variable(middleware_path)
+            middleware_cls = builder()
+            if middleware_cls is None:
+                logger.warning(f"Builder {middleware_path} returned None; skipping")
+                continue
+            if not isinstance(middleware_cls, type):
+                logger.warning(f"Builder {middleware_path} returned non-class {type(middleware_cls).__name__}; skipping")
+                continue
+            app.add_middleware(middleware_cls)
+            logger.info(f"Loaded HTTP middleware: {middleware_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load HTTP middleware {middleware_path}: {e}", exc_info=True)
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -322,6 +364,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    # Plugin HTTP middlewares from extensions_config.json.
+    # Added last so they execute before built-in middlewares (LIFO order).
+    _load_http_middlewares(app)
 
     # Include routers
     # Models API is mounted at /api/models
