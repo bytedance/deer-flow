@@ -23,6 +23,8 @@ export interface SubtaskResultUpdate {
 export const SUCCESS_PREFIX = "Task Succeeded. Result:";
 export const FAILURE_PREFIX = "Task failed.";
 export const TIMEOUT_PREFIX = "Task timed out";
+export const CANCELLED_PREFIX = "Task cancelled by user.";
+export const POLLING_TIMEOUT_PREFIX = "Task polling timed out";
 export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
 
 /**
@@ -59,6 +61,14 @@ export function parseSubtaskResult(text: string): SubtaskResultUpdate {
   }
 
   if (trimmed.startsWith(TIMEOUT_PREFIX)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  if (trimmed.startsWith(CANCELLED_PREFIX)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  if (trimmed.startsWith(POLLING_TIMEOUT_PREFIX)) {
     return { status: "failed", error: trimmed };
   }
 

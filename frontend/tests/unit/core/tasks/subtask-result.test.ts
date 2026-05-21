@@ -25,6 +25,25 @@ describe("parseSubtaskResult", () => {
     expect(parsed.error).toBe("Task timed out after 900s");
   });
 
+  it("recognises the cancelled-by-user prefix", () => {
+    // bytedance/deer-flow#3131 review: this is one of the five terminal
+    // strings task_tool.py actually emits — the previous cut treated it as
+    // unrecognised content and pushed the card back to in_progress.
+    const parsed = parseSubtaskResult("Task cancelled by user.");
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toBe("Task cancelled by user.");
+  });
+
+  it("recognises the polling-timed-out prefix", () => {
+    // Emitted by task_tool when the background polling loop runs out of
+    // budget waiting for the subagent to reach a terminal state.
+    const parsed = parseSubtaskResult(
+      "Task polling timed out after 15 minutes. This may indicate the background task is stuck. Status: RUNNING",
+    );
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toContain("polling timed out");
+  });
+
   it("treats middleware-wrapped tool errors as terminal failures", () => {
     // bytedance/deer-flow issue #3107 BUG-007: the parent-visible ToolMessage
     // produced by ToolErrorHandlingMiddleware never matches the three legacy
