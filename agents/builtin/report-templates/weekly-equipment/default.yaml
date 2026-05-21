@@ -92,11 +92,6 @@ transforms:
       weekly_kpi: weekly_kpi.json
 
 sections:
-  - id: data_source_banner
-    title: ""
-    component: markdown
-    source: $.steps.weekly_kpi.weekly_kpi.data_source_banner
-
   - id: overview
     title: 本周运行概览
     component: markdown

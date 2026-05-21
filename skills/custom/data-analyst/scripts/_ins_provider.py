@@ -83,6 +83,8 @@ _INS_FACTORY_ID: str | None = os.environ.get("INS_FACTORY_ID") or None
 #   position_types : iterable of positionType ints to match (None = match any)
 #   feature        : the InS feature column name to fetch (8k/9k field, 2k
 #                    Chinese-name-mapped key, or 6k key like ``corrosionRate``)
+#   feature_aliases: optional fallback feature names to request/read when the
+#                    primary feature is absent in a given endpoint family
 #   expected_series: "2k" / "6k" / "8k" / "9k" (used to bucket trend calls)
 #   derivation     : how to roll up multiple samples into one KPI scalar
 #                    one of: "mean" | "max" | "alarm_count" | "runtime_rate" |
@@ -93,6 +95,11 @@ _INS_FACTORY_ID: str | None = os.environ.get("INS_FACTORY_ID") or None
 #                    selection by Chinese name (used when positionType
 #                    ranges overlap multiple physical signals)
 #
+
+_RM_POSITION_TYPES = tuple(range(81, 84))
+_RC_POSITION_TYPES = tuple(range(91, 100))
+_RM_RC_POSITION_TYPES = _RM_POSITION_TYPES + _RC_POSITION_TYPES
+
 
 _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
     # ---- 2K vibration (multi-feature, machine 4 = PUMP) ----
@@ -115,56 +122,128 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
         "derivation": "mean",
     },
 
-    # ---- 8K / 9K rotating machinery KPIs ----
+    # ---- 8K / 9K rotating / reciprocating KPIs ----
+    # Business mapping is explicit: rotating_machinery => 8k, and
+    # reciprocating_machinery => 9k. We still keep the tuple fallback for
+    # mixed/all selections, because the InS field schemas for pp_value /
+    # speed / temperature / flow / pressure are identical between 8k and 9k.
     "vibration_level": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
         "feature": "pp_value",
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "mean",
     },
     "bearing_temp": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
-        "feature": "temperature",
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
+        "feature": "value",
+        "feature_aliases": ["temperature"],
         "name_keywords": ["轴承"],
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "mean",
     },
     "valve_temp": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
-        "feature": "temperature",
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
+        "feature": "value",
+        "feature_aliases": ["temperature"],
         "name_keywords": ["阀", "气缸"],
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "mean",
     },
     "flow_rate": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
-        "feature": "flow",
-        "expected_series": "8k",
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
+        "feature": "value",
+        "feature_aliases": ["flow"],
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "mean",
     },
     "outlet_pressure": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
-        "feature": "pressure",
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
+        "feature": "value",
+        "feature_aliases": ["pressure"],
         "name_keywords": ["出口"],
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "mean",
     },
     "runtime_rate": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
         "feature": "speed",
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "runtime_rate",
     },
     "alarm_count": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
         "feature": "pp_value",
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "alarm_count",
     },
     "downtime_count": {
-        "position_types": tuple(range(81, 84)) + tuple(range(91, 100)),
+        "position_types": _RM_RC_POSITION_TYPES,
+        "position_types_by_type": {
+            "rotating_machinery": _RM_POSITION_TYPES,
+            "reciprocating_machinery": _RC_POSITION_TYPES,
+        },
         "feature": "speed",
-        "expected_series": "8k",
+        "expected_series": ("8k", "9k"),
+        "expected_series_by_type": {
+            "rotating_machinery": "8k",
+            "reciprocating_machinery": "9k",
+        },
         "derivation": "downtime_count",
     },
 
@@ -220,6 +299,7 @@ def _iter_points(components: list[dict[str, Any]]):
 def _select_points_for_kpi(
     components: list[dict[str, Any]],
     kpi_key: str,
+    eq_type: str = "all",
 ) -> list[dict[str, Any]]:
     """Return all points in ``components`` that match the KPI's filters.
 
@@ -231,23 +311,22 @@ def _select_points_for_kpi(
     if spec is None:
         raise HttpProviderError(f"unmappable KPI key: {kpi_key!r}")
 
-    pos_filter = spec.get("position_types")
+    pos_filter = _position_filter_for_spec(spec, eq_type)
     name_keywords: list[str] = spec.get("name_keywords") or []
-    expected_series: str = spec["expected_series"]
+    expected = _expected_series_for_spec(spec, eq_type)
+    allowed_series: tuple[str, ...] = (
+        (expected,) if isinstance(expected, str) else tuple(expected)
+    )
 
     selected: list[dict[str, Any]] = []
     for point in _iter_points(components):
-        # positionType: stored either at top level or absent — slim_component
-        # only emits ``endpoint_series``, so we approximate via series.
-        # (Series filtering is the strong signal; positionType ranges
-        # overlap heavily with series, so series == expected_series is
-        # both necessary and sufficient.)
+        # ``position_type`` is the point-level selector carried by slim_component.
+        # ``type_num`` is the owning node's own type, so it must not be used for
+        # point routing.
         series = point.get("endpoint_series")
-        if series != expected_series:
+        if series not in allowed_series:
             continue
-        # Position type may have been preserved in raw form alongside the
-        # slim node; fall back to series alone if absent.
-        pt_raw = point.get("type_num")
+        pt_raw = point.get("position_type")
         if isinstance(pos_filter, (tuple, list)) and pt_raw is not None:
             try:
                 pt_int = int(pt_raw)
@@ -255,6 +334,15 @@ def _select_points_for_kpi(
                 pt_int = None
             if pt_int is not None and pt_int not in pos_filter:
                 continue
+        elif pt_raw is None:
+            pt_raw = point.get("type_num")
+            if isinstance(pos_filter, (tuple, list)) and pt_raw is not None:
+                try:
+                    pt_int = int(pt_raw)
+                except (TypeError, ValueError):
+                    pt_int = None
+                if pt_int is not None and pt_int not in pos_filter:
+                    continue
 
         if name_keywords:
             name = str(point.get("name") or "")
@@ -273,13 +361,35 @@ def _select_points_for_kpi(
     return [p for p in selected if p["id"]]
 
 
+def _position_filter_for_spec(spec: dict[str, Any], eq_type: str):
+    by_type = spec.get("position_types_by_type") or {}
+    return by_type.get(eq_type, spec.get("position_types"))
+
+
+def _expected_series_for_spec(spec: dict[str, Any], eq_type: str):
+    by_type = spec.get("expected_series_by_type") or {}
+    return by_type.get(eq_type, spec["expected_series"])
+
+
+def _feature_candidates_for_spec(spec: dict[str, Any]) -> list[str]:
+    names = [spec["feature"], *(spec.get("feature_aliases") or [])]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for name in names:
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Aggregation: trend rows → single KPI scalar / 24-bucket hourly array
 # ---------------------------------------------------------------------------
 
 
 def _row_value(row: dict[str, Any], feature: str) -> float | None:
-    """Pull ``feature`` from a unified trend row.
+    """Pull one numeric ``feature`` from a unified trend row.
 
     Unified row shape (post-wrappers): ``{component_id, time_ms, time, values}``.
     Some 2k/6k flat rows may still have feature at top level — handle both.
@@ -293,6 +403,14 @@ def _row_value(row: dict[str, Any], feature: str) -> float | None:
         return None
     if isinstance(v, (int, float)) and not (isinstance(v, float) and math.isnan(v)):
         return float(v)
+    return None
+
+
+def _row_first_value(row: dict[str, Any], features: list[str]) -> float | None:
+    for feature in features:
+        value = _row_value(row, feature)
+        if value is not None:
+            return value
     return None
 
 
@@ -345,8 +463,9 @@ def _aggregate_trend_to_kpi(
     """
     spec = _KPI_FEATURE_MAP[kpi_key]
     feature = spec["feature"]
+    feature_candidates = _feature_candidates_for_spec(spec)
     derivation = spec["derivation"]
-    values = [v for v in (_row_value(r, feature) for r in rows) if v is not None]
+    values = [v for v in (_row_first_value(r, feature_candidates) for r in rows) if v is not None]
 
     if derivation == "mean":
         if not values:
@@ -442,6 +561,7 @@ async def _fetch_kpi_for_equipment(
     start_ms: str,
     end_ms: str,
     components_cache: dict[str, list[dict[str, Any]]],
+    eq_type: str = "all",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """For one equipment, fetch all requested KPIs.
 
@@ -460,7 +580,7 @@ async def _fetch_kpi_for_equipment(
     for kpi_key in kpi_keys:
         if kpi_key not in _KPI_FEATURE_MAP:
             raise HttpProviderError(f"unmappable KPI key: {kpi_key!r}")
-        points = _select_points_for_kpi(components, kpi_key)
+        points = _select_points_for_kpi(components, kpi_key, eq_type=eq_type)
         kpi_to_points[kpi_key] = points
         if not points:
             continue
@@ -468,7 +588,7 @@ async def _fetch_kpi_for_equipment(
         for point in points:
             point_index[point["id"]] = point
             bucket = (point["id"], point["endpoint_series"])
-            request_buckets.setdefault(bucket, set()).add(spec["feature"])
+            request_buckets.setdefault(bucket, set()).update(_feature_candidates_for_spec(spec))
 
     # Issue one ``get_trend_data`` call per (component_id, endpoint_series)
     # bucket. Each call yields a list of unified rows.
@@ -554,7 +674,7 @@ async def _async_fetch_payload(
         per_equipment_speed_rows: dict[str, list[dict[str, Any]]] = {}
         for eid in equipment_ids:
             kpis, speed_rows = await _fetch_kpi_for_equipment(
-                client, eid, kpi_keys, start_ms, end_ms, components_cache
+                client, eid, kpi_keys, start_ms, end_ms, components_cache, eq_type=eq_type
             )
             per_equipment_kpis[eid] = kpis
             per_equipment_speed_rows[eid] = speed_rows

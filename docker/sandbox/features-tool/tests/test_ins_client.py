@@ -103,6 +103,54 @@ def test_parse_trend_response_9k_passes_through():
     assert out == rows
 
 
+def test_get_trend_data_unwraps_live_6k_envelope():
+    """Live InS 6k responses nest sample rows inside data[0].value[]."""
+    client = _make_client()
+    body = _ok_body([
+        {
+            "posName": "弯头_TH",
+            "positionType": 62,
+            "gpid": "2309140102562780001",
+            "value": [
+                {
+                    "datatime": 1779000700073,
+                    "value": [
+                        {"key": "corrosionRate", "value": "0.0"},
+                        {"key": "thinningRate", "value": "0.0"},
+                        {"key": "thickness", "value": "17.16"},
+                        {"key": "temperature", "value": "166.77"},
+                    ],
+                },
+                {
+                    "datatime": 1779029593477,
+                    "value": [
+                        {"key": "corrosionRate", "value": "0.1"},
+                        {"key": "thinningRate", "value": ""},
+                        {"key": "thickness", "value": "17.14"},
+                        {"key": "temperature", "value": "166.92"},
+                    ],
+                },
+            ],
+        }
+    ])
+    p, captured = _patch_get_json(client, body)
+    with p:
+        rows = _run(
+            client.get_trend_data(
+                "2309140102562780001",
+                "0",
+                "1",
+                ["corrosionRate", "thinningRate", "thickness", "temperature"],
+                endpoint_series="6k",
+            )
+        )
+    assert len(rows) == 2
+    assert rows[0]["corrosionRate"] == 0.0
+    assert rows[0]["thickness"] == 17.16
+    assert rows[1]["temperature"] == 166.92
+    assert rows[1]["thinningRate"] is None
+
+
 def test_parse_trend_response_skips_non_list_value():
     rows = [{"datatime": "t", "value": "scalar"}, {"datatime": "t2", "value": [{"key": "x", "value": "1"}]}]
     out = parse_trend_response(rows, "6k")
@@ -171,11 +219,14 @@ def test_slim_component_9k_point_via_position_type():
         "id": "p9k",
         "name": "轴瓦振动",
         "unitType": 3,
+        "type": 9,
         "positionType": 93,
         "configInfo": {},
     }
     result = slim_component(node, parent_machine_type=9)
     assert result["endpoint_series"] == "9k"
+    assert result["type_num"] == 9
+    assert result["position_type"] == 93
 
 
 def test_slim_component_machine_type_fallback_when_no_position_type():

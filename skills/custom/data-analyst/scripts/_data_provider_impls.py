@@ -1,25 +1,33 @@
 """Provider implementations for the DataConnector abstraction.
 
-Each query script's data source has two providers registered here:
-  - ``demo`` — wraps the existing deterministic demo logic
-  - ``http`` — calls a configured HTTP endpoint (env-driven)
+Two categories of sources live in this module:
+
+* The original 5 (``trend`` / ``fault_context`` / ``failure_data`` /
+  ``closure_items`` / ``inspection``) each register a ``demo`` + ``http``
+  pair. They keep deterministic synthetic data so the dev / demo workflows
+  run offline; ``fetch_with_fallback`` swaps in the demo path when the HTTP
+  endpoint is unreachable. AI report sources (``daily`` / ``weekly`` /
+  ``monthly``) do **not** participate in this fallback — they register only
+  the InS provider and surface failures verbatim.
+
+* The AI report sources (``daily`` / ``weekly`` / ``monthly``) register
+  **only** the InS-backed provider. There is no demo fallback — any
+  ``HttpProviderError`` propagates so the failure is visible at the CLI as
+  ``{"error": "HttpProviderError: ..."}`` instead of being masked by
+  synthetic output.
 
 This module **must be imported** for the registry to pick up the providers.
 Query scripts do this implicitly by importing ``_data_providers``.
 
-Real backend integration is intentionally a single contract per source:
-each ``Http*Provider`` POSTs a typed JSON body and expects a typed JSON
-response. Engineers wiring a real CMMS / TSDB pull only need to:
+For the HTTP-backed sources the integration contract is one typed JSON body
+in, one typed JSON body out. Engineers wiring a real CMMS / TSDB pull only
+need to:
 
   1. Stand up an endpoint matching the contract documented below each
      ``Http*Provider.fetch``.
-  2. Set the ``DEER_FLOW_DATA_PROVIDER=http`` env var.
+  2. Set ``DEER_FLOW_DATA_PROVIDER=http`` (only affects the original 5).
   3. Set the source-specific ``{PREFIX}_URL`` + ``{PREFIX}_TOKEN`` env vars
      (e.g. ``DEERFLOW_TREND_URL``).
-
-If the endpoint isn't reachable or returns malformed JSON, ``fetch_with_fallback``
-in ``_data_providers`` transparently falls back to the demo provider so the
-demo / dev environment keeps working.
 """
 
 from __future__ import annotations
@@ -540,40 +548,12 @@ register_provider("inspection", "http", HttpInspectionProvider)
 # ============================================================================
 
 
-class DemoDailyProvider:
-    """Wraps ``query_daily._demo_day`` so the registry produces the same
-    deterministic md5-seeded payload the script has always shipped."""
-
-    def fetch(
-        self,
-        *,
-        date_str: str,
-        equipment_ids: list[str],
-        kpi_keys: list[str],
-        eq_type: str = "all",
-        include_per_equipment: bool = False,
-        equipment_meta: dict[str, dict] | None = None,
-    ) -> ProviderResult:
-        qd = _load_script("query_daily")
-        return ProviderResult(
-            data=qd._demo_day(
-                date_str,
-                equipment_ids,
-                kpi_keys,
-                eq_type,
-                include_per_equipment,
-                equipment_meta,
-            ),
-            data_source=DEMO_FALLBACK,
-        )
-
-
 class InsDailyProvider:
     """Calls ``_ins_provider.fetch_daily_payload`` against the InS platform.
 
-    On success returns a ``current``-block-shaped dict tagged ``data_source="ins"``.
-    Any exception is re-raised as ``HttpProviderError`` so ``fetch_with_fallback``
-    transparently falls back to ``DemoDailyProvider``.
+    On success returns a ``current``-block-shaped dict tagged
+    ``data_source="ins"``. Any failure raises ``HttpProviderError`` which the
+    query script propagates as ``{"error": "HttpProviderError: ..."}``.
     """
 
     def fetch(
@@ -598,48 +578,19 @@ class InsDailyProvider:
             )
         except ins.HttpProviderError:
             raise
-        except Exception as exc:  # noqa: BLE001 - any failure → fallback trigger
+        except Exception as exc:  # noqa: BLE001 - normalise to HttpProviderError
             raise HttpProviderError(
                 f"InS daily provider failed: {type(exc).__name__}: {exc}"
             ) from exc
         return ProviderResult(data=data, data_source=INS_SUCCESS)
 
 
-register_provider("daily", "demo", DemoDailyProvider)
 register_provider("daily", "ins", InsDailyProvider)
 
 
 # ============================================================================
 # weekly / query_weekly.py — InS-backed equipment weekly report
 # ============================================================================
-
-
-class DemoWeeklyProvider:
-    """Wraps ``query_weekly.fetch_week_with_provenance`` with explicit
-    ``provider_mode="demo"`` so this provider never re-enters the InS path
-    through the per-day fallback chain."""
-
-    def fetch(
-        self,
-        *,
-        week_start: str,
-        equipment_ids: list[str],
-        kpi_keys: list[str],
-        eq_type: str = "all",
-        aggregate: bool = False,
-        equipment_meta: dict[str, dict] | None = None,
-    ) -> ProviderResult:
-        qw = _load_script("query_weekly")
-        data, _, _ = qw.fetch_week_with_provenance(
-            week_start,
-            equipment_ids,
-            kpi_keys,
-            eq_type,
-            aggregate,
-            equipment_meta,
-            "demo",
-        )
-        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
 
 
 class InsWeeklyProvider:
@@ -679,41 +630,12 @@ class InsWeeklyProvider:
         return ProviderResult(data=data, data_source=INS_SUCCESS)
 
 
-register_provider("weekly", "demo", DemoWeeklyProvider)
 register_provider("weekly", "ins", InsWeeklyProvider)
 
 
 # ============================================================================
 # monthly / query_monthly.py — InS-backed equipment monthly report
 # ============================================================================
-
-
-class DemoMonthlyProvider:
-    """Wraps ``query_monthly.fetch_month_with_provenance`` with explicit
-    ``provider_mode="demo"`` so this provider never re-enters the InS path
-    through the per-day fallback chain."""
-
-    def fetch(
-        self,
-        *,
-        report_month: str,
-        equipment_ids: list[str],
-        kpi_keys: list[str],
-        eq_type: str = "all",
-        aggregate: bool = False,
-        equipment_meta: dict[str, dict] | None = None,
-    ) -> ProviderResult:
-        qm = _load_script("query_monthly")
-        data, _, _ = qm.fetch_month_with_provenance(
-            report_month,
-            equipment_ids,
-            kpi_keys,
-            eq_type,
-            aggregate,
-            equipment_meta,
-            "demo",
-        )
-        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
 
 
 class InsMonthlyProvider:
@@ -752,5 +674,4 @@ class InsMonthlyProvider:
         return ProviderResult(data=data, data_source=INS_SUCCESS)
 
 
-register_provider("monthly", "demo", DemoMonthlyProvider)
 register_provider("monthly", "ins", InsMonthlyProvider)

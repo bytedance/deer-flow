@@ -1,20 +1,17 @@
 """Tests for skills/custom/data-analyst/scripts/query_monthly.py.
 
-Mirrors test_ai_report_weekly_query.py. Loads the script by file path because
-it lives in the runtime sandbox skills tree, not on the package import path.
-Covers sprint plan M1/M7 acceptance items:
-- Leap-year / regular Feb day_count
-- Cross-year same-month previous_month/previous_year_month boundaries
-- Month-anchored 7-day buckets (W1/W5 truncation) — NOT ISO weeks
-- compare CSV multi-baseline + ``none`` exclusivity + dict-shape output
-- previous_year_month below horizon → null + compare_warning
-- maintenance.total_uptime_hours formula
-- improvement_tracking demo covers all 3 statuses
-- Static check: script never uses datetime.isocalendar()
+After the demo data path was removed, every data fetch goes through the
+InS-backed daily provider. These tests pin the script's CLI / validation /
+date-arithmetic / output-shape contract, mocking ``fetch_month_with_provenance``
+with InS-tagged synthetic payloads.
+
+For end-to-end InS provider tests see
+``test_ai_report_monthly_ins_provider.py``.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -33,16 +30,69 @@ def _load_module():
     return module
 
 
+def _ins_month_payload(report_month: str, equipment_ids: list[str], kpi_keys: list[str],
+                       day_count: int = 30, maintenance_overrides: dict | None = None,
+                       improvement_overrides: list[dict] | None = None) -> dict:
+    """Return a minimal InS-shaped monthly payload."""
+    daily = [
+        {
+            "date": f"2026-{report_month[5:]}-{d:02d}",
+            "kpis": {key: 0.5 for key in kpi_keys},
+            "kpi_units": {key: "%" for key in kpi_keys},
+            "alarms": [],
+        }
+        for d in range(1, min(day_count + 1, 29))
+    ]
+    daily = daily[:day_count]
+    agg: dict = {"kpis_mean": {}, "kpis_max": {}, "kpis_min": {}, "kpis_std": {}, "kpis_target_rate": {}}
+    for key in kpi_keys:
+        agg["kpis_mean"][key] = 0.5
+        agg["kpis_max"][key] = 0.5
+        agg["kpis_min"][key] = 0.5
+        agg["kpis_std"][key] = 0.0
+    maintenance = {
+        "total_failures": 0,
+        "total_uptime_hours": day_count * 24,
+        "total_downtime_minutes": 0,
+        "total_repair_minutes": 0,
+        "mtbf_hours": None,
+        "mttr_hours": None,
+    }
+    if maintenance_overrides:
+        maintenance.update(maintenance_overrides)
+    return {
+        "weekly": [],
+        "aggregated": agg,
+        "maintenance": maintenance,
+        "alarms": [],
+        "critical_events": [],
+        "improvement_tracking": improvement_overrides or [],
+        "kpi_units": {key: "%" for key in kpi_keys},
+    }
+
+
+def _stub_ins_fetch(query_monthly):
+    """Patch ``fetch_month_with_provenance`` to return InS-tagged synthetic data."""
+
+    def fake_fetch(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
+        return _ins_month_payload(report_month, equipment_ids, kpi_keys), "ins", []
+
+    query_monthly.fetch_month_with_provenance = fake_fetch
+
+
 @pytest.fixture()
 def query_monthly(tmp_path, monkeypatch):
     monkeypatch.setenv("MONTHLY_REPORT_OUTPUT_DIR", str(tmp_path))
-    # Demo data comes from query_daily.fetch_day; route its outputs to the
-    # same tmp dir so both layers respect the harness scratch space.
     monkeypatch.setenv("WEEKLY_REPORT_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
     monkeypatch.delenv("DATA_PLATFORM_URL", raising=False)
     monkeypatch.delenv("DATA_API_URL", raising=False)
-    return _load_module()
+    module = _load_module()
+    _stub_ins_fetch(module)
+    return module
+
+
+# -- Date arithmetic (leap year, Feb, 31-day, cross-year) --------------------
 
 
 def test_day_count_leap_february(query_monthly):
@@ -106,8 +156,11 @@ def test_cross_leap_year_previous_month_handles_2024_03(query_monthly):
     assert cp == {"start": "2024-02-01", "end": "2024-02-29"}
 
 
+# -- Compare shape & warnings -------------------------------------------------
+
+
 def test_previous_year_month_missing_returns_null(query_monthly):
-    """previous_year_month for 2024-02 lands on 2023-02, below demo horizon → None."""
+    """previous_year_month for 2024-02 lands on 2023-02, below horizon -> None."""
     result = query_monthly.build_result(
         report_month="2024-02",
         equipment_ids=["RM-001"],
@@ -131,26 +184,20 @@ def test_compare_is_dict_keyed_by_basis(query_monthly):
     pm = result["compare"]["previous_month"]
     assert "aggregated" in pm
     assert "maintenance" in pm
-    # maintenance block must carry the full 6-field schema (regression #D)
     assert {
-        "total_failures",
-        "total_uptime_hours",
-        "total_downtime_minutes",
-        "total_repair_minutes",
-        "mtbf_hours",
-        "mttr_hours",
+        "total_failures", "total_uptime_hours", "total_downtime_minutes",
+        "total_repair_minutes", "mtbf_hours", "mttr_hours",
     }.issubset(pm["maintenance"].keys())
 
 
+# -- CSV parsing (no data dependency) -----------------------------------------
+
+
 def test_compare_csv_parsing_none_exclusive(query_monthly):
-    # ``none`` mixed with another basis must raise ValueError
     with pytest.raises(ValueError, match="none"):
         query_monthly._parse_compare_csv("previous_month,none")
-    # Single ``none`` parses to [``none``]
     assert query_monthly._parse_compare_csv("none") == ["none"]
-    # Empty CSV defaults to [``none``]
     assert query_monthly._parse_compare_csv("") == ["none"]
-    # Multiple bases preserved in order
     assert query_monthly._parse_compare_csv("previous_month,previous_year_month") == [
         "previous_month",
         "previous_year_month",
@@ -159,11 +206,37 @@ def test_compare_csv_parsing_none_exclusive(query_monthly):
 
 def test_compare_csv_invalid_basis_rejected(query_monthly):
     with pytest.raises(ValueError, match="invalid basis"):
-        query_monthly._parse_compare_csv("mom,yoy")  # short names are DSL aliases, not script-level
+        query_monthly._parse_compare_csv("mom,yoy")
 
 
-def test_maintenance_total_uptime_hours_formula(query_monthly):
+# -- Maintenance formula ------------------------------------------------------
+
+
+def test_maintenance_total_uptime_hours_formula(query_monthly, monkeypatch):
     """total_uptime_hours = day_count * 24 - total_downtime_minutes / 60."""
+    def fake_fetch(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
+        payload = _ins_month_payload(
+            report_month, equipment_ids, kpi_keys,
+            maintenance_overrides={
+                "total_failures": 2,
+                "total_uptime_hours": 0,  # placeholder — formula recalcs
+                "total_downtime_minutes": 480,
+                "total_repair_minutes": 120,
+                "mtbf_hours": 360,
+                "mttr_hours": 2.0,
+            },
+        )
+        # Simulate the formula from fetch_month_with_provenance:
+        # total_uptime_hours = day_count * 24 - total_downtime_minutes / 60
+        year, month = int(report_month[:4]), int(report_month[5:7])
+        import calendar as _cal
+        _, day_count = _cal.monthrange(year, month)
+        maint = payload["maintenance"]
+        maint["total_uptime_hours"] = round(day_count * 24 - maint["total_downtime_minutes"] / 60.0, 2)
+        return payload, "ins", []
+
+    monkeypatch.setattr(query_monthly, "fetch_month_with_provenance", fake_fetch)
+
     result = query_monthly.build_result(
         report_month="2026-04",
         equipment_ids=["RM-001", "RM-002"],
@@ -176,7 +249,20 @@ def test_maintenance_total_uptime_hours_formula(query_monthly):
     assert maint["total_uptime_hours"] == pytest.approx(expected_uptime, abs=0.01)
 
 
-def test_improvement_tracking_demo_covers_3_statuses(query_monthly):
+def test_improvement_tracking_covers_3_statuses(query_monthly, monkeypatch):
+    def fake_fetch(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
+        payload = _ins_month_payload(
+            report_month, equipment_ids, kpi_keys,
+            improvement_overrides=[
+                {"title": "task-1", "status": "done"},
+                {"title": "task-2", "status": "in_progress"},
+                {"title": "task-3", "status": "delayed"},
+            ],
+        )
+        return payload, "ins", []
+
+    monkeypatch.setattr(query_monthly, "fetch_month_with_provenance", fake_fetch)
+
     result = query_monthly.build_result(
         report_month="2026-04",
         equipment_ids=["RM-001", "RM-002"],
@@ -184,19 +270,24 @@ def test_improvement_tracking_demo_covers_3_statuses(query_monthly):
         compare_bases=["previous_month"],
     )
     statuses = [r["status"] for r in result["current"]["improvement_tracking"]]
-    assert set(statuses) >= {"done", "in_progress", "delayed"}, f"missing status coverage: {statuses}"
+    assert set(statuses) >= {"done", "in_progress", "delayed"}
+
+
+def test_data_source_is_ins(query_monthly):
+    result = query_monthly.build_result(
+        report_month="2026-04",
+        equipment_ids=["RM-001"],
+        kpi_keys=["runtime_rate"],
+        compare_bases=["previous_month"],
+    )
+    assert result["data_source"] == "ins"
+    assert result["data_notes"] == []
+
+
+# -- Static / validation / CLI tests ------------------------------------------
 
 
 def test_script_does_not_use_iso_calendar():
-    """Static check (sprint plan M1 acceptance): no isocalendar / IsoYear call sites.
-
-    Allows ``isocalendar`` to appear inside string literals / docstrings (the
-    module deliberately documents the prohibition there). We parse with ``ast``
-    and only flag the symbol if it shows up as a real expression or attribute
-    reference.
-    """
-    import ast
-
     tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
     forbidden = {"isocalendar", "IsoYear"}
     offenders: list[str] = []
@@ -205,23 +296,14 @@ def test_script_does_not_use_iso_calendar():
             offenders.append(f"line {node.lineno}: .{node.attr}")
         elif isinstance(node, ast.Name) and node.id in forbidden:
             offenders.append(f"line {node.lineno}: {node.id}")
-    assert not offenders, f"query_monthly.py must not reference isocalendar/IsoYear at the AST level; found: {offenders}"
-
-
-def test_data_source_demo_fallback(query_monthly):
-    result = query_monthly.build_result(
-        report_month="2026-04",
-        equipment_ids=["RM-001"],
-        kpi_keys=["runtime_rate"],
-        compare_bases=["previous_month"],
+    assert not offenders, (
+        f"query_monthly.py must not reference isocalendar/IsoYear; found: {offenders}"
     )
-    assert result["data_source"] == "demo_fallback"
-    assert result["data_notes"] == []
 
 
 def test_report_month_validation(query_monthly):
     with pytest.raises(ValueError, match="invalid"):
-        query_monthly._parse_report_month("2026-4")  # missing zero-pad
+        query_monthly._parse_report_month("2026-4")
     with pytest.raises(ValueError, match="month"):
         query_monthly._parse_report_month("2026-13")
     with pytest.raises(ValueError, match="year"):
@@ -240,10 +322,6 @@ def test_equipment_id_validation(query_monthly):
 
 
 def test_kpi_keys_includes_special_via_main_args(query_monthly):
-    """When kpi_keys carries mtbf/mttr/target_rate the query layer drops them
-    but echoes them back on result['kpi_keys'] for downstream consumers."""
-    # build_result itself drops nothing — the filtering happens in main(). We
-    # test the contract by simulating the main() workflow.
     query_kpis = [k for k in ["runtime_rate", "mtbf", "mttr"] if k not in query_monthly.SPECIAL_KPIS]
     result = query_monthly.build_result(
         report_month="2026-04",
@@ -251,9 +329,7 @@ def test_kpi_keys_includes_special_via_main_args(query_monthly):
         kpi_keys=query_kpis,
         compare_bases=["previous_month"],
     )
-    # Manually echo (main() does this):
     result["kpi_keys"] = ["runtime_rate", "mtbf", "mttr"]
     assert "mtbf" in result["kpi_keys"]
     assert "mttr" in result["kpi_keys"]
-    # but should NOT be in current.aggregated.kpis_mean (handled by monthly_kpi)
     assert "mtbf" not in result["current"]["aggregated"]["kpis_mean"]

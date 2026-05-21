@@ -168,3 +168,16 @@ Non-conversion 4xx/5xx still throw a plain `Error` with the server's `detail` st
 - Forces `enabled=false` when every selected ID disappears, so the next chat turn doesn't try to retrieve from an empty set and silently produce zero results.
 
 Parents passing `onSelectionChange` should still wrap it in `useCallback`, but the selector keeps a ref to the latest callback so an unstable identity won't refire cleanup.
+
+## Device Selector Filter Invariant
+
+Both [DeviceSelectorBlock.tsx](src/components/genui/DeviceSelectorBlock.tsx) and [DeviceSelectorMultiBlock.tsx](src/components/genui/DeviceSelectorMultiBlock.tsx) share a single source of truth for filtering the org-tree response: [device-selector-utils.ts](src/components/genui/device-selector-utils.ts) exports `collectDevices(node, filterDeviceType?)`.
+
+Invariants — locked by [tests/unit/components/genui/device-selector-utils.test.ts](tests/unit/components/genui/device-selector-utils.test.ts):
+
+- **Devices vs org levels**: `type < 10` is a device; `type >= 10` is an org level. Only devices are returned.
+- **Strict equality filter**: when `filterDeviceType` is set, a child is included **only if `child.type === filterDeviceType`** — never approximate, never via parent's type. This is the frontend's defense against ins-bus-rpc returning a mixed tree when the caller asked for one type.
+- **No recursion into devices**: the walker descends into org children only. Measurement points / sub-components hanging off a device must not be hoisted into the device list (the previous code did this and would surface point nodes alongside parent devices).
+- **Stable ordering**: results sorted by `displayOrder` ascending.
+
+This came from a bug where selecting "静设备 (6)" in the daily report rendered 旋转机组 (1) entries in the device list — the agent's SOUL.md example hard-coded `typeId: 4` (pump) and LLMs sometimes copied it verbatim instead of applying the mapping table. Fix: (1) [device-selector-utils.ts](src/components/genui/device-selector-utils.ts) provides a single `collectDevices` shared by both selector components; (2) SOUL.md now uses a valid JSON example (typeId=1) with a prominent per-type mapping list right after the code block, plus a "do NOT copy the number" warning.

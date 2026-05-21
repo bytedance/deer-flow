@@ -74,7 +74,7 @@ def _monthly_payload(**overrides) -> dict:
         "improvement_tracking": [],
         "monthly_review": "本月整体平稳。",
         "next_month_plan": ["保持当前节奏"],
-        "data_source": "demo_fallback",
+        "data_source": "ins",
     }
     payload.update(overrides)
     return payload
@@ -152,15 +152,9 @@ def test_render_monthly_markdown_ignores_summary_markdown_injection(export_repor
     assert "STALE-MUST-NOT-APPEAR" not in md
 
 
-def test_demo_banner_present_for_demo_fallback(export_report):
+def test_monthly_markdown_no_demo_banner(export_report):
+    """After demo removal, the monthly markdown never contains demo banner text."""
     md = export_report.render_monthly_markdown(_monthly_payload())
-    assert "演示数据" in md
-
-
-def test_demo_banner_absent_for_real_data(export_report):
-    payload = _monthly_payload()
-    payload["data_source"] = "ins"
-    md = export_report.render_monthly_markdown(payload)
     assert "演示数据" not in md
 
 
@@ -192,7 +186,7 @@ def test_write_report_weekly_no_regression(export_report, tmp_path):
         "anomaly_top_n": [],
         "alarm_table": [],
         "next_week_focus": ["保持节奏"],
-        "data_source": "demo_fallback",
+        "data_source": "ins",
     }
     out = export_report.write_report(weekly_payload, "md", report_type="weekly")
     assert out.name == "weekly_report.md"

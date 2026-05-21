@@ -19,12 +19,51 @@ def _load_module(name: str):
     return module
 
 
+def _fake_fetch_day(date_str, equipment_ids, kpi_keys, eq_type="all", include_per_equipment=False, equipment_meta=None):
+    """Stub fetch_day_with_provenance returning synthetic InS-tagged data."""
+    _kpi_defaults = {
+        "runtime_rate": 0.93,
+        "downtime_count": 2,
+        "alarm_count": 3,
+        "vibration_level": 1.2,
+        "bearing_temp": 65.0,
+        "corrosion_rate": 0.05,
+    }
+    _units = {
+        "runtime_rate": "%",
+        "downtime_count": "次",
+        "alarm_count": "条",
+        "vibration_level": "mm/s",
+        "bearing_temp": "℃",
+        "corrosion_rate": "mm/a",
+    }
+    kpis = {k: _kpi_defaults.get(k, 1.0) for k in kpi_keys}
+    data = {
+        "kpis": kpis,
+        "kpi_units": {k: _units.get(k, "") for k in kpis},
+        "hourly_runtime_rate": [0.9] * 24,
+        "alarms": [],
+    }
+    if include_per_equipment:
+        per_eq: dict = {}
+        for eid in equipment_ids:
+            entry: dict = {"kpis": dict(kpis), "hourly_runtime_rate": [0.9] * 24}
+            if equipment_meta and eid in equipment_meta:
+                entry["name"] = equipment_meta[eid].get("name", eid)
+                entry["area"] = equipment_meta[eid].get("area", "")
+            per_eq[eid] = entry
+        data["per_equipment"] = per_eq
+    return (data, "ins", [])
+
+
 def test_query_kpi_export_pipeline(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
 
     query_daily = _load_module("query_daily")
     daily_kpi = _load_module("daily_kpi")
     export_report = _load_module("export_report")
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", _fake_fetch_day)
 
     monkeypatch.setattr(
         sys,
@@ -103,6 +142,8 @@ def test_scope_aggregation_pipeline(monkeypatch, tmp_path, capsys):
     query_daily = _load_module("query_daily")
     daily_kpi = _load_module("daily_kpi")
     export_report = _load_module("export_report")
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", _fake_fetch_day)
 
     eq_result = list_equipment.query_equipment("static_equipment", "area", "A区", limit=10000)
     assert eq_result["total_matched"] == 250
@@ -184,6 +225,8 @@ def test_new_kpi_pipeline(monkeypatch, tmp_path, capsys):
 
     query_daily = _load_module("query_daily")
     daily_kpi = _load_module("daily_kpi")
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", _fake_fetch_day)
 
     monkeypatch.setattr(
         sys,

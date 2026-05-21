@@ -25,6 +25,53 @@ def _load(name: str):
     return module
 
 
+def _fake_fetch_month(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
+    """Stub fetch_month_with_provenance returning synthetic InS-tagged monthly data."""
+    kpis_mean = {}
+    for k in kpi_keys:
+        kpis_mean[k] = {
+            "runtime_rate": 0.93, "alarm_count": 4.6, "mtbf": 115.3, "mttr": 0.89, "target_rate": 0.80,
+        }.get(k, 1.0)
+
+    weekly = [
+        {
+            "label": f"W{i+1}",
+            "day_count": 7,
+            "kpis_mean": dict(kpis_mean),
+            "kpis_max": dict(kpis_mean),
+            "kpis_min": dict(kpis_mean),
+            "kpis_std": {k: 0.01 for k in kpis_mean},
+        }
+        for i in range(4)
+    ]
+
+    current = {
+        "weekly": weekly,
+        "aggregated": {
+            "kpis_mean": dict(kpis_mean),
+            "kpis_max": dict(kpis_mean),
+            "kpis_min": dict(kpis_mean),
+            "kpis_std": {k: 0.01 for k in kpis_mean},
+            "kpis_target_rate": {k: 0.80 for k in kpis_mean},
+        },
+        "maintenance": {
+            "total_failures": 6,
+            "total_uptime_hours": 692,
+            "total_downtime_minutes": 480,
+            "total_repair_minutes": 320,
+            "mtbf_hours": 115.3,
+            "mttr_hours": 0.89,
+        },
+        "alarms": [],
+        "critical_events": [],
+        "improvement_tracking": [
+            {"id": "IMP-1", "owner": "x", "plan": "p1", "due_date": f"{report_month}-15", "status": "done", "note": ""},
+        ],
+        "kpi_units": {k: "%" if "rate" in k else "条" if "alarm" in k else "h" for k in kpis_mean},
+    }
+    return (current, "ins", [])
+
+
 @pytest.fixture()
 def pipeline(tmp_path, monkeypatch):
     monkeypatch.setenv("MONTHLY_REPORT_OUTPUT_DIR", str(tmp_path))
@@ -40,8 +87,10 @@ def pipeline(tmp_path, monkeypatch):
     }
 
 
-def test_full_pipeline_end_to_end(pipeline):
+def test_full_pipeline_end_to_end(pipeline, monkeypatch):
     qm, mk, er = pipeline["qm"], pipeline["mk"], pipeline["er"]
+
+    monkeypatch.setattr(qm, "fetch_month_with_provenance", _fake_fetch_month)
 
     # 1. query_monthly
     monthly_data = qm.build_result(
@@ -66,9 +115,12 @@ def test_full_pipeline_end_to_end(pipeline):
     assert "## 8. 下月计划" in md_text
 
 
-def test_dual_baseline_propagation(pipeline):
+def test_dual_baseline_propagation(pipeline, monkeypatch):
     """Both previous_month_mean and previous_year_month_mean must be populated."""
     qm, mk = pipeline["qm"], pipeline["mk"]
+
+    monkeypatch.setattr(qm, "fetch_month_with_provenance", _fake_fetch_month)
+
     monthly_data = qm.build_result(
         report_month="2026-04",
         equipment_ids=["RM-001"],
@@ -82,9 +134,12 @@ def test_dual_baseline_propagation(pipeline):
     assert rt["previous_year_month_mean"] is not None
 
 
-def test_none_compare_propagation(pipeline):
+def test_none_compare_propagation(pipeline, monkeypatch):
     """compare_with=none → kpi_summary deltas all None + section 6 skipped."""
     qm, mk, er = pipeline["qm"], pipeline["mk"], pipeline["er"]
+
+    monkeypatch.setattr(qm, "fetch_month_with_provenance", _fake_fetch_month)
+
     monthly_data = qm.build_result(
         report_month="2026-04",
         equipment_ids=["RM-001"],
@@ -101,8 +156,11 @@ def test_none_compare_propagation(pipeline):
     assert "## 6. 月环比 + 同比" not in md
 
 
-def test_leap_year_pipeline(pipeline):
+def test_leap_year_pipeline(pipeline, monkeypatch):
     qm, mk, er = pipeline["qm"], pipeline["mk"], pipeline["er"]
+
+    monkeypatch.setattr(qm, "fetch_month_with_provenance", _fake_fetch_month)
+
     monthly_data = qm.build_result(
         report_month="2024-02",
         equipment_ids=["RM-001"],
@@ -112,6 +170,5 @@ def test_leap_year_pipeline(pipeline):
     monthly_data["kpi_keys"] = ["runtime_rate"]
     kpi = mk.compute(monthly_data)
     assert kpi["report_period"]["day_count"] == 29
-    # Compare warning propagates from query layer
     md = er.render_monthly_markdown(kpi)
-    assert "去年同期" in md or "compare_warning" not in md  # banner appears via render layer
+    assert "去年同期" in md or "compare_warning" not in md

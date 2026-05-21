@@ -1,7 +1,13 @@
 """Tests for skills/custom/data-analyst/scripts/query_daily.py.
 
-The script is loaded by file path because it lives in the runtime sandbox skills
-tree, not on the package import path.
+After the demo data path was removed, every data fetch goes through the
+InS-backed provider. These tests pin the script's CLI / validation / output
+contract, mocking ``fetch_day_with_provenance`` with InS-tagged synthetic
+payloads so we exercise ``build_result`` and ``main`` without standing up
+the real provider stack.
+
+For end-to-end InS provider tests see
+``test_ai_report_daily_ins_provider.py``.
 """
 
 from __future__ import annotations
@@ -26,29 +32,38 @@ def _load_module():
     return module
 
 
+def _ins_day_payload(date_str: str, equipment_ids: list[str], kpi_keys: list[str]) -> dict:
+    """Return a minimal InS-shaped daily payload, deterministic on inputs."""
+    return {
+        "kpis": {key: 0.5 for key in kpi_keys},
+        "kpi_units": {key: "%" for key in kpi_keys},
+        "hourly_runtime_rate": [0.5] * 24,
+        "alarms": [],
+        "marker": f"ins_{date_str}_{'-'.join(equipment_ids)}",
+    }
+
+
+def _stub_ins_fetch(query_daily, calls: list[str] | None = None):
+    """Install a fake ``fetch_day_with_provenance`` that returns InS-tagged data."""
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        if calls is not None:
+            calls.append(date_str)
+        return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
+
+    query_daily.fetch_day_with_provenance = fake_fetch
+    return fake_fetch
+
+
 @pytest.fixture()
 def query_daily(tmp_path, monkeypatch):
     monkeypatch.setenv("DAILY_REPORT_OUTPUT_DIR", str(tmp_path))
     monkeypatch.delenv("DATA_PLATFORM_URL", raising=False)
     monkeypatch.delenv("DATA_API_URL", raising=False)
-    return _load_module()
-
-
-def test_demo_payload_contract(query_daily):
-    """Demo fallback must satisfy design doc §6.1 shape."""
-    payload = query_daily.fetch_day(
-        "2026-05-13",
-        ["E001", "E002"],
-        ["runtime_rate", "downtime_count", "alarm_count"],
-    )
-    assert "kpis" in payload
-    assert "kpi_units" in payload
-    assert "hourly_runtime_rate" in payload
-    assert "alarms" in payload
-    assert len(payload["hourly_runtime_rate"]) == 24
-    for kpi in ["runtime_rate", "downtime_count", "alarm_count"]:
-        assert kpi in payload["kpis"]
-        assert kpi in payload["kpi_units"]
+    module = _load_module()
+    _stub_ins_fetch(module)
+    return module
 
 
 def test_build_result_previous_day(query_daily):
@@ -60,8 +75,11 @@ def test_build_result_previous_day(query_daily):
     )
     assert result["report_date"] == "2026-05-13"
     assert result["compare_type"] == "previous_day"
+    assert result["compare_date"] == "2026-05-12"
     assert result["compare"] is not None
     assert result["current"]["kpis"]["runtime_rate"] is not None
+    assert result["data_source"] == "ins"
+    assert result["data_notes"] == []
 
 
 def test_build_result_previous_week(query_daily):
@@ -85,7 +103,7 @@ def test_build_result_no_compare(query_daily):
     )
     assert result["compare"] is None
     assert result["compare_type"] == "none"
-    assert result["data_source"] == "demo_fallback"
+    assert result["data_source"] == "ins"
     assert result["data_notes"] == []
 
 
@@ -101,6 +119,7 @@ def test_writes_to_output_dir(query_daily, tmp_path):
     assert out_path.name == "daily_data.json"
     loaded = json.loads(out_path.read_text(encoding="utf-8"))
     assert loaded["report_date"] == "2026-05-13"
+    assert loaded["data_source"] == "ins"
 
 
 def test_main_accepts_form_csv_payload(query_daily, monkeypatch, capsys, tmp_path):
@@ -125,6 +144,7 @@ def test_main_accepts_form_csv_payload(query_daily, monkeypatch, capsys, tmp_pat
     loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
     assert loaded["equipment_ids"] == ["E001", "E002"]
     assert loaded["kpi_keys"] == ["runtime_rate", "downtime_count"]
+    assert loaded["data_source"] == "ins"
 
 
 def test_main_rejects_empty_equipment(query_daily, monkeypatch, capsys):
@@ -192,9 +212,6 @@ def test_main_deduplicates_equipment_and_kpis(query_daily, monkeypatch, capsys, 
     assert loaded["kpi_keys"] == ["runtime_rate", "downtime_count"]
 
 
-# --- New KPI and --type/--scope/--scope-filter tests ---
-
-
 def test_new_kpi_units_registered(query_daily):
     """All 12 KPI keys must be in KPI_UNITS."""
     expected = {
@@ -205,162 +222,21 @@ def test_new_kpi_units_registered(query_daily):
     assert expected.issubset(set(query_daily.KPI_UNITS.keys()))
 
 
-def test_new_kpi_demo_values(query_daily):
-    """New KPIs should produce valid demo data."""
-    new_kpis = ["corrosion_rate", "thickness_loss", "vibration_level", "bearing_temp", "flow_rate", "outlet_pressure", "valve_temp"]
-    payload = query_daily.fetch_day("2026-05-13", ["E001"], new_kpis)
-    for key in new_kpis:
-        assert key in payload["kpis"]
-        assert key in payload["kpi_units"]
-        assert isinstance(payload["kpis"][key], (int, float))
-
-
-def test_scope_mode_returns_per_equipment(query_daily, monkeypatch, capsys, tmp_path):
-    """--scope area mode should produce per_equipment for >20 devices."""
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "query_daily.py",
-            "--date", "2026-05-13",
-            "--type", "static_equipment",
-            "--scope", "area",
-            "--scope-filter", "A区",
-            "--kpis", "runtime_rate,corrosion_rate",
-            "--compare", "previous_day",
-        ],
-    )
-    assert query_daily.main() == 0
-    capsys.readouterr()
-    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
-    assert loaded["equipment_type"] == "static_equipment"
-    assert loaded["equipment_count"] == 250
-    assert "per_equipment" in loaded["current"]
-    assert len(loaded["current"]["per_equipment"]) == 250
-
-
-def test_scope_all_returns_all_devices(query_daily, monkeypatch, capsys, tmp_path):
-    """--scope all --type pump should return 1000 pump devices."""
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "query_daily.py",
-            "--date", "2026-05-13",
-            "--type", "pump",
-            "--scope", "all",
-            "--kpis", "runtime_rate,flow_rate",
-            "--compare", "none",
-        ],
-    )
-    assert query_daily.main() == 0
-    capsys.readouterr()
-    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
-    assert len(loaded["equipment_ids"]) == 1000
-    assert loaded["equipment_count"] == 1000
-
-
-def test_backward_compat_no_type_no_scope(query_daily, monkeypatch, capsys, tmp_path):
-    """Without --type/--scope, behavior must match original."""
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "query_daily.py",
-            "--date", "2026-05-13",
-            "--equipment", "E001,E002",
-            "--kpis", "runtime_rate,alarm_count",
-            "--compare", "previous_day",
-        ],
-    )
-    assert query_daily.main() == 0
-    capsys.readouterr()
-    loaded = json.loads((tmp_path / "daily_data.json").read_text(encoding="utf-8"))
-    assert loaded["equipment_ids"] == ["E001", "E002"]
-    assert "per_equipment" not in loaded["current"]
-    assert "equipment_count" not in loaded
-
-
-def test_type_specific_alarms(query_daily):
-    """Alarm messages should differ by equipment type."""
-    payload_static = query_daily.fetch_day("2026-05-13", ["SE-001"], ["runtime_rate"], eq_type="static_equipment")
-    payload_pump = query_daily.fetch_day("2026-05-13", ["PP-001"], ["runtime_rate"], eq_type="pump")
-    static_messages = set(query_daily.TYPE_ALARM_MESSAGES["static_equipment"])
-    pump_messages = set(query_daily.TYPE_ALARM_MESSAGES["pump"])
-    assert static_messages != pump_messages
-
-
 # ---------------------------------------------------------------------------
-# Regression: build_result mismatch-downgrade — when fetch_day_with_provenance
-# returns different data_source values for current vs compare blocks, the
-# whole payload must drop to demo_fallback with a mismatch note, AND both
-# blocks must be re-rendered from the demo helper for internal consistency.
-# Covered design contract: query_daily.py:347-355.
+# Provenance propagation — build_result must preserve the InS data_source tag
+# and notes returned by fetch_day_with_provenance for both current and compare
+# blocks, with no demo-fallback rewriting.
 # ---------------------------------------------------------------------------
 
 
-def test_build_result_downgrades_when_current_ins_but_compare_demo(query_daily, monkeypatch):
-    calls: list[str] = []
-
+def test_build_result_propagates_ins_notes(query_daily, monkeypatch):
     def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
                    include_per_equipment=False, equipment_meta=None):
-        calls.append(date_str)
-        if date_str == "2026-05-13":
-            # current — real InS
-            return ({"kpis": {"runtime_rate": 0.93}, "marker": "ins_real"}, "ins", [])
-        # compare day — degraded to demo
-        return ({"kpis": {"runtime_rate": 0.5}, "marker": "demo_real"}, "demo_fallback",
-                ["InS unreachable for compare day"])
+        # Current day carries one note; compare day adds another.
+        note = "note-current" if date_str == "2026-05-13" else "note-compare"
+        return ({"kpis": {"runtime_rate": 0.9}, "marker": f"ins_{date_str}"}, "ins", [note])
 
     monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
-
-    demo_marker = {"call_count": 0}
-
-    def fake_demo(date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta):
-        demo_marker["call_count"] += 1
-        return {"kpis": {"runtime_rate": 0.42}, "marker": f"demo_rerendered_{date_str}"}
-
-    monkeypatch.setattr(query_daily, "_demo_day", fake_demo)
-
-    result = query_daily.build_result(
-        date_str="2026-05-13",
-        equipment_ids=["E001"],
-        kpi_keys=["runtime_rate"],
-        compare="previous_day",
-    )
-
-    assert result["data_source"] == "demo_fallback", (
-        "mismatch must downgrade the whole payload to demo_fallback"
-    )
-    # Both blocks must have been re-rendered from demo (NOT the original mixed payloads).
-    assert result["current"]["marker"] == "demo_rerendered_2026-05-13"
-    assert result["compare"]["marker"] == "demo_rerendered_2026-05-12"
-    assert demo_marker["call_count"] == 2
-    # data_notes must include the mismatch explanation + carried compare notes.
-    joined = "\n".join(result["data_notes"])
-    assert "data_source mismatch" in joined
-    assert "current=ins" in joined
-    assert "compare=demo_fallback" in joined
-    assert "InS unreachable for compare day" in joined
-
-
-def test_build_result_no_downgrade_when_sources_match(query_daily, monkeypatch):
-    """If current and compare share a data_source, downgrade must NOT fire and
-    _demo_day must NOT be called as a re-render. data_source is preserved."""
-
-    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
-                   include_per_equipment=False, equipment_meta=None):
-        return ({"kpis": {"runtime_rate": 0.91}, "marker": f"ins_{date_str}"}, "ins", [])
-
-    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
-
-    demo_called = {"n": 0}
-
-    def fake_demo(*a, **kw):
-        demo_called["n"] += 1
-        return {"kpis": {"runtime_rate": 0.0}, "marker": "should_not_be_used"}
-
-    monkeypatch.setattr(query_daily, "_demo_day", fake_demo)
 
     result = query_daily.build_result(
         date_str="2026-05-13",
@@ -372,14 +248,12 @@ def test_build_result_no_downgrade_when_sources_match(query_daily, monkeypatch):
     assert result["data_source"] == "ins"
     assert result["current"]["marker"] == "ins_2026-05-13"
     assert result["compare"]["marker"] == "ins_2026-05-12"
-    assert demo_called["n"] == 0
-    assert not any("mismatch" in n for n in result["data_notes"])
+    assert result["data_notes"] == ["note-current", "note-compare"]
 
 
 def test_build_result_no_compare_keeps_current_source(query_daily, monkeypatch):
-    """When compare='none' there is no compare_src to mismatch against —
-    data_source stays whatever current returned. Regression guard against
-    accidental downgrade when compare_src is None."""
+    """When compare='none' there is no compare fetch — data_source / notes
+    come straight from the single current-day fetch."""
 
     def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
                    include_per_equipment=False, equipment_meta=None):
@@ -395,6 +269,58 @@ def test_build_result_no_compare_keeps_current_source(query_daily, monkeypatch):
     )
     assert result["data_source"] == "ins"
     assert result["compare"] is None
-    # compare_notes path must not extend notes when compare_src is None.
     assert result["data_notes"] == ["note-a"]
 
+
+def test_build_result_propagates_http_provider_error(query_daily, monkeypatch):
+    """If the InS provider raises, build_result must not swallow it.
+
+    The CLI catches the exception in ``main()`` and writes a JSON error blob;
+    callers of ``build_result`` directly (weekly/monthly aggregators) rely on
+    the exception bubbling up.
+    """
+
+    class _Boom(Exception):
+        pass
+
+    def fake_fetch(*args, **kwargs):
+        raise _Boom("ins exploded")
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+
+    with pytest.raises(_Boom):
+        query_daily.build_result(
+            date_str="2026-05-13",
+            equipment_ids=["E001"],
+            kpi_keys=["runtime_rate"],
+            compare="none",
+        )
+
+
+def test_main_emits_error_json_when_fetch_raises(query_daily, monkeypatch, capsys, tmp_path):
+    """main() must convert any fetch exception into ``{"error": "...""}`` on
+    stdout instead of bubbling and instead of writing daily_data.json."""
+
+    def fake_fetch(*args, **kwargs):
+        raise RuntimeError("ins unreachable")
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "E001",
+            "--kpis", "runtime_rate",
+            "--compare", "none",
+        ],
+    )
+    rc = query_daily.main()
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    payload = json.loads(out)
+    assert "error" in payload
+    assert "RuntimeError" in payload["error"]
+    assert "ins unreachable" in payload["error"]
+    assert not (tmp_path / "daily_data.json").exists()
