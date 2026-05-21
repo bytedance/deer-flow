@@ -7,35 +7,51 @@ metadata:
 
 # Pump Fault Diagnosis
 
-Use this skill to diagnose pump faults with the user's rule base, plant inspection toolchain, and process-variable correlation.
+Use this skill to diagnose pump faults with the managed Deer Flow pump rule runtime. The Agent input contract matches rotating machinery diagnosis: select one pump device + sub-device, select one diagnosis hour, then run the rule runtime.
+
+## Managed Runtime
+
+Authoritative runtime entrypoints:
+
+- `scripts/run_pump_rule_diagnosis.py`
+- `scripts/build_pump_report_payload.py`
+
+Runtime package:
+
+- `/opt/features-tool/pump_rule` in sandbox
+- `docker/sandbox/features-tool/pump_rule` in the repository
+
+Required runtime environment:
+
+- `INS_ACCESS_TOKEN`: current user Bearer token injected by Deer Flow runtime
+- `INS_BASE_URL`: optional deployment-level InS base URL
+
+Do not use `INS_USERNAME` / `INS_PASSWORD`, Nacos, MQ, database credentials, or start-stop status configuration for this managed path.
+
+The managed runtime does not evaluate start-stop state and never skips vibration diagnosis because of startup/shutdown status.
 
 ## Workflow
 
-1. Confirm the target pump, time window, operating regime (steady / startup / shutdown / process upset), and whether the user wants a one-off diagnosis or a quick screening.
-2. Determine equipment kind (`centrifugal_pump` / `positive_displacement_pump`) from naming and available measurements.
-3. Use the plant inspection toolchain first to locate the pump, inspect component hierarchy, and identify key points:
+1. Confirm the target pump device, selected sub-device, and diagnosis hour.
+2. Determine target context from the device tree and selected sub-device.
+3. Use the plant inspection toolchain first to locate the pump, inspect component hierarchy, and identify related points:
    - shaft vibration X/Y at drive end and non-drive end (or housing vibration on small pumps)
    - suction / discharge pressure
    - flow rate (and rated min-flow if known)
    - motor current / power
    - bearing temperatures if available
    - seal flush pressure / temperature if instrumented
-4. Judge operating condition before fault typing:
-   - steady state at rated point
-   - throttled / off-design (low flow → cavitation / recirculation risk)
-   - startup ramp / coastdown
-   - process upset (suction loss, discharge throttling, parallel pump start/stop)
-5. Build an evidence chain in this order unless data is missing:
+4. Build an evidence chain in this order unless data is missing:
    - overall trend and alarm behavior (vibration, current, ΔP)
    - vibration spectrum dominant components (1X / 2X / vane-pass-frequency / broadband)
    - waveform shape (sine / clipped / impulsive / random)
    - process correlation (flow vs ΔP, NPSH margin, recirculation valve state)
    - motor-side correlation (current harmonics, torque pulsation)
    - bearing / seal temperature corroboration
-6. Match observed behavior against the bundled rule reference at `references/diagnosis-rules.md`.
-7. Output a structured conclusion with:
+5. Match observed behavior against the managed runtime output first; use `references/diagnosis-rules.md` as explanatory reference material only.
+6. Output a structured conclusion with:
    - pump info (tag, kind, service)
-   - operating condition
+   - selected sub-device
    - abnormal points
    - evidence
    - primary diagnosis
@@ -53,7 +69,7 @@ Use this skill to diagnose pump faults with the user's rule base, plant inspecti
   - likely / suspected
   - not supported by current data
 - Do not force a diagnosis when only one feature matches weakly.
-- For pumps, **process variables (flow / ΔP / current) carry equal weight to vibration evidence**; do not finalize a diagnosis without checking at least one process channel when available.
+- For pumps, process variables (flow / ΔP / current) are useful supporting evidence when available, but the managed runtime can still produce a vibration-only rule result when process channels are unavailable.
 
 ## Rule matching guidance
 
@@ -164,4 +180,4 @@ When LLM produces a primary diagnosis, use the `code` value verbatim in any stru
 
 ## Status
 
-> **占位版本（2026-05-18 Story S1-3）**：本 skill 当前包含 3 条占位规则（不平衡 / 汽蚀 / 流量低于最小连续流量），用于 `fault-diagnosis--pump` 端到端联调。完整规则评审在双 Sprint 之外作为独立工作流推进，每条规则上线前需领域专家逐条评审现场样本。
+Managed rule runtime is the authoritative path for `fault-diagnosis--pump`. The Markdown rule reference remains for human explanation and fallback documentation; it is no longer the authoritative matcher for the Agent's formal conclusion.
