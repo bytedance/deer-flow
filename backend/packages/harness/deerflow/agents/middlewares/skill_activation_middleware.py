@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.skills.slash import get_original_user_content_text, parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SUMMARY_MESSAGE_NAME = "summary"
 
 
@@ -40,6 +42,10 @@ class _Activation:
 class _ActivationResolution:
     activation: _Activation | None = None
     failure_message: str | None = None
+
+
+def is_slash_skill_activation_reminder(message: object) -> bool:
+    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_SLASH_SKILL_ACTIVATION_KEY))
 
 
 def _is_user_activation_target(message: object) -> bool:
@@ -170,31 +176,31 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.category,
             activation.content_hash[:12],
         )
-        system_message = self._append_activation_to_system_message(
-            request.system_message,
-            self._build_activation_reminder(activation),
-        )
-        return request.override(system_message=system_message)
+        activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
+        messages = list(request.messages)
+        target_index = self._find_target_index(messages, target)
+        messages.insert(target_index, activation_msg)
+        return request.override(messages=messages)
 
     @staticmethod
-    def _append_activation_to_system_message(system_message: SystemMessage | None, activation_content: str) -> SystemMessage:
-        if system_message is None:
-            return SystemMessage(content=activation_content)
-
-        if isinstance(system_message.content, str):
-            content = f"{system_message.content}\n\n{activation_content}"
-        elif isinstance(system_message.content, list):
-            content = [*system_message.content, {"type": "text", "text": f"\n\n{activation_content}"}]
-        else:
-            content = f"{system_message.content}\n\n{activation_content}"
-
-        return SystemMessage(
-            content=content,
-            id=system_message.id,
-            name=system_message.name,
-            additional_kwargs=system_message.additional_kwargs,
-            response_metadata=system_message.response_metadata,
+    def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:
+        stable_id = target.id or str(uuid.uuid4())
+        return HumanMessage(
+            content=activation_content,
+            id=f"{stable_id}__slash_activation",
+            additional_kwargs={
+                "hide_from_ui": True,
+                _SLASH_SKILL_ACTIVATION_KEY: True,
+            },
         )
+
+    @staticmethod
+    def _find_target_index(messages: list, target: HumanMessage) -> int:
+        for idx, message in enumerate(messages):
+            if message is target:
+                return idx
+        logger.warning("SkillActivationMiddleware target message was not found in request messages; appending activation at the end")
+        return len(messages)
 
     @override
     def wrap_model_call(
