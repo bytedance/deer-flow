@@ -348,6 +348,14 @@ class InsApiClient:
         )
         return body.get("data") or []
 
+    async def get_point_configs(self, node_id: str, node_type: int | str = 4) -> dict[str, Any]:
+        body = await self._get_json(
+            "ins-os-manage/organize/getPointConfigs",
+            {"nodeId": node_id, "nodeType": str(node_type)},
+        )
+        data = body.get("data")
+        return data if isinstance(data, dict) else {}
+
     async def get_slim_components(self, device_id: str) -> list[dict[str, Any]]:
         components = await self.get_components(device_id)
         return [slim_component(node) for node in components]

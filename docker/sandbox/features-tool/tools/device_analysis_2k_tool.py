@@ -57,8 +57,8 @@ def _filter_node_by_series(node: dict, series: str) -> dict | None:
 
 
 async def get_device_children_2k(device_id: str) -> dict:
-    if not INS_SETTINGS.username or not INS_SETTINGS.password:
-        raise RuntimeError("缺少 INS_USERNAME 或 INS_PASSWORD 环境变量，无法登录 InS 接口")
+    if not INS_SETTINGS.access_token and (not INS_SETTINGS.username or not INS_SETTINGS.password):
+        raise RuntimeError("缺少 INS_ACCESS_TOKEN，且未配置 INS_USERNAME/INS_PASSWORD，无法访问 InS 接口")
 
     components = await ins_client.get_slim_components(device_id)
     filtered = [

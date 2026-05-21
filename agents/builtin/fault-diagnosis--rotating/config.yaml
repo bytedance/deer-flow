@@ -9,17 +9,7 @@ tool_groups:
   - bash
 exclude_tools: []
 skills:
-  - data-analyst
   - rotating-device-context
-  - rotating-fault-diagnosis
-  - vibration-fault-diagnosis
-  - ins-device-analysis
-  - ins-get-trend-data
-  - ins-get-waveform-data
-  - ins-get-orbit-data
-  - ins-extract-trend-features
-  - ins-extract-spectral-waveform-features
-  - ins-extract-orbit-centerline-features
 mcp_servers: null
 tags:
   - diagnosis

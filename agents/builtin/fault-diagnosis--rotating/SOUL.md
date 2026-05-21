@@ -157,7 +157,7 @@ else: print('VALID')
 - `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
 - `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
 
-### 步骤 2：获取原始树，由当前 Agent 生成标准设备上下文 JSON
+### 步骤 2：获取原始树，并严格通过 `rotating-device-context` skill 生成标准设备上下文 JSON
 
 调用底层原始设备树脚本（**只取树，不在脚本内再起模型**）：
 
@@ -165,11 +165,12 @@ else: print('VALID')
 python /opt/features-tool/tools/device_analysis.py "{machineId}" --output /mnt/user-data/outputs/device_tree_raw.json
 ```
 
-然后**按顺序执行**：
+然后**必须严格按 `rotating-device-context` skill 执行**，不允许当前 SOUL 自行补充规则、自己写代码实现设备上下文生成逻辑，或脱离 skill 编造结构。除调用上面的 `device_analysis.py` 获取 raw tree 外，**严禁编写、生成或执行任何新的 Python 代码**；`device_context.json` 必须由当前 Agent 基于 raw tree 和 skill 规则直接推理写出。SOUL 在此步骤只规定输入、输出和校验要求：
 
-1. **阅读 raw tree**：使用 `read_file` 读取 `/mnt/user-data/outputs/device_tree_raw.json`，理解设备树结构（设备类型、轴系、轴承、测点）。
-2. **阅读 skill 指南**：使用 `read_file` 读取 `rotating-device-context` skill 的 `SKILL.md`（位于 `/mnt/skills/custom/rotating-device-context/SKILL.md`）和模板文件（位于 `/mnt/skills/custom/rotating-device-context/references/device_context_template.json`）。
-3. **推理并写出**：由当前 Agent 自行推理，基于 **`device_tree_raw.json` 原始树** 写出 `/mnt/user-data/outputs/device_context.json`。
+1. 输入文件：`/mnt/user-data/outputs/device_tree_raw.json`
+2. 必用 skill：`/mnt/skills/custom/rotating-device-context/SKILL.md`
+3. 输出文件：`/mnt/user-data/outputs/device_context.json`
+4. 除必要文件读写外，不输出任何命令、代码、伪代码、执行计划或步骤说明
 
 > **重要**：`machine_service` 在沙箱环境中不可用，无法通过 HTTP或 RPC 调用。所需信息（device_id、设备类型、设备结构）都已包含在 `device_tree_raw.json` 中，直接从中提取即可。
 
@@ -180,16 +181,6 @@ python /opt/features-tool/tools/device_analysis.py "{machineId}" --output /mnt/u
 - `device_type` / `process_type` / `device_structure`
 - `child_device_list`
 - `target_info`
-
-推理要求（以 `rotating-device-context` skill 为准）：
-
-- 当前 `componentId` 是轴承、测点还是转子子设备
-- 是否存在 X/Y 双探头配对与轴承归属
-- 设备类型补位（汽轮机 / 离心压缩机 / 轴流压缩机 / 螺杆压缩机 / 齿轮箱等）
-- `child_device_list` 应保留机组根节点，不要把 `unit_type=1/type_num=1` 根节点整体删除
-- 当 `type_num=82` 或部分未挂载的 `type_num=83` 测点未挂在合适的 `80/70` 节点下时，优先按 `belongShaftId` 找轴系，再结合设备词和方向词（联端/非联端/驱动端/非驱动端）补挂到最匹配的轴承或转子节点
-- 轴承温度、轴位移、止推轴瓦温度等测点不能漏挂；只有在无法可靠定位到 `70` 也无法定位到 `80` 时，才允许保留在机组根节点
-- 不要把 `type_num=82` 的振动/位移类点整体忽略；仅对明显无效或噪声点才可省略，并需说明原因
 
 写文件要求：
 

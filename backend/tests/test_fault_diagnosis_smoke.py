@@ -4,16 +4,15 @@ Story S1-8 acceptance (initial) + Story S2-6 expansion (full coverage):
 
 1. Parent group + 3 sub-agent configs are discovered by ``scan_builtin_agents``
 2. Each sub-agent SOUL.md uses its own callback_id prefix → no cross-talk
-3. Pump / reciprocating SOULs preserve the staged MVP pipeline contract, while
-   rotating SOUL follows the new real-rule runtime contract.
+3. Pump / rotating SOULs follow the two-step real-rule runtime contract, while
+   reciprocating preserves the staged MVP pipeline contract.
 4. ``data_source=demo_fallback`` flows through the MVP pipelines and
    historical_cases are tagged so the SOUL can prefix "演示".
 5. The four forbidden structured-summary headings never appear as Markdown
    headings in any of the new SOUL files.
 6. Rotating SOUL does not render any chart blocks in the final report;
    reciprocating SOUL skips orbit.
-7. Pump / reciprocating SOULs declare the expected ``focus_*`` field names;
-   rotating SOUL now uses the two-step real-rule form flow instead of a focus form.
+7. Pump / rotating now use the two-step real-rule form flow instead of a focus form.
 
 These checks defend the fault-diagnosis MVP at the contract level. Live
 GenUI rendering / browser flow is verified manually (screenshots archived
@@ -69,10 +68,8 @@ EXPECTED_FOCUS_CODES: dict[str, list[str]] = {
 # two-step device/time flow for the real-rule runtime.
 CALLBACK_IDS_BY_AGENT: dict[str, list[str]] = {
     "fault-diagnosis--pump": [
-        "fd-pump-scope",
         "fd-pump-device",
-        "fd-pump-target",
-        "fd-pump-focus",
+        "fd-pump-time",
     ],
     "fault-diagnosis--rotating": [
         "fd-rotating-device",
@@ -126,13 +123,6 @@ def test_pump_subagent_skill_chain_complete():
     expected = {
         "data-analyst",
         "pump-fault-diagnosis",
-        "ins-device-analysis",
-        "ins-get-trend-data",
-        "ins-get-waveform-data",
-        "ins-get-orbit-data",
-        "ins-extract-trend-features",
-        "ins-extract-spectral-waveform-features",
-        "ins-extract-orbit-centerline-features",
     }
     assert expected.issubset(set(cfg.skills or []))
 
@@ -221,6 +211,14 @@ def test_subagent_contract_blocks_present(name):
         assert "build_rotating_report_payload.py" in soul
         assert "rotating_rule_cache" in soul
         assert "禁止静默回退" in soul
+    elif name == "fault-diagnosis--pump":
+        assert "sub-device-selector" in soul
+        assert "run_pump_rule_diagnosis.py" in soul
+        assert "build_pump_report_payload.py" in soul
+        assert "pump_rule_result.json" in soul
+        assert "pump_rule_cache" in soul
+        assert "INS_ACCESS_TOKEN" in soul
+        assert "起停机" in soul
     else:
         # Two-stage pull contract
         assert "第一阶段" in soul or "聚合特征拉取" in soul
@@ -230,7 +228,7 @@ def test_subagent_contract_blocks_present(name):
         assert "演示" in soul
 
 
-@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
+@pytest.mark.parametrize("name", ["fault-diagnosis--reciprocating"])
 def test_subagent_default_selection_documented(name):
     """Pump / reciprocating SOULs must explicitly note the ≤5-device default."""
     soul = _read_soul(name)
@@ -239,7 +237,7 @@ def test_subagent_default_selection_documented(name):
     assert "日报" in soul and ("全选" in soul or "默认勾选" in soul)
 
 
-@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
+@pytest.mark.parametrize("name", ["fault-diagnosis--reciprocating"])
 def test_subagent_has_three_well_formed_form_blocks(name):
     """Pump / reciprocating staged forms must parse as JSON and use expected callback IDs."""
     soul = _read_soul(name)
@@ -263,7 +261,7 @@ def test_subagent_has_three_well_formed_form_blocks(name):
         assert callback_id in callbacks, f"{name} form block missing callback {callback_id}"
 
 
-@pytest.mark.parametrize("name", ["fault-diagnosis--pump", "fault-diagnosis--reciprocating"])
+@pytest.mark.parametrize("name", ["fault-diagnosis--reciprocating"])
 def test_subagent_focus_codes_match_design(name):
     """Pump / reciprocating SOULs must declare the expected focus_* fields."""
     soul = _read_soul(name)
@@ -295,6 +293,31 @@ def test_rotating_soul_uses_two_step_real_rule_flow():
     assert "sub-device-selector" in soul
 
 
+def test_pump_soul_uses_two_step_real_rule_flow():
+    """Pump SOUL must use the dedicated device/time callbacks and pump rule scripts."""
+    soul = _read_soul("fault-diagnosis--pump")
+    blocks = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", soul, re.DOTALL)]
+
+    assert len(blocks) >= 2, "pump SOUL should declare device selector + time form"
+    assert blocks[0]["component"] == "sub-device-selector"
+    assert blocks[0]["callback_id"] == "fd-pump-device"
+    assert blocks[0]["props"]["queryParams"]["typeId"] == 4
+    assert blocks[0]["props"]["filterDeviceType"] == 4
+    assert blocks[0]["callback_timeout_ms"] >= 60_000
+    assert blocks[1]["component"] == "form"
+    assert blocks[1]["callback_id"] == "fd-pump-time"
+    assert blocks[1]["callback_timeout_ms"] >= 60_000
+    assert "focus_" not in soul
+    assert "device-selector-multi" not in soul
+    assert "maxSelect" not in soul
+    assert "run_pump_rule_diagnosis.py" in soul
+    assert "build_pump_report_payload.py" in soul
+    assert "pump_rule_result.json" in soul
+    assert "diagnosis_features.json" in soul
+    assert "INS_ACCESS_TOKEN" in soul
+    assert "不考虑起停机状态" in soul
+
+
 # --- Reciprocating-specific orbit prohibition ---
 
 
@@ -322,11 +345,12 @@ def test_rotating_soul_removes_all_chart_rendering():
     assert "最终报告彻底不要图谱" in soul
 
 
-def test_pump_soul_keeps_orbit_pipeline():
-    """Pump SOUL must keep orbit ins-* skill calls for double-probe pumps."""
+def test_pump_soul_uses_rule_cache_not_orbit_pipeline():
+    """Pump SOUL must use managed rule cache rather than old orbit subprocess calls."""
     soul = _read_soul("fault-diagnosis--pump")
-    assert "ins-get-orbit-data" in soul
-    assert "ins-extract-orbit-centerline-features" in soul
+    assert "pump_rule_cache" in soul
+    assert "bash /mnt/skills/custom/ins-get-orbit-data" not in soul
+    assert "bash /mnt/skills/custom/ins-extract-orbit-centerline-features" not in soul
 
 
 # --- Group landing page ---
