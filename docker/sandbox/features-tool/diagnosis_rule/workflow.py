@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import json
 import math
 import os
@@ -15,7 +16,11 @@ from tools.extract_s_trend_features_tool import extract_trend_features_tool as _
 from tools.extract_spectral_waveform_features_tool import _extract_spectral_waveform_features_impl
 from tools.extract_trend_features_tool import _extract_trend_features_impl as _extract_rise_vol_trend_features_impl
 from tools.get_orbit_data_tool import _get_orbit_data_impl, close_clients as close_orbit_clients
-from tools.get_trend_data_tool import _get_trend_data_impl, close_clients as close_trend_clients
+from tools.get_trend_data_tool import (
+    _get_trend_data_impl,
+    close_clients as close_trend_clients,
+    collect_union_features,
+)
 from tools.get_waveform_data_tool import _get_waveform_data_impl, close_clients as close_waveform_clients
 
 from .config import load_config
@@ -31,6 +36,9 @@ def _artifact_root() -> Path:
 
 def _write_cache(prefix: str, name: str, payload: dict[str, Any]) -> None:
     safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in name)
+    if len(safe_name) > 120:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:16]
+        safe_name = f"{safe_name[:80]}_{digest}"
     path = _artifact_root() / f"{prefix}_{safe_name}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -124,6 +132,12 @@ class TrendSnapshot:
     step_change_magnitude: float = 0.0
     changepoint_types: tuple[str, ...] = ()
     window: str = "30d"  # "1d" | "3d" | "30d"
+
+
+@dataclass
+class TrendCollectionResult:
+    snapshots: list[TrendSnapshot]
+    failures: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -441,10 +455,23 @@ async def _collect_trend_snapshots(
     target_info: dict[str, Any],
     time_ms: str,
     config: dict[str, Any],
-) -> list[TrendSnapshot]:
+) -> TrendCollectionResult:
     component_features = _build_component_features(context, target_info, config)
     if not component_features:
-        return []
+        return TrendCollectionResult(
+            snapshots=[],
+            failures=[
+                {
+                    "stage": "build_component_features",
+                    "reason": "empty_component_features",
+                    "target_info": {
+                        "target_kind": target_info.get("target_kind"),
+                        "owner_device_id": target_info.get("owner_device_id"),
+                        "probe_count": len([str(item) for item in (target_info.get("probe_ids") or []) if str(item)]),
+                    },
+                }
+            ],
+        )
 
     end_ms = int(datetime_input_to_ms(time_ms))
     window_days = _safe_float(config.get("trend_window_days")) or 30
@@ -456,31 +483,101 @@ async def _collect_trend_snapshots(
 
     import asyncio as _asyncio
 
-    async def _fetch_raw_payload(start_ms: str) -> dict[str, Any] | None:
+    async def _fetch_raw_payload(label: str, start_ms: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         try:
-            return await cached_get_trend_data(
-                component_features=component_features,
-                start=start_ms,
-                end=str(end_ms),
+            return (
+                await cached_get_trend_data(
+                    component_features=component_features,
+                    start=start_ms,
+                    end=str(end_ms),
+                ),
+                None,
             )
-        except Exception:
-            return None
+        except Exception as exc:
+            return (
+                None,
+                {
+                    "window": label,
+                    "stage": "get_trend_data",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_count": len(component_features),
+                    "feature_union": collect_union_features(component_features),
+                    "component_features": component_features,
+                    "error": str(exc),
+                },
+            )
 
-    async def _fetch_window(label: str, days: int) -> list[TrendSnapshot]:
+    async def _fetch_window(label: str, days: int) -> tuple[list[TrendSnapshot], list[dict[str, Any]]]:
         window_ms = days * 24 * 3600 * 1000
         start_ms = str(max(0, end_ms - window_ms))
-        raw_payload = await _fetch_raw_payload(start_ms)
+        failures: list[dict[str, Any]] = []
+        raw_payload, raw_error = await _fetch_raw_payload(label, start_ms)
+        if raw_error is not None:
+            failures.append(raw_error)
+            return [], failures
         if raw_payload is None:
-            return []
+            failures.append(
+                {
+                    "window": label,
+                    "stage": "get_trend_data",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_count": len(component_features),
+                    "feature_union": collect_union_features(component_features),
+                    "component_features": component_features,
+                    "reason": "raw_payload_is_none",
+                }
+            )
+            return [], failures
+
+        raw_data = raw_payload.get("data") or {}
+        if not any(raw_data.get(component_id) for component_id in raw_payload.get("component_ids") or []):
+            failures.append(
+                {
+                    "window": label,
+                    "stage": "get_trend_data",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_count": len(component_features),
+                    "feature_union": collect_union_features(component_features),
+                    "component_features": component_features,
+                    "reason": "empty_trend_data",
+                    "component_ids": raw_payload.get("component_ids") or [],
+                }
+            )
+            return [], failures
 
         try:
             trend_payload = await cached_extract_trend_features(trend_data_payload=raw_payload)
-        except Exception:
-            return []
+        except Exception as exc:
+            failures.append(
+                {
+                    "window": label,
+                    "stage": "extract_trend_features",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_ids": raw_payload.get("component_ids") or [],
+                    "feature_union": collect_union_features(component_features),
+                    "error": str(exc),
+                }
+            )
+            return [], failures
 
         try:
             segmented_payload = await cached_extract_segmented_trend_features(trend_data_payload=raw_payload)
-        except Exception:
+        except Exception as exc:
+            failures.append(
+                {
+                    "window": label,
+                    "stage": "extract_segmented_trend_features",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_ids": raw_payload.get("component_ids") or [],
+                    "feature_union": collect_union_features(component_features),
+                    "error": str(exc),
+                }
+            )
             segmented_payload = {"point_results": []}
 
         thresholds = config.get("thresholds") or {}
@@ -554,13 +651,28 @@ async def _collect_trend_snapshots(
                         window=label,
                     )
                 )
-        return snapshots
+        if not snapshots:
+            failures.append(
+                {
+                    "window": label,
+                    "stage": "build_trend_snapshots",
+                    "start_ms": start_ms,
+                    "end_ms": str(end_ms),
+                    "component_ids": raw_payload.get("component_ids") or [],
+                    "point_result_count": len(trend_payload.get("point_results") or []),
+                    "segmented_point_result_count": len(segmented_payload.get("point_results") or []),
+                    "reason": "no_snapshots_built",
+                }
+            )
+        return snapshots, failures
 
     results = await _asyncio.gather(*[_fetch_window(label, days) for label, days in windows])
     all_snapshots: list[TrendSnapshot] = []
-    for batch in results:
-        all_snapshots.extend(batch)
-    return all_snapshots
+    all_failures: list[dict[str, Any]] = []
+    for snapshots, failures in results:
+        all_snapshots.extend(snapshots)
+        all_failures.extend(failures)
+    return TrendCollectionResult(snapshots=all_snapshots, failures=all_failures)
 
 
 def _select_anomaly_times(trend_snapshots: list[TrendSnapshot], input_time_ms: str) -> list[str]:
@@ -3238,7 +3350,9 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
     diagnosis_target = _resolve_target(context, sub_device_id, device_id, config)
     target_info = diagnosis_target.target_info
 
-    trends = await _collect_trend_snapshots(context, target_info, time_ms, config)
+    trend_collection = await _collect_trend_snapshots(context, target_info, time_ms, config)
+    trends = trend_collection.snapshots
+    trend_failures = trend_collection.failures
     waveform_probe_ids = [str(item) for item in (target_info.get("waveform_probe_ids") or [])]
 
     # 每个探头单独解析波形时间戳（不同探头的异常峰值时刻不同）
@@ -3360,6 +3474,7 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
                 f"target_device_type={diagnosis_target.target_device_type}",
                 f"target_kind={target_info.get('target_kind')}",
                 f"trend_points=1d:{sum(1 for s in trends if s.window=='1d')} 3d:{sum(1 for s in trends if s.window=='3d')} 30d:{sum(1 for s in trends if s.window=='30d')}",
+                f"trend_failures={len(trend_failures)}",
                 f"waveform_cases={len(waveform_results)} orbit_cases={len(orbit_results)}",
                 f"waveform_probes={len(waveform_probe_ids)} bearing_ids={len([str(item) for item in (target_info.get('bearing_ids') or [])])} waveform_times={all_waveform_times}",
                 f"waveform_failures={len(waveform_failures)} orbit_failures={len(orbit_failures)}",
@@ -3367,6 +3482,7 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
                 f"top_rules={[item.rule_id for item in selected]}",
             ],
             "target_info": target_info,
+            "trend_failures": trend_failures,
             "waveform_failures": waveform_failures,
             "orbit_failures": orbit_failures,
             "process_type_summary": process_type_summary,
