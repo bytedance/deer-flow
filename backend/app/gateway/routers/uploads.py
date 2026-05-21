@@ -74,6 +74,25 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
     os.chmod(file_path, writable_mode, **chmod_kwargs)
 
 
+def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
+    """Ensure uploaded files are readable by the sandbox process.
+
+    For Docker sandboxes (AIO), the gateway writes files as root with 0o600
+    permissions, then bind-mounts the host directory into the container. The
+    sandbox process inside the container runs as a non-root user and cannot
+    read those files without group/other read bits. This function adds
+    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content.
+    """
+    file_stat = os.lstat(file_path)
+    if stat.S_ISLNK(file_stat.st_mode):
+        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
+        return
+
+    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, readable_mode, **chmod_kwargs)
+
+
 def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
@@ -275,6 +294,15 @@ async def upload_files(
             logger.error(f"Failed to upload {file.filename}: {e}")
             _cleanup_uploaded_paths(written_paths)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+
+    # When the sandbox uses bind-mounted thread data directories (e.g. AIO with
+    # LocalContainerBackend), uploaded files are visible inside the container but
+    # retain the 0o600 permissions set by the gateway.  The sandbox process runs
+    # as a different user and cannot read them.  Adjust permissions to add
+    # group/other read bits so the sandbox can access the files.
+    if not sync_to_sandbox and getattr(sandbox_provider, "needs_upload_permission_adjustment", True):
+        for file_path in written_paths:
+            _make_file_sandbox_readable(file_path)
 
     if sync_to_sandbox:
         for file_path, virtual_path in sandbox_sync_targets:
