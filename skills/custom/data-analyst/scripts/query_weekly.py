@@ -56,25 +56,25 @@ def _output_dir() -> Path:
     return Path(os.environ.get("WEEKLY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
-def _load_query_daily():
-    """Load the sibling query_daily module to reuse its demo data generator."""
-    module = sys.modules.get("query_daily")
+def _load_ins_provider():
+    """Load the sibling InS provider module by file path."""
+    module = sys.modules.get("_ins_provider")
     if module is not None:
         return module
     script_dir = Path(__file__).parent
-    qd_path = script_dir / "query_daily.py"
-    if not qd_path.exists():
-        raise RuntimeError(f"query_daily.py not found beside query_weekly.py at {qd_path}")
-    spec = importlib.util.spec_from_file_location("query_daily", qd_path)
+    provider_path = script_dir / "_ins_provider.py"
+    if not provider_path.exists():
+        raise RuntimeError(f"_ins_provider.py not found beside query_weekly.py at {provider_path}")
+    spec = importlib.util.spec_from_file_location("_ins_provider", provider_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("failed to build spec for query_daily")
+        raise RuntimeError("failed to build spec for _ins_provider")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["query_daily"] = module
+    sys.modules["_ins_provider"] = module
     try:
         spec.loader.exec_module(module)
     except Exception:
-        if sys.modules.get("query_daily") is module:
-            del sys.modules["query_daily"]
+        if sys.modules.get("_ins_provider") is module:
+            del sys.modules["_ins_provider"]
         raise
     return module
 
@@ -164,42 +164,23 @@ def fetch_week_with_provenance(
 ) -> tuple[dict, str, list[str]]:
     """Provider-aware variant of :func:`fetch_week`.
 
-    Composes the 7-day window from per-day calls to
-    :func:`query_daily.fetch_day_with_provenance` so the existing weekly
-    aggregation logic keeps owning the shape (``daily[]`` + ``aggregated``).
-    Each per-day call resolves to the InS-backed daily provider; any
+    Fetches the 7-day window through the InS batch adapter so the weekly
+    aggregation logic keeps owning the shape (``daily[]`` + ``aggregated``)
+    while reusing one InS client/session across the full window. Any
     ``HttpProviderError`` propagates so the CLI surfaces the failure.
     """
-    query_daily = _load_query_daily()
-    start_dt = datetime.strptime(week_start, "%Y-%m-%d")
-
-    daily_entries: list[dict] = []
+    ins = _load_ins_provider()
+    daily_entries = ins.fetch_daily_series_payload(
+        start_date=week_start,
+        day_count=DAY_COUNT,
+        equipment_ids=equipment_ids,
+        kpi_keys=kpi_keys,
+        eq_type=eq_type,
+        equipment_meta=equipment_meta,
+    )
     union_alarms: list[dict] = []
-    sources: set[str] = set()
-    notes: list[str] = []
-    for offset in range(DAY_COUNT):
-        date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-        day_payload, day_src, day_notes = query_daily.fetch_day_with_provenance(
-            date_str,
-            equipment_ids,
-            kpi_keys,
-            eq_type,
-            False,
-            equipment_meta,
-        )
-        sources.add(day_src)
-        for note in day_notes:
-            tagged = f"[{date_str}] {note}"
-            if tagged not in notes:
-                notes.append(tagged)
-        entry = {
-            "date": date_str,
-            "kpis": day_payload.get("kpis", {}),
-            "kpi_units": day_payload.get("kpi_units", {}),
-            "alarms": day_payload.get("alarms", []),
-        }
-        daily_entries.append(entry)
-        union_alarms.extend(entry["alarms"])
+    for entry in daily_entries:
+        union_alarms.extend(entry.get("alarms", []))
 
     aggregated = _aggregate_daily(daily_entries, kpi_keys)
     result: dict = {
@@ -212,16 +193,8 @@ def fetch_week_with_provenance(
         # can render units without re-scanning daily list.
         result["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
 
-    # All days come from the same InS provider; mismatch can only happen if
-    # one of the days returns no `data_source` at all, which would be a
-    # programming bug — surface it loudly rather than silently coercing.
-    if len(sources) != 1:
-        raise RuntimeError(
-            f"unexpected per-day data_source mismatch ({sorted(sources)}); "
-            "InS provider should always tag results as 'ins'"
-        )
-    data_source = next(iter(sources))
-    return result, data_source, notes
+    # Batch weekly fetches always come from the InS provider.
+    return result, "ins", []
 
 
 def _aggregate_daily(daily_entries: list[dict], kpi_keys: list[str]) -> dict:
