@@ -236,10 +236,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
     def _extract_summary_text(self, response: Any) -> str:
         # Prefer .text which normalizes list content blocks (e.g. [{"type": "text", "text": "..."}]).
-        # Fall back to .content for non-LangChain responses.
+        # Fall back to .content for non-LangChain responses, with explicit list handling
+        # to avoid producing Python repr strings like "[{'type': 'text', ...}]".
         summary_text = getattr(response, "text", None)
         if summary_text is None:
             summary_text = getattr(response, "content", "")
+        if isinstance(summary_text, list):
+            parts: list[str] = []
+            for block in summary_text:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            summary_text = "".join(parts)
         return summary_text.strip() if isinstance(summary_text, str) else str(summary_text).strip()
 
     @override

@@ -725,15 +725,46 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     assert queue.add_nowait.call_args.kwargs["user_id"] == "alice"
 
 
-def test_extract_summary_text_normalizes_list_content_blocks() -> None:
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        # String content — straight through
+        ("Plain summary", "Plain summary"),
+        # Single text block
+        ([{"type": "text", "text": "A summary of the chat."}], "A summary of the chat."),
+        # Multiple text blocks concatenated
+        (
+            [{"type": "text", "text": "Part one. "}, {"type": "text", "text": "Part two."}],
+            "Part one. Part two.",
+        ),
+        # Mixed blocks: reasoning should be skipped, only text extracted
+        (
+            [
+                {"type": "thinking", "thinking": "internal reasoning"},
+                {"type": "text", "text": "Visible summary."},
+            ],
+            "Visible summary.",
+        ),
+        # Empty list → empty string
+        ([], ""),
+    ],
+)
+def test_extract_summary_text_normalizes_list_content_blocks(content, expected) -> None:
     """AIMessage.content can be a list of content blocks; _extract_summary_text
-    must normalize to plain text via the .text property instead of producing
-    a Python repr like [{'type': 'text', 'text': 'summary'}]."""
+    must normalize to plain text instead of producing a Python repr like
+    [{'type': 'text', 'text': 'summary'}]."""
+    middleware = _middleware()
+    response = AIMessage(content=content)
+    assert middleware._extract_summary_text(response) == expected
+
+
+def test_extract_summary_text_handles_non_aimessage_with_list_content() -> None:
+    """When response has no .text attribute and .content is a list, the explicit
+    list normalization must still extract text instead of falling through to repr."""
     middleware = _middleware()
 
-    response = AIMessage(content=[{"type": "text", "text": "A summary of the chat."}])
-    assert middleware._extract_summary_text(response) == "A summary of the chat."
+    class FakeResponse:
+        text = None  # type: ignore[assignment]
+        content = [{"type": "text", "text": "Summary from non-AIMessage."}]
 
-    # Plain string content still works
-    response_str = AIMessage(content="Plain summary")
-    assert middleware._extract_summary_text(response_str) == "Plain summary"
+    assert middleware._extract_summary_text(FakeResponse()) == "Summary from non-AIMessage."
