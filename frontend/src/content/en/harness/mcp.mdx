@@ -49,6 +49,27 @@ Each server entry supports:
 - `args`: command arguments as an array
 - `enabled`: whether the server is active (can be toggled without removing the entry)
 - `env`: optional environment variables injected into the server process
+- `type` / `url`: transport settings for remote `http` or `sse` MCP servers
+- `headers`: optional HTTP headers for remote `http` or `sse` MCP servers
+
+Values in `extensions_config.json` can reference environment variables with `$VAR_NAME` syntax. This also applies to nested fields such as `headers.Authorization`. The entire field value must be the environment variable placeholder; inline interpolation such as `Bearer $TOKEN` is not supported. For bearer tokens, store the full header value (for example, `Bearer <token>`) in the environment variable.
+
+Example remote MCP server with an auth header loaded from the environment:
+
+```json
+{
+  "mcpServers": {
+    "github-remote": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "$GITHUB_MCP_AUTH_HEADER"
+      }
+    }
+  }
+}
+```
 
 ## How tools are loaded
 
