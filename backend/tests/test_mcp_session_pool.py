@@ -368,3 +368,42 @@ async def test_session_pool_tool_get_config_fallback():
 
     pool = get_session_pool()
     assert ("server", "from-langgraph-config") in pool._entries
+
+
+def test_session_pool_tool_sync_wrapper_path_is_safe():
+    """Sync wrapper (tool.func) invocation doesn't crash on cross-loop access."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+    from deerflow.tools.sync import make_sync_tool_wrapper
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    connection = {"transport": "stdio", "command": "pw", "args": []}
+
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        # Attach the sync wrapper exactly as get_mcp_tools() does.
+        wrapped.func = make_sync_tool_wrapper(wrapped.coroutine, wrapped.name)
+
+        # Call via the sync path (asyncio.run in a worker thread).
+        # runtime is not supplied so _extract_thread_id falls back to "default".
+        wrapped.func(url="https://example.com")
+
+    mock_session.call_tool.assert_called_once_with("navigate", {"url": "https://example.com"})

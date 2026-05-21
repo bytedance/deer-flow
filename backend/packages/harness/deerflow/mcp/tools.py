@@ -31,21 +31,91 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
             return str(tid)
 
     try:
-        return str(get_config().get("configurable", {}).get("thread_id"))
+        tid = get_config().get("configurable", {}).get("thread_id")
+        return str(tid) if tid is not None else "default"
     except RuntimeError:
         return "default"
+
+
+def _convert_call_tool_result(call_tool_result: Any) -> Any:
+    """Convert an MCP CallToolResult to the LangChain ``content_and_artifact`` format.
+
+    Implements the same conversion logic as the adapter without relying on
+    the private ``langchain_mcp_adapters.tools._convert_call_tool_result`` symbol.
+    """
+    from langchain_core.messages import ToolMessage
+    from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
+    from langchain_core.tools import ToolException
+    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+
+    # Pass ToolMessage through directly (interceptor short-circuit).
+    if isinstance(call_tool_result, ToolMessage):
+        return call_tool_result, None
+
+    # Pass LangGraph Command through directly when langgraph is installed.
+    try:
+        from langgraph.types import Command
+
+        if isinstance(call_tool_result, Command):
+            return call_tool_result, None
+    except ImportError:
+        pass
+
+    # Convert MCP content blocks to LangChain content blocks.
+    lc_content = []
+    for item in call_tool_result.content:
+        if isinstance(item, TextContent):
+            lc_content.append(create_text_block(text=item.text))
+        elif isinstance(item, ImageContent):
+            lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+        elif isinstance(item, ResourceLink):
+            mime = item.mimeType or None
+            if mime and mime.startswith("image/"):
+                lc_content.append(create_image_block(url=str(item.uri), mime_type=mime))
+            else:
+                lc_content.append(create_file_block(url=str(item.uri), mime_type=mime))
+        elif isinstance(item, EmbeddedResource):
+            from mcp.types import BlobResourceContents
+
+            res = item.resource
+            if isinstance(res, TextResourceContents):
+                lc_content.append(create_text_block(text=res.text))
+            elif isinstance(res, BlobResourceContents):
+                mime = res.mimeType or None
+                if mime and mime.startswith("image/"):
+                    lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
+                else:
+                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+            else:
+                lc_content.append(create_text_block(text=str(res)))
+        else:
+            lc_content.append(create_text_block(text=str(item)))
+
+    if call_tool_result.isError:
+        error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
+        raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
+
+    artifact = None
+    if call_tool_result.structuredContent is not None:
+        artifact = {"structured_content": call_tool_result.structuredContent}
+
+    return lc_content, artifact
 
 
 def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
     connection: dict[str, Any],
+    tool_interceptors: list[Any] | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
     by ``(server_name, thread_id)``.  This ensures stateful MCP servers (e.g.
     Playwright) keep their state across tool calls within the same thread.
+
+    The configured ``tool_interceptors`` (OAuth, custom) are preserved and
+    applied on every call before invoking the pooled session.
     """
     # Strip the server-name prefix to recover the original MCP tool name.
     original_name = tool.name
@@ -57,13 +127,35 @@ def _make_session_pool_tool(
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
-        **arguments: dict[str, Any],
+        **arguments: Any,
     ) -> Any:
         thread_id = _extract_thread_id(runtime)
         session = await pool.get_session(server_name, thread_id, connection)
-        call_tool_result = await session.call_tool(original_name, arguments)
 
-        from langchain_mcp_adapters.tools import _convert_call_tool_result
+        if tool_interceptors:
+            from langchain_mcp_adapters.interceptors import MCPToolCallRequest
+
+            async def base_handler(request: MCPToolCallRequest) -> Any:
+                return await session.call_tool(request.name, request.args)
+
+            handler = base_handler
+            for interceptor in reversed(tool_interceptors):
+                outer = handler
+
+                async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
+                    return await _i(req, _h)
+
+                handler = wrapped
+
+            request = MCPToolCallRequest(
+                name=original_name,
+                args=arguments,
+                server_name=server_name,
+                runtime=runtime,
+            )
+            call_tool_result = await handler(request)
+        else:
+            call_tool_result = await session.call_tool(original_name, arguments)
 
         return _convert_call_tool_result(call_tool_result)
 
@@ -167,7 +259,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                     break
 
             if tool_server is not None:
-                wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server]))
+                wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
             else:
                 wrapped_tools.append(tool)
 
