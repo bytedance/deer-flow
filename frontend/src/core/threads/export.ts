@@ -5,11 +5,44 @@ import {
   extractReasoningContentFromMessage,
   hasContent,
   hasToolCalls,
+  isHiddenFromUIMessage,
   stripUploadedFilesTag,
 } from "../messages/utils";
 
 import type { AgentThread } from "./types";
 import { titleOfThread } from "./utils";
+
+/**
+ * Optional debug switches for advanced exports.
+ *
+ * Bytedance/deer-flow issue #3107 BUG-006: by default, the user-facing chat
+ * export must include only the visible transcript. Internal payloads —
+ * `hide_from_ui` messages, reasoning content, tool calls, and tool result
+ * messages — stay out unless the caller explicitly opts in. There is no UI
+ * surface for this today; the flags exist so a future "debug export" can
+ * reuse the same formatter instead of forking it.
+ */
+export interface ExportOptions {
+  includeReasoning?: boolean;
+  includeToolCalls?: boolean;
+  includeToolMessages?: boolean;
+  includeHidden?: boolean;
+}
+
+function visibleMessages(
+  messages: Message[],
+  options: ExportOptions,
+): Message[] {
+  return messages.filter((message) => {
+    if (!options.includeHidden && isHiddenFromUIMessage(message)) {
+      return false;
+    }
+    if (!options.includeToolMessages && message.type === "tool") {
+      return false;
+    }
+    return true;
+  });
+}
 
 function formatMessageContent(message: Message): string {
   const text = extractContentFromMessage(message);
@@ -26,6 +59,7 @@ function formatToolCalls(message: Message): string {
 export function formatThreadAsMarkdown(
   thread: AgentThread,
   messages: Message[],
+  options: ExportOptions = {},
 ): string {
   const title = titleOfThread(thread);
   const createdAt = thread.created_at
@@ -41,16 +75,20 @@ export function formatThreadAsMarkdown(
     "",
   ];
 
-  for (const message of messages) {
+  for (const message of visibleMessages(messages, options)) {
     if (message.type === "human") {
       const content = formatMessageContent(message);
       if (content) {
         lines.push(`## 🧑 User`, "", content, "", "---", "");
       }
     } else if (message.type === "ai") {
-      const reasoning = extractReasoningContentFromMessage(message);
+      const reasoning = options.includeReasoning
+        ? extractReasoningContentFromMessage(message)
+        : undefined;
       const content = formatMessageContent(message);
-      const toolCalls = formatToolCalls(message);
+      const toolCalls = options.includeToolCalls
+        ? formatToolCalls(message)
+        : "";
 
       if (!content && !toolCalls && !reasoning) continue;
 
@@ -86,17 +124,20 @@ export function formatThreadAsMarkdown(
 export function formatThreadAsJSON(
   thread: AgentThread,
   messages: Message[],
+  options: ExportOptions = {},
 ): string {
   const exportData = {
     title: titleOfThread(thread),
     thread_id: thread.thread_id,
     created_at: thread.created_at,
     exported_at: new Date().toISOString(),
-    messages: messages.map((msg) => ({
+    messages: visibleMessages(messages, options).map((msg) => ({
       type: msg.type,
       id: msg.id,
       content: typeof msg.content === "string" ? msg.content : msg.content,
-      ...(msg.type === "ai" && msg.tool_calls?.length
+      ...(options.includeToolCalls &&
+      msg.type === "ai" &&
+      msg.tool_calls?.length
         ? { tool_calls: msg.tool_calls }
         : {}),
     })),
