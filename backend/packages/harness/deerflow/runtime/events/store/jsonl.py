@@ -44,9 +44,7 @@ class JsonlRunEventStore(RunEventStore):
         self._write_locks: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
-        if thread_id not in self._write_locks:
-            self._write_locks[thread_id] = asyncio.Lock()
-        return self._write_locks[thread_id]
+        return self._write_locks.setdefault(thread_id, asyncio.Lock())
 
     @staticmethod
     def _validate_id(value: str, label: str) -> str:
@@ -205,8 +203,12 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
-        self._write_locks.pop(thread_id, None)
-        return count
+            # Pop the lock inside the held scope to minimise the window where a new caller
+            # could obtain a fresh lock while a waiting coroutine still holds the old one.
+            # Note: coroutines that already acquired a reference to this lock before the
+            # delete will still proceed after we release — this is an accepted narrow race.
+            self._write_locks.pop(thread_id, None)
+            return count
 
     async def delete_by_run(self, thread_id, run_id):
         async with self._get_write_lock(thread_id):

@@ -2,8 +2,8 @@
 
 Verifies:
 - write-lock serialises concurrent puts within the same thread_id
-- asyncio.to_thread is used for blocking file I/O (no event-loop blocking)
 - put_batch keeps monotonic seq even under concurrent callers
+- seq recovery from disk on fresh store init
 - DB put_batch rejects mixed-thread batches
 """
 
