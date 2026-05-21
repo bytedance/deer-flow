@@ -42,6 +42,7 @@ _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+_DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
 _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
@@ -433,6 +434,42 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
         thread_data = get_thread_data(runtime)
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
+
+
+def _truncate_write_file_error_detail(detail: str, max_chars: int) -> str:
+    """Middle-truncate write_file error details, preserving the head and tail."""
+    if max_chars == 0:
+        return detail
+    if len(detail) <= max_chars:
+        return detail
+    total = len(detail)
+    marker_max_len = len(f"\n... [write_file error truncated: {total} chars skipped] ...\n")
+    kept = max(0, max_chars - marker_max_len)
+    if kept == 0:
+        return detail[:max_chars]
+    head_len = kept // 2
+    tail_len = kept - head_len
+    skipped = total - kept
+    marker = f"\n... [write_file error truncated: {skipped} chars skipped] ...\n"
+    return f"{detail[:head_len]}{marker}{detail[-tail_len:] if tail_len > 0 else ''}"
+
+
+def _format_write_file_error(
+    requested_path: str,
+    error: Exception,
+    runtime: Runtime | None = None,
+    *,
+    max_chars: int = _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+) -> str:
+    """Return a bounded, sanitized error string for write_file failures."""
+    header = f"Error: Failed to write file '{requested_path}'"
+    detail = _sanitize_error(error, runtime)
+    if max_chars == 0:
+        return f"{header}: {detail}"
+    detail_budget = max_chars - len(header) - 2
+    if detail_budget <= 0:
+        return _truncate_write_file_error_detail(f"{header}: {detail}", max_chars)
+    return f"{header}: {_truncate_write_file_error_detail(detail, detail_budget)}"
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -1651,9 +1688,9 @@ def write_file_tool(
         append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
     """
     try:
+        requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
@@ -1664,15 +1701,21 @@ def write_file_tool(
             sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
-        return f"Error: {e}"
+        return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
-        return f"Error: Permission denied writing to file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Permission denied writing to file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Path is a directory, not a file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except OSError as e:
-        return f"Error: Failed to write file '{requested_path}': {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
     except Exception as e:
-        return f"Error: Unexpected error writing file: {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
 
 
 async def _write_file_tool_async(
