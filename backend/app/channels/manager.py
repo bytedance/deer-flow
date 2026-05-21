@@ -364,12 +364,12 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 def _is_enabled_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
-    storage: SkillStorage | None = None,
+    storage: SkillStorage | Callable[[], SkillStorage] | None = None,
 ) -> bool:
     if parse_slash_skill_reference(text) is None:
         return False
     try:
-        resolved_storage = storage or get_or_new_skill_storage()
+        resolved_storage = storage() if callable(storage) else storage or get_or_new_skill_storage()
         return (
             resolve_slash_skill(
                 text,
@@ -1051,7 +1051,7 @@ class ChannelManager:
             lambda: _is_enabled_slash_skill_command(
                 text,
                 self._resolve_available_skill_names(msg),
-                self._get_skill_storage(),
+                self._get_skill_storage,
             )
         ):
             from dataclasses import replace as _dc_replace
