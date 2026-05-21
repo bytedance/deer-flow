@@ -33,11 +33,11 @@ export function useUploadFiles(threadId: string) {
 /**
  * Hook to list uploaded files
  */
-export function useUploadedFiles(threadId: string) {
+export function useUploadedFiles(threadId: string, enabled = true) {
   return useQuery({
     queryKey: ["uploads", "list", threadId],
     queryFn: () => listUploadedFiles(threadId),
-    enabled: !!threadId,
+    enabled: !!threadId && enabled,
   });
 }
 

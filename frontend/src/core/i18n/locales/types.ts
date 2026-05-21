@@ -21,7 +21,13 @@ export interface Translations {
     loadMore: string;
     download: string;
     thinking: string;
+    files: string;
     artifacts: string;
+    uploads: string;
+    current: string;
+    diff: string;
+    before: string;
+    after: string;
     public: string;
     custom: string;
     notAvailableInDemoMode: string;
