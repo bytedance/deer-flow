@@ -103,20 +103,30 @@ _RM_RC_POSITION_TYPES = _RM_POSITION_TYPES + _RC_POSITION_TYPES
 
 _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
     # ---- 2K vibration (multi-feature, machine 4 = PUMP) ----
+    # PositionType 22 carries temperature ("当前值"), 23-30 carry vibration.
     "vibration_velocity_rms": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "v_rms",
         "expected_series": "2k",
         "derivation": "mean",
     },
     "vibration_acceleration_peak": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "a_peak",
         "expected_series": "2k",
         "derivation": "mean",
     },
     "kurtosis_index": {
         "position_types": tuple(range(22, 31)),
+        "position_types_by_type": {
+            "pump": tuple(range(23, 31)),
+        },
         "feature": "kurtosis",
         "expected_series": "2k",
         "derivation": "mean",
@@ -146,14 +156,19 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
         "position_types_by_type": {
             "rotating_machinery": _RM_POSITION_TYPES,
             "reciprocating_machinery": _RC_POSITION_TYPES,
+            "pump": (22,),
         },
         "feature": "value",
         "feature_aliases": ["temperature"],
         "name_keywords": ["轴承"],
+        "name_keywords_by_type": {
+            "pump": [],
+        },
         "expected_series": ("8k", "9k"),
         "expected_series_by_type": {
             "rotating_machinery": "8k",
             "reciprocating_machinery": "9k",
+            "pump": "2k",
         },
         "derivation": "mean",
     },
@@ -312,7 +327,7 @@ def _select_points_for_kpi(
         raise HttpProviderError(f"unmappable KPI key: {kpi_key!r}")
 
     pos_filter = _position_filter_for_spec(spec, eq_type)
-    name_keywords: list[str] = spec.get("name_keywords") or []
+    name_keywords: list[str] = _name_keywords_for_spec(spec, eq_type)
     expected = _expected_series_for_spec(spec, eq_type)
     allowed_series: tuple[str, ...] = (
         (expected,) if isinstance(expected, str) else tuple(expected)
@@ -364,6 +379,11 @@ def _select_points_for_kpi(
 def _position_filter_for_spec(spec: dict[str, Any], eq_type: str):
     by_type = spec.get("position_types_by_type") or {}
     return by_type.get(eq_type, spec.get("position_types"))
+
+
+def _name_keywords_for_spec(spec: dict[str, Any], eq_type: str) -> list[str]:
+    by_type = spec.get("name_keywords_by_type") or {}
+    return by_type.get(eq_type, spec.get("name_keywords") or [])
 
 
 def _expected_series_for_spec(spec: dict[str, Any], eq_type: str):

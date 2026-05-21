@@ -41,6 +41,9 @@ KPI_DISPLAY_NAMES = {
     "flow_rate": "流量",
     "outlet_pressure": "出口压力",
     "valve_temp": "阀温",
+    "vibration_velocity_rms": "振动速度有效值",
+    "vibration_acceleration_peak": "振动加速度峰值",
+    "kurtosis_index": "峭度指标",
 }
 
 KPI_BETTER_WHEN_HIGHER = {"runtime_rate", "output", "flow_rate", "outlet_pressure"}

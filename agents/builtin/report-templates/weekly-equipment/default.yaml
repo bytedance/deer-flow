@@ -1,7 +1,7 @@
 dsl_version: "1"
 name: weekly-equipment
 display_name: "设备运行周报"
-description: "面向自然周或自定义 7 天窗口的设备周报：周期 → 设备 → KPI → 生成。复用日报的设备/KPI 选择体系，仅扩展时间窗口和聚合逻辑。"
+description: "面向自然周或自定义 7 天窗口的设备周报：周起始日 -> 设备 -> KPI -> 生成。复用日报的设备/KPI 选择体系，仅扩展时间窗口和聚合逻辑。"
 visibility: builtin
 
 form_steps:
@@ -38,7 +38,7 @@ form_steps:
 
   - id: equipment
     title: 选择设备
-    description: 请在左侧组织树中选择本周报告覆盖的设备，点击"确认选择"提交。
+    description: 请选择本周报告覆盖的设备，确认后进入 KPI 选择。
     component: device-selector-multi
     device_filter:
       type_id_from: scope.equipment_type
@@ -105,22 +105,22 @@ sections:
   - id: daily_trend
     title: 每日趋势
     component: echart
-    source: $.steps.weekly_kpi.weekly_kpi.trend_chart
+    source: $.steps.weekly_kpi.weekly_kpi.daily_trend_chart
 
   - id: anomalies
     title: 异常 TopN
     component: table
-    source: $.steps.weekly_kpi.weekly_kpi.top_anomalies
+    source: $.steps.weekly_kpi.weekly_kpi.anomaly_top_n
 
-  - id: compare
-    title: 与上一周对比
-    component: card_group
-    source: $.steps.weekly_kpi.weekly_kpi.compare_summary
+  - id: alarms
+    title: 告警流水
+    component: table
+    source: $.steps.weekly_kpi.weekly_kpi.alarm_table
 
   - id: next_focus
     title: 下周关注重点
     component: markdown
-    source: $.steps.weekly_kpi.weekly_kpi.next_focus
+    source: $.steps.weekly_kpi.weekly_kpi.next_week_focus
 
 export:
   formats: [md, pdf]

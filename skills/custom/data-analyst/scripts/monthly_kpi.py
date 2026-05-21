@@ -51,6 +51,9 @@ KPI_DISPLAY_NAMES = {
     "mtbf": "MTBF",
     "mttr": "MTTR",
     "target_rate": "达标率",
+    "vibration_velocity_rms": "振动速度有效值",
+    "vibration_acceleration_peak": "振动加速度峰值",
+    "kurtosis_index": "峭度指标",
 }
 
 KPI_UNITS = {

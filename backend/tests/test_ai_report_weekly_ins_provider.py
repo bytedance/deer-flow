@@ -94,6 +94,42 @@ def test_weekly_query_uses_ins_for_8k_payload(monkeypatch, tmp_path):
     assert fake.trend_calls[0]["kwargs"]["endpoint_series"] == "8k"
 
 
+def test_weekly_query_reuses_one_ins_client_for_current_window(monkeypatch, tmp_path):
+    """Weekly detail fetch should reuse one InS client across the 7-day window.
+
+    Regression: the old implementation routed weekly queries through
+    ``query_daily.fetch_day_with_provenance()`` 7 times, which instantiated a
+    fresh ``InsApiClient`` per day and increased the chance of ConnectTimeout.
+    """
+    fake = FakeClient(
+        components={"EQ-8K": machine_8k()},
+        trend_table={("P_8K_1", "8k"): raw_rows_8k_pressures([1.2, 1.8, 2.4])},
+    )
+    provider = patch_ins_provider(
+        monkeypatch, fake_client=None, features_available=True, factory_id="FAC-001"
+    )
+    created_clients: list[object] = []
+
+    def _factory(_settings):
+        created_clients.append(object())
+        return fake
+
+    monkeypatch.setattr(provider, "InsApiClient", _factory)
+    query_weekly = _load_query_weekly(monkeypatch, tmp_path)
+
+    result = query_weekly.build_result(
+        week_start="2026-05-05",
+        equipment_ids=["EQ-8K"],
+        kpi_keys=["outlet_pressure"],
+        compare="none",
+        eq_type="all",
+        aggregate=False,
+    )
+
+    assert result["data_source"] == "ins"
+    assert len(created_clients) == 1
+
+
 def test_weekly_query_uses_ins_for_6k_payload(monkeypatch, tmp_path):
     fake = FakeClient(
         components={"EQ-6K": machine_6k()},

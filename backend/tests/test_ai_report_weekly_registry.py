@@ -18,6 +18,7 @@ that would silently break the contract if drifted:
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 from pathlib import Path
 
@@ -28,10 +29,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst"
 REGISTRY_PATH = SKILL_DIR / "report_scripts.yaml"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
+WEEKLY_TEMPLATE_DIR = REPO_ROOT / "agents" / "builtin" / "report-templates" / "weekly-equipment"
 
 
 def _load_registry() -> dict:
     return yaml.safe_load(REGISTRY_PATH.read_text(encoding="utf-8"))
+
+
+def _load_weekly_builtin_template() -> dict:
+    return yaml.safe_load((WEEKLY_TEMPLATE_DIR / "default.yaml").read_text(encoding="utf-8"))
+
+
+def _load_weekly_sample_parameters() -> dict:
+    return json.loads((WEEKLY_TEMPLATE_DIR / "examples" / "sample_parameters.json").read_text(encoding="utf-8"))
 
 
 def _load_script_module(script_filename: str):
@@ -223,6 +233,41 @@ def test_query_weekly_kind_includes_data_step():
 def test_weekly_kpi_kind_includes_transform():
     registry = _load_registry()
     assert "transform" in registry["scripts"]["weekly_kpi"]["kind"]
+
+
+def test_weekly_builtin_template_section_sources_match_weekly_kpi_contract():
+    """The builtin weekly DSL must consume the current weekly_kpi.py output names.
+
+    This guards the exact regression where the template kept the old
+    ``trend_chart`` / ``top_anomalies`` / ``compare_summary`` / ``next_focus``
+    sources after the script contract moved to
+    ``daily_trend_chart`` / ``anomaly_top_n`` / ``alarm_table`` /
+    ``next_week_focus``.
+    """
+    dsl = _load_weekly_builtin_template()
+    actual = {section["id"]: section["source"] for section in dsl["sections"]}
+    expected = {
+        "overview": "$.steps.weekly_kpi.weekly_kpi.overall_status.summary",
+        "kpi_cards": "$.steps.weekly_kpi.weekly_kpi.kpi_summary",
+        "daily_trend": "$.steps.weekly_kpi.weekly_kpi.daily_trend_chart",
+        "anomalies": "$.steps.weekly_kpi.weekly_kpi.anomaly_top_n",
+        "alarms": "$.steps.weekly_kpi.weekly_kpi.alarm_table",
+        "next_focus": "$.steps.weekly_kpi.weekly_kpi.next_week_focus",
+    }
+    assert actual == expected
+
+
+def test_weekly_sample_parameters_kpis_match_selected_type():
+    """Example parameters should stay runnable against list_equipment metadata."""
+    params = _load_weekly_sample_parameters()
+    eq_type = params["scope"]["equipment_type"]
+    selected_kpis = set(params["kpis"]["kpi_keys"])
+    list_equipment = _load_script_module("list_equipment.py")
+    supported_kpis = set(list_equipment.EQUIPMENT_TYPE_KPIS[eq_type])
+    unsupported = sorted(selected_kpis - supported_kpis)
+    assert not unsupported, (
+        f"weekly sample parameters pick unsupported KPI(s) for {eq_type}: {unsupported}"
+    )
 
 
 # ---------------------------------------------------------------------------

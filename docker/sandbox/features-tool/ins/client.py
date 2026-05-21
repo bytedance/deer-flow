@@ -58,6 +58,7 @@ _TWO_K_NAME_KEY_MAP: dict[str, str] = {
     "裕度": "margin",
     "脉冲指标": "pulse",
     "波形指标": "wave",
+    "当前值": "value",
 }
 
 _TWO_K_ALARM_FIELD_MAP: dict[str, tuple[str | None, str | None, str | None]] = {
