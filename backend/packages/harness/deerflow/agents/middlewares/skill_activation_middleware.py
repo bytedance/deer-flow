@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -15,9 +16,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.skills.slash import get_original_user_content_text, parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE
+from deerflow.utils.messages import get_original_user_content_text
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -97,6 +99,14 @@ class SkillActivationMiddleware(AgentMiddleware):
 
         storage = self._storage()
         skills = storage.load_skills(enabled_only=False)
+        skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
+        if skill is None:
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
+        if not skill.enabled:
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is installed but disabled. Enable it before using slash activation.")
+        if self._available_skills is not None and reference.name not in self._available_skills:
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
+
         resolved = resolve_slash_skill(
             text,
             skills,
@@ -104,7 +114,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             container_base_path=storage.get_container_root(),
         )
         if resolved is None:
-            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not enabled or is not available for this agent.")
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
 
         try:
             skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path())
@@ -127,19 +137,25 @@ class SkillActivationMiddleware(AgentMiddleware):
     @staticmethod
     def _build_activation_reminder(activation: _Activation) -> str:
         user_request = activation.remaining_text or ("No additional task text was provided after the slash skill command. Ask the user what they want to do with this skill if the next step is unclear.")
+        escaped_user_request = html.escape(user_request, quote=False)
+        escaped_skill_content = html.escape(activation.skill_content, quote=False)
+        escaped_skill_name = html.escape(activation.skill_name, quote=True)
+        escaped_category = html.escape(activation.category, quote=True)
+        escaped_path = html.escape(activation.container_file_path, quote=True)
+        escaped_content_hash = html.escape(activation.content_hash, quote=True)
         return f"""<slash_skill_activation>
 The user explicitly activated the `{activation.skill_name}` skill for this turn.
 Treat the task text as:
 <user_request>
-{user_request}
+{escaped_user_request}
 </user_request>
 
 Follow this skill before choosing a general workflow. Load supporting resources from the same skill directory only when needed.
 
-<skill name="{activation.skill_name}" category="{activation.category}" path="{activation.container_file_path}" sha256="{activation.content_hash}">
------ BEGIN SKILL.md -----
-{activation.skill_content}
------ END SKILL.md -----
+<skill name="{escaped_skill_name}" category="{escaped_category}" path="{escaped_path}" sha256="{escaped_content_hash}">
+<skill_content encoding="xml-escaped">
+{escaped_skill_content}
+</skill_content>
 </skill>
 </slash_skill_activation>"""
 

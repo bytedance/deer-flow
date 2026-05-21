@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
-from deerflow.skills.slash import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 THREAD_ID = "thread-abc123"
 

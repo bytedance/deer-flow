@@ -11,8 +11,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.slash import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 from deerflow.utils.file_conversion import extract_outline
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
 

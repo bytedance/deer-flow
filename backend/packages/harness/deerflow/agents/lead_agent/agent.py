@@ -462,7 +462,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            available_skills=available_skills,
             app_config=resolved_app_config,
         ),
         state_schema=ThreadState,

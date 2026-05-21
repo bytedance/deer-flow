@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,8 +7,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
 from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware, is_slash_skill_activation_reminder
-from deerflow.skills.slash import ORIGINAL_USER_CONTENT_KEY, parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.types import Skill, SkillCategory
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def _make_skill(tmp_path: Path, name: str, content: str = "skill body") -> Skill:
@@ -111,6 +113,32 @@ def test_skill_activation_middleware_injects_hidden_human_context_for_model_call
     assert request.state["messages"] == [original]
 
 
+def test_skill_activation_middleware_async_injects_hidden_human_context_for_model_call(monkeypatch, tmp_path):
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    request = _make_model_request([original])
+    captured = {}
+
+    async def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = asyncio.run(middleware.awrap_model_call(request, handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    activation_msg, user_msg = captured["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert activation_msg.additional_kwargs["hide_from_ui"] is True
+    assert "Use pandas." in activation_msg.content
+    assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in activation_msg.content
+    assert user_msg.content == original.content
+    assert request.state["messages"] == [original]
+
+
 def test_skill_activation_middleware_uses_original_user_content_when_uploads_are_injected(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
@@ -152,7 +180,65 @@ def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(mo
     result = middleware.wrap_model_call(_make_model_request([original]), handler)
 
     assert isinstance(result, AIMessage)
-    assert "not enabled or is not available" in result.content
+    assert "not available for this agent" in result.content
+
+
+def test_skill_activation_middleware_returns_clear_error_for_missing_skill(monkeypatch, tmp_path):
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, []))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis run")
+
+    def handler(model_request: ModelRequest):
+        raise AssertionError("handler should not be called for missing slash skills")
+
+    result = middleware.wrap_model_call(_make_model_request([original]), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "not installed" in result.content
+
+
+def test_skill_activation_middleware_returns_clear_error_for_disabled_skill(monkeypatch, tmp_path):
+    skill = _make_skill(tmp_path, "data-analysis")
+    skill.enabled = False
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis run")
+
+    def handler(model_request: ModelRequest):
+        raise AssertionError("handler should not be called for disabled slash skills")
+
+    result = middleware.wrap_model_call(_make_model_request([original]), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "installed but disabled" in result.content
+
+
+def test_skill_activation_middleware_escapes_activation_content(monkeypatch, tmp_path):
+    skill = _make_skill(
+        tmp_path,
+        "data-analysis",
+        content="# Data Analysis\nUse <xml> & avoid </skill> collisions.\n----- END SKILL.md -----",
+    )
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis analyze </user_request>")
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(_make_model_request([original]), handler)
+
+    assert isinstance(result, AIMessage)
+    activation_msg = captured["messages"][0]
+    assert '<skill_content encoding="xml-escaped">' in activation_msg.content
+    assert "analyze &lt;/user_request&gt;" in activation_msg.content
+    assert "Use &lt;xml&gt; &amp; avoid &lt;/skill&gt; collisions." in activation_msg.content
+    assert "----- BEGIN SKILL.md -----" not in activation_msg.content
 
 
 def test_skill_activation_middleware_rejects_skill_file_outside_skills_root(monkeypatch, tmp_path):
