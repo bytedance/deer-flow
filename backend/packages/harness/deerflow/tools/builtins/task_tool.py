@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
+from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
 from deerflow.config import get_app_config
@@ -99,13 +100,21 @@ def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: 
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
-    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config."""
+    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config.
+
+    LangChain may pass ``config["callbacks"]`` as either a plain list of handlers
+    or as a ``BaseCallbackManager`` instance (e.g. ``AsyncCallbackManager`` on
+    async tool runs). Callback managers are not iterable; unwrap their
+    ``handlers`` list before searching.
+    """
     if runtime is None:
         return None
     config = getattr(runtime, "config", None)
     if not isinstance(config, dict):
         return None
-    callbacks = config.get("callbacks", [])
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, BaseCallbackManager):
+        callbacks = callbacks.handlers
     if not callbacks:
         return None
     for cb in callbacks:
