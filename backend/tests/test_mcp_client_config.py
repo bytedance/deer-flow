@@ -24,6 +24,26 @@ def test_build_server_params_stdio_success():
     }
 
 
+def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
+    monkeypatch.setenv("MCP_TOKEN", "secret")
+    monkeypatch.delenv("MISSING_TOKEN", raising=False)
+    raw_config = {
+        "args": ["--token", "$MCP_TOKEN", {"nested": ["$MCP_TOKEN", "$MISSING_TOKEN"]}],
+        "tuple_args": ("$MCP_TOKEN", "$MISSING_TOKEN"),
+        "env": {"API_KEY": "$MCP_TOKEN"},
+        "enabled": True,
+        "timeout": 30,
+    }
+
+    resolved = ExtensionsConfig.resolve_env_variables(raw_config)
+
+    assert resolved["args"] == ["--token", "secret", {"nested": ["secret", ""]}]
+    assert resolved["tuple_args"] == ("secret", "")
+    assert resolved["env"] == {"API_KEY": "secret"}
+    assert resolved["enabled"] is True
+    assert resolved["timeout"] == 30
+
+
 def test_build_server_params_stdio_requires_command():
     config = McpServerConfig(type="stdio", command=None)
 

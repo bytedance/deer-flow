@@ -241,7 +241,7 @@ class LocalContainerBackend(SandboxBackend):
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
-    def create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
+    def create(self, thread_id: str | None, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
         """Start a new container and return its connection info.
 
         Args:

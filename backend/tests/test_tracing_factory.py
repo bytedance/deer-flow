@@ -12,7 +12,7 @@ from deerflow.tracing import factory as tracing_factory
 
 @pytest.fixture(autouse=True)
 def clear_tracing_env(monkeypatch):
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
     for name in (
         "LANGSMITH_TRACING",
@@ -30,9 +30,9 @@ def clear_tracing_env(monkeypatch):
         "LANGFUSE_BASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
-    tracing_module._tracing_config = None
+    reset_tracing_config()
     yield
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
 
 def test_build_tracing_callbacks_returns_empty_list_when_disabled(monkeypatch):
@@ -114,12 +114,12 @@ def test_build_tracing_callbacks_raises_when_enabled_provider_fails(monkeypatch)
 
 
 def test_build_tracing_callbacks_raises_for_explicitly_enabled_misconfigured_provider(monkeypatch):
-    from deerflow.config import tracing_config as tracing_module
+    from deerflow.config.tracing_config import reset_tracing_config
 
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
     with pytest.raises(ValueError, match="LANGFUSE_PUBLIC_KEY"):
         tracing_factory.build_tracing_callbacks()

@@ -383,9 +383,6 @@ async def task_tool(
             # Polling timeout as a safety net (in case thread pool timeout doesn't work)
             # Set to execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
-            # Note: We don't call cleanup_background_task here because the task may
-            # still be running in the background. The cleanup will happen when the
-            # executor completes and sets a terminal status.
             if poll_count > max_poll_count:
                 timeout_minutes = config.timeout_seconds // 60
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
@@ -393,6 +390,11 @@ async def task_tool(
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
+                # The task may still be running in the background. Signal cooperative
+                # cancellation and schedule deferred cleanup to remove the entry from
+                # _background_tasks once the background thread reaches a terminal state.
+                request_cancel_background_task(task_id)
+                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.
