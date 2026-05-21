@@ -69,6 +69,88 @@ def test_builds_target_context_from_point_configs():
     assert context.points[1].thresholds["temp_h"] == 75
 
 
+def test_point_config_context_falls_back_to_machine_points():
+    from pump_rule.context import build_target_context_from_point_configs
+
+    context = build_target_context_from_point_configs(
+        "PUMP1",
+        "PUMP_STAGE",
+        {
+            "vibPointConfig": [
+                {
+                    "posId": "VIB1",
+                    "posName": "电机联端_水平",
+                    "componentId": "LOWER_POSITION",
+                    "type": 27,
+                    "position": "P-101A/电机/电机联端",
+                    "config": "{\"vRmsCValue\":4.5}",
+                }
+            ],
+            "staPointConfig": [],
+        },
+        component_name="泵体",
+    )
+
+    assert [point.point_id for point in context.points] == ["VIB1"]
+    assert any("已回退使用整台机泵测点" in warning for warning in context.warnings)
+
+
+def test_component_tree_context_expands_pump_subdevice_children():
+    from pump_rule.context import build_target_context_from_component_tree
+
+    context = build_target_context_from_component_tree(
+        "230110150247014",
+        "550472292971315200",
+        [
+            {
+                "id": "230110150247014",
+                "name": "歧化进料泵3500-P-101A",
+                "type": 4,
+                "children": [
+                    {
+                        "id": "550472292971315200",
+                        "type": 50,
+                        "name": "泵",
+                        "children": [
+                            {
+                                "id": "448840838189940736",
+                                "type": 40,
+                                "name": "泵联端",
+                                "children": [
+                                    {
+                                        "unitType": 3,
+                                        "machineId": "230110150247014",
+                                        "id": "2301101502470140001",
+                                        "type": 23,
+                                        "name": "泵联端_H",
+                                        "configInfo": {"vRmsCValue": 4.5, "tempH": 75},
+                                    },
+                                    {
+                                        "unitType": 3,
+                                        "machineId": "230110150247014",
+                                        "id": "2301101502470140004",
+                                        "type": 22,
+                                        "name": "泵联端_T",
+                                        "configInfo": {"tempH": 75, "tempHH": 80},
+                                    },
+                                ],
+                                "unitType": 2,
+                            }
+                        ],
+                        "unitType": 2,
+                    }
+                ],
+                "unitType": 1,
+            }
+        ],
+    )
+
+    assert context.target_name == "泵"
+    assert [point.point_id for point in context.points] == ["2301101502470140001", "2301101502470140004"]
+    assert context.points[0].point_kind == "vibration"
+    assert context.points[1].point_kind == "temperature"
+
+
 @pytest.fixture(autouse=True)
 def _path(monkeypatch):
     monkeypatch.setenv("FEATURES_TOOL_ROOT", str(FEATURES_TOOL_DIR))

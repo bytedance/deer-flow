@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .context import build_target_context_from_point_configs
+from .context import build_target_context_from_component_tree, build_target_context_from_point_configs
 from .health import check_temperature_health, check_vibration_health
 from .models import PumpDiagnosisResult
 from .provider import InsPumpDataProvider, JsonFixturePumpDataProvider, PumpDataProvider
@@ -80,14 +80,23 @@ async def run_diagnosis(
     provider = provider or _provider_from_env()
     warnings: list[str] = []
 
-    point_configs = await provider.get_point_configs(machine_id)
-    _write_cache("point_configs", machine_id, point_configs)
-    context = build_target_context_from_point_configs(
+    component_tree = await provider.get_component_tree(machine_id)
+    _write_cache("component_tree", machine_id, {"data": component_tree})
+    context = build_target_context_from_component_tree(
         machine_id,
         component_id,
-        point_configs,
+        component_tree,
         component_name=component_name,
     )
+    if not context.points:
+        point_configs = await provider.get_point_configs(machine_id)
+        _write_cache("point_configs", machine_id, point_configs)
+        context = build_target_context_from_point_configs(
+            machine_id,
+            component_id,
+            point_configs,
+            component_name=component_name,
+        )
     warnings.extend(context.warnings)
 
     vibration_points = [point for point in context.points if point.point_kind == "vibration"]

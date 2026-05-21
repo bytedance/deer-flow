@@ -32,10 +32,9 @@
 
 ## 测点获取
 
-- 机泵运行时通过 `/ins-os-manage/organize/getPointConfigs?nodeId={machineId}&nodeType=4` 获取测点配置。
-- 振动测点来自返回值 `data.vibPointConfig`，仅纳入 `type` 为 `23`、`24`、`26`、`27` 的测点。
-- 温度测点来自 `data.staPointConfig`，用于温度健康规则。
-- 子设备筛选使用 `componentId` 匹配；如果输入本身是 `posId`，则使用该测点所属 `componentId` 下的同组测点。
+- 机泵运行时优先通过 `/ins-os-manage/organize/getComponentByMachineIds?operateType=1&machineIds={machineId}` 获取组件树，按所选 `componentId` 向下展开子节点，提取 `unitType=3` 的测点。
+- 振动测点类型仅纳入 `23`、`24`、`26`、`27`；温度测点类型纳入 `22`、`28`。
+- 当组件树不可用或未解析到测点时，兼容回退到 `/ins-os-manage/organize/getPointConfigs?nodeId={machineId}&nodeType=4`。
 - `config` 字段按 JSON 字符串解析，提取 `bValue`、`cValue`、`dValue`、`vRmsBValue`、`vRmsCValue`、`vRmsDValue`、`tempH`、`tempHH` 等门限。
 
 ## 回滚
@@ -48,7 +47,7 @@
 
 ## 已知限制
 
-- 当前真实 InS 取数依赖 `getPointConfigs`、趋势和波形工具返回字段，字段缺失时 runtime 会返回 warning 或结构化错误。
-- 当所选 `componentId` 或测点 `posId` 无法定位关联测点时，不会生成无依据结论。
+- 当前真实 InS 取数依赖组件树、趋势和波形工具返回字段，字段缺失时 runtime 会返回 warning 或结构化错误。
+- 当组件树未找到所选 `componentId` 或该子树无振动测点时，runtime 会回退到整台机泵测点并写入 warning；若整台机泵仍无可用振动测点，才跳过频谱规则。
 - 报告图表只允许使用规则阶段缓存数据，不在报告阶段重新采样。
 - 现场参考 `/malfunction` 对比需要真实样例或录制数据；没有样例时不能标记对比完成。

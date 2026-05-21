@@ -33,7 +33,7 @@ The managed runtime does not evaluate start-stop state and never skips vibration
 ## Workflow
 
 1. Confirm the target pump device, selected sub-device, and diagnosis hour.
-2. Determine target context from `/ins-os-manage/organize/getPointConfigs?nodeId={machineId}&nodeType=4`; vibration points are `data.vibPointConfig` rows whose `type` is `23`, `24`, `26`, or `27`, filtered by the selected `componentId`.
+2. Determine target context from `/ins-os-manage/organize/getComponentByMachineIds?operateType=1&machineIds={machineId}` by expanding the selected `componentId`; vibration points are `unitType=3` rows whose `type` is `23`, `24`, `26`, or `27`. Use `getPointConfigs` only as a fallback when the component tree cannot provide points.
 3. Use the plant inspection toolchain first to locate the pump, inspect component hierarchy, and identify related points:
    - shaft vibration X/Y at drive end and non-drive end (or housing vibration on small pumps)
    - suction / discharge pressure

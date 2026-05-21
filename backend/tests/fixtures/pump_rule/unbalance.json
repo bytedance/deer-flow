@@ -2118,5 +2118,53 @@
         "time": "1771570800000"
       }
     ]
-  }
+  },
+  "component_tree": [
+    {
+      "id": "PUMP1",
+      "name": "P-101A",
+      "type": 4,
+      "unitType": 1,
+      "children": [
+        {
+          "id": "BRG1",
+          "name": "驱动端轴承",
+          "type": 70,
+          "unitType": 2,
+          "children": [
+            {
+              "id": "VIB1",
+              "name": "驱动端 X 轴振",
+              "machineId": "PUMP1",
+              "type": 27,
+              "unitType": 3,
+              "configInfo": {
+                "bValue": 3.0,
+                "cValue": 4.0,
+                "dValue": 7.0,
+                "vRmsBValue": 3.0,
+                "vRmsCValue": 4.0,
+                "vRmsDValue": 7.0,
+                "bearingOuterRaceRatio": "3.0,3.6",
+                "bpfRatio": "6",
+                "isUsing": 1
+              }
+            },
+            {
+              "id": "TEMP1",
+              "name": "驱动端轴承温度",
+              "machineId": "PUMP1",
+              "type": 28,
+              "unitType": 3,
+              "configInfo": {
+                "tempH": 80,
+                "tempHH": 90,
+                "isUsing": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }

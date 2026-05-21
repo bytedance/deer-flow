@@ -11,6 +11,74 @@ VIBRATION_KEYWORDS = ("振动", "轴振", "瓦振", "速度", "加速度", "DE",
 TEMPERATURE_KEYWORDS = ("温度", "轴承温度", "瓦温", "T")
 
 
+def build_target_context_from_component_tree(
+    machine_id: str,
+    component_id: str,
+    component_tree: list[dict[str, Any]],
+    *,
+    component_name: str | None = None,
+) -> PumpTargetContext:
+    warnings: list[str] = []
+    flat = list(_walk_nodes(component_tree))
+    target = _find_node(flat, component_id)
+    if target is None:
+        warnings.append(f"未在组件树中找到子设备 {component_id}，已回退使用整台机泵测点")
+        roots = [node for node in component_tree if isinstance(node, dict)]
+        target = _find_node(flat, machine_id) or (roots[0] if roots else {"id": machine_id, "name": component_name or machine_id, "type": 4})
+        related_nodes = flat
+    else:
+        related_nodes = _descendants(target)
+
+    vibration_nodes = [
+        node
+        for node in related_nodes
+        if _is_component_point(node)
+        and _coerce_int(node.get("type")) in VIBRATION_POINT_TYPES
+    ]
+    temperature_nodes = [
+        node
+        for node in related_nodes
+        if _is_component_point(node)
+        and _coerce_int(node.get("type")) in {22, 28}
+    ]
+
+    if not vibration_nodes and target is not None:
+        warnings.append(f"子设备 {component_id} 下未找到振动测点，已回退使用整台机泵测点")
+        vibration_nodes = [
+            node
+            for node in flat
+            if _is_component_point(node)
+            and _coerce_int(node.get("type")) in VIBRATION_POINT_TYPES
+        ]
+        temperature_nodes = [
+            node
+            for node in flat
+            if _is_component_point(node)
+            and _coerce_int(node.get("type")) in {22, 28}
+        ]
+
+    points = [
+        _component_node_to_point(node, "vibration")
+        for node in vibration_nodes
+    ] + [
+        _component_node_to_point(node, "temperature")
+        for node in temperature_nodes
+    ]
+    deduped = _dedupe_points(points)
+    if not deduped:
+        warnings.append(f"子设备 {component_id} 未解析到可用测点")
+
+    target_name = component_name or str(target.get("name") or component_id)
+    return PumpTargetContext(
+        machine_id=machine_id,
+        component_id=component_id,
+        target_name=target_name,
+        target_kind=_target_kind(target),
+        points=deduped,
+        warnings=_dedupe_text(warnings),
+    )
+
+
 def build_target_context_from_point_configs(
     machine_id: str,
     component_id: str,
@@ -26,12 +94,18 @@ def build_target_context_from_point_configs(
     ]
     temperature_rows = _as_rows(point_configs.get("staPointConfig"))
 
-    matched_vibration = _filter_component_points(vibration_rows, component_id)
-    matched_temperature = _filter_component_points(temperature_rows, component_id)
+    matched_vibration = _filter_component_points(vibration_rows, component_id, component_name)
+    matched_temperature = _filter_component_points(temperature_rows, component_id, component_name)
     matched_rows = matched_vibration + matched_temperature
 
     if not matched_rows:
-        warnings.append(f"未在 getPointConfigs 返回中找到子设备 {component_id} 的关联测点")
+        warnings.append(
+            f"未在 getPointConfigs 返回中直接匹配到子设备 {component_id} 的关联测点，"
+            "已回退使用整台机泵测点"
+        )
+        matched_vibration = vibration_rows
+        matched_temperature = temperature_rows
+        matched_rows = matched_vibration + matched_temperature
 
     target_name = component_name or _infer_target_name(matched_rows) or component_id
     points = [
@@ -163,13 +237,46 @@ def _node_to_point(node: dict[str, Any]) -> PumpPoint:
     )
 
 
+def _is_component_point(node: dict[str, Any]) -> bool:
+    return node.get("unitType", node.get("unit_type")) == 3
+
+
+def _component_node_to_point(node: dict[str, Any], point_kind: str) -> PumpPoint:
+    config = dict(node.get("configInfo") or node.get("config") or {})
+    thresholds = _extract_thresholds(node, config)
+    name = str(node.get("name") or node.get("label") or node.get("id") or "")
+    return PumpPoint(
+        point_id=str(node.get("id") or ""),
+        name=name,
+        point_kind=point_kind,
+        endpoint_series="2k",
+        thresholds=thresholds,
+        config=config,
+        raw=node,
+    )
+
+
+def _dedupe_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
 def _as_rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
 
 
-def _filter_component_points(rows: list[dict[str, Any]], component_id: str) -> list[dict[str, Any]]:
+def _filter_component_points(
+    rows: list[dict[str, Any]],
+    component_id: str,
+    component_name: str | None = None,
+) -> list[dict[str, Any]]:
     component = str(component_id)
     matched_by_component = [
         row
@@ -184,7 +291,19 @@ def _filter_component_points(rows: list[dict[str, Any]], component_id: str) -> l
     selected_component_id = str(selected.get("componentId") or "")
     if not selected_component_id:
         return [selected]
-    return [row for row in rows if str(row.get("componentId") or "") == selected_component_id]
+    matched_by_selected_component = [row for row in rows if str(row.get("componentId") or "") == selected_component_id]
+    if matched_by_selected_component:
+        return matched_by_selected_component
+
+    name = str(component_name or "").strip()
+    if not name:
+        return []
+    return [
+        row
+        for row in rows
+        if name in str(row.get("position") or "")
+        or name in str(row.get("posName") or row.get("name") or "")
+    ]
 
 
 def _point_config_to_point(row: dict[str, Any], point_kind: str) -> PumpPoint:

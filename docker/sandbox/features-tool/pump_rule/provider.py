@@ -8,6 +8,10 @@ from typing import Any
 
 class PumpDataProvider(ABC):
     @abstractmethod
+    async def get_component_tree(self, machine_id: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -28,6 +32,15 @@ class JsonFixturePumpDataProvider(PumpDataProvider):
         self.fixture_path = Path(fixture_path)
         self.payload = json.loads(self.fixture_path.read_text(encoding="utf-8"))
 
+    async def get_component_tree(self, machine_id: str) -> list[dict[str, Any]]:
+        _ = machine_id
+        tree = self.payload.get("component_tree")
+        if isinstance(tree, list):
+            return tree
+        legacy_tree = self.payload.get("device_tree") or {}
+        legacy_roots = legacy_tree.get("child_device_list") or legacy_tree.get("components")
+        return legacy_roots if isinstance(legacy_roots, list) else []
+
     async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
         _ = machine_id
         return self.payload.get("point_configs") or {"vibPointConfig": [], "staPointConfig": []}
@@ -46,6 +59,14 @@ class JsonFixturePumpDataProvider(PumpDataProvider):
 class InsPumpDataProvider(PumpDataProvider):
     def __init__(self) -> None:
         self._clients: list[Any] = []
+
+    async def get_component_tree(self, machine_id: str) -> list[dict[str, Any]]:
+        from ins.client import InsApiClient
+        from ins.config import load_ins_settings
+
+        client = InsApiClient(load_ins_settings())
+        self._clients.append(client.close)
+        return await client.get_components(machine_id)
 
     async def get_point_configs(self, machine_id: str) -> dict[str, Any]:
         from ins.client import InsApiClient
