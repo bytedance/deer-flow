@@ -1235,12 +1235,12 @@ def test_write_file_tool_bounds_large_sandbox_error(monkeypatch) -> None:
     [
         pytest.param(
             PermissionError("permission denied"),
-            "PermissionError: permission denied",
+            "Error: Permission denied writing to file: /mnt/user-data/workspace/output.txt",
             id="permission",
         ),
         pytest.param(
             IsADirectoryError("target is a directory"),
-            "IsADirectoryError: target is a directory",
+            "Error: Path is a directory, not a file: /mnt/user-data/workspace/output.txt",
             id="directory",
         ),
         pytest.param(

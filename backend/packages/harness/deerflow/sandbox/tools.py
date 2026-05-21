@@ -457,11 +457,10 @@ def _format_write_file_error(
     error: Exception,
     runtime: Runtime | None = None,
     *,
-    message: str | None = None,
     max_chars: int = _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
 ) -> str:
     """Return a bounded, sanitized error string for write_file failures."""
-    header = message or f"Error: Failed to write file '{requested_path}'"
+    header = f"Error: Failed to write file '{requested_path}'"
     detail = _sanitize_error(error, runtime)
     if max_chars == 0:
         return f"{header}: {detail}"
@@ -1564,19 +1563,15 @@ def write_file_tool(
         return "OK"
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
-    except PermissionError as e:
-        return _format_write_file_error(
-            requested_path,
-            e,
-            runtime,
-            message=f"Error: Permission denied writing to file: {requested_path}",
+    except PermissionError:
+        return _truncate_write_file_error_detail(
+            f"Error: Permission denied writing to file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
         )
-    except IsADirectoryError as e:
-        return _format_write_file_error(
-            requested_path,
-            e,
-            runtime,
-            message=f"Error: Path is a directory, not a file: {requested_path}",
+    except IsADirectoryError:
+        return _truncate_write_file_error_detail(
+            f"Error: Path is a directory, not a file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
         )
     except OSError as e:
         return _format_write_file_error(requested_path, e, runtime)
