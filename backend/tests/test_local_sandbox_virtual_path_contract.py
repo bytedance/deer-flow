@@ -367,7 +367,7 @@ def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 6. User-id scoping: per-user path isolation contract (#3024 / #2873)
+# 7. User-id scoping: per-user path isolation contract (#3024 / #2873)
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -433,6 +433,7 @@ def test_user_a_writes_invisible_to_user_b_on_same_thread_id(provider, isolated_
 
     try:
         content = sandbox_b.read_file("/mnt/user-data/workspace/secret.txt")
-        assert "user-a-data" not in content
-    except Exception:
-        pass  # expected: user-b has no such file
+    except FileNotFoundError:
+        pass  # expected: user-b's workspace is a different host directory
+    else:
+        assert "user-a-data" not in content, "user-b can read user-a's file — per-user isolation is broken"
