@@ -17,7 +17,6 @@ import pytest
 
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -68,12 +67,7 @@ async def test_concurrent_puts_produce_unique_monotonic_seqs():
     """10 concurrent puts on the same thread must yield distinct, monotonic seq values."""
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(Path(tmp))
-        results = await asyncio.gather(
-            *[
-                store.put(thread_id="t1", run_id=f"r{i}", event_type="trace", category="trace", content=f"msg{i}")
-                for i in range(10)
-            ]
-        )
+        results = await asyncio.gather(*[store.put(thread_id="t1", run_id=f"r{i}", event_type="trace", category="trace", content=f"msg{i}") for i in range(10)])
     seqs = sorted(r["seq"] for r in results)
     assert seqs == list(range(1, 11)), f"Expected 1-10, got {seqs}"
 
@@ -174,9 +168,7 @@ async def test_list_messages_reads_written_records():
 async def test_count_messages_accurate_after_concurrent_writes():
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(Path(tmp))
-        await asyncio.gather(
-            *[store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message") for _ in range(7)]
-        )
+        await asyncio.gather(*[store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message") for _ in range(7)])
         count = await store.count_messages("t1")
     assert count == 7
 
