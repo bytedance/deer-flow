@@ -338,7 +338,7 @@ class MemoryUpdater:
             reinforcement_detected=reinforcement_detected,
         )
         prompt = MEMORY_UPDATE_PROMPT.format(
-            current_memory=json.dumps(current_memory, indent=2),
+            current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
         )

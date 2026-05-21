@@ -20,12 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 if TYPE_CHECKING:
@@ -63,6 +64,16 @@ class RunJournal(BaseCallbackHandler):
         self._total_tokens = 0
         self._llm_call_count = 0
 
+        # Caller-bucketed token accumulators
+        self._lead_agent_tokens = 0
+        self._subagent_tokens = 0
+        self._middleware_tokens = 0
+
+        # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
+        self._counted_llm_run_ids: set[str] = set()
+        self._counted_external_source_ids: set[str] = set()
+        self._counted_message_llm_run_ids: set[str] = set()
+
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
@@ -76,6 +87,50 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
 
     # -- Lifecycle callbacks --
+
+    @staticmethod
+    def _message_text(message: BaseMessage) -> str:
+        """Extract displayable text from a message's mixed content shape."""
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, Mapping):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                    else:
+                        nested = block.get("content")
+                        if isinstance(nested, str):
+                            parts.append(nested)
+            return "".join(parts)
+        if isinstance(content, Mapping):
+            for key in ("text", "content"):
+                value = content.get(key)
+                if isinstance(value, str):
+                    return value
+
+        text = getattr(message, "text", None)
+        if isinstance(text, str):
+            return text
+        return ""
+
+    def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
+        """Update run-level convenience fields for persisted run rows."""
+        self._msg_count += 1
+
+        # ``last_ai_message`` should represent the lead agent's user-facing
+        # answer. Middleware/subagent model calls and empty tool-call-only
+        # AI messages must not overwrite the last useful assistant text.
+        is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+        if is_ai_message and (caller is None or caller == "lead_agent"):
+            text = self._message_text(message).strip()
+            if text:
+                self._last_ai_msg = text[:2000]
 
     def on_chain_start(
         self,
@@ -155,6 +210,7 @@ class RunJournal(BaseCallbackHandler):
                             content=m.model_dump(),
                             metadata={"caller": caller},
                         )
+                        self._record_message_summary(m, caller=caller)
                         break
                 if self._first_human_msg:
                     break
@@ -213,19 +269,33 @@ class RunJournal(BaseCallbackHandler):
                     "llm_call_index": call_index,
                 },
             )
+            if rid not in self._counted_message_llm_run_ids:
+                self._record_message_summary(message, caller=caller)
 
-            # Token accumulation
+            # Token accumulation (dedup by langchain run_id to avoid double-counting
+            # when the callback fires more than once for the same response)
             if self._track_tokens:
                 input_tk = usage_dict.get("input_tokens", 0) or 0
                 output_tk = usage_dict.get("output_tokens", 0) or 0
                 total_tk = usage_dict.get("total_tokens", 0) or 0
                 if total_tk == 0:
                     total_tk = input_tk + output_tk
-                if total_tk > 0:
+                if total_tk > 0 and rid not in self._counted_llm_run_ids:
+                    self._counted_llm_run_ids.add(rid)
                     self._total_input_tokens += input_tk
                     self._total_output_tokens += output_tk
                     self._total_tokens += total_tk
                     self._llm_call_count += 1
+
+                    if caller.startswith("subagent:"):
+                        self._subagent_tokens += total_tk
+                    elif caller.startswith("middleware:"):
+                        self._middleware_tokens += total_tk
+                    else:
+                        self._lead_agent_tokens += total_tk
+
+        if messages:
+            self._counted_message_llm_run_ids.add(str(run_id))
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
@@ -242,12 +312,14 @@ class RunJournal(BaseCallbackHandler):
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
                 self._put(event_type="llm.tool.result", category="message", content=msg.model_dump())
+                self._record_message_summary(msg)
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
                 for message in messages:
                     if isinstance(message, BaseMessage):
                         self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+                        self._record_message_summary(message)
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
             else:
@@ -330,6 +402,49 @@ class RunJournal(BaseCallbackHandler):
 
     # -- Public methods (called by worker) --
 
+    def record_external_llm_usage_records(
+        self,
+        records: list[dict[str, int | str]],
+    ) -> None:
+        """Record token usage from external sources (e.g., subagents).
+
+        Each record should contain:
+            source_run_id: Unique identifier to prevent double-counting
+            caller: Caller tag (e.g. "subagent:general-purpose")
+            input_tokens: Input token count
+            output_tokens: Output token count
+            total_tokens: Total token count (computed from input+output if 0/missing)
+        """
+        if not self._track_tokens:
+            return
+        for record in records:
+            source_id = str(record.get("source_run_id", ""))
+            if not source_id:
+                continue
+            if source_id in self._counted_external_source_ids:
+                continue
+
+            total_tk = record.get("total_tokens", 0) or 0
+            if total_tk <= 0:
+                input_tk = record.get("input_tokens", 0) or 0
+                output_tk = record.get("output_tokens", 0) or 0
+                total_tk = input_tk + output_tk
+            if total_tk <= 0:
+                continue
+
+            self._counted_external_source_ids.add(source_id)
+            self._total_input_tokens += record.get("input_tokens", 0) or 0
+            self._total_output_tokens += record.get("output_tokens", 0) or 0
+            self._total_tokens += total_tk
+
+            caller = str(record.get("caller", ""))
+            if caller.startswith("subagent:"):
+                self._subagent_tokens += total_tk
+            elif caller.startswith("middleware:"):
+                self._middleware_tokens += total_tk
+            else:
+                self._lead_agent_tokens += total_tk
+
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
         self._first_human_msg = content[:2000] if content else None
@@ -376,6 +491,9 @@ class RunJournal(BaseCallbackHandler):
             "total_output_tokens": self._total_output_tokens,
             "total_tokens": self._total_tokens,
             "llm_call_count": self._llm_call_count,
+            "lead_agent_tokens": self._lead_agent_tokens,
+            "subagent_tokens": self._subagent_tokens,
+            "middleware_tokens": self._middleware_tokens,
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,

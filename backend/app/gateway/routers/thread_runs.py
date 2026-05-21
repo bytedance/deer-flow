@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, serialize_channel_values
+from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -68,9 +68,36 @@ class RunResponse(BaseModel):
     updated_at: str = ""
 
 
+class ThreadTokenUsageModelBreakdown(BaseModel):
+    tokens: int = 0
+    runs: int = 0
+
+
+class ThreadTokenUsageCallerBreakdown(BaseModel):
+    lead_agent: int = 0
+    subagent: int = 0
+    middleware: int = 0
+
+
+class ThreadTokenUsageResponse(BaseModel):
+    thread_id: str
+    total_tokens: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_runs: int = 0
+    by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
+    by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
+    if record.status in (RunStatus.pending, RunStatus.running):
+        return f"Run {run_id} is not active on this worker and cannot be cancelled"
+    return f"Run {run_id} is not cancellable (status: {record.status.value})"
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -159,7 +186,8 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
     run_mgr = get_run_manager(request)
-    records = await run_mgr.list_by_thread(thread_id)
+    user_id = await get_current_user(request)
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
 
@@ -168,7 +196,8 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
 async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    user_id = await get_current_user(request)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
@@ -191,16 +220,13 @@ async def cancel_run(
     - wait=false: Return immediately with 202
     """
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Run {run_id} is not cancellable (status: {record.status.value})",
-        )
+        raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
 
     if wait and record.task is not None:
         try:
@@ -216,12 +242,14 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
-    bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if record.store_only:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
+    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -250,14 +278,18 @@ async def stream_existing_run(
     remaining buffered events so the client observes a clean shutdown.
     """
     run_mgr = get_run_manager(request)
-    record = run_mgr.get(run_id)
+    record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if record.store_only and action is None:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
         cancelled = await run_mgr.cancel(run_id, action=action)
-        if cancelled and wait and record.task is not None:
+        if not cancelled:
+            raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+        if wait and record.task is not None:
             try:
                 await record.task
             except (asyncio.CancelledError, Exception):
@@ -368,10 +400,10 @@ async def list_run_events(
     return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
 
 
-@router.get("/{thread_id}/token-usage")
+@router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
-async def thread_token_usage(thread_id: str, request: Request) -> dict:
+async def thread_token_usage(thread_id: str, request: Request) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
     agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    return {"thread_id": thread_id, **agg}
+    return ThreadTokenUsageResponse(thread_id=thread_id, **agg)

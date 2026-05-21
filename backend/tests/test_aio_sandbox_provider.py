@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.config.paths import Paths, join_host_path
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
@@ -314,3 +315,36 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
         await asyncio.sleep(0.01)
 
     pytest.fail("provider thread lock was not released after successor acquire_async")
+
+
+def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
+    """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    token = set_current_user(SimpleNamespace(id="user-7"))
+    posted: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://sandbox.local"}
+
+    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+        posted.update({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "post", _post)
+
+    try:
+        backend.create("thread-42", "sandbox-42")
+    finally:
+        reset_current_user(token)
+
+    assert posted["url"] == "http://provisioner:8002/api/sandboxes"
+    assert posted["json"] == {
+        "sandbox_id": "sandbox-42",
+        "thread_id": "thread-42",
+        "user_id": "user-7",
+    }

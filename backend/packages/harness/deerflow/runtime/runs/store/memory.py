@@ -22,6 +22,7 @@ class MemoryRunStore(RunStore):
         thread_id,
         assistant_id=None,
         user_id=None,
+        model_name=None,
         status="pending",
         multitask_strategy="reject",
         metadata=None,
@@ -35,6 +36,7 @@ class MemoryRunStore(RunStore):
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": user_id,
+            "model_name": model_name,
             "status": status,
             "multitask_strategy": multitask_strategy,
             "metadata": metadata or {},
@@ -44,8 +46,13 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
         }
 
-    async def get(self, run_id):
-        return self._runs.get(run_id)
+    async def get(self, run_id, *, user_id=None):
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        if user_id is not None and run.get("user_id") != user_id:
+            return None
+        return run
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
@@ -57,6 +64,11 @@ class MemoryRunStore(RunStore):
             self._runs[run_id]["status"] = status
             if error is not None:
                 self._runs[run_id]["error"] = error
+            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+
+    async def update_model_name(self, run_id, model_name):
+        if run_id in self._runs:
+            self._runs[run_id]["model_name"] = model_name
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def delete(self, run_id):
