@@ -33,6 +33,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 
 from .manager import RunManager, RunRecord
+from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,9 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
+        # Resolve after runtime context installation so context/configurable reflect
+        # the agent name that this run will actually execute.
+        config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
