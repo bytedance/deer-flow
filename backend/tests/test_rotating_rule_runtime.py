@@ -188,9 +188,9 @@ def test_build_rotating_report_payload_reads_cache_only(tmp_path, monkeypatch):
 
     assert payload["report_meta"]["data_source"] == "rotating_rule_runtime"
     assert payload["report_meta"]["rules_skill"] == "vibration-fault-diagnosis"
-    assert payload["trend_chart"]["series"]
-    assert len(payload["spectrum_charts"]) == 1
-    assert len(payload["orbit_charts"]) == 1
+    assert payload["trend_chart"] == {}
+    assert payload["spectrum_charts"] == []
+    assert payload["orbit_charts"] == []
     assert payload["rule_matches"][0]["fault_family"] == "unbalance"
     assert payload["rule_matches"][1]["fault_family"] == "misalignment"
     assert payload["recommendations"] == [
@@ -240,9 +240,43 @@ def test_build_rotating_report_payload_keeps_engine_fallback_semantics(tmp_path,
 
     built = module.build_payload(payload)
 
-    assert len(built["rule_matches"]) == 1
-    assert built["rule_matches"][0]["fault_family"] == "no_specific_fault"
-    assert built["rule_matches"][0]["confidence"] == "low"
+    assert built["rule_matches"] == []
+    assert built["result_summary"]["overall_verdict"] == "normal"
+    assert built["result_summary"]["primary_fault"] == "机组正常"
+    assert built["recommendations"] == []
+
+
+def test_build_rotating_report_payload_filters_low_score_faults_and_keeps_multiple(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
+    _write_cache(tmp_path)
+    module = _load_module("build_rotating_report_payload.py", "build_rotating_report_payload_thresholds")
+
+    payload = _result_payload(tmp_path)
+    payload["result"]["alternative_faults"] = [
+        {
+            "rule_id": "rule-misalignment",
+            "fault_type": "misalignment",
+            "fault_subtype": "",
+            "score": 0.72,
+            "matched_conditions": ["存在一定 2X 成分"],
+            "missing_evidence": [],
+            "contradictions": [],
+        },
+        {
+            "rule_id": "rule-rub",
+            "fault_type": "rub",
+            "fault_subtype": "",
+            "score": 0.31,
+            "matched_conditions": ["轻微碰摩征兆"],
+            "missing_evidence": [],
+            "contradictions": [],
+        },
+    ]
+
+    built = module.build_payload(payload)
+
+    assert [item["fault_family"] for item in built["rule_matches"]] == ["unbalance", "misalignment"]
+    assert all(item["score"] >= 0.5 for item in built["rule_matches"])
 
 
 def test_build_device_context_artifact_contains_target_info(monkeypatch):

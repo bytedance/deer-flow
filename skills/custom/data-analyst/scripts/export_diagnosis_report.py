@@ -119,6 +119,9 @@ def _section_evidence_chain(payload: dict) -> str:
 
 def _section_diagnosis(payload: dict) -> str:
     matches = payload.get("rule_matches", []) or []
+    summary = payload.get("result_summary", {}) or {}
+    if summary.get("overall_verdict") == "normal":
+        return "## 4. 诊断结论\n\n**机组正常**：当前未发现准确率不低于 0.5 的故障诊断结果，建议保持常规监测。\n"
     if not matches:
         return "## 4. 诊断结论\n\n_未匹配到任何规则；建议加密监测并由领域专家复核_\n"
     lines = ["## 4. 诊断结论", ""]
@@ -130,6 +133,7 @@ def _section_diagnosis(payload: dict) -> str:
     lines.append("")
     lines.append(f"- 设备：{_equipment_label(primary)}")
     lines.append(f"- 置信度：{_confidence_label(primary.get('confidence', '—'))}")
+    lines.append(f"- 诊断得分：{_format_value(primary.get('score'))}")
     lines.append(f"- 命中规则节：{primary.get('rule_section', '—')}")
     supporting = primary.get("supporting_evidence_indices", []) or []
     marginal = primary.get("marginal_evidence_indices", []) or []
@@ -139,11 +143,21 @@ def _section_diagnosis(payload: dict) -> str:
     missing = primary.get("missing_evidence", []) or []
     if missing:
         lines.append(f"- 缺失证据：{', '.join(missing)}")
+    if len(matches) > 1:
+        lines.append("")
+        lines.append("**并发故障候选**：")
+        for candidate in matches[1:]:
+            lines.append(
+                f"- {candidate.get('fault_family', '—')}（置信度：{_confidence_label(candidate.get('confidence', '—'))}，得分：{_format_value(candidate.get('score'))}）"
+            )
     return "\n".join(lines) + "\n"
 
 
 def _section_differential(payload: dict) -> str:
     matches = payload.get("rule_matches", []) or []
+    summary = payload.get("result_summary", {}) or {}
+    if summary.get("overall_verdict") == "normal":
+        return "## 5. 差异诊断\n\n_无需要展示的故障候选_\n"
     if len(matches) <= 1:
         return "## 5. 差异诊断\n\n_本次诊断未发现替代候选；建议补充更多测点 / 工艺联动数据后再判定_\n"
     lines = ["## 5. 差异诊断", ""]

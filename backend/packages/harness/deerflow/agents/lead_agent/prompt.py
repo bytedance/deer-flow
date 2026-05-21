@@ -445,6 +445,8 @@ You are {agent_name}, an open-source super agent.
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
 {acp_section}
+
+	- **Current thread ID**: {thread_id} — used when generating artifact download links and closure tickets
 </working_directory>
 
 <response_style>
@@ -752,6 +754,7 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     exclude_tools: list[str] | None = None,
     app_config: AppConfig | None = None,
+    thread_id: str = "",
 ) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name, app_config=app_config)
@@ -818,6 +821,7 @@ def apply_prompt_template(
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
+        thread_id=thread_id,
     )
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

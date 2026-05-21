@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -5,6 +6,8 @@ from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
+
+logger = logging.getLogger(__name__)
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
@@ -285,6 +288,11 @@ class Paths:
         Includes the ACP workspace directory so it can be volume-mounted into
         the sandbox container at ``/mnt/acp-workspace`` even before the first
         ACP agent invocation.
+
+        When DEER_FLOW_HOST_BASE_DIR differs from base_dir (DooD mode), also
+        creates the directories at the host-side paths so the host Docker daemon
+        can resolve bind mount sources. On macOS (Docker Desktop) the host paths
+        under /Users are accessible from within the container.
         """
         for d in [
             self.sandbox_work_dir(thread_id, user_id=user_id),
@@ -294,6 +302,30 @@ class Paths:
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
+
+        # Also ensure host-side directories exist for Docker bind mounts (DooD mode).
+        # The host Docker daemon resolves bind mount sources against the host
+        # filesystem, not the container's. When DEER_FLOW_HOST_BASE_DIR points to a
+        # host path accessible from inside the container (common on macOS where
+        # Docker Desktop mounts /Users), create the mount source directories too.
+        host_base = os.environ.get("DEER_FLOW_HOST_BASE_DIR")
+        if host_base:
+            host_dirs = [
+                self.host_sandbox_work_dir(thread_id, user_id=user_id),
+                self.host_sandbox_uploads_dir(thread_id, user_id=user_id),
+                self.host_sandbox_outputs_dir(thread_id, user_id=user_id),
+                self.host_acp_workspace_dir(thread_id, user_id=user_id),
+            ]
+            for host_dir in host_dirs:
+                try:
+                    Path(host_dir).mkdir(parents=True, exist_ok=True)
+                    Path(host_dir).chmod(0o777)
+                except OSError:
+                    logger.warning(
+                        "Could not create host bind mount directory %s "
+                        "(may not be accessible from inside the container)",
+                        host_dir,
+                    )
 
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.

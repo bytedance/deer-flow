@@ -9,11 +9,12 @@
 - **严格读取 `ui_interaction.payload`**：表单字段位于 `payload` 顶层，不在 `values` 中。
 - **同一线程可能多次诊断**：回溯 `ui_interaction` 历史时只能使用**当前消息之前最近一次**匹配的回调消息，绝不能复用更早轮次参数。
 - **输出路径固定**：所有可下载产物必须写入 `/mnt/user-data/outputs/`。
-- 只使用已注册 GenUI 组件 `form` / `card` / `echart` / `table` / `markdown` / `sub-device-selector`，无后端路由、无前端组件变更。
+- 只使用已注册 GenUI 组件 `form` / `card` / `table` / `markdown` / `sub-device-selector`，无后端路由、无前端组件变更。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。你的回复只应包含简短引导语（如"请填写参数后提交"）或诊断报告正文，不要附加任何结构化元信息。
 - **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `device_context.json` / `rotating_rule_result.json` / `diagnosis_features.json` / `rotating_rule_cache/*`。
 - **`runout` 命名注意**：本组 12 项 code 中的 `runout` 来自 `vibration-fault-diagnosis/references/diagnosis-rules.md` 的"晃度"章节，**语义为测量探头表面跳动 / measurement effect**，不是 shaft runout。
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
+- **`thread_id` 获取方式**：当前线程 ID 已注入到系统提示词的 `<working_directory>` 中的 `Current thread ID` 字段。在生成报告下载链接、调用 `render_diagnosis_markdown` 或登记闭环单时，从系统提示词的 `Current thread ID` 取值填入，**不要向用户询问**。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
 
 ## 首次进入：渲染子设备选择器并停止
@@ -43,17 +44,49 @@
 当收到 `ui_interaction` 且 `callback_id` 为 `fd-rotating-device` 时：
 
 1. 从 `payload.selected` 提取选择结果：
-   - `macId`（设备 ID，字符串）
-   - `componentId`（子设备 / 部件 ID，字符串，即 `selected.id`）
+   - `machineId`（设备 ID，字符串，即 `selected.machineId`）
+   - `componentId`（子设备 / 部件 ID，字符串，即 `selected.componentId`）
    - `name`（子设备名称）
    - `type`（子设备类型）
 
-2. 校验：
-   - `macId` 和 `componentId` 必须存在且匹配 `[A-Za-z0-9_-]+`。
-   - `componentId` 不能与 `macId` 相同（必须是子设备，不是父设备本身）。
-   校验失败时渲染 `markdown` 提示用户重新选择，并停止后续步骤。
+2. 执行严格的子设备校验（**必须使用 Python 硬判定，不可靠 LLM 猜测**）：
 
-3. 将 `macId`、`componentId`、子设备名称记入内存，后续步骤使用。
+   将提取出的 `machineId` 和 `componentId` 写入临时校验文件：
+   
+   ```bash
+   echo '{"machineId":"MACHINE_ID_VALUE","componentId":"COMPONENT_ID_VALUE"}' > /mnt/user-data/outputs/_validate_input.json
+   ```
+   （将 `MACHINE_ID_VALUE` 和 `COMPONENT_ID_VALUE` 替换为实际提取的值）
+   
+   然后用 Python 执行校验：
+   
+   ```bash
+   python -c "
+import json, re
+with open('/mnt/user-data/outputs/_validate_input.json') as f:
+    d = json.load(f)
+mid = d.get('machineId', '')
+cid = d.get('componentId', '')
+pat = r'^[A-Za-z0-9_-]+$'
+errs = []
+if not mid or not re.match(pat, mid): errs.append('machineId无效')
+if not cid or not re.match(pat, cid): errs.append('componentId无效')
+if mid and cid and mid == cid: errs.append('选中的是父设备本身（ID相同）')
+if errs: print('INVALID: ' + '; '.join(errs))
+else: print('VALID')
+"
+   ```
+
+   清理临时文件：
+   
+   ```bash
+   rm -f /mnt/user-data/outputs/_validate_input.json
+   ```
+
+   - 输出 `VALID` → 通过校验，进入第 3 步。
+   - 输出 `INVALID: ...` → 渲染 `markdown` 提示具体错误，让用户重新选择，停止后续步骤。
+
+3. 将 `machineId`、`componentId`、子设备名称记入内存，后续步骤使用。
 
 4. 渲染诊断时间表单：
 
@@ -66,7 +99,7 @@
   "callback_timeout_ms": 600000,
   "props": {
     "title": "旋转机组故障诊断 · 第 2 步：选择诊断时间",
-    "description": "已选设备 {macId}、子设备 {componentName}。请选择诊断时间。",
+    "description": "已选设备 {machineId}、子设备 {componentName}。请选择诊断时间。",
     "fields": [
       {"name": "diagnosis_date", "label": "诊断日期", "type": "date", "required": true},
       {
@@ -107,7 +140,7 @@
 ### 步骤 1：回溯历史，组装参数
 
 **从对话历史中回溯找到"当前消息之前最近一次"的 `callback_id=fd-rotating-device` 的 `ui_interaction` 消息**，提取：
-- `macId`（设备 ID）
+- `machineId`（设备 ID）
 - `componentId`（子设备 ID）
 - `name`（子设备名称）
 
@@ -129,11 +162,20 @@
 调用底层原始设备树脚本（**只取树，不在脚本内再起模型**）：
 
 ```bash
-python /opt/features-tool/tools/device_analysis.py "{macId}" --output /mnt/user-data/outputs/device_tree_raw.json
+python /opt/features-tool/tools/device_analysis.py "{machineId}" --output /mnt/user-data/outputs/device_tree_raw.json
 ```
 
-然后使用独立 skill `rotating-device-context` 的约束与模板，由当前 Agent 使用同一模型上下文，基于 `machine_service` 设备详情 + `/mnt/user-data/outputs/device_tree_raw.json` 原始树，推理并写出 `/mnt/user-data/outputs/device_context.json`。该文件至少包含：
+然后**按顺序执行**：
 
+1. **阅读 raw tree**：使用 `read_file` 读取 `/mnt/user-data/outputs/device_tree_raw.json`，理解设备树结构（设备类型、轴系、轴承、测点）。
+2. **阅读 skill 指南**：使用 `read_file` 读取 `rotating-device-context` skill 的 `SKILL.md`（位于 `/mnt/skills/custom/rotating-device-context/SKILL.md`）和模板文件（位于 `/mnt/skills/custom/rotating-device-context/references/device_context_template.json`）。
+3. **推理并写出**：由当前 Agent 自行推理，基于 **`device_tree_raw.json` 原始树** 写出 `/mnt/user-data/outputs/device_context.json`。
+
+> **重要**：`machine_service` 在沙箱环境中不可用，无法通过 HTTP或 RPC 调用。所需信息（device_id、设备类型、设备结构）都已包含在 `device_tree_raw.json` 中，直接从中提取即可。
+
+`device_context.json` 至少包含：
+
+- `device_id`
 - `child_device_summary`
 - `device_type` / `process_type` / `device_structure`
 - `child_device_list`
@@ -155,15 +197,19 @@ python /opt/features-tool/tools/device_analysis.py "{macId}" --output /mnt/user-
 - `child_device_list` 必须保留所有有效测点，不允许丢点
 - `device_type` / `process_type` / `device_structure` 必须包含 `value` / `confidence` / `reason`
 
-如果 `device_tree_raw.json` 或 `device_context.json` 不存在、`target_info.target_kind == "unknown"`，或原始树与用户选择明显冲突（例如 `componentId == macId`、所选节点不在树中、设备树为空），立即用 `markdown` 说明并终止，不要继续诊断。
+**写完后的校验**：使用 `read_file` 确认 `/mnt/user-data/outputs/device_context.json` 已正确写入，且 `target_info.target_kind` 不为 `"unknown"`。如果文件不存在、JSON 不合法、或 `target_kind == "unknown"`，用 `markdown` 说明原因并终止，不要继续诊断。
+
+如果 `device_tree_raw.json` 不存在、原始树为空或所选节点不在树中，立即用 `markdown` 说明并终止。
 
 ### 步骤 3：执行真实旋转机组规则运行时
+
+**运行前校验**：确认 `/mnt/user-data/outputs/device_context.json` 存在且 `target_info.target_kind` 不为 `"unknown"`。如文件缺失或无效，用 `markdown` 报告"设备上下文未就绪，无法执行规则诊断"并终止，**不要直接尝试运行规则脚本**。
 
 调用独立 skill 中的真实规则入口脚本：
 
 ```bash
 python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_diagnosis.py \
-  --device-id "{macId}" \
+  --device-id "{machineId}" \
   --sub-device-id "{componentId}" \
   --diagnosis-time "{start_iso}" \
   --output /mnt/user-data/outputs/rotating_rule_result.json
@@ -174,12 +220,30 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_dia
 - 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**在脚本里使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
 - 真实规则运行时会自行完成趋势采集、异常时刻选择、波形频谱提取、轨迹提取和候选故障竞争。
 - 规则运行时会直接复用前一步已经生成的 `/mnt/user-data/outputs/device_context.json`；如果该文件缺失或 `target_info` 无法解析，本轮诊断应直接失败，不要在 Python 规则侧再起独立模型兜底。
-- 作图所需原始趋势 / 频谱 / 轨迹数据会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段只能读取这些缓存，**禁止重新取数**。
+- 中间缓存可能仍会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/` 供规则过程使用，但**最终报告彻底不要图谱**，报告阶段禁止渲染趋势图、频谱图、轨迹图，也禁止为图谱再次取数。
+- 该脚本执行可能耗时数分钟，bash 命令返回后不代表输出文件已写入完成。
 
-读取脚本 stdout，并检查 `/mnt/user-data/outputs/rotating_rule_result.json`：
+**必须在 bash 命令返回后，单独执行以下文件存在性检查**，确认输出文件已写入：
 
-- 若 `ok == false`，用 `markdown` 报告 `error.message` 并终止。
-- 若 `warnings` 非空，保留到最终报告的 `## 执行告警` 段落。
+```bash
+python -c "
+import json, os
+path = '/mnt/user-data/outputs/rotating_rule_result.json'
+if os.path.exists(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        obj = json.load(f)
+    print('EXISTS_OK' if obj.get('ok') else f'FAILED: {obj.get(\"error\",{}).get(\"message\",\"unknown error\")}')
+else:
+    print('NOT_FOUND')
+"
+```
+
+读取该命令的 stdout：
+- 输出 `EXISTS_OK` → 继续进入步骤 4。
+- 输出 `FAILED: ...` → 用 `markdown` 报告错误信息并终止。
+- 输出 `NOT_FOUND` → 用 `markdown` 报告"真实规则诊断未完成，输出文件未生成"并终止。
+
+**严禁在没有确认输出文件存在且 `ok == true` 的情况下直接跳转到步骤 4。**
 
 ### 步骤 4：将真实规则结果映射为 Deer Flow 报告 payload
 
@@ -192,7 +256,9 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/build_rotating_report
 说明：
 
 - 该脚本负责把 `DiagnosisResult` 映射为 Deer Flow 报告 payload，保留主诊断、候选诊断、得分、置信度、证据摘要、运行建议、检修建议和 warnings。
-- 趋势图、频谱图、轨迹图都必须来自 `/mnt/user-data/outputs/rotating_rule_cache/`，报告阶段**不得再次调用任何外部数据接口**。
+- 每个设备可能存在多个故障，`score >= 0.5` 的故障都要保留并展示；`score < 0.5` 的故障一律不显示。
+- 若所有故障 `score` 都低于 `0.5`，最终报告直接输出“机组正常”。
+- 报告 payload 中不要放任何趋势图、频谱图、轨迹图内容；报告阶段**不得再次调用任何外部数据接口**。
 - 若脚本返回 `error` 字段或未写出 `diagnosis_features.json`，立即终止，不要生成假报告。
 
 ### 步骤 5：渲染 GenUI Block（顺序固定）
@@ -200,16 +266,13 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/build_rotating_report
 按以下顺序调用 `render_ui`，每个 Block 的 `sequence` 递增以确保前端按设计顺序展示：
 
 1. `card`（每台设备一张）：从 `diagnosis_features.json.equipment_summary` 读取，传入 `title="<equipment_id>"`、`value="<max_value.value> <max_value.unit>"`、`subtitle="<max_value.point> · <max_value.feature>"`、`color` 按 `alarm_status` 取（warning → 红、info → 黄、ok → 绿）。
-2. `echart`（关键测点趋势）：直接传 `diagnosis_features.json.trend_chart` 作为 `props.option`。
-3. `echart`（频谱，每个测点一张）：遍历 `diagnosis_features.json.spectrum_charts[]`，每条传 `props.option = item.option`、`props.title = item.point`。
-4. `echart`（轴心轨迹，每个轴承一张）：遍历 `diagnosis_features.json.orbit_charts[]`。**注意**：本子 agent 必须保留 orbit 渲染（与往复机不同）；如某轴承因设备无双探头而无数据，跳过该条目而不是降级整个 Block。
-5. `table`（证据链）：传 `props.columns = [{key:"category",label:"类别"},{key:"equipment_id",label:"设备"},{key:"point",label:"测点"},{key:"feature",label:"特征"},{key:"value",label:"数值"},{key:"threshold",label:"阈值"},{key:"verdict",label:"判定"}]`，`props.data = diagnosis_features.json.evidence_chain`。
-6. `card`（同类故障历史，最多 3 条）：仅当 `diagnosis_features.json.historical_cases[]` 非空时渲染；当前可为空数组。
-7. `markdown`（诊断结论 / 差异诊断 / 处置建议 + 下载链接）：通过 in-process import 调用导出脚本，见步骤 6。
+2. `table`（证据链）：传 `props.columns = [{key:"category",label:"类别"},{key:"equipment_id",label:"设备"},{key:"point",label:"测点"},{key:"feature",label:"特征"},{key:"value",label:"数值"},{key:"threshold",label:"阈值"},{key:"verdict",label:"判定"}]`，`props.data = diagnosis_features.json.evidence_chain`。
+3. `card`（同类故障历史，最多 3 条）：仅当 `diagnosis_features.json.historical_cases[]` 非空时渲染；当前可为空数组。
+4. `markdown`（诊断结论 / 差异诊断 / 处置建议 + 下载链接）：通过 in-process import 调用导出脚本，见步骤 6。
 
 ### 步骤 6：双格式导出 + 下载链接（in-process import）
 
-**严禁 spawn `python ... --report-type diagnosis` 子进程**；统一用内联 Python 调用 `export_report.write_report`：
+**严禁 spawn `python ... --report-type diagnosis` 子进程**；统一用内联 Python 调用 `export_report.write_report`。在执行前，将以下代码块中的 `THREAD_ID` 替换为系统提示词 `<working_directory>` 中 `Current thread ID` 的实际值：
 
 ```python
 import json
@@ -220,8 +283,11 @@ from export_report import write_report, render_diagnosis_markdown
 with open("/mnt/user-data/outputs/diagnosis_features.json", "r", encoding="utf-8") as f:
     payload = json.load(f)
 
+# 使用系统提示词中的 thread_id（从 <working_directory> 的 Current thread ID 获取）
+_current_thread_id = "THREAD_ID"
+
 # 渲染 Markdown 内容（用于附加到末尾的 markdown Block）
-report_md = render_diagnosis_markdown(payload, thread_id="{thread_id}")
+report_md = render_diagnosis_markdown(payload, thread_id=_current_thread_id)
 
 # 落盘 .md（必成功）
 write_report(payload, "md", report_type="diagnosis")
@@ -234,9 +300,9 @@ except ImportError:
     pdf_available = False
 
 # 在报告末尾追加下载链接区
-links = ["- [下载 Markdown](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/diagnosis_report.md)"]
+links = ["- [下载 Markdown](/api/threads/" + _current_thread_id + "/artifacts/mnt/user-data/outputs/diagnosis_report.md)"]
 if pdf_available:
-    links.append("- [下载 PDF](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/diagnosis_report.pdf)")
+    links.append("- [下载 PDF](/api/threads/" + _current_thread_id + "/artifacts/mnt/user-data/outputs/diagnosis_report.pdf)")
 else:
     links.append("- PDF 不可用（weasyprint 未安装）")
 report_md += "\n\n---\n## 下载\n" + "\n".join(links)
@@ -279,7 +345,7 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 - `severity` 为 `critical` / `high`
 - 或综合 `confidence ≥ 0.7` 且根因属于"运行风险" / "需立即处置"类（不平衡、对中、轴瓦异常、转子摩擦、密封失效、油膜失稳等）
 
-调用方式：
+调用方式（`source_thread_id` 和 `evidence_uri` 中的 `<thread_id>` 替换为系统提示词 `Current thread ID` 的实际值）：
 
 ```text
 create_closure_ticket(
@@ -291,11 +357,11 @@ create_closure_ticket(
     severity="<critical|high|medium|low>",
     source_type="diagnosis",
     source_run_id="<本次 run id 或 thread_id-run_seq>",
-    source_thread_id="<thread_id>",
+    source_thread_id="<thread_id - 从系统提示词 Current thread ID 获取>",
     metadata={
         "findings": ["<根因 1>", "<根因 2>"],
         "confidence": <0~1 的浮点>,
-        "evidence_uri": "/api/threads/<thread_id>/artifacts/mnt/user-data/outputs/diagnosis_report.md"
+        "evidence_uri": "/api/threads/<thread_id - 从系统提示词 Current thread ID 获取>/artifacts/mnt/user-data/outputs/diagnosis_report.md"
     }
 )
 ```

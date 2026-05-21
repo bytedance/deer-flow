@@ -429,6 +429,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
+    thread_id = cfg.get("thread_id", "")
     agent_name = validate_agent_name(cfg.get("agent_name"))
     tenant_id = cfg.get("tenant_id", "default")
 
@@ -516,6 +517,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 max_concurrent_subagents=max_concurrent_subagents,
                 available_skills=set(["bootstrap"]),
                 app_config=resolved_app_config,
+                thread_id=thread_id,
             ),
             state_schema=ThreadState,
         )
@@ -552,6 +554,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
             exclude_tools=agent_config.exclude_tools if agent_config else None,
             app_config=resolved_app_config,
+            thread_id=thread_id,
         ),
         state_schema=ThreadState,
     )
