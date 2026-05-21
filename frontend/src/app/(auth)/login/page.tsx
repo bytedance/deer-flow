@@ -10,6 +10,7 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { getBackendBaseURL } from "@/core/config";
 
 /**
  * Validate next parameter
@@ -71,7 +72,7 @@ export default function LoginPage() {
   useEffect(() => {
     let cancelled = false;
 
-    void fetch("/api/v1/auth/setup-status")
+    void fetch(`${getBackendBaseURL()}/api/v1/auth/setup-status`)
       .then((r) => r.json())
       .then((data: { needs_setup?: boolean }) => {
         if (!cancelled && data.needs_setup) {
@@ -94,8 +95,8 @@ export default function LoginPage() {
 
     try {
       const endpoint = isLogin
-        ? "/api/v1/auth/login/local"
-        : "/api/v1/auth/register";
+        ? `${getBackendBaseURL()}/api/v1/auth/login/local`
+        : `${getBackendBaseURL()}/api/v1/auth/register`;
       const body = isLogin
         ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
         : JSON.stringify({ email, password });

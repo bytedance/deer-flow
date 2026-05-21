@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
+import { getBackendBaseURL } from "@/core/config";
 
 import { WorkspaceContent } from "./workspace-content";
 
@@ -44,7 +45,7 @@ export default async function WorkspaceLayout({
               Retry
             </Link>
             <Link
-              href="/api/v1/auth/logout"
+              href={`${getBackendBaseURL()}/api/v1/auth/logout`}
               className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm"
             >
               Logout &amp; Reset
