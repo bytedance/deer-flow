@@ -28,11 +28,6 @@ MCP 服务器在 `extensions_config.json` 中配置，这个文件独立于 `con
       "args": ["-y", "@my-org/my-mcp-server"],
       "enabled": true
     },
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-      "enabled": true
-    },
     "sqlite": {
       "command": "uvx",
       "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
@@ -41,6 +36,15 @@ MCP 服务器在 `extensions_config.json` 中配置，这个文件独立于 `con
   }
 }
 ```
+
+<Callout type="warning">
+  不要为 DeerFlow 工作区文件引入 MCP filesystem server。DeerFlow 已提供按
+  thread 隔离的内置文件工具；重复引入路径语义不同的文件工具，会让 LLM
+  的工具选择和文件访问行为不稳定。DeerFlow 当前没有为 filesystem server
+  适配 MCP Roots 模式：不会发布按 thread 收窄的 MCP roots，也不会把{" "}
+  <code>/mnt/user-data/...</code> 这类沙箱路径映射成{" "}
+  <code>@modelcontextprotocol/server-filesystem</code> 可接受的路径。
+</Callout>
 
 每个服务器条目支持：
 
