@@ -200,42 +200,45 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 5. 把校验后的 `compare_with` 拼装为命令行 CSV：
    - 含 `none` → 传空串 `""`
    - 否则传 `previous_month` / `previous_year_month` / `previous_month,previous_year_month`（保持顺序）
-6. 根据设备选择情况选择调用方式（与日报/周报同策略）：
+6. **执行 query_monthly.py 拉取月度原始数据**（输出 `/mnt/user-data/outputs/monthly_data.json`）——根据设备选择情况选择以下命令之一执行：
+
    - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID，**同时使用 `--equipment-names` 传递设备名称**（顺序与 `--equipment` 保持一致）。
    - **选中设备数量 > 10 且等于某区域全量**：使用 `--type` / `--scope area` / `--scope-filter` 参数（脚本会自行从设备目录读取名称）。
    - **选中设备数量 > 10 但为跨区域混选**：使用 `--equipment` 并加上 `--aggregate` 标志（同样需要 `--equipment-names`）。
    - **选中设备数量 > 50**：强制 `--aggregate`，覆盖上述路径（同样需要 `--equipment-names`）。
 
-按区域或全部场景：
+   按区域或全部场景执行：
 
-```bash
-python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
-  --report-month "{validated.report_month}" \
-  --type "{validated.equipment_type}" \
-  --scope "{validated.equipment_scope}" \
-  --scope-filter "{validated.scope_filter}" \
-  --kpis "{validated.kpi_keys}" \
-  --compare "{csv_compare_basis}"
-```
+   ```bash
+   python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
+     --report-month "{validated.report_month}" \
+     --type "{validated.equipment_type}" \
+     --scope "{validated.equipment_scope}" \
+     --scope-filter "{validated.scope_filter}" \
+     --kpis "{validated.kpi_keys}" \
+     --compare "{csv_compare_basis}"
+   ```
 
-指定设备场景：
+   指定设备场景执行：
 
-```bash
-python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
-  --report-month "{validated.report_month}" \
-  --equipment "{validated.equipment_ids}" \
-  --equipment-names "{validated.equipment_labels}" \
-  --kpis "{validated.kpi_keys}" \
-  --compare "{csv_compare_basis}"
-```
+   ```bash
+   python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
+     --report-month "{validated.report_month}" \
+     --equipment "{validated.equipment_ids}" \
+     --equipment-names "{validated.equipment_labels}" \
+     --kpis "{validated.kpi_keys}" \
+     --compare "{csv_compare_basis}"
+   ```
 
-7. 调用月 KPI 计算脚本：
+   **执行完毕后必须验证**：检查标准输出是否包含 `"output"` 字段且不含 `"error"` 字段。若含 `error`，渲染 markdown 说明错误并停止，不要继续后续步骤。
 
-```bash
-python /mnt/skills/custom/data-analyst/scripts/monthly_kpi.py \
-  --input /mnt/user-data/outputs/monthly_data.json \
-  --output /mnt/user-data/outputs/monthly_kpi.json
-```
+7. 执行 monthly_kpi.py 计算月度 KPI（依赖上一步输出的 `monthly_data.json`）：
+
+   ```bash
+   python /mnt/skills/custom/data-analyst/scripts/monthly_kpi.py \
+     --input /mnt/user-data/outputs/monthly_data.json \
+     --output /mnt/user-data/outputs/monthly_kpi.json
+   ```
 
 8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
 
