@@ -229,6 +229,34 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_run_progress_preserves_omitted_fields(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_progress(
+            "r1",
+            total_input_tokens=40,
+            total_output_tokens=10,
+            total_tokens=50,
+            llm_call_count=1,
+            lead_agent_tokens=30,
+            subagent_tokens=20,
+            message_count=2,
+        )
+
+        await repo.update_run_progress("r1", total_tokens=60, last_ai_message="updated")
+
+        row = await repo.get("r1")
+        assert row["total_input_tokens"] == 40
+        assert row["total_output_tokens"] == 10
+        assert row["total_tokens"] == 60
+        assert row["llm_call_count"] == 1
+        assert row["lead_agent_tokens"] == 30
+        assert row["subagent_tokens"] == 20
+        assert row["message_count"] == 2
+        assert row["last_ai_message"] == "updated"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_run_progress_skips_terminal_runs(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="running")

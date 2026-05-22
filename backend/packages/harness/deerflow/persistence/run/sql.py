@@ -231,19 +231,20 @@ class RunRepository(RunStore):
         self,
         run_id: str,
         *,
-        total_input_tokens: int = 0,
-        total_output_tokens: int = 0,
-        total_tokens: int = 0,
-        llm_call_count: int = 0,
-        lead_agent_tokens: int = 0,
-        subagent_tokens: int = 0,
-        middleware_tokens: int = 0,
-        message_count: int = 0,
+        total_input_tokens: int | None = None,
+        total_output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        llm_call_count: int | None = None,
+        lead_agent_tokens: int | None = None,
+        subagent_tokens: int | None = None,
+        middleware_tokens: int | None = None,
+        message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
     ) -> None:
         """Update token usage + convenience fields while a run is still active."""
-        values: dict[str, Any] = {
+        values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
+        optional_counters = {
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
             "total_tokens": total_tokens,
@@ -252,8 +253,10 @@ class RunRepository(RunStore):
             "subagent_tokens": subagent_tokens,
             "middleware_tokens": middleware_tokens,
             "message_count": message_count,
-            "updated_at": datetime.now(UTC),
         }
+        for key, value in optional_counters.items():
+            if value is not None:
+                values[key] = value
         if last_ai_message is not None:
             values["last_ai_message"] = last_ai_message[:2000]
         if first_human_message is not None:
