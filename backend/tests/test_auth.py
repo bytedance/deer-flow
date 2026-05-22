@@ -8,6 +8,7 @@ import bcrypt
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from app.gateway.auth import create_access_token, decode_token, hash_password, verify_password
 from app.gateway.auth.models import User
@@ -19,6 +20,11 @@ from app.gateway.authz import (
     require_auth,
     require_permission,
 )
+
+
+class DeferredBodyRequest(BaseModel):
+    value: str
+
 
 # ── Password Hashing ────────────────────────────────────────────────────────
 
@@ -278,6 +284,26 @@ def test_require_permission_denies_wrong_permission():
             response = client.get("/test")
             assert response.status_code == 403
             assert "Permission denied" in response.json()["detail"]
+
+
+def test_require_permission_preserves_deferred_body_param_for_fastapi():
+    """Decorated routes should keep string-annotated Pydantic bodies as bodies."""
+    from fastapi import Request
+
+    app = FastAPI()
+
+    @app.post("/test")
+    @require_permission("threads", "write")
+    async def endpoint(body: "DeferredBodyRequest", request: Request):
+        return {"value": body.value}
+
+    route = next(route for route in app.routes if getattr(route, "path", "") == "/test")
+
+    assert len(route.dependant.body_params) == 1
+    body_param = route.dependant.body_params[0]
+    assert body_param.name == "body"
+    assert body_param.field_info.annotation is DeferredBodyRequest
+    assert "body" not in {param.name for param in route.dependant.query_params}
 
 
 # ── Weak JWT secret warning ──────────────────────────────────────────────────
