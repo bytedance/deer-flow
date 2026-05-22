@@ -3,11 +3,21 @@
 **Getters** (used by routers): raise 503 when a required dependency is
 missing, except ``get_store`` which returns ``None``.
 
+``AppConfig`` is intentionally *not* cached on ``app.state``. Routers and the
+run path resolve it through :func:`deerflow.config.app_config.get_app_config`,
+which performs mtime-based hot reload, so edits to ``config.yaml`` take
+effect on the next request without a process restart. The engines created in
+:func:`langgraph_runtime` (stream bridge, persistence, checkpointer, store,
+run-event store) accept a ``startup_config`` snapshot — they are
+restart-required by design and stay bound to that snapshot to keep the live
+process consistent with itself.
+
 Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -15,11 +25,13 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -30,21 +42,55 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-def get_config(request: Request) -> AppConfig:
-    """Return the app-scoped ``AppConfig`` stored on ``app.state``."""
-    config = getattr(request.app.state, "config", None)
-    if config is None:
-        raise HTTPException(status_code=503, detail="Configuration not available")
-    return config
+def get_config() -> AppConfig:
+    """Return the freshest ``AppConfig`` for the current request.
+
+    Routes through :func:`deerflow.config.app_config.get_app_config`, which
+    honours runtime ``ContextVar`` overrides and reloads ``config.yaml`` from
+    disk when its mtime changes. ``AppConfig`` is not cached on ``app.state``
+    at all — the only startup-time snapshot lives as a local
+    ``startup_config`` variable inside ``lifespan()`` and is passed
+    explicitly into :func:`langgraph_runtime` for the engines that are
+    restart-required by design. Routing every request through
+    :func:`get_app_config` closes the bytedance/deer-flow issue #3107 BUG-001
+    split-brain where the worker / lead-agent thread saw a stale startup
+    snapshot.
+
+    Any failure to materialise the config (missing file, permission denied,
+    YAML parse error, validation error) is reported as 503 — semantically
+    "the gateway cannot serve requests without a usable configuration" — and
+    logged with the original exception so operators have something to debug.
+    """
+    try:
+        return get_app_config()
+    except Exception as exc:  # noqa: BLE001 - request boundary: log and degrade gracefully
+        logger.exception("Failed to load AppConfig at request time")
+        raise HTTPException(status_code=503, detail="Configuration not available") from exc
 
 
 @asynccontextmanager
-async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
+async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
     """Bootstrap and tear down all LangGraph runtime singletons.
+
+    ``startup_config`` is the ``AppConfig`` snapshot taken once during
+    ``lifespan()`` for one-shot infrastructure bootstrap. The engines and
+    stores constructed here (stream bridge, persistence engine, checkpointer,
+    store, run-event store) are restart-required by design — they hold live
+    connections, file handles, or singleton providers — so they bind to this
+    snapshot and survive across `config.yaml` edits. Request-time consumers
+    must still go through :func:`get_config` for any field that should be
+    hot-reloadable. See ``backend/CLAUDE.md`` "Config Hot-Reload Boundary".
+
+    The matching ``run_events_config`` is frozen onto ``app.state`` so
+    :func:`get_run_context` pairs a freshly-loaded ``AppConfig`` with the
+    *startup-time* run-events configuration the underlying ``event_store``
+    was built from — otherwise the runtime could end up combining a live
+    new ``run_events_config`` with an event store still bound to the
+    previous backend.
 
     Usage in ``app.py``::
 
-        async with langgraph_runtime(app):
+        async with langgraph_runtime(app, startup_config):
             yield
     """
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -53,9 +99,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
     from deerflow.runtime.events.store import make_run_event_store
 
     async with AsyncExitStack() as stack:
-        config = getattr(app.state, "config", None)
-        if config is None:
-            raise RuntimeError("langgraph_runtime() requires app.state.config to be initialized")
+        config = startup_config
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
@@ -84,8 +128,12 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
 
-        # Run event store (has its own factory with config-driven backend selection)
+        # Run event store. The store and the matching ``run_events_config`` are
+        # both frozen at startup so ``get_run_context`` does not combine a
+        # freshly-reloaded ``AppConfig.run_events`` with a store still bound to
+        # the previous backend.
         run_events_config = getattr(config, "run_events", None)
+        app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
@@ -139,16 +187,20 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
-    Returns a *base* context with infrastructure dependencies.
+    Returns a *base* context with infrastructure dependencies. The
+    ``app_config`` field is resolved live so per-run fields (e.g.
+    ``models[*].max_tokens``) follow ``config.yaml`` edits; the
+    ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
+    captured in :func:`langgraph_runtime` so callers never see a store bound
+    to one backend paired with a config pointing at another.
     """
-    config = get_config(request)
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
         event_store=get_run_event_store(request),
-        run_events_config=getattr(config, "run_events", None),
+        run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
-        app_config=config,
+        app_config=get_config(),
     )
 
 

@@ -17,7 +17,7 @@ from fastapi import FastAPI
 
 
 @asynccontextmanager
-async def _noop_langgraph_runtime(_app):
+async def _noop_langgraph_runtime(_app, _startup_config):
     yield
 
 
