@@ -16,7 +16,6 @@ import {
 import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractTextFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -28,8 +27,7 @@ import {
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
-import { useUpdateSubtask } from "@/core/tasks/context";
-import { parseSubtaskResult } from "@/core/tasks/subtask-result";
+import { buildSubtaskMapFromMessages } from "@/core/tasks/derive";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -177,7 +175,6 @@ export function MessageList({
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
-  const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
@@ -194,6 +191,18 @@ export function MessageList({
         thread.getMessagesMetadata,
       ),
     [messages, thread.getMessagesMetadata, thread.isLoading],
+  );
+
+  // `derivedSubtasks` is computed once via `useMemo` from the thread
+  // message list. `SubtaskCard` receives each entry as a `task` prop.
+  // The previous implementation called `updateSubtask` *during render*
+  // from the per-message loop below, which mutated the shared context
+  // object without triggering a re-render and is the React-19 Strict-Mode
+  // warning pattern #3147 removes. The SSE-driven `latestMessage` path
+  // still flows through context (see `useUpdateLatestMessage`).
+  const derivedSubtasks = useMemo(
+    () => buildSubtaskMapFromMessages(messages),
+    [messages],
   );
 
   const renderAssistantCopyButton = useCallback(
@@ -354,29 +363,19 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:subagent") {
+            // The subtask context is fed by `derivedSubtasks` / the effect
+            // above — render only consumes it. Collect the per-group task
+            // *references* (used downstream to build subtask cards and
+            // count rendered subtasks) directly from the AI tool_calls so
+            // we do not mutate any shared state here.
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
-              if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
-                  if (toolCall.name === "task") {
-                    const task: Subtask = {
-                      id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
-                      status: "in_progress",
-                    };
-                    updateSubtask(task);
-                    tasks.add(task);
-                  }
-                }
-              } else if (message.type === "tool") {
-                const taskId = message.tool_call_id;
-                if (taskId) {
-                  const parsed = parseSubtaskResult(
-                    extractTextFromMessage(message),
-                  );
-                  updateSubtask({ id: taskId, ...parsed });
+              if (message.type !== "ai") continue;
+              for (const toolCall of message.tool_calls ?? []) {
+                if (toolCall.name !== "task" || !toolCall.id) continue;
+                const task = derivedSubtasks[toolCall.id];
+                if (task) {
+                  tasks.add(task);
                 }
               }
             }
@@ -417,10 +416,13 @@ export function MessageList({
                 ?.filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
+                if (!taskId) continue;
+                const taskForCard = derivedSubtasks[taskId];
+                if (!taskForCard) continue;
                 results.push(
                   <SubtaskCard
                     key={"task-group-" + taskId}
-                    taskId={taskId!}
+                    task={taskForCard}
                     isLoading={thread.isLoading}
                   />,
                 );
