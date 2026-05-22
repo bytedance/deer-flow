@@ -801,7 +801,7 @@ summarization:
   trigger:
     # Trigger when token count reaches 15564
     - type: tokens
-      value: 15564
+      value: 32000
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50
