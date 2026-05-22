@@ -171,6 +171,27 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_run_progress_keeps_status_running(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_progress(
+            "r1",
+            total_input_tokens=40,
+            total_output_tokens=10,
+            total_tokens=50,
+            llm_call_count=1,
+            message_count=2,
+            last_ai_message="partial answer",
+        )
+        row = await repo.get("r1")
+        assert row["status"] == "running"
+        assert row["total_tokens"] == 50
+        assert row["llm_call_count"] == 1
+        assert row["message_count"] == 2
+        assert row["last_ai_message"] == "partial answer"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")
@@ -222,6 +243,28 @@ class TestRunRepository:
             "lead_agent": 120,
             "subagent": 25,
             "middleware": 5,
+        }
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_can_include_active_runs(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_run_completion("success-run", status="success", total_tokens=100, lead_agent_tokens=100)
+        await repo.put("running-run", thread_id="t1", status="running")
+        await repo.update_run_progress("running-run", total_tokens=25, lead_agent_tokens=20, subagent_tokens=5)
+
+        without_active = await repo.aggregate_tokens_by_thread("t1")
+        with_active = await repo.aggregate_tokens_by_thread("t1", include_active=True)
+
+        assert without_active["total_tokens"] == 100
+        assert without_active["total_runs"] == 1
+        assert with_active["total_tokens"] == 125
+        assert with_active["total_runs"] == 2
+        assert with_active["by_caller"] == {
+            "lead_agent": 120,
+            "subagent": 5,
+            "middleware": 0,
         }
         await _cleanup()
 

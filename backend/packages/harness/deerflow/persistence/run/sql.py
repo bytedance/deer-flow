@@ -227,9 +227,45 @@ class RunRepository(RunStore):
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()
 
-    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
+    async def update_run_progress(
+        self,
+        run_id: str,
+        *,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+    ) -> None:
+        """Update token usage + convenience fields while a run is still active."""
+        values: dict[str, Any] = {
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tokens": total_tokens,
+            "llm_call_count": llm_call_count,
+            "lead_agent_tokens": lead_agent_tokens,
+            "subagent_tokens": subagent_tokens,
+            "middleware_tokens": middleware_tokens,
+            "message_count": message_count,
+            "updated_at": datetime.now(UTC),
+        }
+        if last_ai_message is not None:
+            values["last_ai_message"] = last_ai_message[:2000]
+        if first_human_message is not None:
+            values["first_human_message"] = first_human_message[:2000]
+        async with self._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            await session.commit()
+
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage via a single SQL GROUP BY query."""
-        _completed = RunRow.status.in_(("success", "error"))
+        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
         model_name = func.coalesce(RunRow.model_name, "unknown")
 
