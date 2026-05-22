@@ -55,12 +55,60 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from _query_monthly_demo import (  # noqa: E402  — must follow sys.path bootstrap
-    _demo_improvement_tracking,
-    _demo_maintenance,
-    _demo_targets,
-    _deterministic_int,
-)
+# ---------------------------------------------------------------------------
+# Default target thresholds for达标率 computation.
+# These are reference configuration values (not per-run demo data).
+# ---------------------------------------------------------------------------
+
+def _default_targets() -> dict[str, dict]:
+    return {
+        "runtime_rate": {"min": 0.85},
+        "vibration_level": {"max": 4.0},
+        "outlet_pressure": {"min": 0.7, "max": 1.5},
+        "bearing_temp": {"max": 75.0},
+    }
+
+
+def _compute_maintenance(daily_entries: list[dict], day_count: int) -> dict:
+    """Compute maintenance stats from real KPI data.
+
+    Uses ``alarm_count`` for failure counts and ``runtime_rate`` for
+    uptime/downtime. Falls back to null when those KPIs weren't fetched.
+    """
+    total_failures = 0
+    runtime_rates: list[float] = []
+    for entry in daily_entries:
+        kpis = entry.get("kpis", {})
+        ac = kpis.get("alarm_count")
+        if ac is not None:
+            total_failures += int(ac)
+        rt = kpis.get("runtime_rate")
+        if rt is not None:
+            runtime_rates.append(rt)
+
+    avg_runtime = sum(runtime_rates) / len(runtime_rates) if runtime_rates else None
+
+    if avg_runtime is not None:
+        total_uptime_hours = round(day_count * 24 * avg_runtime, 2)
+        total_downtime_minutes = round(day_count * 24 * 60 * (1 - avg_runtime))
+    else:
+        total_uptime_hours = None
+        total_downtime_minutes = None
+
+    mtbf_hours = (
+        round(total_uptime_hours / total_failures, 2)
+        if (total_failures > 0 and total_uptime_hours is not None)
+        else None
+    )
+
+    return {
+        "total_failures": total_failures,
+        "total_uptime_hours": total_uptime_hours,
+        "total_downtime_minutes": total_downtime_minutes,
+        "total_repair_minutes": None,
+        "mtbf_hours": mtbf_hours,
+        "mttr_hours": None,
+    }
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 OUTPUT_FILENAME = "monthly_data.json"
@@ -398,9 +446,9 @@ def fetch_month_with_provenance(
         )
 
     aggregated = _weighted_aggregate_from_weekly(weekly, kpi_keys)
-    aggregated["kpis_target_rate"] = _kpis_target_rate(daily_entries, kpi_keys, _demo_targets())
+    aggregated["kpis_target_rate"] = _kpis_target_rate(daily_entries, kpi_keys, _default_targets())
 
-    maintenance = _demo_maintenance(report_month, day_count, equipment_ids)
+    maintenance = _compute_maintenance(daily_entries, day_count)
     critical_events = [
         {
             "time": a.get("time", ""),
@@ -408,17 +456,14 @@ def fetch_month_with_provenance(
             "equipment": a.get("equipment", ""),
             "level": a.get("level", "critical"),
             "message": a.get("message", ""),
-            # Maintenance dataset placeholder; real CMMS will overwrite both.
-            "duration_minutes": _deterministic_int(
-                f"crit|{a.get('time', '')}|{a.get('equipment_id', a.get('equipment', ''))}", 30, 180
-            ),
+            "duration_minutes": None,
             "resolved": True,
         }
         for a in union_alarms
         if a.get("level") == "critical"
     ][:50]
 
-    improvement_tracking = _demo_improvement_tracking(report_month, equipment_ids)
+    improvement_tracking: list[dict] = []
 
     # Sort alarms by time for deterministic output.
     union_alarms.sort(key=lambda a: a.get("time", ""))
