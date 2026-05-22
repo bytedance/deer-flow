@@ -156,7 +156,7 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
@@ -235,7 +235,10 @@ class RunRepository(RunStore):
         first_human_message: str | None = None,
         error: str | None = None,
     ) -> bool:
-        """Update status + token usage + convenience fields on run completion."""
+        """Update status + token usage + convenience fields on run completion.
+
+        Returns ``False`` when no run row matched the requested ``run_id``.
+        """
         values: dict[str, Any] = {
             "status": status,
             "total_input_tokens": total_input_tokens,
