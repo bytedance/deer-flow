@@ -173,6 +173,7 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
             "pump": "2k",
         },
         "derivation": "mean",
+        "value_scale": 0.01,
     },
     "valve_temp": {
         "position_types": _RM_RC_POSITION_TYPES,
@@ -189,6 +190,7 @@ _KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
             "reciprocating_machinery": "9k",
         },
         "derivation": "mean",
+        "value_scale": 0.01,
     },
     "flow_rate": {
         "position_types": _RM_RC_POSITION_TYPES,
@@ -487,7 +489,12 @@ def _aggregate_trend_to_kpi(
     feature = spec["feature"]
     feature_candidates = _feature_candidates_for_spec(spec)
     derivation = spec["derivation"]
-    values = [v for v in (_row_first_value(r, feature_candidates) for r in rows) if v is not None]
+    scale = spec.get("value_scale", 1.0)
+    values = [
+        v * scale if scale != 1.0 else v
+        for v in (_row_first_value(r, feature_candidates) for r in rows)
+        if v is not None
+    ]
 
     if derivation == "mean":
         if not values:
