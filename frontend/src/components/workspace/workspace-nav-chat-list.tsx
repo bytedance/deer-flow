@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowRightIcon,
   BookOpenIcon,
   BotIcon,
   BugIcon,
@@ -28,11 +29,14 @@ import {
 import { type Agent, type NavItem, useAgentChildren, useAgents } from "@/core/agents";
 import { useClosureRefresh, useClosureSummary } from "@/core/closed-loop";
 import { useI18n } from "@/core/i18n/hooks";
+import { useReportThreads } from "@/core/report-templates";
+import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { AgentChildSelector } from "./agent-child-selector";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
+const REPORT_THREADS_KEY = "sidebar-report-threads-collapsed";
 
 const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   FileText: FileTextIcon,
@@ -166,6 +170,16 @@ export function WorkspaceNavChatList() {
 
         {dynamicNavItems.map((item) => {
           const Icon = NAV_ICON_MAP[item.icon] ?? FileTextIcon;
+          if (item.path === "/workspace/report-runs") {
+            return (
+              <ReportHistoryNavItem
+                key={item.key}
+                icon={Icon}
+                label={item.label}
+                path={item.path}
+              />
+            );
+          }
           return (
             <SidebarMenuItem key={item.key}>
               <SidebarMenuButton
@@ -231,6 +245,94 @@ function ClosedLoopNavItem({ active }: { active: boolean }) {
           )}
         </Link>
       </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
+function ReportHistoryNavItem({
+  icon: Icon,
+  label,
+  path,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  path: string;
+}) {
+  const pathname = usePathname();
+  const { threads } = useReportThreads(5);
+  const [open, setOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(REPORT_THREADS_KEY) !== "true";
+  });
+
+  useEffect(() => {
+    localStorage.setItem(REPORT_THREADS_KEY, open ? "false" : "true");
+  }, [open]);
+
+  if (threads.length === 0) {
+    return (
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          isActive={pathname.startsWith(path)}
+          asChild
+        >
+          <Link className="text-muted-foreground" href={path}>
+            <Icon className="size-4" />
+            <span>{label}</span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    );
+  }
+
+  return (
+    <SidebarMenuItem>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger asChild>
+          <SidebarMenuButton isActive={pathname.startsWith(path)}>
+            <Icon className="size-4" />
+            <span className="flex-1 text-left">{label}</span>
+            <ChevronDownIcon
+              className={cn(
+                "size-4 transition-transform",
+                !open && "-rotate-90",
+              )}
+            />
+          </SidebarMenuButton>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenu className="ml-3 border-l pl-2">
+            {threads.map((thread) => (
+              <SidebarMenuItem key={thread.thread_id}>
+                <SidebarMenuButton
+                  isActive={pathname === pathOfThread(thread)}
+                  asChild
+                >
+                  <Link
+                    className="text-muted-foreground"
+                    href={pathOfThread(thread)}
+                  >
+                    <span className="text-xs truncate">
+                      {titleOfThread(thread)}
+                    </span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
+            <SidebarMenuItem>
+              <SidebarMenuButton asChild>
+                <Link
+                  className="text-muted-foreground text-xs"
+                  href={`${path}?tab=chats`}
+                >
+                  <ArrowRightIcon className="size-3" />
+                  <span>查看全部</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </CollapsibleContent>
+      </Collapsible>
     </SidebarMenuItem>
   );
 }

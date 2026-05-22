@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,9 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { getAPIClient } from "@/core/api";
+import { useAgents } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { collectReportAgentNames } from "@/core/report-templates";
 import {
   exportThreadAsJSON,
   exportThreadAsMarkdown,
@@ -67,7 +69,24 @@ export function RecentChatList() {
       thread_id: string;
       agent_name?: string;
     }>();
+  const { agents } = useAgents();
   const { data: threads = [] } = useThreads();
+
+  const reportAgentNames = useMemo(
+    () => collectReportAgentNames(agents),
+    [agents],
+  );
+
+  const nonReportThreads = useMemo(
+    () =>
+      threads.filter((t) => {
+        const agentName = t.metadata?.agent_name;
+        return (
+          typeof agentName !== "string" || !reportAgentNames.has(agentName)
+        );
+      }),
+    [threads, reportAgentNames],
+  );
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -80,21 +99,21 @@ export function RecentChatList() {
     (threadId: string) => {
       deleteThread({ threadId });
       if (threadId === threadIdFromPath) {
-        const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
+        const threadIndex = nonReportThreads.findIndex((t) => t.thread_id === threadId);
         let nextThreadPath = pathOfThread("new", {
           agent_name: agentNameFromPath,
         });
         if (threadIndex > -1) {
-          if (threads[threadIndex + 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex + 1]!);
-          } else if (threads[threadIndex - 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex - 1]!);
+          if (nonReportThreads[threadIndex + 1]) {
+            nextThreadPath = pathOfThread(nonReportThreads[threadIndex + 1]!);
+          } else if (nonReportThreads[threadIndex - 1]) {
+            nextThreadPath = pathOfThread(nonReportThreads[threadIndex - 1]!);
           }
         }
         void router.push(nextThreadPath);
       }
     },
-    [agentNameFromPath, deleteThread, router, threadIdFromPath, threads],
+    [agentNameFromPath, deleteThread, router, threadIdFromPath, nonReportThreads],
   );
 
   const handleRenameClick = useCallback(
@@ -159,7 +178,7 @@ export function RecentChatList() {
     [t],
   );
 
-  if (threads.length === 0) {
+  if (nonReportThreads.length === 0) {
     return null;
   }
   return (
@@ -173,7 +192,7 @@ export function RecentChatList() {
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+              {nonReportThreads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 return (
                   <SidebarMenuItem
