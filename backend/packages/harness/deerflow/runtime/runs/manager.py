@@ -144,6 +144,9 @@ class RunManager:
             self._runs[run_id] = record
             try:
                 await self._persist_new_run_to_store(record)
+            except asyncio.CancelledError:
+                self._runs.pop(run_id, None)
+                raise
             except Exception:
                 self._runs.pop(run_id, None)
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
@@ -348,6 +351,9 @@ class RunManager:
             self._runs[run_id] = record
             try:
                 await self._persist_new_run_to_store(record)
+            except asyncio.CancelledError:
+                self._runs.pop(run_id, None)
+                raise
             except Exception:
                 self._runs.pop(run_id, None)
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
