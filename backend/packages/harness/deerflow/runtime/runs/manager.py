@@ -53,24 +53,27 @@ class RunManager:
         self._lock = asyncio.Lock()
         self._store = store
 
-    async def _persist_to_store(self, record: RunRecord) -> None:
-        """Best-effort persist run record to backing store."""
+    async def _persist_new_run_to_store(self, record: RunRecord) -> None:
+        """Persist a newly created run record to the backing store.
+
+        Initial run creation is part of the run visibility boundary: callers
+        should not observe a run in memory unless its backing store row exists.
+        Unlike follow-up status/model updates, failures are propagated so the
+        caller can treat creation as failed.
+        """
         if self._store is None:
             return
-        try:
-            await self._store.put(
-                record.run_id,
-                thread_id=record.thread_id,
-                assistant_id=record.assistant_id,
-                status=record.status.value,
-                multitask_strategy=record.multitask_strategy,
-                metadata=record.metadata or {},
-                kwargs=record.kwargs or {},
-                created_at=record.created_at,
-                model_name=record.model_name,
-            )
-        except Exception:
-            logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+        await self._store.put(
+            record.run_id,
+            thread_id=record.thread_id,
+            assistant_id=record.assistant_id,
+            status=record.status.value,
+            multitask_strategy=record.multitask_strategy,
+            metadata=record.metadata or {},
+            kwargs=record.kwargs or {},
+            created_at=record.created_at,
+            model_name=record.model_name,
+        )
 
     async def _persist_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Best-effort persist a status transition to the backing store."""
@@ -139,7 +142,12 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
-        await self._persist_to_store(record)
+            try:
+                await self._persist_new_run_to_store(record)
+            except Exception:
+                self._runs.pop(run_id, None)
+                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                raise
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -317,16 +325,8 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
-                for r in inflight:
-                    r.abort_action = multitask_strategy
-                    r.abort_event.set()
-                    if r.task is not None and not r.task.done():
-                        r.task.cancel()
-                    r.status = RunStatus.interrupted
-                    r.updated_at = now
-                    interrupted_run_ids.append(r.run_id)
                 logger.info(
-                    "Cancelled %d inflight run(s) on thread %s (strategy=%s)",
+                    "Preparing to cancel %d inflight run(s) on thread %s (strategy=%s)",
                     len(inflight),
                     thread_id,
                     multitask_strategy,
@@ -346,10 +346,25 @@ class RunManager:
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            try:
+                await self._persist_new_run_to_store(record)
+            except Exception:
+                self._runs.pop(run_id, None)
+                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                raise
+
+            if multitask_strategy in ("interrupt", "rollback") and inflight:
+                for r in inflight:
+                    r.abort_action = multitask_strategy
+                    r.abort_event.set()
+                    if r.task is not None and not r.task.done():
+                        r.task.cancel()
+                    r.status = RunStatus.interrupted
+                    r.updated_at = now
+                    interrupted_run_ids.append(r.run_id)
 
         for interrupted_run_id in interrupted_run_ids:
             await self._persist_status(interrupted_run_id, RunStatus.interrupted)
-        await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
