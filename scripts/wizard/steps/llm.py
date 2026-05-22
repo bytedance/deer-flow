@@ -9,6 +9,7 @@ from wizard.ui import (
     ask_choice,
     ask_secret,
     ask_text,
+    ask_yes_no,
     print_header,
     print_info,
     print_success,
@@ -21,6 +22,22 @@ class LLMStepResult:
     model_name: str
     api_key: str | None
     base_url: str | None = None
+    extra_model_config: dict | None = None
+
+
+def _ask_model_capabilities(provider: LLMProvider) -> dict:
+    extra_model_config = dict(provider.extra_config)
+    if not provider.ask_supports_thinking:
+        return extra_model_config
+
+    print_header("Model capabilities")
+    default_supports_thinking = bool(extra_model_config.get("supports_thinking", False))
+    supports_thinking = ask_yes_no(
+        "Does this model support thinking/reasoning output?",
+        default=default_supports_thinking,
+    )
+    extra_model_config["supports_thinking"] = supports_thinking
+    return extra_model_config
 
 
 def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
@@ -48,7 +65,10 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         print_header(f"{step_label} · Connection details")
         base_url = ask_text("Base URL (e.g. https://api.openai.com/v1)", required=True)
         model_name = ask_text("Model name", default=provider.default_model)
-    elif provider.auth_hint:
+
+    extra_model_config = _ask_model_capabilities(provider)
+
+    if provider.auth_hint:
         print_header(f"{step_label} · Authentication")
         print_info(provider.auth_hint)
         api_key = None
@@ -57,6 +77,7 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
             model_name=model_name,
             api_key=api_key,
             base_url=base_url,
+            extra_model_config=extra_model_config,
         )
 
     print_header(f"{step_label} · Enter your API Key")
@@ -73,4 +94,5 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         model_name=model_name,
         api_key=api_key,
         base_url=base_url,
+        extra_model_config=extra_model_config,
     )
