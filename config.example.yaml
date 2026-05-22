@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 9
+config_version: 10
 
 # ============================================================================
 # Logging
@@ -534,6 +534,41 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Provider Safety Termination Configuration
+# ============================================================================
+# Intercept AIMessages where the provider stopped generation for safety reasons
+# (e.g. OpenAI finish_reason='content_filter', Anthropic stop_reason='refusal',
+# Gemini finish_reason='SAFETY') while still returning tool_calls. The
+# tool_calls in such responses are typically truncated/unreliable and must
+# not be executed. See issue #3028 for the full failure mode.
+#
+# Detectors are loaded by class path via reflection (same pattern as
+# guardrails / models / tools). The built-in set covers OpenAI-compatible
+# content_filter, Anthropic refusal, and Gemini SAFETY/BLOCKLIST/
+# PROHIBITED_CONTENT/SPII/RECITATION.
+
+safety_finish_reason:
+  enabled: true
+  # Leave `detectors` unset to use the built-in detector set. Set to a
+  # non-empty list to fully override (use `enabled: false` to disable instead
+  # of providing an empty list).
+  #
+  # Example — extend the OpenAI-compatible detector for a Chinese provider
+  # whose gateway uses a non-standard finish_reason token:
+  # detectors:
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
+  #     config:
+  #       finish_reasons: ["content_filter", "sensitive", "risk_control"]
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
+  #
+  # Example — add a custom detector for an in-house provider:
+  # detectors:
+  #   - use: my_company.deerflow_ext:WenxinSafetyDetector
+  #     config:
+  #       error_codes: [336003, 17, 18]
 
 # ============================================================================
 # Sandbox Configuration
