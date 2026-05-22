@@ -30,6 +30,7 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
 import { useArtifactContent } from "@/core/artifacts/hooks";
+import { isArtifactPreviewSupported } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
@@ -81,8 +82,8 @@ export function ArtifactFileDetail({
     return checkCodeFile(filepath);
   }, [filepath, isWriteFile, isSkillFile]);
   const isSupportPreview = useMemo(() => {
-    return language === "html" || language === "markdown";
-  }, [language]);
+    return isArtifactPreviewSupported({ language, isWriteFile });
+  }, [language, isWriteFile]);
   const { content } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
@@ -132,7 +133,7 @@ export function ArtifactFileDetail({
               <div className="px-2">{getFileName(filepath)}</div>
             ) : (
               <Select value={filepath} onValueChange={select}>
-                <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
+                <SelectTrigger className="bg-transparent! select-none border-none shadow-none focus:outline-0 active:outline-0">
                   <SelectValue placeholder="Select a file" />
                 </SelectTrigger>
                 <SelectContent className="select-none">
@@ -290,7 +291,9 @@ export function ArtifactFilePreview({
       return;
     }
 
-    const blob = new Blob([content ?? ""], { type: "text/html" });
+    const blob = new Blob([content ?? ""], {
+      type: "text/html;charset=utf-8",
+    });
     const url = URL.createObjectURL(blob);
     setHtmlPreviewUrl(url);
 
