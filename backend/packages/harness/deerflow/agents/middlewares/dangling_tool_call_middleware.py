@@ -125,7 +125,6 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     tool_call_ids.add(tc_id)
 
         patched: list = []
-        consumed_tool_msg_objects: set[int] = set()
         patch_count = 0
         for msg in messages:
             if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
@@ -141,13 +140,9 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     continue
 
                 tool_msg_queue = tool_messages_by_id.get(tc_id)
-                while tool_msg_queue and id(tool_msg_queue[0]) in consumed_tool_msg_objects:
-                    tool_msg_queue.popleft()
-
                 existing_tool_msg = tool_msg_queue.popleft() if tool_msg_queue else None
                 if existing_tool_msg is not None:
                     patched.append(existing_tool_msg)
-                    consumed_tool_msg_objects.add(id(existing_tool_msg))
                 else:
                     patched.append(
                         ToolMessage(
