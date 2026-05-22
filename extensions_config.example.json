@@ -6,18 +6,6 @@
     "my_package.middleware:build_metadata_middleware"
   ],
   "mcpServers": {
-    "filesystem": {
-      "enabled": false,
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/path/to/allowed/files"
-      ],
-      "env": {},
-      "description": "Provides filesystem access within allowed directories"
-    },
     "github": {
       "enabled": false,
       "type": "stdio",
