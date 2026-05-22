@@ -2,7 +2,6 @@
 
 import asyncio
 import re
-from contextlib import suppress
 
 import pytest
 
@@ -298,13 +297,14 @@ async def test_create_does_not_expose_run_until_store_persist_completes():
         assert [run.run_id for run in runs] == [record.run_id]
     finally:
         allow_put.set()
+        cleanup_tasks = []
         for task in (list_task, create_task):
             if task is None:
                 continue
             if not task.done():
                 task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            cleanup_tasks.append(task)
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
 
 @pytest.mark.anyio
