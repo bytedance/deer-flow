@@ -1,10 +1,14 @@
 """Tests for RunManager."""
 
 import re
+import sqlite3
+from typing import Any
 
 import pytest
+from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
+from deerflow.runtime.runs.manager import PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -13,6 +17,66 @@ ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 @pytest.fixture
 def manager() -> RunManager:
     return RunManager()
+
+
+class FlakyStatusRunStore(MemoryRunStore):
+    """Memory run store that simulates transient SQLite status-write failures."""
+
+    def __init__(self, *, status_failures: int) -> None:
+        super().__init__()
+        self.status_failures = status_failures
+        self.status_update_attempts = 0
+
+    async def update_status(self, run_id, status, *, error=None):
+        self.status_update_attempts += 1
+        if self.status_failures > 0:
+            self.status_failures -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return await super().update_status(run_id, status, error=error)
+
+
+class MissingRowStatusRunStore(MemoryRunStore):
+    """Memory run store that reports a missing row for status updates."""
+
+    async def update_status(self, run_id, status, *, error=None):
+        await super().update_status(run_id, status, error=error)
+        return False
+
+
+class PermanentStatusRunStore(MemoryRunStore):
+    """Memory run store that simulates a permanent SQLAlchemy write failure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_update_attempts = 0
+
+    async def update_status(self, run_id, status, *, error=None):
+        self.status_update_attempts += 1
+        raise SQLAlchemyDatabaseError(
+            "UPDATE runs SET status = :status WHERE run_id = :run_id",
+            {"status": status, "run_id": run_id},
+            sqlite3.DatabaseError("no such table: runs"),
+        )
+
+
+class FailingStatusRunStore(MemoryRunStore):
+    """Memory run store that always fails status updates."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_update_attempts = 0
+
+    async def update_status(self, run_id, status, *, error=None):
+        self.status_update_attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+
+async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
+    rows = {}
+    for run_id in run_ids:
+        row = await store.get(run_id)
+        rows[run_id] = row["status"] if row else None
+    return rows
 
 
 @pytest.mark.anyio
@@ -78,6 +142,96 @@ async def test_cancel_persists_interrupted_status_to_store():
     assert cancelled is True
     assert stored is not None
     assert stored["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_status_persistence_retries_transient_sqlite_lock():
+    """Transient SQLite lock errors should not leave a final status stale."""
+    store = FlakyStatusRunStore(status_failures=2)
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "success"
+    assert store.status_update_attempts >= 4
+
+
+@pytest.mark.anyio
+async def test_status_persistence_recreates_missing_store_row():
+    """A final status update should recreate a run row if initial persistence was lost."""
+    store = MissingRowStatusRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await store.delete(record.run_id)
+
+    await manager.set_status(record.run_id, RunStatus.error, error="boom")
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert stored["error"] == "boom"
+
+
+@pytest.mark.anyio
+async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
+    """Permanent SQLAlchemy failures should not be retried as SQLite pressure."""
+    store = PermanentStatusRunStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=5, initial_delay=0),
+    )
+    record = await manager.create("thread-1")
+
+    await manager.set_status(record.run_id, RunStatus.error, error="boom")
+
+    assert store.status_update_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
+    """Startup recovery should turn persisted active rows into explicit errors."""
+    store = MemoryRunStore()
+    await store.put("pending-run", thread_id="thread-1", status="pending", created_at="2026-01-01T00:00:00+00:00")
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:01+00:00")
+    await store.put("success-run", thread_id="thread-1", status="success", created_at="2026-01-01T00:00:02+00:00")
+    manager = RunManager(store=store)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="Gateway restarted before this run reached a durable final state.",
+        before="2026-01-01T00:00:02+00:00",
+    )
+
+    assert {record.run_id for record in recovered} == {"pending-run", "running-run"}
+    assert await _stored_statuses(store, "pending-run", "running-run", "success-run") == {
+        "pending-run": "error",
+        "running-run": "error",
+        "success-run": "success",
+    }
+
+
+@pytest.mark.anyio
+async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_not_persisted():
+    """Startup recovery must not report a row as recovered if the error update failed."""
+    store = FailingStatusRunStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=2, initial_delay=0),
+    )
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="Gateway restarted before this run reached a durable final state.",
+        before="2026-01-01T00:00:01+00:00",
+    )
+
+    stored = await store.get("running-run")
+    assert recovered == []
+    assert stored["status"] == "running"
+    assert store.status_update_attempts == 2
 
 
 @pytest.mark.anyio
