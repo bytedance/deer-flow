@@ -153,8 +153,6 @@ async def run_agent(
 
     journal = None
 
-    journal = None
-
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
         logger.info(
