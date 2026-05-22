@@ -10,10 +10,12 @@ import type { RunStatus } from "@/core/report-templates/types";
 import { titleOfThread, pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
+import { ThreadActionMenu } from "./thread-action-menu";
+
 const STATUS_LABEL: Record<RunStatus, string> = {
   pending: "等待中",
   running: "运行中",
-  succeeded: "成功",
+  success: "成功",
   failed: "失败",
   canceled: "已取消",
 };
@@ -21,7 +23,7 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 const STATUS_COLOR: Record<RunStatus, string> = {
   pending: "bg-muted text-muted-foreground",
   running: "bg-blue-500/15 text-blue-700 dark:text-blue-300",
-  succeeded: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
   failed: "bg-red-500/15 text-red-700 dark:text-red-300",
   canceled: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
 };
@@ -138,20 +140,25 @@ function ChatsTab() {
   return (
     <div className="flex flex-col gap-1">
       {threads.map((thread) => (
-        <Link
+        <div
           key={thread.thread_id}
-          href={pathOfThread(thread)}
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent"
+          className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent group"
         >
-          <span className="text-foreground flex-1 truncate">
-            {titleOfThread(thread)}
-          </span>
-          <span className="text-muted-foreground shrink-0 text-xs">
-            {thread.updated_at
-              ? new Date(thread.updated_at).toLocaleDateString()
-              : ""}
-          </span>
-        </Link>
+          <Link
+            href={pathOfThread(thread)}
+            className="flex-1 flex items-center gap-3 min-w-0"
+          >
+            <span className="text-foreground truncate">
+              {titleOfThread(thread)}
+            </span>
+            <span className="text-muted-foreground shrink-0 text-xs">
+              {thread.updated_at
+                ? new Date(thread.updated_at).toLocaleDateString()
+                : ""}
+            </span>
+          </Link>
+          <ThreadActionMenu thread={thread} sidebarStyle={false} />
+        </div>
       ))}
     </div>
   );

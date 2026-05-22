@@ -34,6 +34,7 @@ import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { AgentChildSelector } from "./agent-child-selector";
+import { ThreadActionMenu } from "./report-templates/thread-action-menu";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
 const REPORT_THREADS_KEY = "sidebar-report-threads-collapsed";
@@ -303,19 +304,25 @@ function ReportHistoryNavItem({
         <CollapsibleContent>
           <SidebarMenu className="ml-3 border-l pl-2">
             {threads.map((thread) => (
-              <SidebarMenuItem key={thread.thread_id}>
+              <SidebarMenuItem
+                key={thread.thread_id}
+                className="group/report-thread"
+              >
                 <SidebarMenuButton
                   isActive={pathname === pathOfThread(thread)}
                   asChild
                 >
-                  <Link
-                    className="text-muted-foreground"
-                    href={pathOfThread(thread)}
-                  >
-                    <span className="text-xs truncate">
-                      {titleOfThread(thread)}
-                    </span>
-                  </Link>
+                  <div>
+                    <Link
+                      className="text-muted-foreground block w-full whitespace-nowrap group-hover/report-thread:overflow-hidden"
+                      href={pathOfThread(thread)}
+                    >
+                      <span className="text-xs truncate">
+                        {titleOfThread(thread)}
+                      </span>
+                    </Link>
+                    <ThreadActionMenu thread={thread} groupName="report-thread" />
+                  </div>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             ))}
