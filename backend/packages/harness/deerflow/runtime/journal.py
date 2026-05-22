@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -46,6 +46,8 @@ class RunJournal(BaseCallbackHandler):
         *,
         track_token_usage: bool = True,
         flush_threshold: int = 20,
+        progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
+        progress_flush_interval: float = 5.0,
     ):
         super().__init__()
         self.run_id = run_id
@@ -53,10 +55,16 @@ class RunJournal(BaseCallbackHandler):
         self._store = event_store
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
+        self._progress_reporter = progress_reporter
+        self._progress_flush_interval = progress_flush_interval
 
         # Write buffer
         self._buffer: list[dict] = []
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
+        self._pending_progress_task: asyncio.Task[None] | None = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._last_progress_flush = 0.0
 
         # Token accumulators
         self._total_input_tokens = 0
@@ -294,6 +302,8 @@ class RunJournal(BaseCallbackHandler):
                     else:
                         self._lead_agent_tokens += total_tk
 
+                    self._schedule_progress_flush()
+
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
 
@@ -445,6 +455,8 @@ class RunJournal(BaseCallbackHandler):
             else:
                 self._lead_agent_tokens += total_tk
 
+            self._schedule_progress_flush()
+
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
         self._first_human_msg = content[:2000] if content else None
@@ -474,6 +486,14 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
+        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+            if self._pending_progress_delayed:
+                self._pending_progress_task.cancel()
+                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+                self._progress_dirty = False
+                self._pending_progress_delayed = False
+                break
+            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
@@ -483,6 +503,57 @@ class RunJournal(BaseCallbackHandler):
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+
+    def _schedule_progress_flush(self) -> None:
+        """Best-effort throttled progress snapshot for active run visibility."""
+        if self._progress_reporter is None:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_progress_flush
+        if elapsed < self._progress_flush_interval:
+            self._progress_dirty = True
+            self._schedule_delayed_progress_flush(self._progress_flush_interval - elapsed)
+            return
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            self._progress_dirty = True
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._progress_dirty = False
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
+
+    def _schedule_delayed_progress_flush(self, delay: float) -> None:
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        delay = max(0.0, delay)
+        self._pending_progress_delayed = delay > 0
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+
+    async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
+        if self._progress_reporter is None:
+            return
+        if delay > 0:
+            self._pending_progress_delayed = True
+            await asyncio.sleep(delay)
+            self._pending_progress_delayed = False
+        dirty_before_write = self._progress_dirty
+        self._progress_dirty = False
+        snapshot_to_write = snapshot or self.get_completion_data()
+        try:
+            await self._progress_reporter(snapshot_to_write)
+            self._last_progress_flush = time.monotonic()
+        except Exception:
+            logger.warning("Failed to persist progress snapshot for run %s", self.run_id, exc_info=True)
+        if dirty_before_write or self._progress_dirty:
+            self._progress_dirty = False
+            self._pending_progress_task = None
+            self._schedule_delayed_progress_flush(self._progress_flush_interval)
 
     def get_completion_data(self) -> dict:
         """Return accumulated token and message data for run completion."""
