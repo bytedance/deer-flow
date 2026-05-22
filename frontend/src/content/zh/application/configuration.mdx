@@ -193,14 +193,22 @@ BETTER_AUTH_SECRET=local-dev-secret-at-least-32-chars
 ```json
 {
   "mcpServers": {
-    "filesystem": {
+    "my-server": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "args": ["-y", "@my-org/my-mcp-server"],
       "enabled": true
     }
   }
 }
 ```
+
+<Callout type="warning">
+  不要为 DeerFlow 工作区文件引入 MCP filesystem server。它会与 DeerFlow
+  内置文件工具形成路径语义不同的重复能力，让 LLM 行为不稳定。DeerFlow
+  当前没有为 filesystem server 适配 MCP Roots 模式，也不会把{" "}
+  <code>/mnt/user-data/...</code> 这类沙箱路径映射成{" "}
+  <code>@modelcontextprotocol/server-filesystem</code> 可接受的路径。
+</Callout>
 
 ### 技能启用状态
 
