@@ -92,24 +92,25 @@ def _output_dir() -> Path:
     )
 
 
-def _load_query_daily():
-    module = sys.modules.get("query_daily")
+def _load_ins_provider():
+    """Load the sibling InS provider module by file path (mirrors query_weekly)."""
+    module = sys.modules.get("_ins_provider")
     if module is not None:
         return module
     script_dir = Path(__file__).parent
-    qd_path = script_dir / "query_daily.py"
-    if not qd_path.exists():
-        raise RuntimeError(f"query_daily.py not found beside query_monthly.py at {qd_path}")
-    spec = importlib.util.spec_from_file_location("query_daily", qd_path)
+    provider_path = script_dir / "_ins_provider.py"
+    if not provider_path.exists():
+        raise RuntimeError(f"_ins_provider.py not found beside query_monthly.py at {provider_path}")
+    spec = importlib.util.spec_from_file_location("_ins_provider", provider_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("failed to build spec for query_daily")
+        raise RuntimeError("failed to build spec for _ins_provider")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["query_daily"] = module
+    sys.modules["_ins_provider"] = module
     try:
         spec.loader.exec_module(module)
     except Exception:
-        if sys.modules.get("query_daily") is module:
-            del sys.modules["query_daily"]
+        if sys.modules.get("_ins_provider") is module:
+            del sys.modules["_ins_provider"]
         raise
     return module
 
@@ -348,46 +349,27 @@ def fetch_month_with_provenance(
 ) -> tuple[dict, str, list[str]]:
     """Provider-aware variant of :func:`fetch_month`.
 
-    Composes the month from per-day calls to
-    :func:`query_daily.fetch_day_with_provenance` so the existing weekly
-    bucketing + aggregation logic keeps owning the rich monthly shape
-    (``weekly[]`` / ``aggregated`` / ``maintenance`` / ``critical_events``).
-    Per-day calls resolve to the InS-backed daily provider; any
-    ``HttpProviderError`` propagates so the CLI surfaces the failure
+    Fetches the full calendar month through the InS batch adapter
+    (``fetch_daily_series_payload``) so the existing weekly bucketing +
+    aggregation logic keeps owning the rich monthly shape (``weekly[]`` /
+    ``aggregated`` / ``maintenance`` / ``critical_events``). A single
+    batch call reuses one InS client/session across the full window.
+    Any ``HttpProviderError`` propagates so the CLI surfaces the failure
     instead of masking it with synthetic output.
     """
-    query_daily = _load_query_daily()
+    ins = _load_ins_provider()
     year, month = _parse_report_month(report_month)
     month_start, month_end, day_count = _month_bounds(year, month)
     week_buckets = _build_week_buckets(month_start, day_count)
 
-    start_dt = datetime.strptime(month_start, "%Y-%m-%d")
-    daily_entries: list[dict] = []
-    sources: set[str] = set()
-    notes: list[str] = []
-    for offset in range(day_count):
-        date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
-        day_payload, day_src, day_notes = query_daily.fetch_day_with_provenance(
-            date_str,
-            equipment_ids,
-            kpi_keys,
-            eq_type,
-            False,
-            equipment_meta,
-        )
-        sources.add(day_src)
-        for note in day_notes:
-            tagged = f"[{date_str}] {note}"
-            if tagged not in notes:
-                notes.append(tagged)
-        daily_entries.append(
-            {
-                "date": date_str,
-                "kpis": day_payload.get("kpis", {}),
-                "kpi_units": day_payload.get("kpi_units", {}),
-                "alarms": day_payload.get("alarms", []),
-            }
-        )
+    daily_entries = ins.fetch_daily_series_payload(
+        start_date=month_start,
+        day_count=day_count,
+        equipment_ids=equipment_ids,
+        kpi_keys=kpi_keys,
+        eq_type=eq_type,
+        equipment_meta=equipment_meta,
+    )
 
     # Slice daily entries into week buckets and aggregate each.
     weekly: list[dict] = []
@@ -458,13 +440,8 @@ def fetch_month_with_provenance(
     # without re-scanning daily list.
     current["kpi_units"] = daily_entries[0].get("kpi_units", {}) if daily_entries else {}
 
-    if len(sources) != 1:
-        raise RuntimeError(
-            f"unexpected per-day data_source mismatch ({sorted(sources)}); "
-            "InS provider should always tag results as 'ins'"
-        )
-    data_source = next(iter(sources))
-    return current, data_source, notes
+    # Batch fetch always comes from the InS provider.
+    return current, "ins", []
 
 
 def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:

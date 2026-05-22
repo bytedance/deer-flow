@@ -25,6 +25,9 @@ def _load(name: str):
     return module
 
 
+from unittest.mock import MagicMock
+
+
 def _fake_fetch_month(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
     """Stub fetch_month_with_provenance returning synthetic InS-tagged monthly data."""
     kpis_mean = {}
@@ -172,3 +175,76 @@ def test_leap_year_pipeline(pipeline, monkeypatch):
     assert kpi["report_period"]["day_count"] == 29
     md = er.render_monthly_markdown(kpi)
     assert "去年同期" in md or "compare_warning" not in md
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for fetch_month_with_provenance batch-fetch path
+# ---------------------------------------------------------------------------
+
+
+def _build_fake_daily_entry(date_str: str, kpi_keys: list[str]) -> dict:
+    """Return a single daily entry matching the InS batch contract."""
+    kpis = {}
+    for k in kpi_keys:
+        kpis[k] = {
+            "runtime_rate": 0.93,
+            "alarm_count": 2.0,
+            "mtbf": 115.3,
+            "mttr": 0.89,
+            "target_rate": 0.80,
+        }.get(k, 1.0)
+    return {
+        "date": date_str,
+        "kpis": kpis,
+        "kpi_units": {k: "%" if "rate" in k else "条" for k in kpi_keys},
+        "alarms": [],
+    }
+
+
+def test_fetch_month_batch_30_day(pipeline, monkeypatch):
+    """fetch_month_with_provenance calls fetch_daily_series_payload with correct 30-day params."""
+    qm = pipeline["qm"]
+
+    fake_ins = MagicMock()
+    fake_ins.fetch_daily_series_payload.return_value = [
+        _build_fake_daily_entry("2026-04-%02d" % d, ["runtime_rate"]) for d in range(1, 31)
+    ]
+    monkeypatch.setattr(qm, "_load_ins_provider", lambda: fake_ins)
+
+    current, source, notes = qm.fetch_month_with_provenance(
+        report_month="2026-04",
+        equipment_ids=["RM-001"],
+        kpi_keys=["runtime_rate"],
+    )
+
+    fake_ins.fetch_daily_series_payload.assert_called_once()
+    call_kwargs = fake_ins.fetch_daily_series_payload.call_args.kwargs
+    assert call_kwargs["start_date"] == "2026-04-01"
+    assert call_kwargs["day_count"] == 30
+    assert call_kwargs["equipment_ids"] == ["RM-001"]
+    assert call_kwargs["kpi_keys"] == ["runtime_rate"]
+    assert source == "ins"
+    assert notes == []
+    assert current["aggregated"]["kpis_mean"]["runtime_rate"] == pytest.approx(0.93)
+
+
+def test_fetch_month_batch_leap_year_february(pipeline, monkeypatch):
+    """fetch_month_with_provenance calls fetch_daily_series_payload with day_count=29 for 2024-02."""
+    qm = pipeline["qm"]
+
+    fake_ins = MagicMock()
+    fake_ins.fetch_daily_series_payload.return_value = [
+        _build_fake_daily_entry("2024-02-%02d" % d, ["runtime_rate"]) for d in range(1, 30)
+    ]
+    monkeypatch.setattr(qm, "_load_ins_provider", lambda: fake_ins)
+
+    current, source, notes = qm.fetch_month_with_provenance(
+        report_month="2024-02",
+        equipment_ids=["RM-001"],
+        kpi_keys=["runtime_rate"],
+    )
+
+    fake_ins.fetch_daily_series_payload.assert_called_once()
+    call_kwargs = fake_ins.fetch_daily_series_payload.call_args.kwargs
+    assert call_kwargs["start_date"] == "2024-02-01"
+    assert call_kwargs["day_count"] == 29
