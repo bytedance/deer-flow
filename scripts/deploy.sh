@@ -43,7 +43,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DOCKER_DIR="$REPO_ROOT/docker"
-COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+COMPOSE_CMD=(docker-compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox-features-tool:latest"
 
@@ -320,6 +320,9 @@ else
     echo "Building images and starting containers..."
     echo ""
     # shellcheck disable=SC2086
+    printf 'DEBUG compose command:'
+    printf ' [%s]' "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    printf '\n'
     "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
 fi
 
