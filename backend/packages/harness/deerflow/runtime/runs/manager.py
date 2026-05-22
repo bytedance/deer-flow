@@ -38,6 +38,16 @@ class RunRecord:
     error: str | None = None
     model_name: str | None = None
     store_only: bool = False
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    llm_call_count: int = 0
+    lead_agent_tokens: int = 0
+    subagent_tokens: int = 0
+    middleware_tokens: int = 0
+    message_count: int = 0
+    last_ai_message: str | None = None
+    first_human_message: str | None = None
 
 
 class RunManager:
@@ -102,15 +112,52 @@ class RunManager:
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
+            total_input_tokens=row.get("total_input_tokens") or 0,
+            total_output_tokens=row.get("total_output_tokens") or 0,
+            total_tokens=row.get("total_tokens") or 0,
+            llm_call_count=row.get("llm_call_count") or 0,
+            lead_agent_tokens=row.get("lead_agent_tokens") or 0,
+            subagent_tokens=row.get("subagent_tokens") or 0,
+            middleware_tokens=row.get("middleware_tokens") or 0,
+            message_count=row.get("message_count") or 0,
+            last_ai_message=row.get("last_ai_message"),
+            first_human_message=row.get("first_human_message"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None:
+                for key, value in kwargs.items():
+                    if key == "status":
+                        continue
+                    if hasattr(record, key) and value is not None:
+                        setattr(record, key, value)
+                record.updated_at = _now_iso()
         if self._store is not None:
             try:
                 await self._store.update_run_completion(run_id, **kwargs)
             except Exception:
                 logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+
+    async def update_run_progress(self, run_id: str, **kwargs) -> None:
+        """Persist a running token/message snapshot without changing status."""
+        should_persist = True
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None:
+                should_persist = record.status == RunStatus.running
+            if record is not None and should_persist:
+                for key, value in kwargs.items():
+                    if hasattr(record, key) and value is not None:
+                        setattr(record, key, value)
+                record.updated_at = _now_iso()
+        if should_persist and self._store is not None:
+            try:
+                await self._store.update_run_progress(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
     async def create(
         self,
