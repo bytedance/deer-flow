@@ -10,6 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.base import RunStore
 
 
 async def _make_repo(tmp_path):
@@ -24,6 +25,42 @@ async def _cleanup():
     from deerflow.persistence.engine import close_engine
 
     await close_engine()
+
+
+class _CustomRunStoreWithoutProgress(RunStore):
+    async def put(self, *args, **kwargs):
+        return None
+
+    async def get(self, *args, **kwargs):
+        return None
+
+    async def list_by_thread(self, *args, **kwargs):
+        return []
+
+    async def update_status(self, *args, **kwargs):
+        return None
+
+    async def delete(self, *args, **kwargs):
+        return None
+
+    async def update_model_name(self, *args, **kwargs):
+        return None
+
+    async def update_run_completion(self, *args, **kwargs):
+        return None
+
+    async def list_pending(self, *args, **kwargs):
+        return []
+
+    async def aggregate_tokens_by_thread(self, *args, **kwargs):
+        return {}
+
+
+@pytest.mark.anyio
+async def test_update_run_progress_defaults_to_noop_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    await store.update_run_progress("r1", total_tokens=1)
 
 
 class TestRunRepository:

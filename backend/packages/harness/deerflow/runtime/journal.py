@@ -486,7 +486,15 @@ class RunJournal(BaseCallbackHandler):
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            self._pending_progress_task.cancel()
             await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+        if self._progress_reporter is not None:
+            try:
+                await self._progress_reporter(self.get_completion_data())
+                self._last_progress_flush = time.monotonic()
+                self._progress_dirty = False
+            except Exception:
+                logger.warning("Failed to persist final progress snapshot for run %s", self.run_id, exc_info=True)
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]

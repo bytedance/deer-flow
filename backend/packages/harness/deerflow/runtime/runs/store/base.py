@@ -95,7 +95,6 @@ class RunStore(abc.ABC):
     ) -> None:
         pass
 
-    @abc.abstractmethod
     async def update_run_progress(
         self,
         run_id: str,
@@ -112,7 +111,7 @@ class RunStore(abc.ABC):
         first_human_message: str | None = None,
     ) -> None:
         """Persist a best-effort running snapshot without changing run status."""
-        pass
+        return None
 
     @abc.abstractmethod
     async def list_pending(self, *, before: str | None = None) -> list[dict[str, Any]]:
