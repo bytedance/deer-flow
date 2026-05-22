@@ -62,6 +62,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer: list[dict] = []
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._pending_progress_task: asyncio.Task[None] | None = None
+        self._pending_progress_delayed = False
         self._progress_dirty = False
         self._last_progress_flush = 0.0
 
@@ -485,16 +486,14 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        if self._pending_progress_task is not None and not self._pending_progress_task.done():
-            self._pending_progress_task.cancel()
-            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
-        if self._progress_reporter is not None:
-            try:
-                await self._progress_reporter(self.get_completion_data())
-                self._last_progress_flush = time.monotonic()
+        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+            if self._pending_progress_delayed:
+                self._pending_progress_task.cancel()
+                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
                 self._progress_dirty = False
-            except Exception:
-                logger.warning("Failed to persist final progress snapshot for run %s", self.run_id, exc_info=True)
+                self._pending_progress_delayed = False
+                break
+            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
@@ -532,28 +531,29 @@ class RunJournal(BaseCallbackHandler):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=max(0.0, delay)))
+        delay = max(0.0, delay)
+        self._pending_progress_delayed = delay > 0
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
 
     async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
         if self._progress_reporter is None:
             return
-        next_snapshot = snapshot
-        next_delay = delay
-        while True:
-            if next_delay > 0:
-                await asyncio.sleep(next_delay)
-            dirty_before_write = self._progress_dirty
+        if delay > 0:
+            self._pending_progress_delayed = True
+            await asyncio.sleep(delay)
+            self._pending_progress_delayed = False
+        dirty_before_write = self._progress_dirty
+        self._progress_dirty = False
+        snapshot_to_write = snapshot or self.get_completion_data()
+        try:
+            await self._progress_reporter(snapshot_to_write)
+            self._last_progress_flush = time.monotonic()
+        except Exception:
+            logger.warning("Failed to persist progress snapshot for run %s", self.run_id, exc_info=True)
+        if dirty_before_write or self._progress_dirty:
             self._progress_dirty = False
-            snapshot_to_write = next_snapshot or self.get_completion_data()
-            next_snapshot = None
-            try:
-                await self._progress_reporter(snapshot_to_write)
-                self._last_progress_flush = time.monotonic()
-            except Exception:
-                logger.warning("Failed to persist progress snapshot for run %s", self.run_id, exc_info=True)
-            if not (dirty_before_write or self._progress_dirty):
-                return
-            next_delay = self._progress_flush_interval
+            self._pending_progress_task = None
+            self._schedule_delayed_progress_flush(self._progress_flush_interval)
 
     def get_completion_data(self) -> dict:
         """Return accumulated token and message data for run completion."""

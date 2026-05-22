@@ -259,7 +259,9 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            await session.execute(
+                update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values)
+            )
             await session.commit()
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:

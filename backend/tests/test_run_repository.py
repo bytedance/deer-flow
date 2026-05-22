@@ -229,6 +229,20 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_run_progress_skips_terminal_runs(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_completion("r1", status="success", total_tokens=100, llm_call_count=1)
+
+        await repo.update_run_progress("r1", total_tokens=200, llm_call_count=2)
+
+        row = await repo.get("r1")
+        assert row["status"] == "success"
+        assert row["total_tokens"] == 100
+        assert row["llm_call_count"] == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")

@@ -83,7 +83,7 @@ class MemoryRunStore(RunStore):
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def update_run_progress(self, run_id, **kwargs):
-        if run_id in self._runs:
+        if run_id in self._runs and self._runs[run_id].get("status") == "running":
             for key, value in kwargs.items():
                 if value is not None:
                     self._runs[run_id][key] = value

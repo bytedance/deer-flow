@@ -143,14 +143,17 @@ class RunManager:
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
+        should_persist = True
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
+                should_persist = record.status == RunStatus.running
+            if record is not None and should_persist:
                 for key, value in kwargs.items():
                     if hasattr(record, key) and value is not None:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
-        if self._store is not None:
+        if should_persist and self._store is not None:
             try:
                 await self._store.update_run_progress(run_id, **kwargs)
             except Exception:
