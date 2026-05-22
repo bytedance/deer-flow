@@ -40,6 +40,30 @@ interface KBDocumentsDialogProps {
   knowledgeBase: KnowledgeBase;
 }
 
+function isDocumentIndexing(status: string): boolean {
+  return status === "pending" || status === "indexing";
+}
+
+function getDocumentStatusMeta(
+  doc: KnowledgeBaseDocument,
+  t: ReturnType<typeof useI18n>["t"],
+): { label: string; variant: "secondary" | "destructive"; title?: string } | null {
+  if (isDocumentIndexing(doc.index_status)) {
+    return {
+      label: t.knowledgeBase.statusIndexing,
+      variant: "secondary",
+    };
+  }
+  if (doc.index_status === "failed") {
+    return {
+      label: t.knowledgeBase.statusError,
+      variant: "destructive",
+      title: doc.index_error ?? t.knowledgeBase.statusError,
+    };
+  }
+  return null;
+}
+
 export function KBDocumentsDialog({
   open,
   onOpenChange,
@@ -258,6 +282,8 @@ function DocumentRow({ doc, kbId }: { doc: KnowledgeBaseDocument; kbId: string }
   const deleteMutation = useDeleteDocument(kbId);
   const reindexMutation = useReindexDocument(kbId);
   const [editing, setEditing] = useState(false);
+  const statusMeta = getDocumentStatusMeta(doc, t);
+  const indexing = isDocumentIndexing(doc.index_status);
 
   async function handleDelete() {
     if (!confirm(t.knowledgeBase.deleteDocumentConfirm)) return;
@@ -287,13 +313,32 @@ function DocumentRow({ doc, kbId }: { doc: KnowledgeBaseDocument; kbId: string }
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-      <div className="flex min-w-0 items-center gap-2">
-        <FileTextIcon className="text-muted-foreground h-4 w-4 shrink-0" />
-        <span className="truncate text-sm font-medium">{doc.title}</span>
-        <Badge variant="outline" className="shrink-0 text-xs">
-          {doc.chunk_count} {t.knowledgeBase.chunks}
-        </Badge>
+    <div className="flex items-start justify-between gap-3 rounded-md border px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <FileTextIcon className="text-muted-foreground h-4 w-4 shrink-0" />
+          <span className="truncate text-sm font-medium">{doc.title}</span>
+          {statusMeta ? (
+            <Badge
+              variant={statusMeta.variant}
+              className="shrink-0 text-xs"
+              title={statusMeta.title}
+            >
+              {statusMeta.label}
+            </Badge>
+          ) : null}
+          <Badge variant="outline" className="shrink-0 text-xs">
+            {doc.chunk_count} {t.knowledgeBase.chunks}
+          </Badge>
+        </div>
+        {doc.index_status === "failed" && doc.index_error ? (
+          <p
+            className="text-destructive mt-1 truncate pl-6 text-xs"
+            title={doc.index_error}
+          >
+            {doc.index_error}
+          </p>
+        ) : null}
       </div>
       <div className="flex shrink-0 gap-1">
         <Button
@@ -310,11 +355,11 @@ function DocumentRow({ doc, kbId }: { doc: KnowledgeBaseDocument; kbId: string }
           variant="ghost"
           className="h-7 w-7"
           onClick={handleReindex}
-          disabled={reindexMutation.isPending}
-          title={t.knowledgeBase.reindex}
+          disabled={reindexMutation.isPending || indexing}
+          title={indexing ? t.knowledgeBase.reindexing : t.knowledgeBase.reindex}
         >
           <RefreshCwIcon
-            className={`h-3.5 w-3.5 ${reindexMutation.isPending ? "animate-spin" : ""}`}
+            className={`h-3.5 w-3.5 ${reindexMutation.isPending || indexing ? "animate-spin" : ""}`}
           />
         </Button>
         <Button

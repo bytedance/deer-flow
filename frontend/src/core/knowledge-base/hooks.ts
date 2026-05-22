@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 
 import {
   createDocument,
@@ -21,9 +22,36 @@ import type {
   CreateDocumentRequest,
   CreateKBRequest,
   GrantPermissionRequest,
+  KnowledgeBaseDocument,
   UpdateDocumentRequest,
   UpdateKBRequest,
 } from "./types";
+
+const ACTIVE_DOCUMENT_INDEX_STATUSES = new Set(["pending", "indexing"]);
+const DOCUMENT_INDEXING_POLL_INTERVAL_MS = 2000;
+
+function hasActiveDocumentIndexing(
+  documents: Array<Pick<KnowledgeBaseDocument, "index_status">> | undefined,
+): boolean {
+  return (
+    documents?.some((document) =>
+      ACTIVE_DOCUMENT_INDEX_STATUSES.has(document.index_status),
+    ) ?? false
+  );
+}
+
+function getDocumentRefetchInterval(
+  documents: Array<Pick<KnowledgeBaseDocument, "index_status">> | undefined,
+): number | false {
+  return hasActiveDocumentIndexing(documents)
+    ? DOCUMENT_INDEXING_POLL_INTERVAL_MS
+    : false;
+}
+
+export const __test_only = {
+  hasActiveDocumentIndexing,
+  getDocumentRefetchInterval,
+};
 
 export function useKnowledgeBases({
   enabled = true,
@@ -73,12 +101,25 @@ export function useDeleteKnowledgeBase() {
 }
 
 export function useDocuments(kbId: string, { enabled = true } = {}) {
-  const { data, isLoading, error } = useQuery({
+  const queryClient = useQueryClient();
+  const { data, isLoading, error } = useQuery<KnowledgeBaseDocument[]>({
     queryKey: ["knowledge-bases", kbId, "documents"],
     queryFn: () => listDocuments(kbId),
     enabled: enabled && !!kbId,
     refetchOnWindowFocus: false,
+    refetchInterval: (query) => getDocumentRefetchInterval(query.state.data),
   });
+
+  useEffect(() => {
+    if (!enabled || !kbId || !hasActiveDocumentIndexing(data)) {
+      return;
+    }
+    void queryClient.invalidateQueries({
+      queryKey: ["knowledge-bases"],
+      refetchType: "active",
+    });
+  }, [data, enabled, kbId, queryClient]);
+
   return {
     documents: data ?? [],
     isLoading,
