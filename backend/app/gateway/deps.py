@@ -166,6 +166,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if getattr(config.database, "backend", None) == "sqlite":
             from deerflow.utils.time import now_iso
 
+            # Startup-only recovery: clean shutdowns return no active rows and
+            # the thread-status update below becomes a no-op.
             recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
                 error="Gateway restarted before this run reached a durable final state.",
                 before=now_iso(),

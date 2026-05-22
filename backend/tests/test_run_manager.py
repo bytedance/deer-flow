@@ -1,5 +1,6 @@
 """Tests for RunManager."""
 
+import logging
 import re
 import sqlite3
 from typing import Any
@@ -69,6 +70,32 @@ class FailingStatusRunStore(MemoryRunStore):
     async def update_status(self, run_id, status, *, error=None):
         self.status_update_attempts += 1
         raise sqlite3.OperationalError("database is locked")
+
+
+class MissingCompletionRunStore(MemoryRunStore):
+    """Memory run store that reports one missing row for completion updates."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.completion_update_attempts = 0
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        self.completion_update_attempts += 1
+        if self.completion_update_attempts == 1:
+            return False
+        return await super().update_run_completion(run_id, status=status, **kwargs)
+
+
+class AlwaysMissingCompletionRunStore(MemoryRunStore):
+    """Memory run store that keeps reporting missing rows for completion updates."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.completion_update_attempts = 0
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        self.completion_update_attempts += 1
+        return False
 
 
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
@@ -192,6 +219,48 @@ async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
 
 
 @pytest.mark.anyio
+async def test_completion_persistence_recreates_missing_store_row():
+    """Completion updates should recreate a missing row and persist final counters."""
+    store = MissingCompletionRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success)
+    await store.delete(record.run_id)
+
+    await manager.update_run_completion(
+        record.run_id,
+        status="success",
+        total_tokens=42,
+        llm_call_count=2,
+        last_ai_message="done",
+    )
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "success"
+    assert stored["total_tokens"] == 42
+    assert stored["llm_call_count"] == 2
+    assert stored["last_ai_message"] == "done"
+    assert store.completion_update_attempts == 2
+
+
+@pytest.mark.anyio
+async def test_completion_persistence_warns_when_recreated_row_still_missing(caplog):
+    """A second zero-row completion update after recreation should not be silent."""
+    store = AlwaysMissingCompletionRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.success)
+    caplog.set_level(logging.WARNING, logger="deerflow.runtime.runs.manager")
+
+    await manager.update_run_completion(record.run_id, status="success", total_tokens=42)
+
+    assert store.completion_update_attempts == 2
+    assert "affected no rows after row recreation" in caplog.text
+
+
+@pytest.mark.anyio
 async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
     """Startup recovery should turn persisted active rows into explicit errors."""
     store = MemoryRunStore()
@@ -211,6 +280,23 @@ async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
         "running-run": "error",
         "success-run": "success",
     }
+
+
+@pytest.mark.anyio
+async def test_reconcile_orphaned_inflight_runs_skips_live_local_run():
+    """Startup recovery should not mark an active row orphaned when this worker owns it."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="Gateway restarted before this run reached a durable final state.",
+    )
+
+    stored = await store.get(record.run_id)
+    assert recovered == []
+    assert stored["status"] == "running"
 
 
 @pytest.mark.anyio

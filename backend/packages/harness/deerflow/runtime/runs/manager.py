@@ -122,6 +122,20 @@ class RunManager:
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
 
+    @staticmethod
+    def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
+        return {
+            "thread_id": record.thread_id,
+            "assistant_id": record.assistant_id,
+            "status": record.status.value,
+            "multitask_strategy": record.multitask_strategy,
+            "metadata": record.metadata or {},
+            "kwargs": record.kwargs or {},
+            "error": error if error is not None else record.error,
+            "created_at": record.created_at,
+            "model_name": record.model_name,
+        }
+
     async def _call_store_with_retry(
         self,
         operation_name: str,
@@ -152,36 +166,33 @@ class RunManager:
                 delay = min(policy.max_delay, delay * policy.backoff_factor if delay else policy.initial_delay)
                 attempt += 1
 
-    async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
-        """Best-effort persist run record to backing store."""
+    async def _persist_snapshot_to_store(self, run_id: str, payload: dict[str, Any]) -> bool:
+        """Best-effort persist a previously captured run snapshot."""
         if self._store is None:
             return True
         try:
             await self._call_store_with_retry(
                 "put",
-                record.run_id,
-                lambda: self._store.put(
-                    record.run_id,
-                    thread_id=record.thread_id,
-                    assistant_id=record.assistant_id,
-                    status=record.status.value,
-                    multitask_strategy=record.multitask_strategy,
-                    metadata=record.metadata or {},
-                    kwargs=record.kwargs or {},
-                    error=error if error is not None else record.error,
-                    created_at=record.created_at,
-                    model_name=record.model_name,
-                ),
+                run_id,
+                lambda: self._store.put(run_id, **payload),
             )
             return True
         except Exception:
-            logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
+            logger.warning("Failed to persist run %s to store", run_id, exc_info=True)
             return False
+
+    async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
+        """Best-effort persist run record to backing store."""
+        return await self._persist_snapshot_to_store(
+            record.run_id,
+            self._store_put_payload(record, error=error),
+        )
 
     async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
             return True
+        row_recovery_payload = self._store_put_payload(record, error=error)
         try:
             updated = await self._call_store_with_retry(
                 "update_status",
@@ -189,7 +200,7 @@ class RunManager:
                 lambda: self._store.update_status(record.run_id, status.value, error=error),
             )
             if updated is False:
-                return await self._persist_to_store(record, error=error)
+                return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
             return True
         except Exception:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
@@ -230,6 +241,7 @@ class RunManager:
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
+        row_recovery_payload: dict[str, Any] | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
@@ -239,6 +251,7 @@ class RunManager:
                     if hasattr(record, key) and value is not None:
                         setattr(record, key, value)
                 record.updated_at = _now_iso()
+                row_recovery_payload = self._store_put_payload(record, error=kwargs.get("error"))
         if self._store is None:
             return
         try:
@@ -248,15 +261,18 @@ class RunManager:
                 lambda: self._store.update_run_completion(run_id, **kwargs),
             )
             if updated is False:
-                async with self._lock:
-                    record = self._runs.get(run_id)
-                if record is not None:
-                    await self._persist_to_store(record, error=kwargs.get("error"))
-                    await self._call_store_with_retry(
-                        "update_run_completion",
-                        run_id,
-                        lambda: self._store.update_run_completion(run_id, **kwargs),
-                    )
+                if row_recovery_payload is None:
+                    logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
+                    return
+                if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
+                    return
+                recovered = await self._call_store_with_retry(
+                    "update_run_completion",
+                    run_id,
+                    lambda: self._store.update_run_completion(run_id, **kwargs),
+                )
+                if recovered is False:
+                    logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
         except Exception:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
 
