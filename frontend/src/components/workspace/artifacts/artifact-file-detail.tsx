@@ -288,6 +288,25 @@ export function ArtifactFilePreview({
   language: string;
   url?: string;
 }) {
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+
+  useEffect(() => {
+    if (language !== "html" || isWriteFile) {
+      setHtmlPreviewUrl(undefined);
+      return;
+    }
+
+    const blob = new Blob([htmlWithBaseHref(content ?? "", url)], {
+      type: "text/html",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    setHtmlPreviewUrl(objectUrl);
+
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [content, isWriteFile, language, url]);
+
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
@@ -311,10 +330,35 @@ export function ArtifactFilePreview({
             ? "allow-scripts allow-forms"
             : "allow-scripts allow-forms allow-same-origin"
         }
-        src={isWriteFile ? undefined : url}
+        src={isWriteFile ? undefined : htmlPreviewUrl}
         srcDoc={isWriteFile ? content : undefined}
       />
     );
   }
   return null;
+}
+
+function htmlWithBaseHref(content: string, url?: string) {
+  if (!url || content.match(/<base\s/i)) {
+    return content;
+  }
+
+  const baseHref = htmlBaseHref(url);
+  const baseElement = `<base href="${escapeHtmlAttribute(baseHref)}">`;
+  if (content.match(/<head[^>]*>/i)) {
+    return content.replace(/<head([^>]*)>/i, `<head$1>${baseElement}`);
+  }
+  return `${baseElement}${content}`;
+}
+
+function htmlBaseHref(url: string) {
+  const baseUrl = new URL(url, window.location.href);
+  baseUrl.pathname = baseUrl.pathname.replace(/\/[^/]*$/, "/");
+  baseUrl.search = "";
+  baseUrl.hash = "";
+  return baseUrl.toString();
+}
+
+function escapeHtmlAttribute(value: string) {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
 }
