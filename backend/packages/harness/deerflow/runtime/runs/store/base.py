@@ -59,7 +59,12 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
-    ) -> None:
+    ) -> bool | None:
+        """Update a run status.
+
+        Returns ``False`` when the store can prove no row was updated. Older or
+        lightweight stores may return ``None`` when they cannot report rowcount.
+        """
         pass
 
     @abc.abstractmethod
@@ -92,7 +97,11 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
-    ) -> None:
+    ) -> bool | None:
+        """Persist final completion fields.
+
+        Returns ``False`` when the store can prove no row was updated.
+        """
         pass
 
     async def update_run_progress(
@@ -115,6 +124,11 @@ class RunStore(abc.ABC):
 
     @abc.abstractmethod
     async def list_pending(self, *, before: str | None = None) -> list[dict[str, Any]]:
+        pass
+
+    @abc.abstractmethod
+    async def list_inflight(self, *, before: str | None = None) -> list[dict[str, Any]]:
+        """Return persisted runs that are still ``pending`` or ``running``."""
         pass
 
     @abc.abstractmethod
