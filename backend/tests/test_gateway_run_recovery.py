@@ -101,9 +101,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     thread_store = _FakeThreadStore()
     _FakeRunManager.instances.clear()
     _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="old-running", thread_id="thread-1")]
-    _FakeRunManager.latest_by_thread = {
-        "thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success")]
-    }
+    _FakeRunManager.latest_by_thread = {"thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success")]}
 
     async def fake_init_engine_from_config(_database):
         return None
