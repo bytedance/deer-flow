@@ -142,15 +142,16 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
+            persisted = False
             try:
                 await self._persist_new_run_to_store(record)
-            except asyncio.CancelledError:
-                self._runs.pop(run_id, None)
-                raise
+                persisted = True
             except Exception:
-                self._runs.pop(run_id, None)
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
                 raise
+            finally:
+                if not persisted:
+                    self._runs.pop(run_id, None)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -349,15 +350,16 @@ class RunManager:
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            persisted = False
             try:
                 await self._persist_new_run_to_store(record)
-            except asyncio.CancelledError:
-                self._runs.pop(run_id, None)
-                raise
+                persisted = True
             except Exception:
-                self._runs.pop(run_id, None)
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
                 raise
+            finally:
+                if not persisted:
+                    self._runs.pop(run_id, None)
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
