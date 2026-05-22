@@ -20,6 +20,7 @@ class AuthConfig(BaseModel):
     admin_password_hash: str = Field(default="", description="Bcrypt hash of the admin password")
     provider: str = Field(default="ins_base", description="Auth provider type: 'local' or 'ins_base'")
     rsa_public_key: str = Field(default="", description="RSA public key PEM for encrypting login credentials when provider is 'ins_base'")
+    token_expiry_days: int = Field(default=7, ge=1, le=30, description="Cookie token expiry in days")
 
 
 _auth_config: AuthConfig | None = None

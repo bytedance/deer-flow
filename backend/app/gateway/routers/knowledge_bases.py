@@ -13,6 +13,7 @@ from app.gateway.routers.knowledge_base_schemas import (
     CreateDocumentRequest,
     CreateKnowledgeBaseRequest,
     DocumentDetailResponse,
+    DocumentIndexStatusResponse,
     DocumentResponse,
     GrantPermissionRequest,
     KnowledgeBaseResponse,
@@ -66,6 +67,18 @@ async def _enrich_owner_display_names(items: list[dict]) -> list[dict]:
     return items
 
 
+async def _enrich_permissions(items: list[dict], svc, user) -> list[dict]:
+    """Add can_write, can_admin, and my_role fields to each KB dict."""
+    from deerflow.knowledge_base.access_control import UserContext
+
+    user_ctx = UserContext(user_id=str(user.id), tenant_id=user.tenant_id, role=user.system_role)
+    for item in items:
+        item["can_write"] = await svc.access_control.can_write(user_ctx, item)
+        item["can_admin"] = await svc.access_control.can_admin(user_ctx, item)
+        item["my_role"] = await svc.access_control.get_user_kb_role(user_ctx, item)
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Knowledge Base CRUD
 # ---------------------------------------------------------------------------
@@ -88,6 +101,7 @@ async def list_knowledge_bases(
         offset=offset,
     )
     await _enrich_owner_display_names(items)
+    await _enrich_permissions(items, svc, user)
     return items
 
 
@@ -140,6 +154,7 @@ async def list_admin_knowledge_bases(
     except PermissionError:
         raise HTTPException(status_code=403, detail="Admin role required")
     await _enrich_owner_display_names(items)
+    await _enrich_permissions(items, svc, user)
     return items
 
 
@@ -275,6 +290,33 @@ async def get_document(
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+
+@router.get("/{kb_id}/documents/{doc_id}/index-status", response_model=DocumentIndexStatusResponse)
+async def get_document_index_status(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+):
+    """Lightweight endpoint for polling document index progress.
+
+    Returns only status fields so the frontend can poll frequently (every 2 s)
+    without pulling full document content on each tick.
+    """
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    doc = await svc.get_document_with_access_check(kb_id, doc_id, user_id=str(user.id), tenant_id=user.tenant_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return DocumentIndexStatusResponse(
+        id=doc["id"],
+        knowledge_base_id=doc["knowledge_base_id"],
+        index_status=doc["index_status"],
+        index_error=doc.get("index_error"),
+        index_queued_at=doc.get("index_queued_at"),
+        last_indexed_at=doc.get("last_indexed_at"),
+        chunk_count=doc.get("chunk_count", 0),
+    )
 
 
 @router.patch("/{kb_id}/documents/{doc_id}", response_model=DocumentDetailResponse)
@@ -475,7 +517,7 @@ async def search_knowledge_base(
         results = await svc.search(
             kb_id,
             tenant_id=user.tenant_id,
-            owner_user_id=str(user.id),
+            user_id=str(user.id),
             query=body.query,
             top_k=body.top_k,
         )
