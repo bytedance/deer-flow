@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import {
   createDocument,
@@ -48,9 +48,26 @@ function getDocumentRefetchInterval(
     : false;
 }
 
+function getDocumentStatsSignature(
+  documents:
+    | Array<
+        Pick<KnowledgeBaseDocument, "id" | "index_status" | "chunk_count">
+      >
+    | undefined,
+): string {
+  return (documents ?? [])
+    .map(
+      (document) =>
+        `${document.id}:${document.index_status}:${document.chunk_count}`,
+    )
+    .sort()
+    .join("|");
+}
+
 export const __test_only = {
   hasActiveDocumentIndexing,
   getDocumentRefetchInterval,
+  getDocumentStatsSignature,
 };
 
 export function useKnowledgeBases({
@@ -102,6 +119,7 @@ export function useDeleteKnowledgeBase() {
 
 export function useDocuments(kbId: string, { enabled = true } = {}) {
   const queryClient = useQueryClient();
+  const lastSummarySignatureRef = useRef<string | null>(null);
   const { data, isLoading, error } = useQuery<KnowledgeBaseDocument[]>({
     queryKey: ["knowledge-bases", kbId, "documents"],
     queryFn: () => listDocuments(kbId),
@@ -111,9 +129,15 @@ export function useDocuments(kbId: string, { enabled = true } = {}) {
   });
 
   useEffect(() => {
-    if (!enabled || !kbId || !hasActiveDocumentIndexing(data)) {
+    if (!enabled || !kbId || !data) {
+      lastSummarySignatureRef.current = null;
       return;
     }
+    const nextSignature = getDocumentStatsSignature(data);
+    if (nextSignature === lastSummarySignatureRef.current) {
+      return;
+    }
+    lastSummarySignatureRef.current = nextSignature;
     void queryClient.invalidateQueries({
       queryKey: ["knowledge-bases"],
       refetchType: "active",
