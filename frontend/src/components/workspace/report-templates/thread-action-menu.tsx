@@ -143,15 +143,14 @@ export function ThreadActionMenu({
     [thread, t],
   );
 
-  const hoverGroup = groupName ? `group-hover/${groupName}:opacity-100 group-focus-within/${groupName}:opacity-100` : "";
-
   const triggerButton = sidebarStyle ? (
     <DropdownMenuTrigger asChild>
       <SidebarMenuAction
         showOnHover={!groupName}
         className={
-          groupName
-            ? `bg-background/50 hover:bg-background md:opacity-0 ${hoverGroup} data-[state=open]:opacity-100`
+          // Tailwind JIT needs complete class names — dynamic template strings won't be scanned.
+          groupName === "report-thread"
+            ? "bg-background/50 hover:bg-background md:opacity-0 group-hover/report-thread:opacity-100 group-focus-within/report-thread:opacity-100 data-[state=open]:opacity-100"
             : "bg-background/50 hover:bg-background"
         }
       >
