@@ -13,3 +13,7 @@ mcp_servers: null
 tags:
   - report
   - monthly
+starters:
+  - label: "生成设备运行月报"
+    prompt: "生成月报"
+    auto_start: true
