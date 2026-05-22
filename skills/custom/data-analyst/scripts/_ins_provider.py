@@ -612,21 +612,33 @@ async def _fetch_kpi_for_equipment(
             bucket = (point["id"], point["endpoint_series"])
             request_buckets.setdefault(bucket, set()).update(_feature_candidates_for_spec(spec))
 
-    # Issue one ``get_trend_data`` call per (component_id, endpoint_series)
-    # bucket. Each call yields a list of unified rows.
-    trend_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    # Group same-series + same-features points for batched InS calls.
+    # Key: (series, frozenset(features)) → list of point_ids.
+    batch_groups: dict[tuple[str, frozenset], list[str]] = {}
     for (point_id, series), features in request_buckets.items():
+        key = (series, frozenset(features))
+        batch_groups.setdefault(key, []).append(point_id)
+
+    # Issue one ``get_trend_data`` call per (series, features) group with
+    # comma-separated gpids. The InS API natively supports multi-gpid queries.
+    trend_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for (series, features_frozen), point_ids in batch_groups.items():
+        features = sorted(features_frozen)
         kwargs: dict[str, Any] = {"endpoint_series": series}
         if _INS_FACTORY_ID is not None:
             kwargs["factory_id"] = _INS_FACTORY_ID
+        combined_id = ",".join(point_ids)
         rows = await client.get_trend_data(
-            point_id,
+            combined_id,
             start_ms,
             end_ms,
-            sorted(features),
+            features,
             **kwargs,
         )
-        trend_rows[(point_id, series)] = rows or []
+        # Demux combined response back to per-point rows.
+        for point_id in point_ids:
+            point_rows = [r for r in (rows or []) if r.get("component_id") == point_id]
+            trend_rows[(point_id, series)] = point_rows
 
     # Reduce per-KPI: pick the rows from the matched points and aggregate.
     for kpi_key in kpi_keys:
