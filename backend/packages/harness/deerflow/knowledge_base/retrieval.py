@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from typing import Any
 
 from deerflow.config.rag_config import get_rag_config
-from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
+from deerflow.config.tenant import get_current_tenant_id
 from deerflow.rag.job_context import kb_context
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.thread_meta import make_thread_store
@@ -232,7 +232,7 @@ def multi_kb_retrieve(
         spec = kb.get("embedding_model")
         embedder = _embedder_for(spec)
         retriever = DocumentRetriever(embedder=embedder)
-        if effective_tenant_id and effective_tenant_id != _DEFAULT_TENANT_ID:
+        if effective_tenant_id:
             with kb_context(tenant_id=effective_tenant_id, user_id=effective_user_id):
                 result = retriever.retrieve(query=query, collection=collection, top_k=per_kb_k)
         else:

@@ -9,6 +9,7 @@ from typing import Any
 from deerflow.config.rag_config import get_rag_config
 from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id
 from deerflow.rag.vector_store import SearchResult, VectorStore
+from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -47,22 +48,27 @@ class ChromaVectorStore(VectorStore):
     def _collection_name(self, collection: str) -> str:
         """Return the tenant-scoped collection name.
 
-        B.4.3 guard: when the current tenant context is "default" (i.e.
-        no auth middleware has run / context wasn't restored on a
-        worker task) and ``rag.allow_no_auth_kb`` is False, refuse to
-        return a name. The alternative is silently writing every
-        tenant's vectors into the ``default_*`` collection, which is
-        cross-tenant data leakage that's invisible until someone
-        reads back the wrong KB.
+        B.4.3 guard: when the current tenant context is "default" *and*
+        no authenticated user context is present, refuse to return a
+        name while ``rag.allow_no_auth_kb`` is False. This still blocks
+        accidental fallback when a worker loses its request context, but
+        allows legitimate authenticated users who actually belong to the
+        default tenant.
         """
         tid = get_current_tenant_id()
-        if tid == _DEFAULT_TENANT_ID and not get_rag_config().allow_no_auth_kb:
+        user = get_current_user()
+        user_id = str(getattr(user, "id", "") or DEFAULT_USER_ID)
+        if (
+            tid == _DEFAULT_TENANT_ID
+            and user_id == DEFAULT_USER_ID
+            and not get_rag_config().allow_no_auth_kb
+        ):
             raise RuntimeError(
                 "ChromaVectorStore: refusing to resolve collection name with "
-                "tenant_id='default' while rag.allow_no_auth_kb=False. This "
-                "usually means a background worker (e.g. dispatcher) ran a job "
-                "without restoring the submitter's tenant context — wrap the "
-                "call site in deerflow.rag.job_context.with_kb_context()."
+                "tenant_id='default' and no authenticated user context while "
+                "rag.allow_no_auth_kb=False. This usually means a background "
+                "worker (e.g. dispatcher) ran a job without restoring the "
+                "submitter's tenant/user context."
             )
         return f"{tid}_{collection}"
 

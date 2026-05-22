@@ -42,19 +42,17 @@ import contextlib
 from collections.abc import AsyncIterator, Iterator
 
 from deerflow.config.tenant import (
-    _DEFAULT_TENANT_ID,
     reset_tenant_id,
     set_current_tenant_id,
 )
 
 
 def _validate_kb_tenant_id(tenant_id: str | None) -> str:
-    if not tenant_id or tenant_id == _DEFAULT_TENANT_ID:
+    if not tenant_id:
         raise ValueError(
-            "with_kb_context requires a real tenant_id; got "
+            "with_kb_context requires a non-empty tenant_id; got "
             f"{tenant_id!r}. Background indexing jobs must carry the "
-            "submitter's tenant — falling back to the 'default' bucket "
-            "would mix vectors across tenants."
+            "submitter's tenant explicitly."
         )
     return tenant_id
 
@@ -109,9 +107,11 @@ async def with_kb_context(
     leaks into the next job picked off the queue.
 
     ``tenant_id`` is required for KB jobs because the Chroma backend
-    derives the per-tenant collection prefix from the contextvar; an
-    empty / "default" tenant in production indicates a bug, not a
-    valid state.
+    derives the per-tenant collection prefix from the contextvar. The
+    caller must pass the concrete tenant from the submitted job —
+    including ``"default"`` when that is the user's actual tenant.
+    The vector-store backend still blocks unauthenticated fallback to
+    the default tenant when ``rag.allow_no_auth_kb=False``.
 
     ``user_id`` is optional: not every code path that calls into KB
     write operations needs the per-user filter (e.g. an admin-triggered

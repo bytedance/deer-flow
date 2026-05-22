@@ -83,6 +83,19 @@ class TestSubmitAndExecute:
         assert args.args[0] is doc
 
     @pytest.mark.asyncio
+    async def test_preflight_failure_marks_doc_failed_not_stuck_pending(self, dispatcher_with_svc) -> None:
+        d, svc, _, doc_repo = dispatcher_with_svc
+        doc = _make_doc()
+        doc["tenant_id"] = ""
+        ok = await d.submit(IndexJobRequest(document=doc, knowledge_base=_make_kb()))
+        assert ok is True
+        await d._queue.join()
+        assert svc.execute_index_job.await_count == 0
+        last_call = doc_repo.update_index_status.call_args_list[-1]
+        assert last_call.kwargs["index_status"] == "failed"
+        assert "tenant_id" in str(last_call.kwargs["index_error"])
+
+    @pytest.mark.asyncio
     async def test_duplicate_submit_collapses(self, dispatcher_with_svc) -> None:
         d, svc, _, _ = dispatcher_with_svc
         # Block the worker so the second submit hits the inflight set.

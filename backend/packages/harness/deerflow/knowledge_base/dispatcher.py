@@ -206,6 +206,18 @@ class IndexingDispatcher:
                 raise
             except Exception as exc:
                 logger.exception("index-worker-%d: job %s failed: %s", worker_id, key, exc)
+                try:
+                    await self._doc_repo.update_index_status(
+                        doc["id"],
+                        index_status="failed",
+                        index_error=str(exc),
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception(
+                        "index-worker-%d: failed to persist failure state for job %s",
+                        worker_id,
+                        key,
+                    )
             finally:
                 async with self._inflight_lock:
                     self._inflight.discard(key)

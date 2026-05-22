@@ -2,15 +2,15 @@
 
 Covers:
 - B.4.1: ``with_kb_context`` sets tenant_id (and optionally user_id)
-  on entry and restores them on exit. Refuses empty / "default" tenant
-  values so a misconfigured caller doesn't silently fall back.
+  on entry and restores them on exit. Refuses empty tenant values.
 - B.4.1: tokens are correctly nested — re-entering with a different
   tenant restores the outer tenant on exit, not the global default.
 - B.4.2: dispatcher worker wraps ``execute_index_job`` in
   ``with_kb_context`` so the KB row's tenant is in scope when the job
   resolves a Chroma collection name.
-- B.4.3: ``ChromaVectorStore._collection_name`` raises when the
-  current tenant is "default" while ``allow_no_auth_kb=False``.
+- B.4.3: ``ChromaVectorStore._collection_name`` raises only when the
+  current tenant is "default" *and* no authenticated user context is present
+  while ``allow_no_auth_kb=False``.
 """
 
 from __future__ import annotations
@@ -35,10 +35,11 @@ class TestWithKbContextScoping:
             assert get_current_tenant_id() == "acme-corp"
         assert get_current_tenant_id() == before
 
-    def test_kb_context_rejects_default_tenant_id(self):
-        with pytest.raises(ValueError, match="real tenant_id"):
-            with kb_context(tenant_id="default"):
-                pass
+    def test_kb_context_allows_default_tenant_id(self):
+        before = get_current_tenant_id()
+        with kb_context(tenant_id="default"):
+            assert get_current_tenant_id() == "default"
+        assert get_current_tenant_id() == before
 
     @pytest.mark.asyncio
     async def test_sets_tenant_inside_block_and_restores_on_exit(self):
@@ -57,14 +58,15 @@ class TestWithKbContextScoping:
         assert get_current_tenant_id() == _DEFAULT_TENANT_ID
 
     @pytest.mark.asyncio
-    async def test_rejects_default_tenant_id(self):
-        with pytest.raises(ValueError, match="real tenant_id"):
-            async with with_kb_context(tenant_id="default"):
-                pass
+    async def test_allows_default_tenant_id(self):
+        before = get_current_tenant_id()
+        async with with_kb_context(tenant_id="default"):
+            assert get_current_tenant_id() == "default"
+        assert get_current_tenant_id() == before
 
     @pytest.mark.asyncio
     async def test_rejects_empty_tenant_id(self):
-        with pytest.raises(ValueError, match="real tenant_id"):
+        with pytest.raises(ValueError, match="non-empty tenant_id"):
             async with with_kb_context(tenant_id=""):
                 pass
 
@@ -81,6 +83,18 @@ class TestWithKbContextScoping:
             user = get_current_user()
             assert user is not None
             assert user.id == "u-1"
+        assert get_current_user() is before
+
+    @pytest.mark.asyncio
+    async def test_user_scoping_allows_default_tenant(self):
+        from deerflow.runtime.user_context import get_current_user
+
+        before = get_current_user()
+        async with with_kb_context(tenant_id="default", user_id="u-1"):
+            user = get_current_user()
+            assert user is not None
+            assert user.id == "u-1"
+            assert get_current_tenant_id() == "default"
         assert get_current_user() is before
 
 
@@ -177,11 +191,57 @@ class TestDispatcherWrapsExecuteWithContext:
         # acme-corp tenant.
         assert get_current_tenant_id() == _DEFAULT_TENANT_ID
 
+    @pytest.mark.asyncio
+    async def test_worker_loop_allows_authenticated_default_tenant_jobs(self):
+        from deerflow.knowledge_base.dispatcher import (
+            IndexingDispatcher,
+            IndexJobRequest,
+        )
+
+        observed: list[str] = []
+
+        async def fake_execute(doc, kb):
+            observed.append(get_current_tenant_id())
+
+        svc = MagicMock()
+        svc.execute_index_job = AsyncMock(side_effect=fake_execute)
+        kb_repo = MagicMock()
+        doc_repo = MagicMock()
+        doc_repo.update_index_status = AsyncMock()
+
+        disp = IndexingDispatcher(
+            indexing_service=svc,
+            kb_repo=kb_repo,
+            doc_repo=doc_repo,
+            workers=1,
+            queue_max=4,
+        )
+        await disp.start()
+        try:
+            await disp.submit(
+                IndexJobRequest(
+                    document={
+                        "id": "d1",
+                        "knowledge_base_id": "kb-1",
+                        "version": 1,
+                        "tenant_id": "default",
+                        "owner_user_id": "u-1",
+                    },
+                    knowledge_base={"id": "kb-1", "collection_name": "kb_x"},
+                )
+            )
+            await disp._queue.join()
+        finally:
+            await disp.aclose()
+
+        assert observed == ["default"]
+
 
 class TestChromaDefaultTenantGuard:
     def teardown_method(self) -> None:
         set_rag_config(RagConfig())
 
+    @pytest.mark.no_auto_user
     def test_collection_name_raises_in_default_tenant_when_no_auth_disabled(
         self,
     ):
@@ -197,6 +257,14 @@ class TestChromaDefaultTenantGuard:
         # be used.
         name = store._collection_name("kb_x")
         assert name.endswith("_kb_x")
+
+    @pytest.mark.asyncio
+    async def test_collection_name_allows_authenticated_default_tenant(self):
+        set_rag_config(RagConfig(allow_no_auth_kb=False))
+        store = ChromaVectorStore()
+        async with with_kb_context(tenant_id="default", user_id="u-1"):
+            name = store._collection_name("kb_x")
+        assert name == "default_kb_x"
 
     @pytest.mark.asyncio
     async def test_collection_name_passes_under_with_kb_context(self):
