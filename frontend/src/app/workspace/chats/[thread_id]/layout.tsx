@@ -1,19 +1,15 @@
-"use client";
+import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
 
-import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
-import { ArtifactsProvider } from "@/components/workspace/artifacts";
-import { SubtasksProvider } from "@/core/tasks/context";
+import { ChatProviders } from "./providers";
+
+export function generateStaticParams() {
+  return DEMO_THREAD_IDS.map((thread_id) => ({ thread_id }));
+}
 
 export default function ChatLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return (
-    <SubtasksProvider>
-      <ArtifactsProvider>
-        <PromptInputProvider>{children}</PromptInputProvider>
-      </ArtifactsProvider>
-    </SubtasksProvider>
-  );
+  return <ChatProviders>{children}</ChatProviders>;
 }

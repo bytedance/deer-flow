@@ -83,7 +83,7 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content } = useArtifactContent({
+  const { content, url } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -254,7 +254,9 @@ export function ArtifactFileDetail({
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
               content={displayContent}
+              isWriteFile={isWriteFile}
               language={language ?? "text"}
+              url={url}
             />
           )}
         {isCodeFile && viewMode === "code" && (
@@ -277,28 +279,15 @@ export function ArtifactFileDetail({
 
 export function ArtifactFilePreview({
   content,
+  isWriteFile,
   language,
+  url,
 }: {
   content: string;
+  isWriteFile: boolean;
   language: string;
+  url?: string;
 }) {
-  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
-
-  useEffect(() => {
-    if (language !== "html") {
-      setHtmlPreviewUrl(undefined);
-      return;
-    }
-
-    const blob = new Blob([content ?? ""], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(url);
-
-    return () => {
-      URL.revokeObjectURL(url);
-    };
-  }, [content, language]);
-
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
@@ -317,8 +306,13 @@ export function ArtifactFilePreview({
       <iframe
         className="size-full"
         title="Artifact preview"
-        sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
+        sandbox={
+          isWriteFile
+            ? "allow-scripts allow-forms"
+            : "allow-scripts allow-forms allow-same-origin"
+        }
+        src={isWriteFile ? undefined : url}
+        srcDoc={isWriteFile ? content : undefined}
       />
     );
   }
