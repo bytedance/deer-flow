@@ -164,4 +164,14 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(ViewImageMiddleware())
 
+    # Same provider safety-termination guard the lead agent uses — subagents
+    # are equally exposed to truncated tool_calls returned with
+    # finish_reason=content_filter (and friends), and the bad call would then
+    # propagate back to the lead agent via the task tool result.
+    safety_config = app_config.safety_finish_reason
+    if safety_config.enabled:
+        from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
     return middlewares

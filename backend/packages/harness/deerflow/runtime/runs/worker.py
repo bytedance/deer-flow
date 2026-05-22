@@ -219,6 +219,12 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        # Expose the run-scoped journal under a sentinel key so middleware can
+        # write audit events (e.g. SafetyFinishReasonMiddleware recording
+        # suppressed tool calls). Double-underscore prefix marks it as a
+        # runtime-internal channel; user code must not depend on the key name.
+        if journal is not None:
+            runtime_ctx["__run_journal"] = journal
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
