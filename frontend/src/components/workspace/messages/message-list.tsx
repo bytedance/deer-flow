@@ -362,6 +362,7 @@ export function MessageList({
                 if (taskId) {
                   const parsed = parseSubtaskResult(
                     extractTextFromMessage(message),
+                    message.additional_kwargs,
                   );
                   updateSubtask({ id: taskId, ...parsed });
                 }
