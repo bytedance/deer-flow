@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 
-import { getGatewayConfig } from "./gateway-config";
 import { isStaticWebsiteOnly } from "../static-mode";
+
+import { getGatewayConfig } from "./gateway-config";
 import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
 

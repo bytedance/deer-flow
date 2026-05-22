@@ -11,6 +11,7 @@ import React, {
 } from "react";
 
 import { isStaticWebsiteOnly } from "../static-mode";
+
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers

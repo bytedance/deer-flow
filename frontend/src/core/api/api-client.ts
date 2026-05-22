@@ -97,9 +97,12 @@ function createStaticClient(): LangGraphClient {
   }) as typeof client.threads.update;
 
   client.runs.list = (async () => []) as typeof client.runs.list;
-  client.runs.stream = async function* () {} as typeof client.runs.stream;
-  client.runs.joinStream =
-    async function* () {} as typeof client.runs.joinStream;
+  client.runs.stream = async function* () {
+    /* empty */
+  } as typeof client.runs.stream;
+  client.runs.joinStream = async function* () {
+    /* empty */
+  } as typeof client.runs.joinStream;
 
   return client as LangGraphClient<AgentThreadState>;
 }

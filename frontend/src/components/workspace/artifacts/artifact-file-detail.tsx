@@ -339,13 +339,13 @@ export function ArtifactFilePreview({
 }
 
 function htmlWithBaseHref(content: string, url?: string) {
-  if (!url || content.match(/<base\s/i)) {
+  if (!url || /<base\s/i.exec(content)) {
     return content;
   }
 
   const baseHref = htmlBaseHref(url);
   const baseElement = `<base href="${escapeHtmlAttribute(baseHref)}">`;
-  if (content.match(/<head[^>]*>/i)) {
+  if (/<head[^>]*>/i.exec(content)) {
     return content.replace(/<head([^>]*)>/i, `<head$1>${baseElement}`);
   }
   return `${baseElement}${content}`;
