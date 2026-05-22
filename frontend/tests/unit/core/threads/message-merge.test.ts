@@ -2,9 +2,22 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  getOldestRunMessageSeq,
   getVisibleOptimisticMessages,
   mergeMessages,
+  runMessagesPageHasMore,
 } from "@/core/threads/hooks";
+import type { RunMessage } from "@/core/threads/types";
+
+function runMessage(seq?: number): RunMessage {
+  return {
+    run_id: "run-1",
+    ...(seq === undefined ? {} : { seq }),
+    content: {} as Message,
+    metadata: { caller: "" },
+    created_at: "2026-05-22T00:00:00Z",
+  };
+}
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {
@@ -154,4 +167,23 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], has_more: true })).toBe(true);
+  expect(runMessagesPageHasMore({ data: [], has_more: false })).toBe(false);
+});
+
+test("runMessagesPageHasMore keeps compatibility with camelCase pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], hasMore: true })).toBe(true);
+});
+
+test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
+  expect(
+    getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
+  ).toBe(8);
+});
+
+test("getOldestRunMessageSeq ignores rows without seq", () => {
+  expect(getOldestRunMessageSeq([runMessage()])).toBeNull();
 });

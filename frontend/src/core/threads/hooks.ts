@@ -92,6 +92,28 @@ function findLatestUnloadedRunIndex(
   return -1;
 }
 
+type RunMessagesPageResponse = {
+  data: RunMessage[];
+  has_more?: boolean;
+  hasMore?: boolean;
+};
+
+export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
+  return result.has_more ?? result.hasMore ?? false;
+}
+
+export function getOldestRunMessageSeq(messages: RunMessage[]) {
+  let oldestSeq: number | null = null;
+  for (const message of messages) {
+    if (typeof message.seq !== "number") {
+      continue;
+    }
+    oldestSeq =
+      oldestSeq === null ? message.seq : Math.min(oldestSeq, message.seq);
+  }
+  return oldestSeq;
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -686,6 +708,7 @@ export function useThreadHistory(threadId: string) {
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -726,16 +749,20 @@ export function useThreadHistory(threadId: string) {
 
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
-        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-          {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
+        const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
+        const searchParams = new URLSearchParams();
+        if (beforeSeq !== undefined) {
+          searchParams.set("before_seq", String(beforeSeq));
+        }
+        const query = searchParams.toString();
+        const url = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages${query ? `?${query}` : ""}`;
+        const result: RunMessagesPageResponse = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
           },
-        ).then((res) => {
+          credentials: "include",
+        }).then((res) => {
           return res.json();
         });
         const _messages = result.data
@@ -744,10 +771,17 @@ export function useThreadHistory(threadId: string) {
         if (threadIdRef.current !== requestThreadId) {
           return;
         }
+        const pageHasMore = runMessagesPageHasMore(result);
+        const oldestSeq = getOldestRunMessageSeq(result.data);
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
-        loadedRunIdsRef.current.add(run.run_id);
+        if (pageHasMore && oldestSeq !== null) {
+          runBeforeSeqRef.current.set(run.run_id, oldestSeq);
+        } else {
+          runBeforeSeqRef.current.delete(run.run_id);
+          loadedRunIdsRef.current.add(run.run_id);
+        }
         indexRef.current = findLatestUnloadedRunIndex(
           runsRef.current,
           loadedRunIdsRef.current,
@@ -771,6 +805,7 @@ export function useThreadHistory(threadId: string) {
       pendingLoadRef.current = false;
       loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
+      runBeforeSeqRef.current = new Map();
       loadingRef.current = false;
       setLoading(false);
       setMessages([]);
