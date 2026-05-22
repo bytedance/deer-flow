@@ -325,11 +325,7 @@ export function ArtifactFilePreview({
       <iframe
         className="size-full"
         title="Artifact preview"
-        sandbox={
-          isWriteFile
-            ? "allow-scripts allow-forms"
-            : "allow-scripts allow-forms allow-same-origin"
-        }
+        sandbox="allow-scripts allow-forms"
         src={isWriteFile ? undefined : htmlPreviewUrl}
         srcDoc={isWriteFile ? content : undefined}
       />
