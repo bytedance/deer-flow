@@ -179,7 +179,7 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
-  const groupedMessages = getMessageGroups(messages);
+  const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
@@ -195,6 +195,56 @@ export function MessageList({
       ),
     [messages, thread.getMessagesMetadata, thread.isLoading],
   );
+  const renderedSubtasks = useMemo(() => {
+    const tasks = new Map<string, Subtask>();
+    const updates: Array<Partial<Subtask> & { id: string }> = [];
+
+    for (const group of groupedMessages) {
+      if (group.type !== "assistant:subagent") {
+        continue;
+      }
+
+      for (const message of group.messages) {
+        if (message.type === "ai") {
+          for (const toolCall of message.tool_calls ?? []) {
+            if (toolCall.name !== "task" || !toolCall.id) {
+              continue;
+            }
+            const task: Subtask = {
+              id: toolCall.id,
+              subagent_type: toolCall.args.subagent_type,
+              description: toolCall.args.description,
+              prompt: toolCall.args.prompt,
+              status: "in_progress",
+            };
+            tasks.set(task.id, task);
+            updates.push(task);
+          }
+        } else if (message.type === "tool") {
+          const taskId = message.tool_call_id;
+          if (taskId) {
+            const update = {
+              id: taskId,
+              ...parseSubtaskResult(extractTextFromMessage(message)),
+            };
+            const task = tasks.get(taskId);
+            if (task) {
+              tasks.set(taskId, { ...task, ...update });
+            }
+            updates.push(update);
+          }
+        }
+      }
+    }
+
+    return { tasks, updates };
+  }, [groupedMessages]);
+
+  useEffect(() => {
+    for (const task of renderedSubtasks.updates) {
+      updateSubtask(task);
+    }
+  }, [renderedSubtasks, updateSubtask]);
 
   const renderAssistantCopyButton = useCallback(
     (messages: Message[], isStreaming: boolean) => {
@@ -354,29 +404,17 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:subagent") {
-            const tasks = new Set<Subtask>();
+            const tasks = new Map<string, Subtask>();
             for (const message of group.messages) {
-              if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
-                  if (toolCall.name === "task") {
-                    const task: Subtask = {
-                      id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
-                      status: "in_progress",
-                    };
-                    updateSubtask(task);
-                    tasks.add(task);
-                  }
-                }
-              } else if (message.type === "tool") {
-                const taskId = message.tool_call_id;
-                if (taskId) {
-                  const parsed = parseSubtaskResult(
-                    extractTextFromMessage(message),
-                  );
-                  updateSubtask({ id: taskId, ...parsed });
+              if (message.type !== "ai") {
+                continue;
+              }
+              for (const toolCall of message.tool_calls ?? []) {
+                const task = toolCall.id
+                  ? renderedSubtasks.tasks.get(toolCall.id)
+                  : undefined;
+                if (toolCall.name === "task" && task) {
+                  tasks.set(task.id, task);
                 }
               }
             }
