@@ -14,6 +14,19 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Filesystem MCP Servers
+
+DeerFlow already provides built-in file tools for thread-scoped workspace access.
+Do not add an MCP filesystem server for the same DeerFlow workspace. The
+overlapping file tools use different path semantics, which can make LLM tool
+selection and file access behavior unstable.
+
+DeerFlow does not currently adapt the MCP Roots mode for filesystem servers. In
+particular, it does not publish per-thread MCP roots or map DeerFlow sandbox
+paths such as `/mnt/user-data/...` to paths accepted by
+`@modelcontextprotocol/server-filesystem`. Use DeerFlow's built-in file tools
+for DeerFlow workspace files.
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.
@@ -88,7 +101,6 @@ MCP servers expose tools that are automatically discovered and integrated into D
 
 MCP servers can provide access to:
 
-- **File systems**
 - **Databases** (e.g., PostgreSQL)
 - **External APIs** (e.g., GitHub, Brave Search)
 - **Browser automation** (e.g., Puppeteer)
