@@ -5,3 +5,4 @@ services:
     volumes:
       - /Users/raidery/bench/centos7:/root/bench
     restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
