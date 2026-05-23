@@ -1,0 +1,7 @@
+services:
+  centos7:
+    image: quay.io/centos/centos:7.6.1810
+    container_name: centos7
+    volumes:
+      - /Users/raidery/bench/centos7:/root/bench
+    restart: unless-stopped
