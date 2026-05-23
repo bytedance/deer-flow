@@ -196,34 +196,37 @@ def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int
     """Return (system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred).
 
     Active vs deferred is determined by the tool_search deferred registry.
-    System vs MCP is determined by which list the tool came from in
-    :func:`deerflow.tools.get_available_tools` — MCP tools come from the
-    MCP cache, everything else (config-defined + builtins + ACP) is system.
+    System vs MCP is determined by name-matching against the MCP cache —
+    :func:`deerflow.mcp.cache.get_cached_mcp_tools` returns the same snapshot
+    that :func:`deerflow.tools.get_available_tools` itself consumes
+    internally, so a single cache read is enough to classify every tool.
+    Skipping the redundant ``ExtensionsConfig.from_file()`` here avoids extra
+    file I/O and INFO-level log noise on every ``GET /token-usage`` poll.
     """
     try:
-        from deerflow.config.extensions_config import ExtensionsConfig
         from deerflow.tools.builtins.tool_search import get_deferred_registry
         from deerflow.tools.tools import get_available_tools
 
         subagents_cfg = getattr(app_config, "subagents", None)
         subagent_enabled = bool(getattr(subagents_cfg, "enabled", False))
 
+        # Snapshot MCP names BEFORE `get_available_tools` so we have a stable
+        # set to classify against. The cache is mtime-invalidated so this is
+        # cheap on a hit; if MCP is currently disabled the cache simply
+        # returns an empty list.
+        mcp_names: set[str] = set()
+        try:
+            from deerflow.mcp.cache import get_cached_mcp_tools
+
+            mcp_names = {t.name for t in get_cached_mcp_tools() if getattr(t, "name", None)}
+        except Exception:
+            mcp_names = set()
+
         all_tools = get_available_tools(
             model_name=model_name,
             subagent_enabled=subagent_enabled,
             app_config=app_config,
         )
-
-        # Identify MCP tools by name lookup against the MCP cache snapshot.
-        mcp_names: set[str] = set()
-        try:
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                from deerflow.mcp.cache import get_cached_mcp_tools
-
-                mcp_names = {t.name for t in get_cached_mcp_tools() if getattr(t, "name", None)}
-        except Exception:
-            mcp_names = set()
 
         deferred_registry = get_deferred_registry()
         deferred_names: set[str] = deferred_registry.deferred_names if deferred_registry is not None else set()

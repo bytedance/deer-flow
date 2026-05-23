@@ -95,7 +95,7 @@ export function TokenUsageIndicator({
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
-          {contextPercentage && (
+          {contextPercentage != null && (
             <span
               className="text-muted-foreground/80 border-l pl-1.5 font-mono"
               aria-label={t.contextUsage.badgeAriaLabel(contextPercentage)}

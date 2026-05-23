@@ -1,7 +1,5 @@
 "use client";
 
-import { useMemo } from "react";
-
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type {
@@ -36,23 +34,25 @@ export function ContextUsageBreakdown({
 }: ContextUsageBreakdownProps) {
   const { t } = useI18n();
 
-  const totalTokens = useMemo(
-    () => contextUsage.breakdown.reduce((sum, row) => sum + row.tokens, 0),
-    [contextUsage.breakdown],
-  );
+  const categoryLabels = t.contextUsage.categories as Record<string, string>;
+  const labelForRow = (row: ContextUsageBreakdownItem) =>
+    categoryLabels[row.key] ?? row.key;
 
+  // Compute the segments and the breakdown total inline — they're cheap (O(n)
+  // over a handful of rows) and depending on `categoryLabels` directly in a
+  // useMemo would force a recompute on every locale change anyway. Keeping it
+  // unmemoized avoids the easy footgun of stale tooltips when the user
+  // switches language (the original useMemo deps omitted `t`).
+  const totalTokens = contextUsage.breakdown.reduce(
+    (sum, row) => sum + row.tokens,
+    0,
+  );
   const denominator = contextUsage.maxContextTokens ?? totalTokens;
   const percentageText = formatContextUsagePercentage(contextUsage.percentage);
-
-  const labelForRow = (row: ContextUsageBreakdownItem) => {
-    const categories = t.contextUsage.categories as Record<string, string>;
-    return categories[row.key] ?? row.key;
-  };
-
-  const segments = useMemo(
-    () => breakdownToSegments(contextUsage.breakdown, denominator, labelForRow),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- t is stable per locale
-    [contextUsage.breakdown, denominator],
+  const segments = breakdownToSegments(
+    contextUsage.breakdown,
+    denominator,
+    labelForRow,
   );
 
   return (
