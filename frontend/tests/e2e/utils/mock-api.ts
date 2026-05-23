@@ -25,6 +25,8 @@ export type MockThread = {
   title?: string;
   updated_at?: string;
   agent_name?: string;
+  messages?: unknown[];
+  artifacts?: string[];
 };
 
 export type MockAgent = {
@@ -113,7 +115,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           {
             values: {
               title: matchingThread.title ?? "Untitled",
-              messages: [
+              messages: matchingThread.messages ?? [
                 {
                   type: "human",
                   id: `msg-human-${matchingThread.thread_id}`,
@@ -125,6 +127,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
                   content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
                 },
               ],
+              artifacts: matchingThread.artifacts ?? [],
             },
             next: [],
             metadata: {},
@@ -155,7 +158,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           values: {
             title: matchingThread?.title ?? "Untitled",
             messages: matchingThread
-              ? [
+              ? (matchingThread.messages ?? [
                   {
                     type: "human",
                     id: `msg-human-${matchingThread.thread_id}`,
@@ -166,8 +169,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
                     id: `msg-ai-${matchingThread.thread_id}`,
                     content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
                   },
-                ]
+                ])
               : [],
+            artifacts: matchingThread?.artifacts ?? [],
           },
           next: [],
           metadata: {},
@@ -183,14 +187,58 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // followed by `?` or end-of-string.  This must NOT match `/runs/stream`.
   void page.route(/\/api\/langgraph\/threads\/[^/]+\/runs(\?|$)/, (route) => {
     if (route.request().method() === "GET") {
+      const url = route.request().url();
+      const matchingThread = threads.find((t) => url.includes(t.thread_id));
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "[]",
+        body: JSON.stringify(
+          matchingThread
+            ? [
+                {
+                  run_id: `run-${matchingThread.thread_id}`,
+                  thread_id: matchingThread.thread_id,
+                  assistant_id: "lead_agent",
+                  status: "success",
+                  metadata: {},
+                  kwargs: {},
+                  created_at: "2025-01-01T00:00:00Z",
+                  updated_at:
+                    matchingThread.updated_at ?? "2025-01-01T00:00:00Z",
+                },
+              ]
+            : [],
+        ),
       });
     }
     return route.fallback();
   });
+
+  void page.route(
+    /\/api\/threads\/([^/]+)\/runs\/([^/]+)\/messages/,
+    (route) => {
+      if (route.request().method() === "GET") {
+        const url = route.request().url();
+        const matchingThread = threads.find((t) =>
+          url.includes(`/api/threads/${t.thread_id}/runs/`),
+        );
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: (matchingThread?.messages ?? []).map((message, index) => ({
+              run_id: `run-${matchingThread?.thread_id ?? "unknown"}`,
+              content: message,
+              metadata: { caller: "lead_agent" },
+              created_at: `2025-01-01T00:00:${String(index).padStart(2, "0")}Z`,
+            })),
+            hasMore: false,
+          }),
+        });
+      }
+      return route.fallback();
+    },
+  );
 
   // Run stream — returns a minimal SSE response with an AI message
   void page.route("**/api/langgraph/runs/stream", handleRunStream);
