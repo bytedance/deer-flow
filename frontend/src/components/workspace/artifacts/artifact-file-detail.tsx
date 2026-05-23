@@ -83,7 +83,7 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content } = useArtifactContent({
+  const { content, url } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -254,7 +254,9 @@ export function ArtifactFileDetail({
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
               content={displayContent}
+              isWriteFile={isWriteFile}
               language={language ?? "text"}
+              url={url}
             />
           )}
         {isCodeFile && viewMode === "code" && (
@@ -277,27 +279,33 @@ export function ArtifactFileDetail({
 
 export function ArtifactFilePreview({
   content,
+  isWriteFile,
   language,
+  url,
 }: {
   content: string;
+  isWriteFile: boolean;
   language: string;
+  url?: string;
 }) {
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
 
   useEffect(() => {
-    if (language !== "html") {
+    if (language !== "html" || isWriteFile) {
       setHtmlPreviewUrl(undefined);
       return;
     }
 
-    const blob = new Blob([content ?? ""], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(url);
+    const blob = new Blob([htmlWithBaseHref(content ?? "", url)], {
+      type: "text/html",
+    });
+    const objectUrl = URL.createObjectURL(blob);
+    setHtmlPreviewUrl(objectUrl);
 
     return () => {
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(objectUrl);
     };
-  }, [content, language]);
+  }, [content, isWriteFile, language, url]);
 
   if (language === "markdown") {
     return (
@@ -318,9 +326,35 @@ export function ArtifactFilePreview({
         className="size-full"
         title="Artifact preview"
         sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
+        src={isWriteFile ? undefined : htmlPreviewUrl}
+        srcDoc={isWriteFile ? content : undefined}
       />
     );
   }
   return null;
+}
+
+function htmlWithBaseHref(content: string, url?: string) {
+  if (!url || /<base\s/i.exec(content)) {
+    return content;
+  }
+
+  const baseHref = htmlBaseHref(url);
+  const baseElement = `<base href="${escapeHtmlAttribute(baseHref)}">`;
+  if (/<head[^>]*>/i.exec(content)) {
+    return content.replace(/<head([^>]*)>/i, `<head$1>${baseElement}`);
+  }
+  return `${baseElement}${content}`;
+}
+
+function htmlBaseHref(url: string) {
+  const baseUrl = new URL(url, window.location.href);
+  baseUrl.pathname = baseUrl.pathname.replace(/\/[^/]*$/, "/");
+  baseUrl.search = "";
+  baseUrl.hash = "";
+  return baseUrl.toString();
+}
+
+function escapeHtmlAttribute(value: string) {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
 }
