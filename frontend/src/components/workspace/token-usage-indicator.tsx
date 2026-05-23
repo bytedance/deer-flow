@@ -26,13 +26,17 @@ import {
   type TokenUsagePreferences,
   type TokenUsageViewPreset,
 } from "@/core/messages/usage-model";
+import type { ContextUsage } from "@/core/threads/token-usage";
 import { cn } from "@/lib/utils";
+
+import { formatContextUsagePercentage } from "./context-usage-format";
 
 interface TokenUsageIndicatorProps {
   threadId?: string;
   messages: Message[];
   pendingMessages?: Message[];
   backendUsage?: TokenUsage | null;
+  contextUsage?: ContextUsage | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -44,6 +48,7 @@ export function TokenUsageIndicator({
   messages,
   pendingMessages,
   backendUsage,
+  contextUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -61,6 +66,9 @@ export function TokenUsageIndicator({
     [backendUsage, messages, pendingMessages, threadId],
   );
   const preset = getTokenUsageViewPreset(preferences);
+  const contextPercentage = formatContextUsagePercentage(
+    contextUsage?.percentage,
+  );
 
   if (!enabled) {
     return null;
@@ -86,6 +94,14 @@ export function TokenUsageIndicator({
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
+          {contextPercentage && (
+            <span
+              className="text-muted-foreground/80 border-l pl-1.5 font-mono"
+              aria-label={t.contextUsage.badgeAriaLabel(contextPercentage)}
+            >
+              {contextPercentage}%
+            </span>
+          )}
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>
@@ -121,6 +137,42 @@ export function TokenUsageIndicator({
             </div>
           )}
         </div>
+        {contextUsage && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>{t.contextUsage.title}</DropdownMenuLabel>
+            <div className="space-y-1 px-2 py-1 text-xs">
+              <div className="flex justify-between gap-4">
+                <span>{t.contextUsage.used}</span>
+                <span className="font-mono">
+                  {formatTokenCount(contextUsage.tokenCount)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-4">
+                <span>{t.contextUsage.capacity}</span>
+                <span className="font-mono">
+                  {contextUsage.maxContextTokens != null
+                    ? formatTokenCount(contextUsage.maxContextTokens)
+                    : "-"}
+                </span>
+              </div>
+              {contextPercentage ? (
+                <div className="border-t pt-1">
+                  <div className="flex justify-between gap-4">
+                    <span>{t.contextUsage.label}</span>
+                    <span className="font-mono font-medium">
+                      {contextPercentage}%
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-muted-foreground pt-1 leading-relaxed">
+                  {t.contextUsage.capacityUnknown}
+                </div>
+              )}
+            </div>
+          </>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>{t.tokenUsage.view}</DropdownMenuLabel>
         <DropdownMenuRadioGroup

@@ -881,6 +881,9 @@ export function useThreadTokenUsage(
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnWindowFocus: false,
+    // Keep the last value visible while a refetch is in flight so the
+    // context-usage percentage does not flicker to blank between turns.
+    placeholderData: (previous) => previous,
   });
 }
 

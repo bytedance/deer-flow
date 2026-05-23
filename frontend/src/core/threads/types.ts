@@ -32,6 +32,12 @@ export interface RunMessage {
   created_at: string;
 }
 
+export interface ThreadContextUsage {
+  token_count: number;
+  max_context_tokens: number | null;
+  percentage: number | null;
+}
+
 export interface ThreadTokenUsageResponse {
   thread_id: string;
   total_tokens: number;
@@ -44,4 +50,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage?: ThreadContextUsage | null;
 }

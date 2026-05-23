@@ -18,3 +18,23 @@ export function threadTokenUsageToTokenUsage(
     totalTokens: usage.total_tokens ?? 0,
   };
 }
+
+export interface ContextUsage {
+  tokenCount: number;
+  maxContextTokens: number | null;
+  percentage: number | null;
+}
+
+export function selectContextUsage(
+  usage: ThreadTokenUsageResponse | null | undefined,
+): ContextUsage | null {
+  if (!usage?.context_usage) {
+    return null;
+  }
+  const { token_count, max_context_tokens, percentage } = usage.context_usage;
+  return {
+    tokenCount: token_count ?? 0,
+    maxContextTokens: max_context_tokens ?? null,
+    percentage: percentage ?? null,
+  };
+}

@@ -319,6 +319,16 @@ export const zhCN: Translations = {
     removeTodo: (content: string) => `移除 To-do：${content}`,
   },
 
+  contextUsage: {
+    label: "上下文",
+    title: "上下文窗口",
+    used: "已使用",
+    capacity: "容量",
+    capacityUnknown:
+      "该模型未配置上下文窗口大小。在 config.yaml 中为该模型设置 `context_window` 以启用百分比显示。",
+    badgeAriaLabel: (percentage: string) => `上下文窗口已使用 ${percentage}%`,
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",

@@ -334,6 +334,17 @@ export const enUS: Translations = {
     removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
+  contextUsage: {
+    label: "Context",
+    title: "Context window",
+    used: "Used",
+    capacity: "Capacity",
+    capacityUnknown:
+      "Context window not configured for this model. Set `context_window` on the model in config.yaml to enable the percentage.",
+    badgeAriaLabel: (percentage: string) =>
+      `Context window ${percentage}% full`,
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
