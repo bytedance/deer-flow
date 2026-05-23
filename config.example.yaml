@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -35,7 +35,18 @@ token_usage:
 # ============================================================================
 # Models Configuration
 # ============================================================================
-# Configure available LLM models for the agent to use
+# Configure available LLM models for the agent to use.
+#
+# Two token fields look similar but mean different things:
+# - `max_tokens`        - per-call OUTPUT cap; passed to the provider as the
+#                         maximum number of tokens the model may generate.
+# - `context_window`    - total context capacity (prompt + completion);
+#                         drives the real-time "% context used" indicator in
+#                         the chat UI. Leave unset if unknown — the
+#                         percentage simply won't render.
+# Always cross-check `context_window` against the provider's official model
+# spec sheet; the values below are documented defaults at the time this file
+# was written and may drift as new model versions ship.
 
 models:
   # Example: Volcengine (Doubao) model
@@ -47,6 +58,7 @@ models:
   #   api_key: $VOLCENGINE_API_KEY
   #   timeout: 600.0
   #   max_retries: 2
+  #   context_window: 262144     # 256K — verify against the Volcengine model card
   #   supports_thinking: true
   #   supports_vision: true
   #   supports_reasoning_effort: true
@@ -82,6 +94,7 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   context_window: 400000     # 400K — see OpenAI model spec
   #   supports_vision: true
 
   # Example: Ollama (native provider — preserves thinking/reasoning content)
@@ -102,6 +115,7 @@ models:
   #   num_predict: 8192
   #   temperature: 0.7
   #   reasoning: true                    # Passes think:true to Ollama native API
+  #   context_window: 32768              # Qwen3 32B default — bump if you serve it with a longer rope
   #   supports_thinking: true
   #   supports_vision: false
   #
@@ -113,6 +127,7 @@ models:
   #   num_predict: 8192
   #   temperature: 0.7
   #   reasoning: true
+  #   context_window: 32768
   #   supports_thinking: true
   #   supports_vision: true
   #
@@ -152,6 +167,7 @@ models:
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
+  #   context_window: 1048576    # 1M tokens — Gemini 2.5 Pro
   #   supports_vision: true
 
   # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
@@ -168,6 +184,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
+  #   context_window: 1048576
   #   supports_thinking: true
   #   supports_vision: true
   #   when_thinking_enabled:
@@ -188,6 +205,7 @@ models:
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
+  #   context_window: 131072    # 128K
   #   supports_thinking: true
   #   supports_vision: false  # DeepSeek V3 does not support vision
   #   when_thinking_enabled:
@@ -209,6 +227,7 @@ models:
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 32768
+  #   context_window: 262144    # 256K — verify against the Moonshot model card
   #   supports_thinking: true
   #   supports_vision: true  # Check your specific model's capabilities
   #   when_thinking_enabled:
@@ -232,6 +251,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
+  #   context_window: 131072    # 128K — DeepSeek V3.2
   #   temperature: 0.7
   #   supports_thinking: true
   #   supports_vision: true
@@ -256,6 +276,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
+  #   context_window: 204800    # 204K — see MiniMax docs link above
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
@@ -269,6 +290,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
+  #   context_window: 204800
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
@@ -285,6 +307,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
+  #   context_window: 204800    # 204K — see MiniMax docs link above
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
@@ -298,6 +321,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
+  #   context_window: 204800
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
@@ -313,6 +337,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
+  #   context_window: 1048576    # 1M — Gemini 2.5 Flash
   #   temperature: 0.7
 
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
@@ -330,6 +355,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
+  #   context_window: 32768      # match the rope length you serve vLLM with
   #   supports_thinking: true
   #   supports_vision: false
   #   when_thinking_enabled:
@@ -347,6 +373,7 @@ models:
   #   api_key: $OPENAI_API_KEY
   #   temperature: 0
   #   max_retries: 1
+  #   context_window: 262144     # Qwen3-Coder-480B is typically served with 256K rope
   #   supports_thinking: false
   #   supports_vision: false
   #   supports_reasoning_effort: false
