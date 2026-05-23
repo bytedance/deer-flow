@@ -2,7 +2,7 @@
 
 import type { Message } from "@langchain/langgraph-sdk";
 import { ChevronDownIcon, CoinsIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +17,7 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   formatTokenCount,
+  selectNonDecreasingTokenUsage,
   selectHeaderTokenUsage,
   type TokenUsage,
 } from "@/core/messages/usage";
@@ -60,6 +61,20 @@ export function TokenUsageIndicator({
       }),
     [backendUsage, messages, pendingMessages, threadId],
   );
+  const [displayedUsage, setDisplayedUsage] = useState<TokenUsage | null>(
+    usage,
+  );
+  const displayedUsageThreadIdRef = useRef(threadId);
+  useEffect(() => {
+    if (displayedUsageThreadIdRef.current !== threadId) {
+      displayedUsageThreadIdRef.current = threadId;
+      setDisplayedUsage(usage);
+      return;
+    }
+    setDisplayedUsage((previous) =>
+      selectNonDecreasingTokenUsage(usage, previous),
+    );
+  }, [threadId, usage]);
   const preset = getTokenUsageViewPreset(preferences);
 
   if (!enabled) {
@@ -81,8 +96,8 @@ export function TokenUsageIndicator({
           <span>{t.tokenUsage.label}</span>
           <span className="font-mono">
             {preferences.headerTotal
-              ? usage
-                ? formatTokenCount(usage.totalTokens)
+              ? displayedUsage
+                ? formatTokenCount(displayedUsage.totalTokens)
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
@@ -92,25 +107,25 @@ export function TokenUsageIndicator({
       <DropdownMenuContent side="bottom" align="end" className="w-80">
         <DropdownMenuLabel>{t.tokenUsage.title}</DropdownMenuLabel>
         <div className="px-2 py-1 text-xs">
-          {usage ? (
+          {displayedUsage ? (
             <div className="space-y-1">
               <div className="flex justify-between gap-4">
                 <span>{t.tokenUsage.input}</span>
                 <span className="font-mono">
-                  {formatTokenCount(usage.inputTokens)}
+                  {formatTokenCount(displayedUsage.inputTokens)}
                 </span>
               </div>
               <div className="flex justify-between gap-4">
                 <span>{t.tokenUsage.output}</span>
                 <span className="font-mono">
-                  {formatTokenCount(usage.outputTokens)}
+                  {formatTokenCount(displayedUsage.outputTokens)}
                 </span>
               </div>
               <div className="border-t pt-1">
                 <div className="flex justify-between gap-4">
                   <span>{t.tokenUsage.total}</span>
                   <span className="font-mono font-medium">
-                    {formatTokenCount(usage.totalTokens)}
+                    {formatTokenCount(displayedUsage.totalTokens)}
                   </span>
                 </div>
               </div>

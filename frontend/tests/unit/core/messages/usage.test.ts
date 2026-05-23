@@ -1,7 +1,11 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
-import { accumulateUsage, selectHeaderTokenUsage } from "@/core/messages/usage";
+import {
+  accumulateUsage,
+  selectHeaderTokenUsage,
+  selectNonDecreasingTokenUsage,
+} from "@/core/messages/usage";
 import {
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -160,5 +164,31 @@ test("falls back to visible messages when backend usage is unavailable or zero",
     inputTokens: 10,
     outputTokens: 5,
     totalTokens: 15,
+  });
+});
+
+test("keeps header usage from decreasing on stale refreshes", () => {
+  const previous = {
+    inputTokens: 200_000,
+    outputTokens: 5_000,
+    totalTokens: 205_000,
+  };
+
+  expect(
+    selectNonDecreasingTokenUsage(
+      { inputTokens: 144_300, outputTokens: 2_824, totalTokens: 147_124 },
+      previous,
+    ),
+  ).toBe(previous);
+
+  expect(
+    selectNonDecreasingTokenUsage(
+      { inputTokens: 319_488, outputTokens: 5_425, totalTokens: 324_913 },
+      previous,
+    ),
+  ).toEqual({
+    inputTokens: 319_488,
+    outputTokens: 5_425,
+    totalTokens: 324_913,
   });
 });

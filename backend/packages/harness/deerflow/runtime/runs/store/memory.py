@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import TOKEN_USAGE_ACTIVE_STATUSES, TOKEN_USAGE_TERMINAL_STATUSES, RunStore
 
 
 class MemoryRunStore(RunStore):
@@ -106,23 +106,23 @@ class MemoryRunStore(RunStore):
         return results
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
-        statuses = ("success", "error", "running") if include_active else ("success", "error")
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
+        statuses = TOKEN_USAGE_ACTIVE_STATUSES if include_active else TOKEN_USAGE_TERMINAL_STATUSES
+        included_runs = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
         by_model: dict[str, dict] = {}
-        for r in completed:
+        for r in included_runs:
             model = r.get("model_name") or "unknown"
             entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
             entry["tokens"] += r.get("total_tokens", 0)
             entry["runs"] += 1
         return {
-            "total_tokens": sum(r.get("total_tokens", 0) for r in completed),
-            "total_input_tokens": sum(r.get("total_input_tokens", 0) for r in completed),
-            "total_output_tokens": sum(r.get("total_output_tokens", 0) for r in completed),
-            "total_runs": len(completed),
+            "total_tokens": sum(r.get("total_tokens", 0) for r in included_runs),
+            "total_input_tokens": sum(r.get("total_input_tokens", 0) for r in included_runs),
+            "total_output_tokens": sum(r.get("total_output_tokens", 0) for r in included_runs),
+            "total_runs": len(included_runs),
             "by_model": by_model,
             "by_caller": {
-                "lead_agent": sum(r.get("lead_agent_tokens", 0) for r in completed),
-                "subagent": sum(r.get("subagent_tokens", 0) for r in completed),
-                "middleware": sum(r.get("middleware_tokens", 0) for r in completed),
+                "lead_agent": sum(r.get("lead_agent_tokens", 0) for r in included_runs),
+                "subagent": sum(r.get("subagent_tokens", 0) for r in included_runs),
+                "middleware": sum(r.get("middleware_tokens", 0) for r in included_runs),
             },
         }

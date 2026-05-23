@@ -99,6 +99,19 @@ export function selectHeaderTokenUsage({
   return accumulateUsage(messages);
 }
 
+export function selectNonDecreasingTokenUsage(
+  currentUsage: TokenUsage | null,
+  previousUsage: TokenUsage | null,
+): TokenUsage | null {
+  if (!currentUsage) {
+    return previousUsage;
+  }
+  if (!previousUsage || currentUsage.totalTokens >= previousUsage.totalTokens) {
+    return currentUsage;
+  }
+  return previousUsage;
+}
+
 /**
  * Format a token count for display: 1234 -> "1,234", 12345 -> "12.3K"
  */
