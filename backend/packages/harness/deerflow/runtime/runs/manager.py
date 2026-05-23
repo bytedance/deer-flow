@@ -59,7 +59,8 @@ class RunManager:
         Initial run creation is part of the run visibility boundary: callers
         should not observe a run in memory unless its backing store row exists.
         Unlike follow-up status/model updates, failures are propagated so the
-        caller can treat creation as failed.
+        caller can treat creation as failed. Rollback is the caller's
+        responsibility after inserting the record into ``_runs``.
         """
         if self._store is None:
             return
@@ -150,6 +151,7 @@ class RunManager:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
                 raise
             finally:
+                # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
@@ -358,6 +360,7 @@ class RunManager:
                 logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
                 raise
             finally:
+                # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
 
