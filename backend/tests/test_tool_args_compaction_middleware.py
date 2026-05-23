@@ -12,6 +12,7 @@ from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     SYNTHETIC_DANGLING_TOOL_RESULT_KEY,
     DanglingToolCallMiddleware,
 )
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_args_compaction_middleware import (
     ToolArgsCompactionMiddleware,
 )
@@ -226,6 +227,47 @@ class TestBuildCompactedMessages:
         assert "2500 chars" in raw_patched["args"]
         assert "2500 chars" in raw_patched["function"]["arguments"]
         assert "2500 chars" in raw_patched["function"]["args"]
+
+
+class _CapturingSummarizationMiddleware(DeerFlowSummarizationMiddleware):
+    def __init__(self):
+        super().__init__(model=MagicMock(), trigger=("messages", 1), keep=("messages", 1))
+        self.summary_messages: list | None = None
+
+    def _should_summarize(self, messages, total_tokens):  # noqa: ANN001
+        return True
+
+    def _determine_cutoff_index(self, messages):  # noqa: ANN001
+        return len(messages)
+
+    def _partition_with_skill_rescue(self, messages, cutoff_index):  # noqa: ANN001
+        return messages[:cutoff_index], messages[cutoff_index:]
+
+    def _create_summary(self, messages_to_summarize):  # noqa: ANN001
+        self.summary_messages = messages_to_summarize
+        return "summary"
+
+
+def test_summarization_uses_compacted_model_bound_view_without_mutating_state():
+    large_content = "x" * 3000
+    original_ai = _ai_with_tool_calls([_write_file_tool_call(content=large_content)])
+    messages = [
+        HumanMessage(content="please write a report"),
+        original_ai,
+        _tool_msg("call_write"),
+    ]
+    mw = _CapturingSummarizationMiddleware()
+    runtime = MagicMock()
+    runtime.context = {}
+
+    result = mw.before_model({"messages": messages}, runtime)
+
+    assert result is not None
+    assert mw.summary_messages is not None
+    summary_ai = mw.summary_messages[1]
+    assert isinstance(summary_ai, AIMessage)
+    assert summary_ai.tool_calls[0]["args"]["content"] == "[write_file content omitted in model context: 3000 chars]"
+    assert original_ai.tool_calls[0]["args"]["content"] == large_content
 
 
 class TestWrapModelCall:

@@ -25,6 +25,16 @@ def _is_synthetic_dangling_tool_result(message: ToolMessage) -> bool:
     return bool((getattr(message, "additional_kwargs", None) or {}).get(SYNTHETIC_DANGLING_TOOL_RESULT_KEY))
 
 
+def compact_messages_for_model_context(
+    messages: list[Any],
+    *,
+    write_file_max_chars: int = _DEFAULT_WRITE_FILE_CONTEXT_MAX_CHARS,
+) -> list[Any]:
+    """Return a compacted model-bound view without mutating the source messages."""
+    patched = ToolArgsCompactionMiddleware(write_file_max_chars=write_file_max_chars)._build_compacted_messages(messages)
+    return patched if patched is not None else messages
+
+
 class ToolArgsCompactionMiddleware(AgentMiddleware[AgentState]):
     """Compacts oversized historical write_file args in the model-bound request view."""
 
