@@ -233,7 +233,7 @@ After analysis:
 
 The script automatically caches loaded data to avoid re-parsing files on every call:
 
-- On first load, files are parsed and stored in a persistent DuckDB database under `/mnt/user-data/workspace/.data-analysis-cache/`
+- On first load, files are parsed and stored in a persistent DuckDB database under `~/.data-analysis-cache/`
 - The cache key is a SHA256 hash of all input file contents — if files change, a new cache is created
 - Subsequent calls with the same files will use the cached database directly (near-instant startup)
 - Cache is transparent — no extra parameters needed
