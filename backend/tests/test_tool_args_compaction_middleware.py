@@ -157,6 +157,34 @@ class TestBuildCompactedMessages:
         assert tool_calls[0]["args"]["content"] == "[write_file content omitted in model context: 3000 chars]"
         assert tool_calls[1]["args"]["content"] == "y" * 3000
 
+    def test_repeated_tool_call_id_compacts_only_occurrences_with_real_results(self):
+        mw = ToolArgsCompactionMiddleware()
+        completed_content = "completed-" + ("x" * 3000)
+        active_content = "active-" + ("y" * 3000)
+        msgs = [
+            _ai_with_tool_calls([_write_file_tool_call(tc_id="call_repeat", content=completed_content)]),
+            _tool_msg("call_repeat"),
+            _ai_with_tool_calls(
+                [
+                    _write_file_tool_call(
+                        tc_id="call_repeat",
+                        content=active_content,
+                        path="/mnt/user-data/active.html",
+                    )
+                ]
+            ),
+        ]
+
+        patched = mw._build_compacted_messages(msgs)
+
+        assert patched is not None
+        first_ai = patched[0]
+        second_ai = patched[2]
+        assert isinstance(first_ai, AIMessage)
+        assert isinstance(second_ai, AIMessage)
+        assert first_ai.tool_calls[0]["args"]["content"] == f"[write_file content omitted in model context: {len(completed_content)} chars]"
+        assert second_ai.tool_calls[0]["args"]["content"] == active_content
+
     def test_does_not_compact_short_write_file_call(self):
         mw = ToolArgsCompactionMiddleware()
         msgs = [
@@ -173,8 +201,13 @@ class TestBuildCompactedMessages:
         raw_tool_call = {
             "id": "call_write",
             "type": "function",
+            "args": json.dumps(tool_call["args"]),
             "thought_signature": "sig-123",
-            "function": {"name": "write_file", "arguments": json.dumps(tool_call["args"])},
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps(tool_call["args"]),
+                "args": json.dumps(tool_call["args"]),
+            },
         }
         msgs = [
             _ai_with_tool_calls([tool_call], additional_kwargs={"tool_calls": [raw_tool_call]}),
@@ -187,8 +220,12 @@ class TestBuildCompactedMessages:
         ai_msg = patched[0]
         raw_patched = ai_msg.additional_kwargs["tool_calls"][0]
         assert raw_patched["thought_signature"] == "sig-123"
+        assert large_content not in raw_patched["args"]
         assert large_content not in raw_patched["function"]["arguments"]
+        assert large_content not in raw_patched["function"]["args"]
+        assert "2500 chars" in raw_patched["args"]
         assert "2500 chars" in raw_patched["function"]["arguments"]
+        assert "2500 chars" in raw_patched["function"]["args"]
 
 
 class TestWrapModelCall:

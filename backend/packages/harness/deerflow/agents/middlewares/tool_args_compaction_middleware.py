@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import Any, override
 
@@ -34,21 +35,21 @@ class ToolArgsCompactionMiddleware(AgentMiddleware[AgentState]):
         if self._write_file_max_chars <= 0:
             return None
 
-        completed_tool_call_ids = {msg.tool_call_id for msg in messages if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and msg.tool_call_id and not _is_synthetic_dangling_tool_result(msg)}
-        if not completed_tool_call_ids:
+        completed_tool_call_positions = self._completed_tool_call_positions(messages)
+        if not completed_tool_call_positions:
             return None
 
         patched: list[Any] = []
         changed = False
-        for msg in messages:
+        for message_index, msg in enumerate(messages):
             if not isinstance(msg, AIMessage) or not msg.tool_calls:
                 patched.append(msg)
                 continue
 
             new_tool_calls: list[dict[str, Any]] = []
             message_changed = False
-            for tool_call in msg.tool_calls:
-                updated_tool_call, tool_call_changed = self._compact_tool_call(tool_call, completed_tool_call_ids)
+            for tool_call_index, tool_call in enumerate(msg.tool_calls):
+                updated_tool_call, tool_call_changed = self._compact_tool_call(tool_call, (message_index, tool_call_index) in completed_tool_call_positions)
                 new_tool_calls.append(updated_tool_call)
                 message_changed = message_changed or tool_call_changed
 
@@ -60,13 +61,36 @@ class ToolArgsCompactionMiddleware(AgentMiddleware[AgentState]):
 
         return patched if changed else None
 
+    def _completed_tool_call_positions(self, messages: list[Any]) -> set[tuple[int, int]]:
+        pending_tool_calls_by_id: dict[str, deque[tuple[int, int]]] = defaultdict(deque)
+        completed_positions: set[tuple[int, int]] = set()
+
+        for message_index, msg in enumerate(messages):
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tool_call_index, tool_call in enumerate(msg.tool_calls):
+                    tool_call_id = tool_call.get("id")
+                    if isinstance(tool_call_id, str) and tool_call_id:
+                        pending_tool_calls_by_id[tool_call_id].append((message_index, tool_call_index))
+                continue
+
+            if not isinstance(msg, ToolMessage) or _is_synthetic_dangling_tool_result(msg):
+                continue
+            tool_call_id = msg.tool_call_id
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                continue
+
+            pending_positions = pending_tool_calls_by_id.get(tool_call_id)
+            if pending_positions:
+                completed_positions.add(pending_positions.popleft())
+
+        return completed_positions
+
     def _compact_tool_call(
         self,
         tool_call: dict[str, Any],
-        completed_tool_call_ids: set[str],
+        is_completed: bool,
     ) -> tuple[dict[str, Any], bool]:
-        tool_call_id = tool_call.get("id")
-        if not isinstance(tool_call_id, str) or tool_call_id not in completed_tool_call_ids:
+        if not is_completed:
             return tool_call, False
         if tool_call.get("name") != "write_file":
             return tool_call, False

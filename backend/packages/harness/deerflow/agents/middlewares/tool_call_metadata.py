@@ -28,7 +28,7 @@ def _clone_raw_tool_call_with_updated_args(raw_tool_call: dict[str, Any], args: 
         cloned_function = dict(function)
         if "arguments" in cloned_function:
             cloned_function["arguments"] = json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["arguments"], str) else dict(args)
-        elif "args" in cloned_function:
+        if "args" in cloned_function:
             cloned_function["args"] = json.dumps(args, ensure_ascii=False) if isinstance(cloned_function["args"], str) else dict(args)
         cloned["function"] = cloned_function
 
