@@ -215,3 +215,36 @@ netstat -tlnp | grep -E "2026|3000|8001"
 docker compose -p deer-flow-dev -f docker-compose-dev.yaml down -v
 docker compose -p deer-flow-dev -f docker-compose-dev.yaml up -d --build frontend gateway nginx
 ```
+
+```
+──────────────┬────────────────────────────┬────────────────────────────────┐
+  │              │          make up           │       make docker-start        │
+  ├──────────────┼────────────────────────────┼────────────────────────────────┤
+  │ 脚本         │ ./scripts/deploy.sh        │ ./scripts/docker.sh start      │
+  ├──────────────┼────────────────────────────┼────────────────────────────────┤
+  │ Compose 文件 │ docker/docker-compose.yaml │ docker/docker-compose-dev.yaml │
+  ├──────────────┼────────────────────────────┼────────────────────────────────┤
+  │ 项目名       │ deer-flow                  │ deer-flow-dev                  │
+  ├──────────────┼────────────────────────────┼────────────────────────────────┤
+  │ 用途         │ 生产环境                   │ 开发环境                       │
+  └──────────────┴────────────────────────────┴────────────────────────────────┘
+
+  实际运行的命令：
+
+  # make up（生产）
+  docker compose -p deer-flow -f docker/docker-compose.yaml up --build -d --remove-orphans frontend gateway nginx
+
+  # make docker-start（开发）
+  docker compose -p deer-flow-dev -f docker/docker-compose-dev.yaml up --build -d --remove-orphans frontend gateway nginx
+
+  共同点：
+  - 都会自动检测 sandbox 模式（local/aio/provisioner）
+  - 都会自动设置 DEER_FLOW_ROOT 环境变量
+  - 都会在 config.yaml 不存在时从 example 复制
+
+  选择建议：
+  - 本地开发 → make docker-start（项目名 deer-flow-dev）
+  - 生产部署 → make up（项目名 deer-flow）
+  - 查看日志 → make docker-logs-gateway
+
+  ```
