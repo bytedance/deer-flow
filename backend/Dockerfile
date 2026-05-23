@@ -72,10 +72,10 @@ ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
 
 # Copy Node.js runtime from builder (provides npx for MCP servers)
-COPY --from=builder /usr/bin/node /usr/bin/node
-COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
+COPY --from=builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/docker:cli /usr/local/bin/docker /usr/local/bin/docker

@@ -7,7 +7,7 @@ ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
 ARG NPM_REGISTRY
 
 # ── Base: shared setup ────────────────────────────────────────────────────────
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS base
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/node:22-alpine AS base
 ARG PNPM_STORE_PATH
 ARG NPM_REGISTRY
 # Configure corepack registry before installing pnpm so the download itself
@@ -37,7 +37,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store,mode=0
 RUN cd /app/frontend && SKIP_ENV_VALIDATION=1 pnpm build
 
 # ── Prod: minimal runtime with pre-built output ───────────────────────────────
-FROM node:22-alpine AS prod
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/node:22-alpine AS prod
 ARG PNPM_STORE_PATH
 ARG NPM_REGISTRY
 RUN if [ -n "${NPM_REGISTRY}" ]; then \
