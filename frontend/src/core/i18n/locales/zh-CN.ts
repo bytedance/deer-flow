@@ -397,6 +397,7 @@ export const zhCN: Translations = {
         work: "工作",
         personal: "个人",
         topOfMind: "近期关注（Top of mind）",
+        cognitiveStyle: "思维习惯",
         historyBackground: "历史背景",
         recentMonths: "近几个月",
         earlierContext: "更早上下文",

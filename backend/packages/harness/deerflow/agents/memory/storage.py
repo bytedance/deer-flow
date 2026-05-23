@@ -21,6 +21,45 @@ def utc_now_iso_z() -> str:
     return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
 
 
+_EMPTY_CONTEXT_SECTION: dict[str, str] = {"summary": "", "updatedAt": ""}
+
+
+def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Ensure memory dict includes all schema fields (backward compatible with older files)."""
+    user = data.get("user")
+    if not isinstance(user, dict):
+        user = {}
+        data["user"] = user
+
+    for section in ("workContext", "personalContext", "topOfMind", "cognitiveStyle"):
+        section_data = user.get(section)
+        if not isinstance(section_data, dict):
+            user[section] = dict(_EMPTY_CONTEXT_SECTION)
+            continue
+        section_data.setdefault("summary", "")
+        section_data.setdefault("updatedAt", "")
+
+    history = data.get("history")
+    if not isinstance(history, dict):
+        history = {}
+        data["history"] = history
+
+    for section in ("recentMonths", "earlierContext", "longTermBackground"):
+        section_data = history.get(section)
+        if not isinstance(section_data, dict):
+            history[section] = dict(_EMPTY_CONTEXT_SECTION)
+            continue
+        section_data.setdefault("summary", "")
+        section_data.setdefault("updatedAt", "")
+
+    if not isinstance(data.get("facts"), list):
+        data["facts"] = []
+
+    data.setdefault("version", "1.0")
+    data.setdefault("lastUpdated", "")
+    return data
+
+
 def create_empty_memory() -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
@@ -30,6 +69,7 @@ def create_empty_memory() -> dict[str, Any]:
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -111,7 +151,7 @@ class FileMemoryStorage(MemoryStorage):
         try:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
-            return data
+            return normalize_memory_data(data)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load memory file: %s", e)
             return create_empty_memory()
@@ -133,7 +173,7 @@ class FileMemoryStorage(MemoryStorage):
         with self._cache_lock:
             cached = self._memory_cache.get(cache_key)
             if cached is not None and cached[1] == current_mtime:
-                return cached[0]
+                return normalize_memory_data(cached[0])
 
         memory_data = self._load_memory_from_file(agent_name, user_id=user_id)
 

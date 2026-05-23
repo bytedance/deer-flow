@@ -22,6 +22,7 @@ def _make_memory(facts: list[dict[str, object]] | None = None) -> dict[str, obje
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -37,6 +38,28 @@ def _memory_config(**overrides: object) -> MemoryConfig:
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def test_apply_updates_cognitive_style_section() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "user": {
+            "cognitiveStyle": {
+                "summary": "Prefers conclusions first, then details.",
+                "shouldUpdate": True,
+            }
+        }
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-cognitive")
+
+    assert result["user"]["cognitiveStyle"]["summary"] == "Prefers conclusions first, then details."
+    assert result["user"]["cognitiveStyle"]["updatedAt"]
 
 
 def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None:

@@ -336,6 +336,7 @@ export interface Translations {
         work: string;
         personal: string;
         topOfMind: string;
+        cognitiveStyle: string;
         historyBackground: string;
         recentMonths: string;
         earlierContext: string;

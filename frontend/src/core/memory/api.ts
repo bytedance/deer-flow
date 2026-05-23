@@ -1,6 +1,7 @@
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
+import { normalizeUserMemory } from "./normalize";
 import type {
   MemoryFactInput,
   MemoryFactPatchInput,
@@ -77,7 +78,8 @@ async function readMemoryResponse(
     );
   }
 
-  return response.json() as Promise<UserMemory>;
+  const memory = (await response.json()) as UserMemory;
+  return normalizeUserMemory(memory);
 }
 
 export async function loadMemory(): Promise<UserMemory> {

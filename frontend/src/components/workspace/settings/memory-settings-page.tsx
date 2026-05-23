@@ -111,6 +111,7 @@ function isImportedMemory(value: unknown): value is UserMemory {
     isMemorySection(value.user.workContext) &&
     isMemorySection(value.user.personalContext) &&
     isMemorySection(value.user.topOfMind) &&
+    isMemorySection(value.user.cognitiveStyle) &&
     isMemorySection(value.history.recentMonths) &&
     isMemorySection(value.history.earlierContext) &&
     isMemorySection(value.history.longTermBackground) &&
@@ -185,6 +186,11 @@ function buildMemorySectionGroups(
           summary: memory.user.topOfMind.summary,
           updatedAt: memory.user.topOfMind.updatedAt,
         },
+        {
+          title: t.settings.memory.markdown.cognitiveStyle,
+          summary: memory.user.cognitiveStyle.summary,
+          updatedAt: memory.user.cognitiveStyle.updatedAt,
+        },
       ],
     },
     {
@@ -251,6 +257,7 @@ function isMemorySummaryEmpty(memory: UserMemory) {
     memory.user.workContext.summary.trim() === "" &&
     memory.user.personalContext.summary.trim() === "" &&
     memory.user.topOfMind.summary.trim() === "" &&
+    memory.user.cognitiveStyle.summary.trim() === "" &&
     memory.history.recentMonths.summary.trim() === "" &&
     memory.history.earlierContext.summary.trim() === "" &&
     memory.history.longTermBackground.summary.trim() === ""
