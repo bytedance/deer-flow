@@ -5,7 +5,10 @@ completes because a downstream node's partial state update with `todos=None`
 overwrites the previously accumulated value.
 """
 
-from packages.harness.deerflow.agents.thread_state import (
+from typing import get_type_hints
+
+from deerflow.agents.thread_state import (
+    ThreadState,
     merge_artifacts,
     merge_todos,
     merge_viewed_images,
@@ -65,3 +68,30 @@ class TestMergeViewedImages:
     def test_empty_dict_clears(self):
         existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
         assert merge_viewed_images(existing, {}) == {}
+
+
+class TestThreadStateAnnotations:
+    """Regression guards: ensure reducer wiring on ThreadState fields.
+
+    These tests protect against silent regressions where a field's
+    ``Annotated[..., reducer]`` is reverted to a plain type, which would
+    re-introduce bugs even when the reducer functions themselves remain
+    correct.
+    """
+
+    def test_todos_field_is_wired_to_merge_todos(self):
+        """ThreadState.todos must use merge_todos.
+
+        Without this Annotated binding, LangGraph falls back to last-value-wins
+        behavior, and partial state updates that omit todos will silently clear
+        previously streamed values.
+        """
+        hints = get_type_hints(ThreadState, include_extras=True)
+        todos_hint = hints["todos"]
+        assert hasattr(todos_hint, "__metadata__"), "ThreadState.todos must be Annotated with a reducer"
+        assert merge_todos in todos_hint.__metadata__, "ThreadState.todos must be wired to merge_todos reducer (see #3123)"
+
+    def test_artifacts_field_is_wired_to_merge_artifacts(self):
+        """Sanity check that existing reducer wiring is preserved."""
+        hints = get_type_hints(ThreadState, include_extras=True)
+        assert merge_artifacts in hints["artifacts"].__metadata__
