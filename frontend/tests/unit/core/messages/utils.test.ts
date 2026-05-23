@@ -2,8 +2,11 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  getStreamingMessageLookup,
+  isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 
 test("aggregates token usage messages once per assistant turn", () => {
@@ -96,4 +99,273 @@ test("hides internal todo reminder messages from message groups", () => {
   expect(
     groups.flatMap((group) => group.messages).map((message) => message.id),
   ).toEqual(["human-1", "ai-1"]);
+});
+
+test("hides assistant copy data while that turn is streaming", () => {
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Partial answer",
+    },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Partial answer");
+  expect(getAssistantTurnCopyData(messages, { isStreaming: true })).toBeNull();
+});
+
+test("marks the latest assistant message as streaming", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Still generating",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, () => ({
+        streamMetadata: { langgraph_node: "agent" },
+      })),
+    ),
+  ).toBe(true);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, false, () => ({
+        streamMetadata: { langgraph_node: "agent" },
+      })),
+    ),
+  ).toBe(false);
+});
+
+test("keeps previous assistant copyable while waiting for a new visible answer", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "opt-human-1",
+      type: "human",
+      content: "Continue",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("keeps previous assistant copyable while a hidden send is starting", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("keeps previous assistant copyable after a hidden send is appended", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "human-hidden",
+      type: "human",
+      content: "Save this agent",
+      additional_kwargs: { hide_from_ui: true },
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true),
+    ),
+  ).toBe(false);
+});
+
+test("uses stream metadata to identify an assistant before optimistic input", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Still generating",
+    },
+    {
+      id: "opt-human-1",
+      type: "human",
+      content: "Continue",
+    },
+  ] as Message[];
+  const assistantGroups = getMessageGroups(messages).filter(
+    (group) => group.type === "assistant",
+  );
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndexes = groups
+    .map((group, index) => (group.type === "assistant" ? index : -1))
+    .filter((index) => index >= 0);
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndexes[0] ?? -1]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(false);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndexes[1] ?? -1]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(true);
+  expect(assistantGroups.map((group) => group.id)).toEqual(["ai-1", "ai-2"]);
+});
+
+test("does not mark a completed assistant group streaming from a later processing group", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Visible answer",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant",
+    "assistant:processing",
+  ]);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-2"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(false);
+});
+
+test("keeps streaming assistant hidden when a hidden control message follows it", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Still generating",
+    },
+    {
+      id: "human-hidden",
+      type: "human",
+      content: "Save this agent",
+      additional_kwargs: { hide_from_ui: true },
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages);
+  const assistantGroupIndex = groups.findIndex(
+    (group) => group.type === "assistant",
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[assistantGroupIndex]?.messages ?? [],
+      getStreamingMessageLookup(messages, true, (message) =>
+        message.id === "ai-1"
+          ? { streamMetadata: { langgraph_node: "agent" } }
+          : undefined,
+      ),
+    ),
+  ).toBe(true);
 });
