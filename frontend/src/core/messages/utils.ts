@@ -170,6 +170,86 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   return usageMessagesByGroupIndex;
 }
 
+type MessageMetadataLookup = (
+  message: Message,
+  index: number,
+) => { streamMetadata?: Record<string, unknown> } | undefined;
+
+export type StreamingMessageLookup = {
+  ids: ReadonlySet<string>;
+  messages: ReadonlySet<Message>;
+};
+
+export function getStreamingMessageLookup(
+  messages: Message[],
+  isStreaming: boolean,
+  getMessagesMetadata?: MessageMetadataLookup,
+): StreamingMessageLookup {
+  const streamingMessageIds = new Set<string>();
+  const streamingMessages = new Set<Message>();
+
+  if (!isStreaming) {
+    return {
+      ids: streamingMessageIds,
+      messages: streamingMessages,
+    };
+  }
+
+  messages.forEach((message, index) => {
+    if (!getMessagesMetadata?.(message, index)?.streamMetadata) {
+      return;
+    }
+
+    if (typeof message.id === "string" && message.id.length > 0) {
+      streamingMessageIds.add(message.id);
+    }
+    streamingMessages.add(message);
+  });
+
+  return {
+    ids: streamingMessageIds,
+    messages: streamingMessages,
+  };
+}
+
+export function isAssistantMessageGroupStreaming(
+  groupMessages: Message[],
+  streamingMessages: StreamingMessageLookup,
+) {
+  return groupMessages.some((message) => {
+    if (message.type !== "ai") {
+      return false;
+    }
+
+    return (
+      (typeof message.id === "string" &&
+        message.id.length > 0 &&
+        streamingMessages.ids.has(message.id)) ||
+      streamingMessages.messages.has(message)
+    );
+  });
+}
+
+export function getAssistantTurnCopyData(
+  messages: Message[],
+  { isStreaming = false }: { isStreaming?: boolean } = {},
+) {
+  if (isStreaming) {
+    return null;
+  }
+
+  return (
+    [...messages]
+      .reverse()
+      .filter((message) => message.type === "ai")
+      .map((message) => {
+        const content = extractContentFromMessage(message);
+        return content ?? extractReasoningContentFromMessage(message) ?? "";
+      })
+      .find((content) => content.length > 0) ?? null
+  );
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (
