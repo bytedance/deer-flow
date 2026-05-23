@@ -674,7 +674,7 @@ export function InputBox({
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
-            {supportReasoningEffort && context.mode !== "flash" && (
+            {supportReasoningEffort && (
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger className="gap-1! px-2!">
                   <div className="text-xs font-normal">

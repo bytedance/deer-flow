@@ -113,6 +113,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
 
+    # langchain_google_genai uses `thinking_level` (minimal|low|medium|high) instead of `reasoning_effort`.
+    if model_class.__name__ == "ChatGoogleGenerativeAI":
+        if "reasoning_effort" in kwargs:
+            kwargs["thinking_level"] = kwargs.pop("reasoning_effort")
+        if "reasoning_effort" in model_settings_from_config:
+            model_settings_from_config["thinking_level"] = model_settings_from_config.pop("reasoning_effort")
+
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
