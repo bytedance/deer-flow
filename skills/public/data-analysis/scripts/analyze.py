@@ -15,13 +15,23 @@ import subprocess
 import sys
 import tempfile
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+LOG_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f"{LOG_DIR}/analyze.log"),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 try:
     import duckdb
 except ImportError:
-    logger.error("duckdb is not installed. Installing...")
+    logger.error("❌ duckdb 未安装，正在安装...")
     subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
     import duckdb
 
@@ -30,9 +40,18 @@ try:
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
 
+try:
+    from header_processor import flatten_excel_headers  # noqa: F401
+except ImportError:
+    # header_processor.py should be in same scripts/ directory
+    flatten_excel_headers = None
+
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
 TABLE_MAP_SUFFIX = ".table_map.json"
+
+# Flat CSV naming pattern from header_processor: {file_hash}_flat_{version}_{sheet_name}.csv
+FLATTEN_VERSION = "v1"
 
 
 def compute_files_hash(files: list[str]) -> str:
@@ -79,6 +98,37 @@ def load_table_map(files_hash: str) -> dict[str, str] | None:
         return None
 
 
+def _compute_file_hash(file_path: str) -> str:
+    """Compute file SHA256 hash (first 12 hex chars) — matches header_processor logic."""
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            hasher.update(chunk)
+    return hasher.hexdigest()[:12]
+
+
+def find_flat_csvs(excel_path: str) -> dict[str, str]:
+    """Find pre-processed flattened CSVs for an Excel file. Returns {sheet_name: csv_path}."""
+    if not os.path.exists(excel_path):
+        return {}
+
+    file_hash = _compute_file_hash(excel_path)
+    pattern = f"{file_hash}_flat_{FLATTEN_VERSION}_"
+    results: dict[str, str] = {}
+
+    if not os.path.isdir(CACHE_DIR):
+        return results
+
+    for fname in os.listdir(CACHE_DIR):
+        if fname.startswith(pattern) and fname.endswith(".csv"):
+            # Extract sheet name: {hash}_flat_{version}_{sheet_name}.csv
+            sheet_name = fname[len(pattern):-4]  # strip pattern and .csv
+            csv_path = os.path.join(CACHE_DIR, fname)
+            results[sheet_name] = csv_path
+
+    return results
+
+
 def sanitize_table_name(name: str) -> str:
     """Sanitize a sheet/file name into a valid SQL table name."""
     sanitized = re.sub(r"[^\w]", "_", name)
@@ -87,28 +137,83 @@ def sanitize_table_name(name: str) -> str:
     return sanitized
 
 
-def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, str]:
+def load_files(con: duckdb.DuckDBPyConnection, files: list[str], use_flat_csv: bool = True) -> dict[str, str]:
     """
     Load Excel/CSV files into DuckDB tables.
 
     Returns a mapping of original_name -> sanitized_table_name.
+    use_flat_csv: If True, prefer pre-processed flattened CSVs (L1 cache) when available.
     """
     con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
         if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
+            logger.error(f"❌ 文件未找到: {file_path}")
             continue
 
         ext = os.path.splitext(file_path)[1].lower()
 
         if ext in (".xlsx", ".xls"):
+            # Try to use pre-processed flattened CSVs (L1 cache) first
+            if use_flat_csv:
+                flat_csvs = find_flat_csvs(file_path)
+                if flat_csvs:
+                    # Load flat CSVs as separate tables
+                    for sheet_name, csv_path in flat_csvs.items():
+                        table_name = sanitize_table_name(sheet_name)
+                        # Handle duplicate table names
+                        original_table_name = table_name
+                        counter = 1
+                        while table_name in table_map.values():
+                            table_name = f"{original_table_name}_{counter}"
+                            counter += 1
+                        try:
+                            con.execute(
+                                f'CREATE TABLE "{table_name}" AS SELECT * FROM read_csv_auto(\'{csv_path}\')'
+                            )
+                            table_map[sheet_name] = table_name
+                            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                            logger.info(
+                                f"  ✅ 已加载（展平CSV）工作表 '{sheet_name}' -> 表 '{table_name}' ({row_count} 行)"
+                            )
+                            print(f"  ✅ 已加载工作表: {sheet_name}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 加载工作表 '{sheet_name}' 失败: {e}")
+                    continue
+
+            # Fall back: try header flattening
+            if flatten_excel_headers:
+                flat_csvs = flatten_excel_headers(file_path, CACHE_DIR)
+                if flat_csvs:
+                    # Load flat CSVs as separate tables
+                    for sheet_name, csv_path in flat_csvs.items():
+                        table_name = sanitize_table_name(sheet_name)
+                        # Handle duplicate table names
+                        original_table_name = table_name
+                        counter = 1
+                        while table_name in table_map.values():
+                            table_name = f"{original_table_name}_{counter}"
+                            counter += 1
+                        try:
+                            con.execute(
+                                f'CREATE TABLE "{table_name}" AS SELECT * FROM read_csv_auto(\'{csv_path}\')'
+                            )
+                            table_map[sheet_name] = table_name
+                            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                            logger.info(
+                                f"  ✅ 已加载（展平）工作表 '{sheet_name}' -> 表 '{table_name}' ({row_count} 行)"
+                            )
+                            print(f"  ✅ 已加载工作表: {sheet_name}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 加载工作表 '{sheet_name}' 失败: {e}")
+                    continue
+            # Fall back to GDAL方式
             _load_excel(con, file_path, table_map)
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
         else:
-            logger.warning(f"Unsupported file format: {ext} ({file_path})")
+            logger.warning(f"❌ 不支持的文件格式: {ext} ({file_path})")
 
     return table_map
 
@@ -179,10 +284,11 @@ def _load_csv(
         table_map[base_name] = table_name
         row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         logger.info(
-            f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
+            f"  ✅ 已加载 CSV '{base_name}' -> 表 '{table_name}' ({row_count} 行)"
         )
+        print(f"  ✅ 已加载 CSV: {base_name}")
     except Exception as e:
-        logger.warning(f"  Failed to load CSV '{base_name}': {e}")
+        logger.warning(f"  ⚠️ 加载 CSV '{base_name}' 失败: {e}")
 
 
 def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
@@ -354,11 +460,11 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
                 )
     else:
-        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
+        msg = f"❌ 不支持的输出格式: {ext}，请使用 .csv、.json 或 .md"
         print(msg)
         return msg
 
-    msg = f"Results exported to {output_file} ({len(rows)} rows)"
+    msg = f"✅ 结果已导出到 {output_file}（{len(rows)} 行）"
     print(msg)
     return msg
 
@@ -477,6 +583,98 @@ def action_summary(
     return result
 
 
+def _col_quote(col_name: str) -> str:
+    """Return double-quoted column name if it contains spaces or special chars."""
+    if any(c in col_name for c in (' ', '-', '（', '）', '_', '/', '\\')):
+        return f'"{col_name}"'
+    return col_name
+
+
+def action_overview(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
+    """
+    Single-pass overview: table structure + column quick-ref + stats summary + sample rows.
+    Designed to provide everything needed to write a query in one call.
+    """
+    output_parts = []
+
+    for original_name, table_name in table_map.items():
+        output_parts.append(f"\n{'=' * 60}")
+        output_parts.append(f"  Table: {original_name}  (SQL: \"{table_name}\")")
+        output_parts.append(f"{'=' * 60}")
+
+        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
+        col_names = [c[0] for c in columns]
+
+        # Section 1: Quick column reference with auto-quoting hints
+        output_parts.append(f"\n--- Column Quick-Ref ---")
+        output_parts.append(f"Rows: {row_count}  |  Columns: {len(columns)}")
+        output_parts.append(f"\n{'Name':<32} {'Type':<12} Nullable")
+        output_parts.append(f"{'-' * 32} {'-' * 12} {'-' * 8}")
+        for col in columns:
+            col_name, col_type, nullable = col[0], col[1], col[2]
+            quoted = _col_quote(col_name)
+            hint = f"  -> use {quoted}" if quoted != col_name else ""
+            output_parts.append(f"{col_name:<32} {col_type:<12} {nullable}{hint}")
+
+        # Section 2: Compact stats for numeric columns
+        numeric_types = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "DOUBLE", "FLOAT", "DECIMAL", "HUGEINT", "REAL", "NUMERIC"}
+        numeric_cols = [(c[0], re.sub(r"\(.*\)", "", c[1]).strip().upper()) for c in columns
+                        if re.sub(r"\(.*\)", "", c[1]).strip().upper() in numeric_types]
+
+        if numeric_cols:
+            output_parts.append(f"\n--- Numeric Columns Summary ---")
+            for col_name, col_type in numeric_cols:
+                try:
+                    stats = con.execute(f"""
+                        SELECT
+                            COUNT("{col_name}"),
+                            AVG("{col_name}")::DOUBLE,
+                            MIN("{col_name}"),
+                            MAX("{col_name}")
+                        FROM "{table_name}"
+                    """).fetchone()
+                    cnt, avg, mn, mx = stats
+                    output_parts.append(f"  {col_name}: count={cnt:,}  avg={avg:,.2f}  min={mn}  max={mx}")
+                except Exception:
+                    pass
+
+        # Section 3: String column top values
+        string_cols = [(c[0], re.sub(r"\(.*\)", "", c[1]).strip().upper()) for c in columns
+                       if re.sub(r"\(.*\)", "", c[1]).strip().upper() not in numeric_types]
+        if string_cols:
+            output_parts.append(f"\n--- String Columns (top 3 values each) ---")
+            for col_name, col_type in string_cols[:5]:  # limit to 5 string cols
+                try:
+                    top_vals = con.execute(f"""
+                        SELECT "{col_name}", COUNT(*) as freq
+                        FROM "{table_name}"
+                        WHERE "{col_name}" IS NOT NULL
+                        GROUP BY "{col_name}"
+                        ORDER BY freq DESC LIMIT 3
+                    """).fetchall()
+                    vals_str = "  |  ".join(f"{v} ({n})" for v, n in top_vals) if top_vals else "(no data)"
+                    output_parts.append(f"  {col_name}: {vals_str}")
+                except Exception:
+                    pass
+
+        # Section 4: Sample rows
+        output_parts.append(f"\n--- Sample Rows (3) ---")
+        try:
+            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 3').fetchdf()
+            output_parts.append(sample.to_string(index=False))
+        except Exception:
+            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 3').fetchall()
+            header = [c[0] for c in columns]
+            output_parts.append("  " + " | ".join(header))
+            for row in sample:
+                output_parts.append("  " + " | ".join(str(v) for v in row))
+
+    result = "\n".join(output_parts)
+    print(result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze Excel/CSV files using DuckDB")
     parser.add_argument(
@@ -488,8 +686,13 @@ def main():
     parser.add_argument(
         "--action",
         required=True,
-        choices=["inspect", "query", "summary"],
-        help="Action to perform: inspect, query, or summary",
+        choices=["inspect", "query", "summary", "overview"],
+        help="Action to perform: inspect, query, summary, or overview (inspect+summary in one)",
+    )
+    parser.add_argument(
+        "--no-flat-csv",
+        action="store_true",
+        help="Disable auto-use of pre-processed flattened CSVs (force re-parse Excel files)",
     )
     parser.add_argument(
         "--sql",
@@ -524,20 +727,21 @@ def main():
 
     if cached_table_map and os.path.exists(db_path):
         # Cache hit: connect to existing DB
-        logger.info(f"Cache hit! Using cached database: {db_path}")
+        print("✅ 缓存命中 — 使用已有缓存数据库")
         con = duckdb.connect(db_path, read_only=True)
         table_map = cached_table_map
-        logger.info(
-            f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
-        )
+        print(f"✅ 已加载 {len(table_map)} 个表")
     else:
         # Cache miss: load files and persist to DB
-        logger.info("Loading files (first time, will cache for future use)...")
+        logger.info("⏳ 首次加载 — 正在解析文件并建立缓存...")
+        print("⏳ 正在解析文件...")
         con = duckdb.connect(db_path)
-        table_map = load_files(con, args.files)
+        use_flat_csv = not args.no_flat_csv
+        table_map = load_files(con, args.files, use_flat_csv=use_flat_csv)
 
         if not table_map:
-            logger.error("No tables were loaded. Check file paths and formats.")
+            logger.error("❌ 未加载任何表，请检查文件路径和格式。")
+            print("❌ 文件加载失败")
             # Clean up empty DB file
             con.close()
             if os.path.exists(db_path):
@@ -546,10 +750,8 @@ def main():
 
         # Save table map for future cache lookups
         save_table_map(files_hash, table_map)
-        logger.info(
-            f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
-        )
-        logger.info(f"Cached database saved to: {db_path}")
+        print(f"✅ 数据已缓存 ({len(table_map)} 个表)")
+        print(f"✅ 缓存已保存")
 
     # Perform action
     if args.action == "inspect":
@@ -558,6 +760,8 @@ def main():
         action_query(con, args.sql, table_map, args.output_file)
     elif args.action == "summary":
         action_summary(con, args.table, table_map)
+    elif args.action == "overview":
+        action_overview(con, table_map)
 
     con.close()
 

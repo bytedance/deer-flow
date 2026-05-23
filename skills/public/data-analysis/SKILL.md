@@ -1,5 +1,6 @@
 ---
 name: data-analysis
+version: 2.0.0-20250524
 description: Use this skill when the user uploads Excel (.xlsx/.xls) or CSV files and wants to perform data analysis, generate statistics, create summaries, pivot tables, SQL queries, or any form of structured data exploration. Supports multi-sheet Excel workbooks, aggregation, filtering, joins, and exporting results to CSV/JSON/Markdown.
 ---
 
@@ -20,8 +21,6 @@ This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process
 
 ## Workflow
 
-### Step 1: Understand Requirements
-
 When a user uploads data files and requests analysis, identify:
 
 - **File location**: Path(s) to uploaded Excel/CSV files under `/mnt/user-data/uploads/`
@@ -29,48 +28,29 @@ When a user uploads data files and requests analysis, identify:
 - **Output format**: How results should be presented (table, CSV export, JSON, etc.)
 - You don't need to check the folder under `/mnt/user-data`
 
-### Step 2: Inspect File Structure
+## Analysis Complexity Adaptation
 
-First, inspect the uploaded file to understand its schema:
+Assess the user's request complexity first:
 
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/data.xlsx \
-  --action inspect
-```
+| Level | 判断标准 | 执行模式 |
+|-------|----------|----------|
+| **Simple** | 模糊/泛化请求，不知问什么 | inspect → 一句话描述 → 结束 |
+| **Medium** | 明确的多维度聚合需求 | inspect → 合并 query（1次SQL）→ 结束 |
+| **Complex** | 明确要求报告/趋势/对比 | inspect → overview → summary → 1次 query 总结 → 结束 |
 
-This returns:
-- Sheet names (for Excel) or filename (for CSV)
-- Column names, data types, and non-null counts
-- Row count per sheet/file
-- Sample data (first 5 rows)
+- **Simple**：用户不知问什么，泛泛说"分析报表"→ `inspect` 获取表结构，用一句话描述数据概况，结束
+- **Medium**：用户有明确问题，多指标汇总、分类对比 → `inspect` 后合并 `query`
+- **Complex**：用户明确要求"生成报告"、"趋势分析"、"环比同比"→ `inspect` + `overview` + `summary` + 分步 `query`
 
-### Step 3: Perform Analysis
+### Action Selection by Level
 
-Based on the schema, construct SQL queries to answer the user's questions.
+**Simple**：`inspect` → 一句话描述 → 结束
 
-#### Run SQL Query
+**Medium**：`inspect` → 合并 `query` → 结束
 
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/data.xlsx \
-  --action query \
-  --sql "SELECT category, COUNT(*) as count, AVG(amount) as avg_amount FROM Sheet1 GROUP BY category ORDER BY count DESC"
-```
+**Complex**：`inspect` → `overview` → `summary` → 1次 `query` 总结 → 结束
 
-#### Generate Statistical Summary
-
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/data.xlsx \
-  --action summary \
-  --table Sheet1
-```
-
-This returns for each numeric column: count, mean, std, min, 25%, 50%, 75%, max, null_count.
-For string columns: count, unique, top value, frequency, null_count.
-
-#### Export Results
+## Query & Export
 
 ```bash
 python /mnt/skills/public/data-analysis/scripts/analyze.py \
@@ -90,7 +70,7 @@ Supported output formats (auto-detected from extension):
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `--files` | Yes | Space-separated paths to Excel/CSV files |
-| `--action` | Yes | One of: `inspect`, `query`, `summary` |
+| `--action` | Yes | One of: `inspect`, `query`, `summary`, `overview` |
 | `--sql` | For `query` | SQL query to execute |
 | `--table` | For `summary` | Table/sheet name to summarize |
 | `--output-file` | No | Path to export results (CSV/JSON/MD) |
@@ -170,43 +150,16 @@ GROUP BY category
 
 User uploads `sales_2024.xlsx` (with sheets: `Orders`, `Products`, `Customers`) and asks: "Analyze my sales data — show top products by revenue and monthly trends."
 
-### Step 1: Inspect the file
-
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/sales_2024.xlsx \
-  --action inspect
-```
-
-### Step 2: Top products by revenue
+**Medium complexity — inspect + merged query:**
 
 ```bash
 python /mnt/skills/public/data-analysis/scripts/analyze.py \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action query \
-  --sql "SELECT p.product_name, SUM(o.quantity * o.unit_price) as total_revenue, SUM(o.quantity) as total_units FROM Orders o JOIN Products p ON o.product_id = p.id GROUP BY p.product_name ORDER BY total_revenue DESC LIMIT 10"
+  --sql "SELECT p.product_name, SUM(o.quantity * o.unit_price) as total_revenue, SUM(o.quantity) as total_units, DATE_TRUNC('month', o.order_date) as month FROM Orders o JOIN Products p ON o.product_id = p.id GROUP BY p.product_name, month ORDER BY month, total_revenue DESC LIMIT 10"
 ```
 
-### Step 3: Monthly revenue trends
-
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/sales_2024.xlsx \
-  --action query \
-  --sql "SELECT DATE_TRUNC('month', order_date) as month, SUM(quantity * unit_price) as revenue FROM Orders GROUP BY month ORDER BY month" \
-  --output-file /mnt/user-data/outputs/monthly-trends.csv
-```
-
-### Step 4: Statistical summary
-
-```bash
-python /mnt/skills/public/data-analysis/scripts/analyze.py \
-  --files /mnt/user-data/uploads/sales_2024.xlsx \
-  --action summary \
-  --table Orders
-```
-
-Present results to the user with clear explanations of findings, trends, and actionable insights.
+Present results with clear explanations of findings, trends, and actionable insights.
 
 ## Multi-file Example
 
