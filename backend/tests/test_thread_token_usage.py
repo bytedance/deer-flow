@@ -235,9 +235,7 @@ def test_payload_autocompact_buffer_uses_window_minus_trigger():
 
 
 def test_payload_drops_autocompact_when_trigger_missing():
-    payload = build_context_usage_payload(
-        **_kwargs(max_context_tokens=20000, messages_tokens=100)
-    )
+    payload = build_context_usage_payload(**_kwargs(max_context_tokens=20000, messages_tokens=100))
     keys = [row["key"] for row in payload["breakdown"]]
     assert "autocompact_buffer" not in keys
 
@@ -256,9 +254,7 @@ def test_payload_drops_autocompact_when_trigger_exceeds_window():
 
 
 def test_payload_drops_free_space_when_window_missing():
-    payload = build_context_usage_payload(
-        **_kwargs(messages_tokens=500, skills_tokens=100)
-    )
+    payload = build_context_usage_payload(**_kwargs(messages_tokens=500, skills_tokens=100))
     keys = [row["key"] for row in payload["breakdown"]]
     assert "free_space" not in keys
 

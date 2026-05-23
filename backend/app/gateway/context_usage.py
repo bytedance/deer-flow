@@ -319,11 +319,7 @@ def build_context_usage_payload(
         free_space = max(0, max_context_tokens - non_free_total)
     raw_counts["free_space"] = free_space
 
-    breakdown = [
-        {"key": key, "tokens": raw_counts[key], "active": key in _ACTIVE_KEYS}
-        for key in _BREAKDOWN_ORDER
-        if raw_counts.get(key, 0) > 0
-    ]
+    breakdown = [{"key": key, "tokens": raw_counts[key], "active": key in _ACTIVE_KEYS} for key in _BREAKDOWN_ORDER if raw_counts.get(key, 0) > 0]
 
     percentage: float | None = None
     if max_context_tokens and max_context_tokens > 0:
