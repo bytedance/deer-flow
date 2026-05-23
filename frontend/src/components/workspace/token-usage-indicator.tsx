@@ -29,6 +29,7 @@ import {
 import type { ContextUsage } from "@/core/threads/token-usage";
 import { cn } from "@/lib/utils";
 
+import { ContextUsageBreakdown } from "./context-usage-breakdown";
 import { formatContextUsagePercentage } from "./context-usage-format";
 
 interface TokenUsageIndicatorProps {
@@ -105,7 +106,7 @@ export function TokenUsageIndicator({
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="end" className="w-80">
+      <DropdownMenuContent side="bottom" align="end" className="w-96">
         <DropdownMenuLabel>{t.tokenUsage.title}</DropdownMenuLabel>
         <div className="px-2 py-1 text-xs">
           {usage ? (
@@ -137,40 +138,10 @@ export function TokenUsageIndicator({
             </div>
           )}
         </div>
-        {contextUsage && (
+        {contextUsage && contextUsage.breakdown.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>{t.contextUsage.title}</DropdownMenuLabel>
-            <div className="space-y-1 px-2 py-1 text-xs">
-              <div className="flex justify-between gap-4">
-                <span>{t.contextUsage.used}</span>
-                <span className="font-mono">
-                  {formatTokenCount(contextUsage.tokenCount)}
-                </span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span>{t.contextUsage.capacity}</span>
-                <span className="font-mono">
-                  {contextUsage.maxContextTokens != null
-                    ? formatTokenCount(contextUsage.maxContextTokens)
-                    : "-"}
-                </span>
-              </div>
-              {contextPercentage ? (
-                <div className="border-t pt-1">
-                  <div className="flex justify-between gap-4">
-                    <span>{t.contextUsage.label}</span>
-                    <span className="font-mono font-medium">
-                      {contextPercentage}%
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-muted-foreground pt-1 leading-relaxed">
-                  {t.contextUsage.capacityUnknown}
-                </div>
-              )}
-            </div>
+            <ContextUsageBreakdown contextUsage={contextUsage} />
           </>
         )}
         <DropdownMenuSeparator />

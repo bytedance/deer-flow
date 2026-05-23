@@ -20,7 +20,8 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_config, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.context_usage import build_context_usage
+from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
@@ -87,10 +88,17 @@ class ThreadTokenUsageCallerBreakdown(BaseModel):
     middleware: int = 0
 
 
+class ThreadContextUsageBreakdownItem(BaseModel):
+    key: str
+    tokens: int
+    active: bool
+
+
 class ThreadContextUsage(BaseModel):
-    token_count: int = 0
     max_context_tokens: int | None = None
+    used_tokens: int = 0
     percentage: float | None = None
+    breakdown: list[ThreadContextUsageBreakdownItem] = Field(default_factory=list)
 
 
 class ThreadTokenUsageResponse(BaseModel):
@@ -436,76 +444,5 @@ async def thread_token_usage(
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    context_usage = await _build_context_usage(request, thread_id, run_store)
+    context_usage = await build_context_usage(request, thread_id, run_store)
     return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)
-
-
-async def _build_context_usage(request: Request, thread_id: str, run_store: Any) -> ThreadContextUsage | None:
-    """Compute current context-window usage for a thread.
-
-    Counts approximate tokens in the latest checkpoint's messages and
-    divides by the thread model's configured ``context_window``. Returns
-    ``None`` when neither the checkpoint nor app config are available so
-    the endpoint stays usable in degraded environments.
-    """
-    from langchain_core.messages.utils import count_tokens_approximately
-
-    try:
-        checkpointer = get_checkpointer(request)
-    except HTTPException:
-        return None
-
-    try:
-        app_config = get_config()
-    except HTTPException:
-        app_config = None
-
-    token_count = 0
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-        if checkpoint_tuple is not None:
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-            messages = channel_values.get("messages") or []
-            if messages:
-                token_count = int(count_tokens_approximately(messages))
-    except Exception:
-        logger.warning("Failed to compute context token count for thread %s", thread_id, exc_info=True)
-        return None
-
-    max_context_tokens: int | None = None
-    if app_config is not None:
-        model_name = await _resolve_thread_model_name(run_store, thread_id, app_config)
-        if model_name:
-            model_cfg = app_config.get_model_config(model_name)
-            if model_cfg is not None and getattr(model_cfg, "context_window", None):
-                max_context_tokens = int(model_cfg.context_window)
-
-    percentage: float | None = None
-    if max_context_tokens and max_context_tokens > 0:
-        percentage = round(token_count / max_context_tokens * 100, 1)
-
-    return ThreadContextUsage(
-        token_count=token_count,
-        max_context_tokens=max_context_tokens,
-        percentage=percentage,
-    )
-
-
-async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config: Any) -> str | None:
-    """Pick the model name a thread is currently using.
-
-    Prefers the most recent run's ``model_name`` (set by the runtime when
-    the run starts), falling back to the first configured model.
-    """
-    try:
-        runs = await run_store.list_by_thread(thread_id, limit=1)
-    except Exception:
-        runs = []
-    if runs:
-        latest = runs[0]
-        name = latest.get("model_name") if isinstance(latest, dict) else getattr(latest, "model_name", None)
-        if isinstance(name, str) and name:
-            return name
-    models = getattr(app_config, "models", None) or []
-    return models[0].name if models else None

@@ -47,16 +47,26 @@ test("selectContextUsage projects the backend block to UI shape", () => {
   const response: ThreadTokenUsageResponse = {
     ..._baseResponse,
     context_usage: {
-      token_count: 350,
+      used_tokens: 350,
       max_context_tokens: 1000,
       percentage: 35,
+      breakdown: [
+        { key: "messages", tokens: 200, active: true },
+        { key: "system_prompt", tokens: 150, active: true },
+        { key: "free_space", tokens: 650, active: false },
+      ],
     },
   };
 
   expect(selectContextUsage(response)).toEqual({
-    tokenCount: 350,
+    usedTokens: 350,
     maxContextTokens: 1000,
     percentage: 35,
+    breakdown: [
+      { key: "messages", tokens: 200, active: true },
+      { key: "system_prompt", tokens: 150, active: true },
+      { key: "free_space", tokens: 650, active: false },
+    ],
   });
 });
 
@@ -64,16 +74,18 @@ test("selectContextUsage preserves nullable capacity and percentage", () => {
   const response: ThreadTokenUsageResponse = {
     ..._baseResponse,
     context_usage: {
-      token_count: 200,
+      used_tokens: 200,
       max_context_tokens: null,
       percentage: null,
+      breakdown: [{ key: "messages", tokens: 200, active: true }],
     },
   };
 
   expect(selectContextUsage(response)).toEqual({
-    tokenCount: 200,
+    usedTokens: 200,
     maxContextTokens: null,
     percentage: null,
+    breakdown: [{ key: "messages", tokens: 200, active: true }],
   });
 });
 
