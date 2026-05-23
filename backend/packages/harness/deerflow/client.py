@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import shutil
 import tempfile
 import uuid
@@ -42,6 +43,7 @@ from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -123,6 +125,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        environment: str | None = None,
     ):
         """Initialize the client.
 
@@ -140,6 +143,12 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            environment: Deployment environment label that ends up in
+                ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
+                When ``None`` the worker/client falls back to the
+                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                explicit value for programmatic callers that do not want
+                env-var coupling.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -156,6 +165,7 @@ class DeerFlowClient:
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
+        self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -228,7 +238,11 @@ class DeerFlowClient:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
         kwargs: dict[str, Any] = {
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+            # attach_tracing=False because ``stream()`` injects tracing
+            # callbacks at the graph invocation root so a single embedded run
+            # produces one trace with correct session_id / user_id propagation.
+            # Attaching them again on the model would emit duplicate spans.
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
             "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
             "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
             "system_prompt": apply_prompt_template(
@@ -571,6 +585,28 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+
+        # Inject tracing callbacks and Langfuse trace metadata at the graph
+        # invocation root so the embedded client matches the gateway worker's
+        # behaviour: a single ``stream()`` produces one trace with all node /
+        # LLM / tool calls nested under it, and the trace carries the reserved
+        # ``langfuse_session_id`` / ``langfuse_user_id`` keys that the Langfuse
+        # CallbackHandler lifts onto the root trace's ``sessionId`` / ``userId``.
+        tracing_callbacks = build_tracing_callbacks()
+        if tracing_callbacks:
+            existing_callbacks = list(config.get("callbacks") or [])
+            config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+        configurable = config.get("configurable") or {}
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=self._agent_name or "lead-agent",
+            model_name=configurable.get("model_name") or self._model_name,
+            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}

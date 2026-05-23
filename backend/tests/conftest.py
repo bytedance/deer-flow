@@ -177,6 +177,31 @@ def _reset_skill_storage_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _restore_title_config_singleton():
+    """Reset ``_title_config`` to its pristine default after every test.
+
+    ``AppConfig.from_file()`` writes the on-disk ``title`` block into the
+    module-level singleton (``config/app_config.py`` calls
+    ``load_title_config_from_dict``). Any test that loads the real
+    ``config.yaml`` therefore leaves the singleton in a state that
+    ``test_title_middleware_core_logic.py`` does not expect; that suite
+    relies on the pristine ``TitleConfig()`` default (``enabled=True``).
+    We restore the default after every test so test files stay
+    independent regardless of order.
+    """
+    try:
+        from deerflow.config.title_config import reset_title_config
+    except ImportError:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        reset_title_config()
+
+
+@pytest.fixture(autouse=True)
 def _auto_user_context(request):
     """Inject a default ``test-user-autouse`` into the contextvar.
 

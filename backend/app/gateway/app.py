@@ -161,10 +161,16 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
-    # Load config and check necessary environment variables at startup
+    # Load config and check necessary environment variables at startup.
+    # `startup_config` is a local snapshot used only for one-shot bootstrap
+    # work (logging level, langgraph_runtime engines, channels). Request-time
+    # config resolution always routes through `get_app_config()` in
+    # `app/gateway/deps.py::get_config()` so `config.yaml` edits become
+    # visible without a process restart. We deliberately do NOT cache this
+    # snapshot on `app.state` to keep that contract enforceable.
     try:
-        app.state.config = get_app_config()
-        apply_logging_level(app.state.config.log_level)
+        startup_config = get_app_config()
+        apply_logging_level(startup_config.log_level)
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -174,7 +180,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app):
+    async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -185,7 +191,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(app.state.config)
+            channel_service = await start_channel_service(startup_config)
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")

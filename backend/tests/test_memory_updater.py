@@ -78,6 +78,41 @@ def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None
     assert all(fact["id"] != "fact_remove" for fact in result["facts"])
 
 
+def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_cn",
+                "content": "Deer-flow是一个非常好的框架。",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-05-20T00:00:00Z",
+                "source": "thread-cn",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+    ):
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = "你好"
+        prepared = updater._prepare_update_prompt(
+            [msg],
+            agent_name=None,
+            correction_detected=False,
+            reinforcement_detected=False,
+        )
+
+    assert prepared is not None
+    _, prompt = prepared
+    assert "Deer-flow是一个非常好的框架。" in prompt
+    assert "\\u" not in prompt
+
+
 def test_apply_updates_skips_same_batch_duplicates_and_keeps_source_metadata() -> None:
     updater = MemoryUpdater()
     current_memory = _make_memory()

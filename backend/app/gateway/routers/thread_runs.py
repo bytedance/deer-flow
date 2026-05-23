@@ -66,6 +66,14 @@ class RunResponse(BaseModel):
     multitask_strategy: str = "reject"
     created_at: str = ""
     updated_at: str = ""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    llm_call_count: int = 0
+    lead_agent_tokens: int = 0
+    subagent_tokens: int = 0
+    middleware_tokens: int = 0
+    message_count: int = 0
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -111,6 +119,14 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         multitask_strategy=record.multitask_strategy,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        total_input_tokens=record.total_input_tokens,
+        total_output_tokens=record.total_output_tokens,
+        total_tokens=record.total_tokens,
+        llm_call_count=record.llm_call_count,
+        lead_agent_tokens=record.lead_agent_tokens,
+        subagent_tokens=record.subagent_tokens,
+        middleware_tokens=record.middleware_tokens,
+        message_count=record.message_count,
     )
 
 
@@ -402,8 +418,15 @@ async def list_run_events(
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
-async def thread_token_usage(thread_id: str, request: Request) -> ThreadTokenUsageResponse:
+async def thread_token_usage(
+    thread_id: str,
+    request: Request,
+    include_active: bool = Query(default=False, description="Include running run progress snapshots"),
+) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
-    agg = await run_store.aggregate_tokens_by_thread(thread_id)
+    if include_active:
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
+    else:
+        agg = await run_store.aggregate_tokens_by_thread(thread_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, **agg)

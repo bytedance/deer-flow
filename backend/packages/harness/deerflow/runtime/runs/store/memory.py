@@ -65,6 +65,8 @@ class MemoryRunStore(RunStore):
             if error is not None:
                 self._runs[run_id]["error"] = error
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        return False
 
     async def update_model_name(self, run_id, model_name):
         if run_id in self._runs:
@@ -81,6 +83,15 @@ class MemoryRunStore(RunStore):
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        return False
+
+    async def update_run_progress(self, run_id, **kwargs):
+        if run_id in self._runs and self._runs[run_id].get("status") == "running":
+            for key, value in kwargs.items():
+                if value is not None:
+                    self._runs[run_id][key] = value
+            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
@@ -88,8 +99,15 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in ("success", "error")]
+    async def list_inflight(self, *, before=None):
+        now = before or datetime.now(UTC).isoformat()
+        results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
+        results.sort(key=lambda r: r["created_at"])
+        return results
+
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             model = r.get("model_name") or "unknown"

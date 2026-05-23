@@ -241,13 +241,6 @@ GET /api/mcp/config
         "GITHUB_TOKEN": "***"
       },
       "description": "GitHub operations"
-    },
-    "filesystem": {
-      "enabled": false,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-      "description": "File system access"
     }
   }
 }

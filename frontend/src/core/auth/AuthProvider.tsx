@@ -10,6 +10,8 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { isStaticWebsiteOnly } from "../static-mode";
+
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -46,6 +48,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
+  const staticMode = isStaticWebsiteOnly();
 
   const isAuthenticated = user !== null;
 
@@ -54,6 +57,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
   const refreshUser = useCallback(async () => {
+    if (staticMode) return;
+
     try {
       setIsLoading(true);
       const res = await fetch("/api/v1/auth/me", {
@@ -77,7 +82,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [pathname, router]);
+  }, [staticMode, pathname, router]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -86,6 +91,11 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const logout = useCallback(async () => {
     // Immediately clear local state to prevent UI flicker
     setUser(null);
+
+    if (staticMode) {
+      router.push("/");
+      return;
+    }
 
     try {
       await fetch("/api/v1/auth/logout", {
@@ -99,7 +109,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     // Redirect to home page
     router.push("/");
-  }, [router]);
+  }, [staticMode, router]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
@@ -108,6 +118,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const lastCheckRef = React.useRef(0);
 
   useEffect(() => {
+    if (staticMode) return;
+
     const handleVisibilityChange = () => {
       if (document.visibilityState !== "visible" || user === null) return;
       const now = Date.now();
@@ -120,7 +132,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [user, refreshUser]);
+  }, [staticMode, user, refreshUser]);
 
   const value: AuthContextType = {
     user,
@@ -155,6 +167,8 @@ export function useRequireAuth(): AuthContextType {
   const pathname = usePathname();
 
   useEffect(() => {
+    if (isStaticWebsiteOnly()) return;
+
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
       router.push(buildLoginUrl(pathname || "/workspace"));

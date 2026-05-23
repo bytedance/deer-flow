@@ -1,0 +1,125 @@
+---
+title: 工具型 Agent 需要正确处理模型提供商的安全中止信号
+description: 当模型输出因安全策略被中止时，为什么不能继续执行残留的工具调用，以及如何在 DeerFlow 中配置 provider detector。
+date: 2026-05-22
+tags:
+  - Safety
+  - Agents
+  - Model Providers
+---
+
+## 工具型 Agent 需要正确处理模型提供商的安全中止信号
+
+当大模型提供商认为输入或输出触发了安全策略时，最理想的结果不是“模型少说了几句话”，而是应用已经明确知道这一轮生成被中止了。对于普通聊天界面，这通常表现为拒答、过滤后的文本，或者一个错误响应。对于能调用工具的 Agent，风险会更高：如果 provider 已经中止输出，但响应里仍残留了 `tool_calls`，这些工具参数很可能只生成了一半。
+
+这类半截工具调用不应被当成正常意图执行。一个被截断的 `write_file` 可能写出不完整的报告；一个被截断的 `bash` 调用可能带着残缺参数进入沙箱；Agent 看到失败结果后还可能继续重试，反复触发同一条安全规则。
+
+[PR #3035](https://github.com/bytedance/deer-flow/pull/3035) 处理的就是这个边界：当 provider 用安全信号中止生成，同时响应仍带有工具调用时，DeerFlow 应先压制这些工具调用，再把这一轮作为安全中止事件记录下来。
+
+## 为什么需要单独处理安全中止
+
+安全中止不是普通的工具调用结束原因。
+
+一次健康的工具轮次通常由 provider 明确告诉应用“现在应该调用工具”。但安全中止表达的是另一件事：输出已经被 provider 的策略拦住，或者流式生成已经被提前切断。此时即使响应对象里还能看到工具调用片段，也不能假设它的 JSON 参数、文件内容或命令文本已经完整。
+
+在真实 Agent 运行中，这会同时产生两类风险：
+
+| 风险 | 影响 |
+| --- | --- |
+| 运行时风险 | 执行被截断的工具参数，产生损坏文件、异常命令、重复重试或工具循环 |
+| provider 风险 | 应用反复把同类违规输入或输出送到 provider，累积安全审核和风控压力 |
+
+第二类风险不能被忽略。不同 provider 的处置力度不同，但官方材料已经表明，安全策略不仅影响单次 completion，也可能影响终端用户、API 访问能力或账号状态。
+
+## 各家 provider 公开了什么信号和处置方式
+
+provider 并没有统一的字段名，也没有统一的处罚流程。部署方至少要区分两层信息：
+
+1. 这一轮响应里，什么信号说明生成被安全策略中止。
+2. 如果安全问题反复出现，provider 公开说明过哪些后续动作。
+
+| Provider | 运行时信号 | 公开的后续处置或建议 |
+| --- | --- | --- |
+| GLM | 同步调用可能返回安全审核错误；流式输出可能以 `finish_reason="sensitive"` 结束 | 建议传入 `user_id` 区分终端用户；平台可封禁违规终端用户请求，避免企业账号受终端用户滥用影响 |
+| OpenAI | Chat Completions 的 `finish_reason` 可为 `content_filter` | 建议使用 Moderation 和 `safety_identifier`；重复违反使用政策可能带来警告、限制或账号停用 |
+| Anthropic | 流式拒绝可通过 `stop_reason="refusal"` 暴露 | 收到拒绝后应重置、改写或缩小上下文；AUP 说明可限制请求、修改输出、暂停或终止访问 |
+| Gemini | 被安全过滤的 candidate 可返回 `finishReason=SAFETY`，且被拦截内容不会返回 | abuse monitoring 会检查 prompts 和 outputs；后续动作可从联系开发者升级到临时限制、暂停或账号关闭 |
+| DeepSeek | Chat completion 的 `finish_reason` 枚举包含 `content_filter` | `user` 字段可帮助内容安全审核；潜在使用规范违规可能触发临时 suspension protocol |
+
+GLM 的说明最直接。它的安全审核文档同时给出了流式安全结束信号、终端用户标识建议，以及对违规终端用户请求做封禁处理的说明。[GLM 安全审核文档](https://docs.bigmodel.cn/cn/guide/platform/securityaudit)
+
+OpenAI 把 `content_filter` 定义为 Chat Completions 的一种 finish reason，并在安全最佳实践中推荐对终端用户使用 `safety_identifier`，以便在违反策略时定位到具体用户而不是只看到一个共享的 API key。OpenAI 的帮助文档还说明，重复违反使用政策可能导致账号被停用。 [Safety best practices](https://developers.openai.com/api/docs/guides/safety-best-practices/) [Why Was My OpenAI Account Deactivated?](https://help.openai.com/en/articles/10562188)
+
+Anthropic 在 Claude 流式拒绝说明中明确区分了普通停止和安全拒绝：当 streaming classifier 介入时，响应可以带有 `stop_reason="refusal"`。它同时建议应用不要把被拒绝内容继续塞回下一轮上下文，而应重置对话、改写提示或缩小任务范围。Anthropic AUP 也说明，它可以限制请求、拦截或修改输出，并在必要时暂停或终止访问。[Handle streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals) [Acceptable Use Policy](https://www.anthropic.com/legal/aup)
+
+Gemini 的安全文档则强调另一种形态：prompt 可能在生成前被拦截，candidate 也可能在生成后被过滤；当 response candidate 被安全策略拦下时，可以看到 `finishReason=SAFETY`，但不会拿到被拦截内容本身。Gemini API 的使用政策还说明，abuse monitoring 会覆盖 prompts 和 outputs，并列出了逐步升级的处置动作。[Gemini safety settings](https://ai.google.dev/gemini-api/docs/safety-settings) [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms)
+
+DeepSeek 的 API 文档把 `content_filter` 列为 chat completion finish reason，并把请求里的 `user` 字段说明为有助于内容安全审核。它的 FAQ 也说明，潜在违反使用规范的场景可能触发临时暂停流程。[Create Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion) [DeepSeek FAQ](https://api-docs.deepseek.com/faq)
+
+还有一些 provider 会在更早或更外层的位置拦截请求。例如 Azure OpenAI 提醒应用检查 `finish_reason`，因为 `content_filter` 可能让 completion 不完整；Amazon Bedrock Guardrails 可在响应中返回 `stopReason="guardrail_intervened"`；阿里云百炼的安全护栏示例里，输出侧拦截也可能直接表现为 `DataInspectionFailed` 错误。它们共同说明了一点：安全拦截既可能是模型消息里的停止信号，也可能是 API 层错误，应用不能只准备一种处理路径。[Azure OpenAI content filtering](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/content-filter) [Amazon Bedrock Guardrails](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-use-converse-api.html)
+
+## DeerFlow 在这条边界上做什么
+
+`SafetyFinishReasonMiddleware` 的职责很窄：它不替代 provider 的内容审核，也不把所有拒答都改写成同一种错误。它只在下面两个条件同时成立时介入：
+
+1. provider 响应携带了已配置的安全中止信号。
+2. 当前 `AIMessage` 仍包含非空的 `tool_calls`。
+
+介入后，它会：
+
+1. 清空结构化工具调用以及 raw provider metadata 中残留的工具调用字段。
+2. 阻止这些工具参数进入工具节点执行。
+3. 保留已经生成的部分文本，并追加面向用户的说明。
+4. 记录 detector、reason 字段、reason 值、被压制的工具名和数量。
+5. 避免把可能正是被过滤内容的工具参数再次写入审计事件。
+
+这意味着安全中止信号的优先级高于“响应里看到了工具调用”。对于 Agent 运行时，这是更保守也更正确的控制流。
+
+## 默认配置
+
+默认情况下只需要启用 `safety_finish_reason`：
+
+```yaml
+safety_finish_reason:
+  enabled: true
+```
+
+不显式配置 `detectors` 时，DeerFlow 使用内置 detector 集合：
+
+| Detector | 默认匹配 |
+| --- | --- |
+| `OpenAICompatibleContentFilterDetector` | `finish_reason="content_filter"` |
+| `AnthropicRefusalDetector` | `stop_reason="refusal"` |
+| `GeminiSafetyDetector` | Gemini 安全相关 `finish_reason`，例如 `SAFETY`、`BLOCKLIST`、`PROHIBITED_CONTENT`、`SPII`、`RECITATION` |
+
+这个默认集合覆盖了 DeerFlow 常见的 OpenAI-compatible provider、Anthropic 和 Gemini 路径。它不会把普通 `finish_reason="tool_calls"` 当成安全中止，也不会把 `length`、`max_tokens` 之类的长度截断混入安全分类。
+
+## 例子：为 GLM 扩展流式安全结束信号
+
+GLM 流式响应使用的安全结束值是 `sensitive`。如果当前适配层把这个值保留在 `AIMessage.response_metadata.finish_reason` 或 `additional_kwargs.finish_reason` 中，可以通过 OpenAI-compatible detector 的可配置 finish reason 集合接入：
+
+```yaml
+safety_finish_reason:
+  enabled: true
+  detectors:
+    - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
+      config:
+        finish_reasons: ["content_filter", "sensitive"]
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
+```
+
+这里有两个配置细节需要注意。
+
+第一，`detectors` 是覆盖默认列表，不是向默认列表追加一项。因此为了给 GLM 增加 `sensitive`，示例里也保留了 Anthropic 和 Gemini detector。
+
+第二，这个 middleware 处理的是已经进入模型消息的安全结束信号。如果 provider 在 API 层直接返回安全审核错误，例如 GLM 同步调用的安全审核错误码，调用方还需要在 LLM/API 错误处理路径里单独处理它。
+
+
+## 边界
+
+`SafetyFinishReasonMiddleware` 解决的是一个明确的 Agent 控制流问题，不是完整的内容安全方案。它不替代 moderation、权限隔离、用户治理或 provider 自身的审核策略，也不覆盖每一种普通文本拒答。
+
+但这一条边界值得单独守住：当 provider 已经因为安全原因停下输出时，工具型 Agent 应把这一轮视为被中断的输出，而不是可执行的工具意图。

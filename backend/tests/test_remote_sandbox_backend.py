@@ -159,6 +159,26 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
     assert info.sandbox_url == "http://k3s:31001"
 
 
+def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_post(url: str, json: dict, timeout: int):
+        assert url == "http://provisioner:8002/api/sandboxes"
+        assert json == {
+            "sandbox_id": "anon123",
+            "thread_id": None,
+            "user_id": "test-user-autouse",
+        }
+        assert timeout == 30
+        return _StubResponse(payload={"sandbox_id": "anon123", "sandbox_url": "http://k3s:31002"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    info = backend.create(None, "anon123")
+    assert info.sandbox_id == "anon123"
+    assert info.sandbox_url == "http://k3s:31002"
+
+
 def test_provisioner_create_raises_runtime_error_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 

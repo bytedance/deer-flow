@@ -11,6 +11,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
+from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 
 
@@ -631,6 +632,7 @@ def test_upload_limits_endpoint_requires_thread_access():
     cfg.uploads = {}
     app = make_authed_test_app(owner_check_passes=False)
     app.state.config = cfg
+    app.dependency_overrides[get_config] = lambda: cfg
     app.include_router(uploads.router)
 
     with TestClient(app) as client:
