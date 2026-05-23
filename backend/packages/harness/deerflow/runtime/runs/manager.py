@@ -181,6 +181,23 @@ class RunManager:
             logger.warning("Failed to persist run %s to store", run_id, exc_info=True)
             return False
 
+    async def _persist_new_run_to_store(self, record: RunRecord) -> None:
+        """Persist a newly created run record to the backing store.
+
+        Initial run creation is part of the run visibility boundary: callers
+        should not observe a run in memory unless its backing store row exists.
+        Unlike follow-up status/model updates, failures are propagated so the
+        caller can treat creation as failed. Rollback is the caller's
+        responsibility after inserting the record into ``_runs``.
+        """
+        if self._store is None:
+            return
+        await self._call_store_with_retry(
+            "put",
+            record.run_id,
+            lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
+        )
+
     async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
         """Best-effort persist run record to backing store."""
         return await self._persist_snapshot_to_store(
@@ -321,7 +338,17 @@ class RunManager:
         )
         async with self._lock:
             self._runs[run_id] = record
-        await self._persist_to_store(record)
+            persisted = False
+            try:
+                await self._persist_new_run_to_store(record)
+                persisted = True
+            except Exception:
+                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                raise
+            finally:
+                # Also covers cancellation, which bypasses ``except Exception``.
+                if not persisted:
+                    self._runs.pop(run_id, None)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -503,16 +530,8 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
-                for r in inflight:
-                    r.abort_action = multitask_strategy
-                    r.abort_event.set()
-                    if r.task is not None and not r.task.done():
-                        r.task.cancel()
-                    r.status = RunStatus.interrupted
-                    r.updated_at = now
-                    interrupted_records.append(r)
                 logger.info(
-                    "Cancelled %d inflight run(s) on thread %s (strategy=%s)",
+                    "Preparing to cancel %d inflight run(s) on thread %s (strategy=%s)",
                     len(inflight),
                     thread_id,
                     multitask_strategy,
@@ -532,10 +551,30 @@ class RunManager:
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            persisted = False
+            try:
+                await self._persist_new_run_to_store(record)
+                persisted = True
+            except Exception:
+                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                raise
+            finally:
+                # Also covers cancellation, which bypasses ``except Exception``.
+                if not persisted:
+                    self._runs.pop(run_id, None)
+
+            if multitask_strategy in ("interrupt", "rollback") and inflight:
+                for r in inflight:
+                    r.abort_action = multitask_strategy
+                    r.abort_event.set()
+                    if r.task is not None and not r.task.done():
+                        r.task.cancel()
+                    r.status = RunStatus.interrupted
+                    r.updated_at = now
+                    interrupted_records.append(r)
 
         for interrupted_record in interrupted_records:
             await self._persist_status(interrupted_record, RunStatus.interrupted)
-        await self._persist_to_store(record)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
