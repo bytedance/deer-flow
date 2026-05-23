@@ -99,8 +99,7 @@ export function useTestMCPServer() {
 
 export function useInvalidateMCPConfig() {
   const queryClient = useQueryClient();
-  return () =>
-    void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
+  return () => void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
 }
 
 export function useRemoveMCPServer() {

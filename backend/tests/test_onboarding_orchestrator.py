@@ -16,7 +16,6 @@ from deerflow.tools.startcloud.onboarding.orchestrator import (
 from deerflow.tools.startcloud.user_offboard import _format_offboard_summary
 from deerflow.tools.startcloud.user_onboard import _format_onboard_summary
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -120,9 +119,7 @@ class TestRunOffboarding:
         assert a.offboard_calls == [("x@y.com", False)]
 
     def test_one_client_raising_does_not_abort_the_others(self) -> None:
-        results = run_offboarding(
-            "x@y.com", clients=[_FakeRaises("broken"), _FakeOK("working")]
-        )
+        results = run_offboarding("x@y.com", clients=[_FakeRaises("broken"), _FakeOK("working")])
         assert results[0].success is False
         assert results[0].action == "failed"
         assert results[1].success is True
@@ -182,27 +179,33 @@ class TestOnboardSummary:
 class TestOffboardSummary:
     def test_disable_mode_label(self) -> None:
         out = _format_offboard_summary(
-            "x@y.com", disable_only=True, results=[
+            "x@y.com",
+            disable_only=True,
+            results=[
                 OffboardResult(service_name="google", success=True, action="disabled"),
-            ]
+            ],
         )
         assert "비활성화 (복구 가능)" in out
         assert "계정 비활성화 완료" in out
 
     def test_delete_mode_label(self) -> None:
         out = _format_offboard_summary(
-            "x@y.com", disable_only=False, results=[
+            "x@y.com",
+            disable_only=False,
+            results=[
                 OffboardResult(service_name="google", success=True, action="deleted"),
-            ]
+            ],
         )
         assert "영구 삭제 시도" in out
         assert "계정 영구 삭제 완료" in out
 
     def test_not_found_renders_korean(self) -> None:
         out = _format_offboard_summary(
-            "missing@y.com", disable_only=True, results=[
+            "missing@y.com",
+            disable_only=True,
+            results=[
                 OffboardResult(service_name="google", success=True, action="not_found"),
-            ]
+            ],
         )
         assert "이미 처리되었거나 미생성" in out
 
@@ -228,9 +231,7 @@ def test_user_onboard_tool_imports_and_runs_without_real_services(
 
     from deerflow.tools.startcloud import user_onboard
 
-    out = user_onboard.invoke(
-        {"email": "sara@example.com", "first_name": "사라", "last_name": "김"}
-    )
+    out = user_onboard.invoke({"email": "sara@example.com", "first_name": "사라", "last_name": "김"})
     assert "사라 김" in out
     assert "sara@example.com" in out
     # All four services should appear in the failure list (Google = unconfigured;

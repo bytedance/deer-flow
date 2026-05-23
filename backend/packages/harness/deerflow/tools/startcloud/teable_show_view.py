@@ -48,9 +48,7 @@ def _normalize_date_filter(filter_obj):
 
     # Process filterSet arrays
     if "filterSet" in filter_obj:
-        filter_obj["filterSet"] = [
-            _normalize_date_filter(item) for item in filter_obj["filterSet"]
-        ]
+        filter_obj["filterSet"] = [_normalize_date_filter(item) for item in filter_obj["filterSet"]]
         return filter_obj
 
     # Process individual filter items with operator + value
@@ -157,11 +155,7 @@ def teable_show_view(
             "artifacts": [f"embed:{embed_url}"],
             "messages": [
                 ToolMessage(
-                    f"Teable 뷰가 오른쪽 패널에 표시됩니다.\n"
-                    f"뷰: {view_body['name']}\n"
-                    f"타입: {view_type}\n"
-                    f"URL: {embed_url}\n"
-                    f"데이터를 수정하면 자동으로 반영됩니다.",
+                    f"Teable 뷰가 오른쪽 패널에 표시됩니다.\n뷰: {view_body['name']}\n타입: {view_type}\nURL: {embed_url}\n데이터를 수정하면 자동으로 반영됩니다.",
                     tool_call_id=tool_call_id,
                 )
             ],

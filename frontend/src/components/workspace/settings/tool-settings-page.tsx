@@ -71,10 +71,7 @@ export function ToolSettingsPage() {
           <div>Error: {error.message}</div>
         ) : (
           config && (
-            <MCPServerList
-              servers={config.mcp_servers}
-              readOnly={readOnly}
-            />
+            <MCPServerList servers={config.mcp_servers} readOnly={readOnly} />
           )
         )}
       </div>
@@ -99,8 +96,7 @@ function MCPServerList({
   if (entries.length === 0) {
     return (
       <div className="text-muted-foreground rounded-md border border-dashed p-6 text-center text-sm">
-        No MCP tools connected yet. Click &ldquo;Add Tool&rdquo; to connect
-        one.
+        No MCP tools connected yet. Click &ldquo;Add Tool&rdquo; to connect one.
       </div>
     );
   }
@@ -144,13 +140,13 @@ function MCPServerList({
                 <div className="flex items-center gap-2">
                   <div>{name}</div>
                   {state.status === "ok" && (
-                    <span className="text-xs text-green-600 inline-flex items-center gap-1">
+                    <span className="inline-flex items-center gap-1 text-xs text-green-600">
                       <CheckCircle2Icon className="size-3" />
                       {state.toolCount} tools
                     </span>
                   )}
                   {state.status === "error" && (
-                    <span className="text-destructive text-xs inline-flex items-center gap-1">
+                    <span className="text-destructive inline-flex items-center gap-1 text-xs">
                       <XCircleIcon className="size-3" />
                       Test failed
                     </span>
@@ -198,9 +194,7 @@ function MCPServerList({
                   size="icon-sm"
                   aria-label={`Remove ${name}`}
                   onClick={() => {
-                    if (
-                      window.confirm(`Remove MCP server "${name}"?`)
-                    ) {
+                    if (window.confirm(`Remove MCP server "${name}"?`)) {
                       removeMCPServer({ serverName: name });
                     }
                   }}

@@ -35,8 +35,7 @@ export const MCP_PRESETS: McpPreset[] = [
     description:
       "Search repositories, read files, manage issues and pull requests on GitHub.",
     authType: "apiKey",
-    docsUrl:
-      "https://github.com/settings/tokens?type=beta",
+    docsUrl: "https://github.com/settings/tokens?type=beta",
     fields: [
       {
         name: "token",
@@ -96,8 +95,7 @@ export const MCP_PRESETS: McpPreset[] = [
       "Read and send Gmail messages on behalf of the connected Google account.",
     authType: "oauth",
     oauthProvider: "google",
-    docsUrl:
-      "https://github.com/GongRzhe/Gmail-MCP-Server",
+    docsUrl: "https://github.com/GongRzhe/Gmail-MCP-Server",
     fields: [],
   },
   {

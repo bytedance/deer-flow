@@ -3,8 +3,8 @@
 import os
 import subprocess
 from datetime import datetime
-from langchain_core.tools import tool
 
+from langchain_core.tools import tool
 
 COMPOSE_DIR = os.environ.get("STARTCLOUD_COMPOSE_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..")))
 BACKUP_DIR = os.path.join(COMPOSE_DIR, "backups")
@@ -33,10 +33,7 @@ def stack_backup(service: str = "all") -> str:
 
     for db in dbs:
         dump_file = os.path.join(backup_path, f"{db}.sql")
-        cmd = [
-            "docker", "exec", "startcloud-postgres",
-            "pg_dump", "-U", "startcloud", "-d", db, "--clean", "--if-exists"
-        ]
+        cmd = ["docker", "exec", "startcloud-postgres", "pg_dump", "-U", "startcloud", "-d", db, "--clean", "--if-exists"]
 
         try:
             result = subprocess.run(

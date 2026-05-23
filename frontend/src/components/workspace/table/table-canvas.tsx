@@ -17,16 +17,20 @@ export function TableCanvas({
   tableName: string | null;
   embedUrl: string | null;
 }) {
-  const { data: shareView, isLoading, error } = useTeableShareView(
-    embedUrl ? null : tableId,
-  );
+  const {
+    data: shareView,
+    isLoading,
+    error,
+  } = useTeableShareView(embedUrl ? null : tableId);
 
   // Agent-generated embed URL takes priority over manual table selection
   const activeUrl = embedUrl ?? shareView?.embed_url ?? null;
 
   if (!tableId && !embedUrl) {
     return (
-      <div className={cn("flex size-full items-center justify-center", className)}>
+      <div
+        className={cn("flex size-full items-center justify-center", className)}
+      >
         <ConversationEmptyState
           icon={<TableIcon />}
           title="No table selected"
@@ -38,7 +42,9 @@ export function TableCanvas({
 
   if (!embedUrl && isLoading) {
     return (
-      <div className={cn("flex size-full items-center justify-center", className)}>
+      <div
+        className={cn("flex size-full items-center justify-center", className)}
+      >
         <LoaderIcon className="text-muted-foreground h-5 w-5 animate-spin" />
       </div>
     );
@@ -46,7 +52,12 @@ export function TableCanvas({
 
   if (!activeUrl) {
     return (
-      <div className={cn("flex size-full items-center justify-center p-4", className)}>
+      <div
+        className={cn(
+          "flex size-full items-center justify-center p-4",
+          className,
+        )}
+      >
         <ConversationEmptyState
           icon={<TableIcon />}
           title="Failed to load view"

@@ -20,7 +20,6 @@ from deerflow.tools.startcloud.onboarding import (
     ServiceOnboardClient,
 )
 
-
 # ---------------------------------------------------------------------------
 # Reference fake — what every client should look like at minimum.
 # ---------------------------------------------------------------------------
@@ -112,13 +111,8 @@ def validate_client(client: object) -> None:
     Per-service tests call this to keep the failure message targeted at the
     method that drifted, instead of just "isinstance returned False".
     """
-    assert isinstance(client, ServiceOnboardClient), (
-        f"{type(client).__name__} does not satisfy ServiceOnboardClient: missing "
-        f"one of service_name / is_configured / create_user / offboard_user"
-    )
-    assert isinstance(client.service_name, str) and client.service_name == client.service_name.lower(), (
-        "service_name must be a lowercase string"
-    )
+    assert isinstance(client, ServiceOnboardClient), f"{type(client).__name__} does not satisfy ServiceOnboardClient: missing one of service_name / is_configured / create_user / offboard_user"
+    assert isinstance(client.service_name, str) and client.service_name == client.service_name.lower(), "service_name must be a lowercase string"
     assert isinstance(client.is_configured(), bool), "is_configured() must return bool"
 
 

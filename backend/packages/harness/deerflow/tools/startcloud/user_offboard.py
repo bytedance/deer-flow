@@ -26,9 +26,7 @@ def user_offboard(email: str, disable_only: bool = True) -> str:
     return _format_offboard_summary(email, disable_only, results)
 
 
-def _format_offboard_summary(
-    email: str, disable_only: bool, results: list[OffboardResult]
-) -> str:
+def _format_offboard_summary(email: str, disable_only: bool, results: list[OffboardResult]) -> str:
     lines: list[str] = []
     lines.append("=== 오프보딩 결과 ===")
     lines.append(f"이메일: {email}")

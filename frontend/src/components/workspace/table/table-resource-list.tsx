@@ -53,7 +53,7 @@ function TreeItem({
       {onToggle ? (
         <button
           type="button"
-          className="shrink-0 rounded p-0.5 hover:bg-muted"
+          className="hover:bg-muted shrink-0 rounded p-0.5"
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
@@ -169,19 +169,12 @@ export function TableResourceList({
 }) {
   const { data: config } = useTeableConfig();
   const defaultBaseId = config?.base_id ?? "";
-  const {
-    data: spaces,
-    isLoading,
-    error,
-  } = useTeableSpaces();
+  const { data: spaces, isLoading, error } = useTeableSpaces();
 
   if (isLoading) {
     return (
       <div
-        className={cn(
-          "flex size-full items-center justify-center",
-          className,
-        )}
+        className={cn("flex size-full items-center justify-center", className)}
       >
         <LoaderIcon className="text-muted-foreground h-5 w-5 animate-spin" />
       </div>

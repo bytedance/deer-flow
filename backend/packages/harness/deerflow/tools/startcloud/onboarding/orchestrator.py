@@ -145,10 +145,7 @@ class _PendingClient:
         return OnboardResult(
             service_name=self._service_name,
             success=False,
-            error=(
-                f"{self._service_name} onboarding client is not yet implemented. "
-                "Tracked in docs/PARALLEL-ONBOARDING-WORK.md."
-            ),
+            error=(f"{self._service_name} onboarding client is not yet implemented. Tracked in docs/PARALLEL-ONBOARDING-WORK.md."),
         )
 
     def offboard_user(self, email: str, *, delete: bool = False) -> OffboardResult:

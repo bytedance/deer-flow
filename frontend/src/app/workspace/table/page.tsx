@@ -27,11 +27,7 @@ export default function TablePage() {
     onStart: (createdThreadId) => {
       setThreadId(createdThreadId);
       setIsNewThread(false);
-      history.replaceState(
-        null,
-        "",
-        `/workspace/table/${createdThreadId}`,
-      );
+      history.replaceState(null, "", `/workspace/table/${createdThreadId}`);
     },
   });
 

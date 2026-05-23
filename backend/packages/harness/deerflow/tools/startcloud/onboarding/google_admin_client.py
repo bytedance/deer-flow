@@ -60,24 +60,15 @@ class GoogleAdminClient:
         impersonate_email: str | None = None,
         domain: str | None = None,
     ) -> None:
-        self._service_account_file = service_account_file or os.environ.get(
-            "GOOGLE_ADMIN_SERVICE_ACCOUNT_FILE"
-        )
-        self._impersonate_email = impersonate_email or os.environ.get(
-            "GOOGLE_ADMIN_IMPERSONATE_EMAIL"
-        )
+        self._service_account_file = service_account_file or os.environ.get("GOOGLE_ADMIN_SERVICE_ACCOUNT_FILE")
+        self._impersonate_email = impersonate_email or os.environ.get("GOOGLE_ADMIN_IMPERSONATE_EMAIL")
         self._domain = domain or os.environ.get("GOOGLE_ADMIN_DOMAIN")
         self._service: Any | None = None  # Lazily built googleapiclient resource
 
     # ── Conformance ────────────────────────────────────────────────────────
 
     def is_configured(self) -> bool:
-        return bool(
-            self._service_account_file
-            and self._impersonate_email
-            and self._domain
-            and os.path.exists(self._service_account_file)
-        )
+        return bool(self._service_account_file and self._impersonate_email and self._domain and os.path.exists(self._service_account_file))
 
     def create_user(self, req: OnboardRequest) -> OnboardResult:
         if not self.is_configured():
@@ -131,9 +122,7 @@ class GoogleAdminClient:
                     action="deleted",
                 )
             # Suspend instead of delete — reversible, preserves data.
-            service.users().update(
-                userKey=email, body={"suspended": True}
-            ).execute()
+            service.users().update(userKey=email, body={"suspended": True}).execute()
             return OffboardResult(
                 service_name=self.service_name,
                 success=True,
@@ -159,14 +148,10 @@ class GoogleAdminClient:
         ).with_subject(self._impersonate_email)
 
         # cache_discovery=False silences a noisy warning under non-cached envs.
-        self._service = build(
-            "admin", "directory_v1", credentials=creds, cache_discovery=False
-        )
+        self._service = build("admin", "directory_v1", credentials=creds, cache_discovery=False)
         return self._service
 
-    def _handle_create_error(
-        self, exc: Exception, req: OnboardRequest, password: str
-    ) -> OnboardResult:
+    def _handle_create_error(self, exc: Exception, req: OnboardRequest, password: str) -> OnboardResult:
         from googleapiclient.errors import HttpError
 
         if isinstance(exc, HttpError) and exc.resp.status == 409:
@@ -185,10 +170,7 @@ class GoogleAdminClient:
                 return OnboardResult(
                     service_name=self.service_name,
                     success=True,
-                    notes=[
-                        f"Account exists for {req.email} but lookup failed; "
-                        "treated as success."
-                    ],
+                    notes=[f"Account exists for {req.email} but lookup failed; treated as success."],
                 )
 
         message = _format_http_error(exc)
@@ -227,11 +209,7 @@ def _generate_temp_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits + "!@#$%&*"
     while True:
         pw = "".join(secrets.choice(alphabet) for _ in range(length))
-        if (
-            any(c.islower() for c in pw)
-            and any(c.isupper() for c in pw)
-            and any(c.isdigit() for c in pw)
-        ):
+        if any(c.islower() for c in pw) and any(c.isupper() for c in pw) and any(c.isdigit() for c in pw):
             return pw
 
 

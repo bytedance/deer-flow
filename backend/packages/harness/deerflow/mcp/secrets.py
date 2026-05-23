@@ -85,9 +85,7 @@ def get_fernet() -> Fernet:
         except OSError:
             pass
         logger.warning(
-            "Generated new MCP secrets key at %s. Back this up: losing it "
-            "invalidates all stored MCP credentials. Set MCP_SECRETS_KEY env "
-            "var to manage it out-of-band.",
+            "Generated new MCP secrets key at %s. Back this up: losing it invalidates all stored MCP credentials. Set MCP_SECRETS_KEY env var to manage it out-of-band.",
             key_path,
         )
 
@@ -127,10 +125,7 @@ def decrypt(value: str) -> str:
     try:
         return get_fernet().decrypt(ciphertext).decode("utf-8")
     except InvalidToken:
-        logger.error(
-            "Failed to decrypt an MCP secret. The key may have been rotated; "
-            "reconnect the affected MCP server to refresh credentials."
-        )
+        logger.error("Failed to decrypt an MCP secret. The key may have been rotated; reconnect the affected MCP server to refresh credentials.")
         raise
 
 

@@ -15,9 +15,7 @@ export async function fetchTeableSpaces(): Promise<TeableSpace[]> {
   return data.spaces;
 }
 
-export async function fetchTeableBases(
-  spaceId: string,
-): Promise<TeableBase[]> {
+export async function fetchTeableBases(spaceId: string): Promise<TeableBase[]> {
   const res = await fetch(
     `${getBackendBaseURL()}/api/teable/spaces/${encodeURIComponent(spaceId)}/bases`,
   );
@@ -28,7 +26,8 @@ export async function fetchTeableBases(
 
 export async function fetchTeableConfig(): Promise<TeableConfig> {
   const res = await fetch(`${getBackendBaseURL()}/api/teable/config`);
-  if (!res.ok) throw new Error(`Failed to load Teable config: ${res.statusText}`);
+  if (!res.ok)
+    throw new Error(`Failed to load Teable config: ${res.statusText}`);
   return res.json() as Promise<TeableConfig>;
 }
 

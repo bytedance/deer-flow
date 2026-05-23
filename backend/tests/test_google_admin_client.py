@@ -16,11 +16,9 @@ import pytest
 from deerflow.tools.startcloud.onboarding import (
     OffboardResult,
     OnboardRequest,
-    OnboardResult,
     ServiceOnboardClient,
 )
 from deerflow.tools.startcloud.onboarding.google_admin_client import GoogleAdminClient
-
 
 # ---------------------------------------------------------------------------
 # Fake Directory API surface — captures bodies so tests can assert payloads.
@@ -107,9 +105,7 @@ def _http_error(status: int, message: str = "boom") -> Exception:
     resp = MagicMock()
     resp.status = status
     resp.reason = message
-    body = (
-        b'{"error":{"code":' + str(status).encode() + b',"message":"' + message.encode() + b'"}}'
-    )
+    body = b'{"error":{"code":' + str(status).encode() + b',"message":"' + message.encode() + b'"}}'
     return HttpError(resp=resp, content=body, uri="http://test/")
 
 
@@ -139,12 +135,8 @@ class TestConformance:
 
 
 class TestCreateUser:
-    def test_happy_path_sends_expected_body_and_returns_account_id(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        fake, captured = _make_fake_service(
-            insert_response={"id": "google-uid-123", "primaryEmail": "sara@example.com"}
-        )
+    def test_happy_path_sends_expected_body_and_returns_account_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake, captured = _make_fake_service(insert_response={"id": "google-uid-123", "primaryEmail": "sara@example.com"})
         client = _client_with_fake(monkeypatch, fake)
 
         result = client.create_user(
@@ -168,15 +160,11 @@ class TestCreateUser:
         assert body["password"] == "TempPass123!"
         assert body["changePasswordAtNextLogin"] is True
 
-    def test_auto_generates_password_when_caller_omits(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auto_generates_password_when_caller_omits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, captured = _make_fake_service(insert_response={"id": "uid"})
         client = _client_with_fake(monkeypatch, fake)
 
-        result = client.create_user(
-            OnboardRequest(email="x@y.com", first_name="X", last_name="Y")
-        )
+        result = client.create_user(OnboardRequest(email="x@y.com", first_name="X", last_name="Y"))
 
         assert result.success is True
         password = result.temporary_credentials["temporary_password"]
@@ -186,32 +174,24 @@ class TestCreateUser:
         assert any(c.isdigit() for c in password)
         assert captured["insert_body"]["password"] == password
 
-    def test_409_existing_user_treated_as_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_409_existing_user_treated_as_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, captured = _make_fake_service(
             insert_raises=_http_error(409, "Entity already exists."),
             get_response={"id": "existing-uid"},
         )
         client = _client_with_fake(monkeypatch, fake)
 
-        result = client.create_user(
-            OnboardRequest(email="dup@example.com", first_name="D", last_name="U")
-        )
+        result = client.create_user(OnboardRequest(email="dup@example.com", first_name="D", last_name="U"))
 
         assert result.success is True
         assert result.account_id == "existing-uid"
         assert any("already existed" in n for n in result.notes)
 
-    def test_generic_http_error_returns_failure_without_raising(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_generic_http_error_returns_failure_without_raising(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, _ = _make_fake_service(insert_raises=_http_error(403, "Forbidden"))
         client = _client_with_fake(monkeypatch, fake)
 
-        result = client.create_user(
-            OnboardRequest(email="x@y.com", first_name="X", last_name="Y")
-        )
+        result = client.create_user(OnboardRequest(email="x@y.com", first_name="X", last_name="Y"))
 
         assert result.success is False
         assert result.error is not None
@@ -227,9 +207,7 @@ class TestCreateUser:
 
 
 class TestOffboardUser:
-    def test_disable_calls_users_update_with_suspended_true(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_disable_calls_users_update_with_suspended_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, captured = _make_fake_service()
         client = _client_with_fake(monkeypatch, fake)
 
@@ -251,9 +229,7 @@ class TestOffboardUser:
         assert result.action == "deleted"
         assert captured["delete_userKey"] == "x@y.com"
 
-    def test_404_treated_as_idempotent_not_found(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_404_treated_as_idempotent_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, _ = _make_fake_service(update_raises=_http_error(404, "Resource Not Found"))
         client = _client_with_fake(monkeypatch, fake)
 
@@ -262,9 +238,7 @@ class TestOffboardUser:
         assert result.success is True
         assert result.action == "not_found"
 
-    def test_other_http_error_returns_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_other_http_error_returns_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake, _ = _make_fake_service(update_raises=_http_error(500, "Internal"))
         client = _client_with_fake(monkeypatch, fake)
 

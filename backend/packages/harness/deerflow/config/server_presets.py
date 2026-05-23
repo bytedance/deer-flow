@@ -196,9 +196,7 @@ def list_oauth_presets() -> list[dict]:
             "displayName": preset.display_name,
             "description": preset.description,
             "provider": preset.provider,
-            "configured": bool(
-                os.getenv(preset.client_id_env) and os.getenv(preset.client_secret_env)
-            ),
+            "configured": bool(os.getenv(preset.client_id_env) and os.getenv(preset.client_secret_env)),
         }
         for preset in OAUTH_PRESETS.values()
     ]

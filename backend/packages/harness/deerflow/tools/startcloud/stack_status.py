@@ -1,12 +1,12 @@
 """Health monitoring for the Start-Cloud service stack."""
 
 import json
-import subprocess
 import os
-import urllib.request
+import subprocess
 import urllib.error
-from langchain_core.tools import tool
+import urllib.request
 
+from langchain_core.tools import tool
 
 COMPOSE_DIR = os.environ.get("STARTCLOUD_COMPOSE_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..")))
 
@@ -35,7 +35,10 @@ def _get_container_status() -> dict:
     try:
         result = subprocess.run(
             ["docker", "compose", "-f", f"{COMPOSE_DIR}/docker-compose.yml", "ps", "--format", "json"],
-            capture_output=True, text=True, timeout=15, cwd=COMPOSE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=COMPOSE_DIR,
         )
         containers = {}
         for line in result.stdout.strip().split("\n"):

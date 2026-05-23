@@ -4,7 +4,7 @@ import json
 
 from langchain_core.tools import tool
 
-from .teable_client import check_configured, teable_delete, teable_get, teable_patch, teable_post
+from .teable_client import check_configured, teable_delete, teable_patch, teable_post
 
 
 @tool

@@ -14,10 +14,7 @@ import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
 import { InputBox } from "../input-box";
-import {
-  MessageList,
-  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-} from "../messages";
+import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 
 import { TableCanvas } from "./table-canvas";
 import { TableResourceList } from "./table-resource-list";
@@ -78,7 +75,12 @@ export function TableWorkspace({
       defaultLayout={{ chat: 30, resources: 20, canvas: 50 }}
     >
       {/* Left pane: Chat */}
-      <ResizablePanel className="relative" defaultSize={30} id="chat" minSize={20}>
+      <ResizablePanel
+        className="relative"
+        defaultSize={30}
+        id="chat"
+        minSize={20}
+      >
         <div className="relative flex size-full min-h-0 flex-col">
           <header
             className={cn(
@@ -112,9 +114,7 @@ export function TableWorkspace({
                         : "ready"
                   }
                   context={settings.context}
-                  onContextChange={(context) =>
-                    setSettings("context", context)
-                  }
+                  onContextChange={(context) => setSettings("context", context)}
                   onSubmit={onSubmit}
                   onStop={onStop}
                 />
@@ -124,7 +124,10 @@ export function TableWorkspace({
         </div>
       </ResizablePanel>
 
-      <ResizableHandle id="chat-resources-separator" className="opacity-33 hover:opacity-100" />
+      <ResizableHandle
+        id="chat-resources-separator"
+        className="opacity-33 hover:opacity-100"
+      />
 
       {/* Center pane: Resource list */}
       <ResizablePanel defaultSize={20} id="resources" minSize={12}>
@@ -137,7 +140,10 @@ export function TableWorkspace({
         />
       </ResizablePanel>
 
-      <ResizableHandle id="resources-canvas-separator" className="opacity-33 hover:opacity-100" />
+      <ResizableHandle
+        id="resources-canvas-separator"
+        className="opacity-33 hover:opacity-100"
+      />
 
       {/* Right pane: Canvas */}
       <ResizablePanel defaultSize={50} id="canvas" minSize={20}>

@@ -76,9 +76,7 @@ async def _run_gws(args: list[str], cwd: str | None = None) -> tuple[dict, str]:
     stderr_text = stderr.decode(errors="replace")
     stdout_text = stdout.decode(errors="replace")
     if proc.returncode != 0:
-        raise GwsError(
-            f"gws {' '.join(args[:3])} failed (exit {proc.returncode}): {stderr_text.strip() or stdout_text.strip()}"
-        )
+        raise GwsError(f"gws {' '.join(args[:3])} failed (exit {proc.returncode}): {stderr_text.strip() or stdout_text.strip()}")
     # ``gws`` occasionally prints progress lines before the JSON payload.
     # Parse the last non-empty line, falling back to the whole output.
     text = stdout_text.strip()
@@ -103,10 +101,7 @@ async def _list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="gdrive_search",
-            description=(
-                "Search Google Drive files. If no query is provided, returns the most-recently "
-                "modified files. Results include id, name, mimeType, modifiedTime, and webViewLink."
-            ),
+            description=("Search Google Drive files. If no query is provided, returns the most-recently modified files. Results include id, name, mimeType, modifiedTime, and webViewLink."),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -217,10 +212,7 @@ def _slice_text(text: str, offset: int, max_chars: int, name: str, mime: str) ->
 
     header_lines = [f"# {name}", "", f"> mimeType: `{mime}`"]
     if start > 0 or end < total:
-        header_lines.append(
-            f"> Showing characters {start:,}–{end:,} of {total:,} total "
-            f"({(end - start):,} returned; pass offset={end} to continue)."
-        )
+        header_lines.append(f"> Showing characters {start:,}–{end:,} of {total:,} total ({(end - start):,} returned; pass offset={end} to continue).")
     header = "\n".join(header_lines) + "\n\n"
     return header + chunk
 
@@ -265,10 +257,7 @@ async def _read_file(
             return [
                 types.TextContent(
                     type="text",
-                    text=(
-                        f"# {name}\n\nmimeType: {mime}\nexport: {export_mime}\nbytes: {len(data):,}\n"
-                        f"base64 (truncated to 512 chars):\n{b64[:512]}"
-                    ),
+                    text=(f"# {name}\n\nmimeType: {mime}\nexport: {export_mime}\nbytes: {len(data):,}\nbase64 (truncated to 512 chars):\n{b64[:512]}"),
                 )
             ]
 
@@ -304,10 +293,7 @@ async def _read_file(
         return [
             types.TextContent(
                 type="text",
-                text=(
-                    f"# {name}\n\nmimeType: {mime}\nbytes: {len(data):,}\n"
-                    f"(binary file; base64 truncated to 512 chars)\n{b64[:512]}"
-                ),
+                text=(f"# {name}\n\nmimeType: {mime}\nbytes: {len(data):,}\n(binary file; base64 truncated to 512 chars)\n{b64[:512]}"),
             )
         ]
 
@@ -329,11 +315,7 @@ async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         if name == "gdrive_get_metadata":
             file_id = arguments["file_id"]
             meta = await _get_metadata(file_id)
-            return [
-                types.TextContent(
-                    type="text", text=json.dumps(meta, indent=2, ensure_ascii=False)
-                )
-            ]
+            return [types.TextContent(type="text", text=json.dumps(meta, indent=2, ensure_ascii=False))]
 
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
     except GwsError as e:

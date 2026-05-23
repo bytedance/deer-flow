@@ -93,9 +93,7 @@ describe("MCP preset toServerConfig outputs", () => {
   test("missing required values do not throw — they pass through as empty strings", () => {
     // The form layer enforces 'required' before submit. The mapper must
     // still be defensive so a malformed call cannot crash the modal.
-    expect(() =>
-      getPresetById("github")!.toServerConfig!({}),
-    ).not.toThrow();
+    expect(() => getPresetById("github")!.toServerConfig!({})).not.toThrow();
     expect(
       getPresetById("github")!.toServerConfig!({}).env
         ?.GITHUB_PERSONAL_ACCESS_TOKEN,

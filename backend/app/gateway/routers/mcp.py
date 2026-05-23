@@ -367,10 +367,7 @@ async def start_mcp_oauth(request: OAuthStartRequest) -> OAuthStartResponse:
     if not client_id or not client_secret:
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"OAuth preset '{preset.id}' is not configured: set "
-                f"{preset.client_id_env} and {preset.client_secret_env} in the server env."
-            ),
+            detail=(f"OAuth preset '{preset.id}' is not configured: set {preset.client_id_env} and {preset.client_secret_env} in the server env."),
         )
 
     store = get_session_store()
@@ -404,7 +401,7 @@ def _callback_html(status: str, preset_id: str | None, message: str) -> str:
 </style>
 </head>
 <body>
-<h1 class="{'ok' if status == 'success' else 'err'}">{status.title()}</h1>
+<h1 class="{"ok" if status == "success" else "err"}">{status.title()}</h1>
 <p>{message}</p>
 <p>You can close this window.</p>
 <script>

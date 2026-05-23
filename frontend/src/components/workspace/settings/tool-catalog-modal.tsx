@@ -69,18 +69,20 @@ export function ToolCatalogModal({
       <DialogContent className="sm:max-w-xl">
         {step === "catalog" ? (
           <CatalogStep onSelect={handleSelectPreset} />
-        ) : preset ? preset.authType === "oauth" ? (
-          <OAuthStep
-            preset={preset}
-            onBack={handleBack}
-            onSuccess={handleSuccess}
-          />
-        ) : (
-          <FormStep
-            preset={preset}
-            onBack={handleBack}
-            onSuccess={handleSuccess}
-          />
+        ) : preset ? (
+          preset.authType === "oauth" ? (
+            <OAuthStep
+              preset={preset}
+              onBack={handleBack}
+              onSuccess={handleSuccess}
+            />
+          ) : (
+            <FormStep
+              preset={preset}
+              onBack={handleBack}
+              onSuccess={handleSuccess}
+            />
+          )
         ) : null}
       </DialogContent>
     </Dialog>
@@ -114,9 +116,7 @@ function CatalogStep({ onSelect }: { onSelect: (preset: McpPreset) => void }) {
                 <div className="font-medium">{preset.displayName}</div>
                 <div className="flex items-center gap-1">
                   {preset.authType === "oauth" && (
-                    <span className="text-muted-foreground text-xs">
-                      OAuth
-                    </span>
+                    <span className="text-muted-foreground text-xs">OAuth</span>
                   )}
                   {alreadyAdded && (
                     <span className="text-muted-foreground text-xs">
@@ -294,7 +294,12 @@ function OAuthStep({
         return;
       }
       const data = event.data as
-        | { type?: string; status?: string; preset_id?: string; message?: string }
+        | {
+            type?: string;
+            status?: string;
+            preset_id?: string;
+            message?: string;
+          }
         | undefined;
       if (data?.type !== "mcp-oauth-result") {
         return;
@@ -336,9 +341,7 @@ function OAuthStep({
       );
       if (!popup) {
         setPending(false);
-        setError(
-          "Popup blocked. Allow pop-ups for this site and try again.",
-        );
+        setError("Popup blocked. Allow pop-ups for this site and try again.");
         return;
       }
       popupRef.current = popup;
@@ -386,8 +389,7 @@ function OAuthStep({
       </DialogHeader>
       <div className="flex flex-col gap-3 py-3">
         <p className="text-muted-foreground text-sm">
-          A popup will open so you can authorize Start-Cloud to access your
-          {" "}
+          A popup will open so you can authorize Start-Cloud to access your{" "}
           {providerLabel} account. Only the scopes required by{" "}
           {preset.displayName} are requested.
         </p>

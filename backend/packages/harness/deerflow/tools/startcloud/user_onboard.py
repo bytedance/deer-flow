@@ -85,9 +85,7 @@ def _format_onboard_summary(req: OnboardRequest, results: list[OnboardResult]) -
             for note in r.notes:
                 lines.append(f"      메모: {note}")
             if r.temporary_credentials:
-                lines.append(
-                    "      임시 자격증명: [숨김] (사용자에게 안전한 채널로 직접 전달)"
-                )
+                lines.append("      임시 자격증명: [숨김] (사용자에게 안전한 채널로 직접 전달)")
         lines.append("")
 
     if failures:
@@ -101,13 +99,9 @@ def _format_onboard_summary(req: OnboardRequest, results: list[OnboardResult]) -
     if successes and not failures:
         lines.append("모든 서비스에 계정이 생성되었습니다.")
     elif successes and failures:
-        lines.append(
-            "일부 서비스만 자동 처리되었습니다. 위의 미처리 서비스는 수동으로 추가해주세요."
-        )
+        lines.append("일부 서비스만 자동 처리되었습니다. 위의 미처리 서비스는 수동으로 추가해주세요.")
     else:
-        lines.append(
-            "자동 온보딩이 작동하지 않았습니다. 환경변수 설정을 확인하거나 수동으로 진행해주세요."
-        )
+        lines.append("자동 온보딩이 작동하지 않았습니다. 환경변수 설정을 확인하거나 수동으로 진행해주세요.")
 
     return "\n".join(lines)
 

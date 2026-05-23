@@ -2,7 +2,6 @@
 
 from langchain_core.tools import tool
 
-
 CATALOG = {
     "vaultwarden": {
         "name": "Vaultwarden",
@@ -136,7 +135,7 @@ def service_info(query: str = "") -> str:
         ]
         if "url" in svc:
             lines.append(f"URL: {svc['url']}")
-        lines.append(f"\nFeatures:")
+        lines.append("\nFeatures:")
         for f in svc["features"]:
             lines.append(f"  • {f}")
         return "\n".join(lines)
@@ -144,7 +143,6 @@ def service_info(query: str = "") -> str:
     # Cost comparison
     if query_lower == "compare":
         lines = ["=== SaaS Cost Comparison (30-person team) ===\n"]
-        total_saas = 0
         for key, svc in CATALOG.items():
             if svc["status"] == "installed":
                 lines.append(f"{svc['name']} ({svc['category']})")

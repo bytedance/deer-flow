@@ -89,10 +89,7 @@ async def exchange_code_for_tokens(
     if not refresh_token:
         # Google only returns refresh_token when access_type=offline + prompt=consent.
         # If it's missing, we can't persist the connection, so surface a clear error.
-        raise ValueError(
-            "OAuth token response missing refresh_token — ensure the preset sets "
-            "access_type=offline and prompt=consent."
-        )
+        raise ValueError("OAuth token response missing refresh_token — ensure the preset sets access_type=offline and prompt=consent.")
 
     return OAuthTokens(
         access_token=access_token,
