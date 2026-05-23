@@ -37,9 +37,34 @@ if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
+    from deerflow.runtime import RunRecord
 
 
 T = TypeVar("T")
+
+
+async def _mark_latest_recovered_threads_error(
+    run_manager: RunManager,
+    thread_store: ThreadMetaStore,
+    recovered_runs: list[RunRecord],
+) -> None:
+    """Mark thread status as error only when its newest run was recovered."""
+    recovered_by_thread: dict[str, set[str]] = {}
+    for record in recovered_runs:
+        recovered_by_thread.setdefault(record.thread_id, set()).add(record.run_id)
+
+    for thread_id, recovered_run_ids in recovered_by_thread.items():
+        try:
+            latest_runs = await run_manager.list_by_thread(thread_id, user_id=None, limit=1)
+        except Exception:
+            logger.warning("Failed to find latest run for thread %s during run reconciliation", thread_id, exc_info=True)
+            continue
+        if not latest_runs or latest_runs[0].run_id not in recovered_run_ids:
+            continue
+        try:
+            await thread_store.update_status(thread_id, "error", user_id=None)
+        except Exception:
+            logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
 
 
 def get_config() -> AppConfig:
@@ -138,6 +163,16 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         app.state.run_manager = RunManager(store=app.state.run_store)
+        if getattr(config.database, "backend", None) == "sqlite":
+            from deerflow.utils.time import now_iso
+
+            # Startup-only recovery: clean shutdowns return no active rows and
+            # the thread-status update below becomes a no-op.
+            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
+                error="Gateway restarted before this run reached a durable final state.",
+                before=now_iso(),
+            )
+            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
         try:
             yield
