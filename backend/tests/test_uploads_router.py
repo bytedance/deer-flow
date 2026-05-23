@@ -236,7 +236,10 @@ def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
 
     assert result.success is True
     make_writable.assert_not_called()
-    make_readable.assert_not_called()
+    # Readable adjustment is now always applied regardless of sandbox type
+    make_readable.assert_called_once()
+    called_path = make_readable.call_args[0][0]
+    assert called_path.name == "notes.txt"
 
 
 def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
