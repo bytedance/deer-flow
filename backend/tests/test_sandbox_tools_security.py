@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -346,6 +347,104 @@ def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ../uploads/secret.txt",
+        "cat subdir/../../secret.txt",
+        "python script.py --input=../secret.txt",
+        "echo ok > ../outputs/result.txt",
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_relative_dotdot_segments(command: str) -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_root_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("cd / && cat etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_parent_escape() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths("cd .. && cat etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_cd_env_var_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("cd $HOME && cat .ssh/id_rsa", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_multiline_cd_escape() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths("echo ok\ncd $HOME && cat .ssh/id_rsa", _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command cd / && cat etc/passwd",
+        "builtin cd $HOME && cat .ssh/id_rsa",
+        "if cd $HOME; then cat .ssh/id_rsa; fi",
+        "{ cd /; cat etc/passwd; }",
+        'echo "$(cd $HOME && cat .ssh/id_rsa)"',
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_complex_cd_escapes(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls /",
+        "ln -s / root && cat root/etc/passwd",
+        "command ls /",
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_bare_root_path(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo cd /",
+        "printf '%s\\n' pushd /",
+    ],
+)
+def test_validate_local_bash_command_paths_allows_cd_words_as_arguments(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_workspace_relative_paths() -> None:
+    validate_local_bash_command_paths(
+        "mkdir -p reports && python script.py data/input.csv > reports/out.txt",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_cd_virtual_workspace_with_relative_paths() -> None:
+    validate_local_bash_command_paths(
+        "cd /mnt/user-data/workspace && cat data/input.csv > reports/out.txt",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_http_url_dotdot_segments() -> None:
+    validate_local_bash_command_paths(
+        "curl https://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",
+        _THREAD_DATA,
+    )
+    validate_local_bash_command_paths(
+        "curl http://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",
+        _THREAD_DATA,
+    )
+
+
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
@@ -365,6 +464,28 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(
+        runtime=runtime,
+        description="run command",
+        command="cat ../uploads/secret.txt",
+    )
+
+    assert "path traversal" in result
 
 
 # ---------- Skills path tests ----------
@@ -1018,6 +1139,170 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_write_file_tool_bounds_large_oserror_and_masks_local_paths(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-large-oserror"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            host_path = f"{_THREAD_DATA['workspace_path']}/nested/output.txt"
+            raise OSError(f"write failed at {host_path}\n{'A' * 12000}\nremote tail marker")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+    monkeypatch.setattr("deerflow.sandbox.tools.get_thread_data", lambda runtime: _THREAD_DATA)
+    monkeypatch.setattr("deerflow.sandbox.tools.validate_local_tool_path", lambda path, thread_data: None)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._resolve_and_validate_user_data_path",
+        lambda path, thread_data: f"{_THREAD_DATA['workspace_path']}/output.txt",
+    )
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="写入大文件失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="report body",
+    )
+
+    assert len(result) <= 2000
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "/tmp/deer-flow/threads/t1/user-data/workspace" not in result
+    assert "/mnt/user-data/workspace/nested/output.txt" in result
+    assert "remote tail marker" in result
+    assert "[write_file error truncated:" in result
+
+
+def test_write_file_tool_preserves_short_oserror_without_truncation(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-short-oserror"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise OSError("disk quota exceeded")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="写入失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert result == "Error: Failed to write file '/mnt/user-data/workspace/output.txt': OSError: disk quota exceeded"
+    assert "[write_file error truncated:" not in result
+
+
+def test_write_file_tool_bounds_large_sandbox_error(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-large-sandbox-error"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise SandboxError(f"remote write rejected {'B' * 12000} final detail")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="远端写入失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert len(result) <= 2000
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "SandboxError: remote write rejected" in result
+    assert "final detail" in result
+    assert "[write_file error truncated:" in result
+
+
+@pytest.mark.parametrize(
+    ("raised_error", "expected_fragment"),
+    [
+        pytest.param(
+            PermissionError("permission denied"),
+            "Error: Permission denied writing to file: /mnt/user-data/workspace/output.txt",
+            id="permission",
+        ),
+        pytest.param(
+            IsADirectoryError("target is a directory"),
+            "Error: Path is a directory, not a file: /mnt/user-data/workspace/output.txt",
+            id="directory",
+        ),
+        pytest.param(
+            Exception("remote sandbox timeout"),
+            "Exception: remote sandbox timeout",
+            id="generic",
+        ),
+    ],
+)
+def test_write_file_tool_formats_all_other_failure_branches(
+    monkeypatch,
+    raised_error: Exception,
+    expected_fragment: str,
+) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-other-failure"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise raised_error
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="验证错误分支格式化",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert "/mnt/user-data/workspace/output.txt" in result
+    assert expected_fragment in result
+    assert "[write_file error truncated:" not in result
+
+
+def test_write_file_tool_handles_sandbox_init_failure(monkeypatch) -> None:
+    """Regression for #3133 review: SandboxError raised during sandbox
+    initialization (before the local `requested_path` assignment) must still
+    surface as a bounded tool error rather than an UnboundLocalError.
+    """
+
+    def raise_sandbox_error(runtime):
+        raise SandboxError("sandbox missing")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", raise_sandbox_error)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="sandbox 初始化失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "SandboxError: sandbox missing" in result
+    assert "[write_file error truncated:" not in result
 
 
 def test_file_operation_lock_memory_cleanup() -> None:

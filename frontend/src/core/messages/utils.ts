@@ -18,7 +18,7 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
-type MessageGroup =
+export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
@@ -26,10 +26,14 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
-export function groupMessages<T>(
-  messages: Message[],
-  mapper: (group: MessageGroup) => T,
-): T[] {
+const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
+  "summary",
+  "loop_warning",
+  "todo_reminder",
+  "todo_completion_reminder",
+]);
+
+export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
@@ -53,10 +57,6 @@ export function groupMessages<T>(
 
   for (const message of messages) {
     if (isHiddenFromUIMessage(message)) {
-      continue;
-    }
-
-    if (message.name === "todo_reminder") {
       continue;
     }
 
@@ -124,9 +124,50 @@ export function groupMessages<T>(
     }
   }
 
-  return groups
+  return groups;
+}
+
+export function groupMessages<T>(
+  messages: Message[],
+  mapper: (group: MessageGroup) => T,
+): T[] {
+  return getMessageGroups(messages)
     .map(mapper)
     .filter((result) => result !== undefined && result !== null) as T[];
+}
+
+export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
+  const usageMessagesByGroupIndex: Array<Message[] | null> = Array.from(
+    { length: groups.length },
+    () => null,
+  );
+
+  let turnStartIndex: number | null = null;
+
+  for (const [index, group] of groups.entries()) {
+    if (group.type === "human") {
+      turnStartIndex = null;
+      continue;
+    }
+
+    turnStartIndex ??= index;
+
+    const nextGroup = groups[index + 1];
+    const isTurnEnd = !nextGroup || nextGroup.type === "human";
+
+    if (!isTurnEnd) {
+      continue;
+    }
+
+    usageMessagesByGroupIndex[index] = groups
+      .slice(turnStartIndex, index + 1)
+      .flatMap((currentGroup) => currentGroup.messages)
+      .filter((message) => message.type === "ai");
+
+    turnStartIndex = null;
+  }
+
+  return usageMessagesByGroupIndex;
 }
 
 export function extractTextFromMessage(message: Message) {
@@ -210,7 +251,7 @@ export function extractReasoningContentFromMessage(message: Message) {
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
-    if (part && "thinking" in part) {
+    if (part && typeof part === "object" && "thinking" in part) {
       return part.thinking as string;
     }
   }
@@ -328,7 +369,11 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
-  return message.additional_kwargs?.hide_from_ui === true;
+  return (
+    message.additional_kwargs?.hide_from_ui === true ||
+    (typeof message.name === "string" &&
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
+  );
 }
 
 /**
@@ -350,6 +395,50 @@ export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
     .trim();
+}
+
+/**
+ * Tag names that backend middlewares wrap around internal payloads before
+ * letting them ride along inside LangGraph message ``content``.
+ *
+ * These markers are *not* user copy — they come from:
+ *
+ * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
+ *   ``<memory>`` / ``<current_date>`` inside)
+ * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
+ *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
+ *   the same tag vocabulary.
+ *
+ * The primary export filter is {@link isHiddenFromUIMessage}. This list is
+ * the defence-in-depth strip for any message that — by middleware bug,
+ * provider quirk, or merge-conflict regression — slips through without
+ * its ``hide_from_ui`` flag set.
+ */
+export const INTERNAL_MARKER_TAGS = [
+  "uploaded_files",
+  "system-reminder",
+  "memory",
+  "current_date",
+] as const;
+
+const INTERNAL_MARKER_RE = new RegExp(
+  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
+  "g",
+);
+
+/**
+ * Strip every known backend-injected marker from message content.
+ *
+ * Intended for the chat export path where a marker leaking through is a
+ * privacy regression. UI render paths should keep using
+ * {@link stripUploadedFilesTag} — they receive ``hide_from_ui`` messages
+ * via a separate filter and the narrower function avoids stripping content
+ * a user might legitimately type into a meta-discussion (e.g. asking the
+ * model about its own ``<memory>`` system).
+ */
+export function stripInternalMarkers(content: string): string {
+  return content.replace(INTERNAL_MARKER_RE, "").trim();
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {

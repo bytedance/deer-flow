@@ -5,10 +5,11 @@ from __future__ import annotations
 import pytest
 
 from deerflow.config import tracing_config as tracing_module
+from deerflow.config.tracing_config import reset_tracing_config
 
 
 def _reset_tracing_cache() -> None:
-    tracing_module._tracing_config = None
+    reset_tracing_config()
 
 
 @pytest.fixture(autouse=True)

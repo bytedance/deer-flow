@@ -16,13 +16,31 @@ logger = logging.getLogger(__name__)
 _slack_md_converter = SlackMarkdownConverter()
 
 
+def _normalize_allowed_users(allowed_users: Any) -> set[str]:
+    if allowed_users is None:
+        return set()
+    if isinstance(allowed_users, str):
+        values = [allowed_users]
+    elif isinstance(allowed_users, list | tuple | set):
+        values = allowed_users
+    else:
+        logger.warning(
+            "Slack allowed_users should be a list of Slack user IDs or a single Slack user ID string; treating %s as one string value",
+            type(allowed_users).__name__,
+        )
+        values = [allowed_users]
+    return {str(user_id) for user_id in values if str(user_id)}
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
     Configuration keys (in ``config.yaml`` under ``channels.slack``):
         - ``bot_token``: Slack Bot User OAuth Token (xoxb-...).
         - ``app_token``: Slack App-Level Token (xapp-...) for Socket Mode.
-        - ``allowed_users``: (optional) List of allowed Slack user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of allowed Slack user IDs, or a
+          single Slack user ID string as shorthand. Empty = allow all. Other
+          scalar values are treated as a single string with a warning.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -30,7 +48,7 @@ class SlackChannel(Channel):
         self._socket_client = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._allowed_users: set[str] = {str(user_id) for user_id in config.get("allowed_users", [])}
+        self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
 
     async def start(self) -> None:
         if self._running:

@@ -19,10 +19,6 @@ import asyncio
 import logging
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-from langgraph.runtime import Runtime
-
-from deerflow.agents import make_lead_agent
 
 try:
     from prompt_toolkit import PromptSession
@@ -34,18 +30,61 @@ except ImportError:
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+_LOG_FMT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _setup_logging(log_level: int = logging.INFO) -> None:
+    """Route logs to ``debug.log`` using *log_level* for the initial root/file setup.
+
+    This configures the root logger and the ``debug.log`` file handler so logs do
+    not print on the interactive console. It is idempotent: any pre-existing
+    handlers on the root logger (e.g. installed by ``logging.basicConfig`` in
+    transitively imported modules) are removed so the debug session output only
+    lands in ``debug.log``.
+
+    Note: later config-driven logging adjustments may change named logger
+    verbosity without raising the root logger or file-handler thresholds set
+    here, so the eventual contents of ``debug.log`` may not be filtered solely by
+    this function's ``log_level`` argument.
+    """
+    root = logging.root
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        h.close()
+    root.setLevel(log_level)
+
+    file_handler = logging.FileHandler("debug.log", mode="a", encoding="utf-8")
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
+    root.addHandler(file_handler)
 
 
 async def main():
+    # Install file logging first so warnings emitted while loading config do not
+    # leak onto the interactive terminal via Python's lastResort handler.
+    _setup_logging()
+
+    from deerflow.config import get_app_config
+    from deerflow.config.app_config import apply_logging_level
+
+    app_config = get_app_config()
+    apply_logging_level(app_config.log_level)
+
+    # Delay the rest of the deerflow imports until *after* logging is installed
+    # so that any import-time side effects (e.g. deerflow.agents starts a
+    # background skill-loader thread on import) emit logs to debug.log instead
+    # of leaking onto the interactive terminal via Python's lastResort handler.
+    from langchain_core.messages import HumanMessage
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents import make_lead_agent
+    from deerflow.config.paths import get_paths
+    from deerflow.mcp import initialize_mcp_tools
+    from deerflow.runtime.user_context import get_effective_user_id
+
     # Initialize MCP tools at startup
     try:
-        from deerflow.mcp import initialize_mcp_tools
-
         await initialize_mcp_tools()
     except Exception as e:
         print(f"Warning: Failed to initialize MCP tools: {e}")
@@ -71,9 +110,12 @@ async def main():
     print("=" * 50)
     print("Lead Agent Debug Mode")
     print("Type 'quit' or 'exit' to stop")
+    print(f"Logs: debug.log (log_level={app_config.log_level})")
     if not _HAS_PROMPT_TOOLKIT:
         print("Tip: `uv sync --group dev` to enable arrow-key & history support")
     print("=" * 50)
+
+    seen_artifacts: set[str] = set()
 
     while True:
         try:
@@ -95,6 +137,22 @@ async def main():
             if result.get("messages"):
                 last_message = result["messages"][-1]
                 print(f"\nAgent: {last_message.content}")
+
+            # Show files presented to the user this turn (new artifacts only)
+            artifacts = result.get("artifacts") or []
+            new_artifacts = [p for p in artifacts if p not in seen_artifacts]
+            if new_artifacts:
+                thread_id = config["configurable"]["thread_id"]
+                user_id = get_effective_user_id()
+                paths = get_paths()
+                print("\n[Presented files]")
+                for virtual in new_artifacts:
+                    try:
+                        physical = paths.resolve_virtual_path(thread_id, virtual, user_id=user_id)
+                        print(f"  - {virtual}\n    → {physical}")
+                    except ValueError as exc:
+                        print(f"  - {virtual}    (failed to resolve physical path: {exc})")
+                seen_artifacts.update(new_artifacts)
 
         except (KeyboardInterrupt, EOFError):
             print("\nGoodbye!")

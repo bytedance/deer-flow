@@ -20,6 +20,7 @@ class ConversationContext:
     messages: list[Any]
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     agent_name: str | None = None
+    user_id: str | None = None
     correction_detected: bool = False
     reinforcement_detected: bool = False
 
@@ -39,11 +40,21 @@ class MemoryUpdateQueue:
         self._timer: threading.Timer | None = None
         self._processing = False
 
+    @staticmethod
+    def _queue_key(
+        thread_id: str,
+        user_id: str | None,
+        agent_name: str | None,
+    ) -> tuple[str, str | None, str | None]:
+        """Return the debounce identity for a memory update target."""
+        return (thread_id, user_id, agent_name)
+
     def add(
         self,
         thread_id: str,
         messages: list[Any],
         agent_name: str | None = None,
+        user_id: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
     ) -> None:
@@ -53,6 +64,9 @@ class MemoryUpdateQueue:
             thread_id: The thread ID.
             messages: The conversation messages.
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            user_id: The user ID captured at enqueue time. Stored in ConversationContext so it
+                survives the threading.Timer boundary (ContextVar does not propagate across
+                raw threads).
             correction_detected: Whether recent turns include an explicit correction signal.
             reinforcement_detected: Whether recent turns include a positive reinforcement signal.
         """
@@ -65,6 +79,7 @@ class MemoryUpdateQueue:
                 thread_id=thread_id,
                 messages=messages,
                 agent_name=agent_name,
+                user_id=user_id,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
             )
@@ -77,6 +92,7 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None = None,
+        user_id: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
     ) -> None:
@@ -90,6 +106,7 @@ class MemoryUpdateQueue:
                 thread_id=thread_id,
                 messages=messages,
                 agent_name=agent_name,
+                user_id=user_id,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
             )
@@ -103,11 +120,13 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None,
+        user_id: str | None,
         correction_detected: bool,
         reinforcement_detected: bool,
     ) -> None:
+        queue_key = self._queue_key(thread_id, user_id, agent_name)
         existing_context = next(
-            (context for context in self._queue if context.thread_id == thread_id),
+            (context for context in self._queue if self._queue_key(context.thread_id, context.user_id, context.agent_name) == queue_key),
             None,
         )
         merged_correction_detected = correction_detected or (existing_context.correction_detected if existing_context is not None else False)
@@ -116,11 +135,12 @@ class MemoryUpdateQueue:
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
+            user_id=user_id,
             correction_detected=merged_correction_detected,
             reinforcement_detected=merged_reinforcement_detected,
         )
 
-        self._queue = [c for c in self._queue if c.thread_id != thread_id]
+        self._queue = [context for context in self._queue if self._queue_key(context.thread_id, context.user_id, context.agent_name) != queue_key]
         self._queue.append(context)
 
     def _reset_timer(self) -> None:
@@ -176,6 +196,7 @@ class MemoryUpdateQueue:
                         agent_name=context.agent_name,
                         correction_detected=context.correction_detected,
                         reinforcement_detected=context.reinforcement_detected,
+                        user_id=context.user_id,
                     )
                     if success:
                         logger.info("Memory updated successfully for thread %s", context.thread_id)

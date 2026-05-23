@@ -1,17 +1,8 @@
 {
+  "mcpInterceptors": [
+    "my_package.mcp.auth:build_auth_interceptor"
+  ],
   "mcpServers": {
-    "filesystem": {
-      "enabled": false,
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/path/to/allowed/files"
-      ],
-      "env": {},
-      "description": "Provides filesystem access within allowed directories"
-    },
     "github": {
       "enabled": false,
       "type": "stdio",

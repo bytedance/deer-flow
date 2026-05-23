@@ -81,6 +81,94 @@ def test_normalize_input_passthrough():
     assert result == {"custom_key": "value"}
 
 
+def test_normalize_input_preserves_additional_kwargs_and_id():
+    """Regression: gh #3132 — frontend ships uploaded-file metadata in
+    additional_kwargs.files (and a client-side message id).  The gateway must
+    not strip them before the graph runs, otherwise UploadsMiddleware reports
+    "(empty)" for new uploads and the frontend message loses its file chip.
+    """
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    files = [{"filename": "a.csv", "size": 100, "path": "/mnt/user-data/uploads/a.csv", "status": "uploaded"}]
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "type": "human",
+                    "id": "client-msg-1",
+                    "name": "user-input",
+                    "content": [{"type": "text", "text": "clean it"}],
+                    "additional_kwargs": {"files": files, "custom": "keep-me"},
+                }
+            ]
+        }
+    )
+    assert len(result["messages"]) == 1
+    msg = result["messages"][0]
+    assert isinstance(msg, HumanMessage)
+    assert msg.id == "client-msg-1"
+    assert msg.name == "user-input"
+    assert msg.content == [{"type": "text", "text": "clean it"}]
+    assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
+
+
+def test_normalize_input_passes_through_basemessage_instances():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    msg = HumanMessage(content="hello", id="m-1", additional_kwargs={"files": [{"filename": "x"}]})
+    result = normalize_input({"messages": [msg]})
+    assert result["messages"][0] is msg
+
+
+def test_normalize_input_rejects_malformed_message_with_400():
+    """Boundary validation: ``convert_to_messages`` raises ``ValueError`` when a
+    message dict is missing ``role``/``type``/``content``.  ``normalize_input``
+    runs inside the gateway HTTP boundary, so a malformed payload should surface
+    as a 400 referencing the offending entry — not bubble up as a 500.
+
+    Raised after the Copilot review on PR #3136.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
+    assert excinfo.value.status_code == 400
+    assert "input.messages[1]" in excinfo.value.detail
+
+
+def test_normalize_input_handles_non_human_roles():
+    """The previous implementation collapsed every role to HumanMessage with a
+    `# TODO: handle other message types` comment.  Resuming a thread with prior
+    AI/tool messages would silently rewrite them as human turns — corrupting
+    the conversation.  Use langchain's standard conversion so ai/system/tool
+    roles round-trip correctly.
+    """
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+
+    from app.gateway.services import normalize_input
+
+    result = normalize_input(
+        {
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "ai", "content": "hi", "id": "ai-1"},
+                {"role": "tool", "content": "result", "tool_call_id": "call-1"},
+            ]
+        }
+    )
+    types = [type(m) for m in result["messages"]]
+    assert types == [SystemMessage, AIMessage, ToolMessage]
+    assert result["messages"][1].id == "ai-1"
+    assert result["messages"][2].tool_call_id == "call-1"
+
+
 def test_build_run_config_basic():
     from app.gateway.services import build_run_config
 
@@ -114,6 +202,7 @@ def test_build_run_config_custom_agent_injects_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id="finalis")
     assert config["configurable"]["agent_name"] == "finalis"
+    assert config["run_name"] == "finalis"
 
 
 def test_build_run_config_lead_agent_no_agent_name():
@@ -122,6 +211,7 @@ def test_build_run_config_lead_agent_no_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id="lead_agent")
     assert "agent_name" not in config["configurable"]
+    assert "run_name" not in config
 
 
 def test_build_run_config_none_assistant_id_no_agent_name():
@@ -130,6 +220,7 @@ def test_build_run_config_none_assistant_id_no_agent_name():
 
     config = build_run_config("thread-1", None, None, assistant_id=None)
     assert "agent_name" not in config["configurable"]
+    assert "run_name" not in config
 
 
 def test_build_run_config_explicit_agent_name_not_overwritten():
@@ -143,6 +234,22 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["run_name"] == "explicit-agent"
+
+
+def test_build_run_config_context_custom_agent_injects_agent_name():
+    """Custom assistant_id must be forwarded as context['agent_name'] in context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"model_name": "deepseek-v3"}},
+        None,
+        assistant_id="finalis",
+    )
+
+    assert config["context"]["agent_name"] == "finalis"
+    assert "configurable" not in config
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
@@ -241,6 +348,37 @@ def test_context_merges_into_configurable():
     assert "thread_id" not in {k for k in context if k in _CONTEXT_CONFIGURABLE_KEYS}
 
 
+def test_merge_run_context_overrides_propagates_to_runtime_context():
+    """Regression for issue #2677: ``agent_name`` (and other whitelisted keys) from
+    ``body.context`` must be propagated into BOTH ``config['configurable']`` and
+    ``config['context']``. Previously only ``configurable`` was populated, so after
+    the LangGraph 1.1.x upgrade removed the fallback from ``configurable``, the
+    ``setup_agent`` tool read ``runtime.context`` with ``agent_name=None`` and
+    silently wrote SOUL.md to the global base_dir.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"agent_name": "my-agent", "is_bootstrap": True, "thread_id": "ignored"})
+
+    assert config["configurable"]["agent_name"] == "my-agent"
+    assert config["configurable"]["is_bootstrap"] is True
+    assert config["context"]["agent_name"] == "my-agent"
+    assert config["context"]["is_bootstrap"] is True
+    # Non-whitelisted keys are not forwarded.
+    assert "thread_id" not in config["context"]
+
+
+def test_merge_run_context_overrides_noop_for_empty_context():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    before = {k: dict(v) if isinstance(v, dict) else v for k, v in config.items()}
+    merge_run_context_overrides(config, None)
+    merge_run_context_overrides(config, {})
+    assert config == before
+
+
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
@@ -278,6 +416,21 @@ def test_context_does_not_override_existing_configurable():
     assert config["configurable"]["subagent_enabled"] is True
 
 
+def test_inject_authenticated_user_context_overrides_client_user_id():
+    """Run context should carry the authenticated user, not client-supplied user_id."""
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"user_id": "spoofed-client"}
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="auth-user-42")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "auth-user-42"
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------
@@ -296,6 +449,36 @@ def test_build_run_config_with_context():
     assert config["context"]["user_id"] == "u-42"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_null_context_becomes_empty_context():
+    """When caller sends context=null, treat it as an empty context object."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None)
+
+    assert config["context"] == {}
+    assert "configurable" not in config
+
+
+def test_build_run_config_rejects_non_mapping_context():
+    """When caller sends a non-object context, raise a clear error instead of a TypeError."""
+    import pytest
+
+    from app.gateway.services import build_run_config
+
+    with pytest.raises(ValueError, match="context"):
+        build_run_config("thread-1", {"context": "bad-context"}, None)
+
+
+def test_build_run_config_null_context_custom_agent_injects_agent_name():
+    """Custom assistant_id can still be injected when context=null starts context mode."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": None}, None, assistant_id="finalis")
+
+    assert config["context"] == {"agent_name": "finalis"}
+    assert "configurable" not in config
 
 
 def test_build_run_config_context_plus_configurable_warns(caplog):
