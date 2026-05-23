@@ -163,6 +163,7 @@ export default function AgentChatPage() {
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
+                backendIncludesActive
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}

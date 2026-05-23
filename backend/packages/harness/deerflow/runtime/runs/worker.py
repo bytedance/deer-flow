@@ -176,6 +176,7 @@ async def run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                progress_loop=asyncio.get_running_loop(),
             )
 
         # 1. Mark running

@@ -742,6 +742,42 @@ class TestProgressSnapshots:
         assert snapshots[-1]["last_ai_message"] == "Answer"
 
     @pytest.mark.anyio
+    async def test_callback_thread_reports_progress_snapshot_on_journal_loop(self):
+        snapshots: list[dict] = []
+        progress_seen = asyncio.Event()
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+            if snapshot["total_tokens"] == 15:
+                progress_seen.set()
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+            progress_loop=asyncio.get_running_loop(),
+        )
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+        await asyncio.to_thread(
+            j.on_llm_end,
+            _make_llm_response("Answer", usage=usage),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.wait_for(progress_seen.wait(), timeout=1.0)
+        await j.flush()
+
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
     async def test_throttled_progress_flush_emits_trailing_snapshot(self):
         snapshots: list[dict] = []
         trailing_seen = asyncio.Event()

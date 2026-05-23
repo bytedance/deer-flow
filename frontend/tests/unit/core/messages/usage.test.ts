@@ -135,6 +135,36 @@ test("adds current in-flight message usage to backend header totals", () => {
   });
 });
 
+test("does not double count pending usage when backend totals include active runs", () => {
+  const completedMessages = [
+    {
+      id: "ai-completed",
+      type: "ai",
+      content: "Completed answer",
+      usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+    },
+    {
+      id: "ai-pending",
+      type: "ai",
+      content: "Streaming answer",
+      usage_metadata: { input_tokens: 4, output_tokens: 6, total_tokens: 10 },
+    },
+  ] as Message[];
+
+  expect(
+    selectHeaderTokenUsage({
+      backendUsage: { inputTokens: 104, outputTokens: 56, totalTokens: 160 },
+      backendIncludesActive: true,
+      messages: completedMessages,
+      pendingMessages: [completedMessages[1]!],
+    }),
+  ).toEqual({
+    inputTokens: 104,
+    outputTokens: 56,
+    totalTokens: 160,
+  });
+});
+
 test("falls back to visible messages when backend usage is unavailable or zero", () => {
   const messages = [
     {

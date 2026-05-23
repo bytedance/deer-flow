@@ -85,14 +85,19 @@ export function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
 
 export function selectHeaderTokenUsage({
   backendUsage,
+  backendIncludesActive = false,
   messages,
   pendingMessages = [],
 }: {
   backendUsage?: TokenUsage | null;
+  backendIncludesActive?: boolean;
   messages: Message[];
   pendingMessages?: Message[];
 }): TokenUsage | null {
   if (hasNonZeroUsage(backendUsage)) {
+    if (backendIncludesActive) {
+      return backendUsage;
+    }
     const pendingUsage = accumulateUsage(pendingMessages);
     return pendingUsage ? addUsage(backendUsage, pendingUsage) : backendUsage;
   }

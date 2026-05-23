@@ -48,6 +48,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        progress_loop: asyncio.AbstractEventLoop | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -57,6 +58,12 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        if progress_loop is None:
+            try:
+                progress_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                progress_loop = None
+        self._progress_loop = progress_loop
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -508,6 +515,10 @@ class RunJournal(BaseCallbackHandler):
         """Best-effort throttled progress snapshot for active run visibility."""
         if self._progress_reporter is None:
             return
+        if not self._run_on_progress_loop(self._schedule_progress_flush_on_loop):
+            self._progress_dirty = True
+
+    def _schedule_progress_flush_on_loop(self) -> None:
         now = time.monotonic()
         elapsed = now - self._last_progress_flush
         if elapsed < self._progress_flush_interval:
@@ -517,23 +528,45 @@ class RunJournal(BaseCallbackHandler):
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
             self._progress_dirty = True
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
+        loop = asyncio.get_running_loop()
         self._progress_dirty = False
         self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
 
     def _schedule_delayed_progress_flush(self, delay: float) -> None:
+        if self._progress_reporter is None:
+            return
+        self._run_on_progress_loop(lambda: self._schedule_delayed_progress_flush_on_loop(delay))
+
+    def _schedule_delayed_progress_flush_on_loop(self, delay: float) -> None:
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
+        loop = asyncio.get_running_loop()
         delay = max(0.0, delay)
         self._pending_progress_delayed = delay > 0
         self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+
+    def _run_on_progress_loop(self, callback: Callable[[], None]) -> bool:
+        loop = self._progress_loop
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if loop is not None and loop.is_closed():
+            self._progress_loop = None
+            loop = None
+        if loop is None:
+            loop = running_loop
+            self._progress_loop = loop
+        if loop is None or loop.is_closed():
+            return False
+        if running_loop is loop:
+            callback()
+            return True
+        try:
+            loop.call_soon_threadsafe(callback)
+        except RuntimeError:
+            return False
+        return True
 
     async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
         if self._progress_reporter is None:

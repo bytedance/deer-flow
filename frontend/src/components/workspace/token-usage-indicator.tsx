@@ -34,6 +34,7 @@ interface TokenUsageIndicatorProps {
   messages: Message[];
   pendingMessages?: Message[];
   backendUsage?: TokenUsage | null;
+  backendIncludesActive?: boolean;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -45,6 +46,7 @@ export function TokenUsageIndicator({
   messages,
   pendingMessages,
   backendUsage,
+  backendIncludesActive = false,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -56,10 +58,11 @@ export function TokenUsageIndicator({
     () =>
       selectHeaderTokenUsage({
         backendUsage: threadId ? backendUsage : null,
+        backendIncludesActive,
         messages,
         pendingMessages,
       }),
-    [backendUsage, messages, pendingMessages, threadId],
+    [backendIncludesActive, backendUsage, messages, pendingMessages, threadId],
   );
   const [displayedUsage, setDisplayedUsage] = useState<TokenUsage | null>(
     usage,
