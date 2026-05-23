@@ -267,7 +267,8 @@ else
     echo "Building images and starting containers..."
     echo ""
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    #"${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    "${COMPOSE_CMD[@]}" up --build --no-cache --remove-orphans $services
 fi
 
 echo ""

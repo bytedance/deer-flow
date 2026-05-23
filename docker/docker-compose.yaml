@@ -71,7 +71,8 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
+    command: >
+      sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -81,13 +82,13 @@ services:
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
       - type: bind
-        source: ${HOME:?HOME must be set}/.claude
+        source: ${HOME:-/root}/.claude
         target: /root/.claude
         read_only: true
         bind:
           create_host_path: true
       - type: bind
-        source: ${HOME:?HOME must be set}/.codex
+        source: ${HOME:-/root}/.codex
         target: /root/.codex
         read_only: true
         bind:
@@ -95,6 +96,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - HOME=${HOME:-/root}
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
@@ -114,36 +116,36 @@ services:
     restart: unless-stopped
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
-  provisioner:
-    build:
-      context: ./provisioner
-      dockerfile: Dockerfile
-      args:
-        APT_MIRROR: ${APT_MIRROR:-}
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
-    container_name: deer-flow-provisioner
-    volumes:
-      - ~/.kube/config:/root/.kube/config:ro
-    environment:
-      - K8S_NAMESPACE=deer-flow
-      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-      - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
-      - KUBECONFIG_PATH=/root/.kube/config
-      - NODE_HOST=host.docker.internal
-      - K8S_API_SERVER=https://host.docker.internal:26443
-    env_file:
-      - ../.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - deer-flow
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
+  # provisioner:
+  #   build:
+  #     context: ./provisioner
+  #     dockerfile: Dockerfile
+  #     args:
+  #       APT_MIRROR: ${APT_MIRROR:-}
+  #       PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  #   container_name: deer-flow-provisioner
+  #   volumes:
+  #     - ~/.kube/config:/root/.kube/config:ro
+  #   environment:
+  #     - K8S_NAMESPACE=deer-flow
+  #     - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  #     - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
+  #     - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
+  #     - KUBECONFIG_PATH=/root/.kube/config
+  #     - NODE_HOST=host.docker.internal
+  #     - K8S_API_SERVER=https://host.docker.internal:26443
+  #   env_file:
+  #     - ../.env
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   networks:
+  #     - deer-flow
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 6
 networks:
   deer-flow:
     driver: bridge
