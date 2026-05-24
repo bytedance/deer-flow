@@ -33,6 +33,18 @@ router = APIRouter(prefix="/api/threads", tags=["runs"])
 # ---------------------------------------------------------------------------
 
 
+def trim_run_message_page(rows: list[dict], *, limit: int, after_seq: int | None) -> tuple[list[dict], bool]:
+    """Trim a limit+1 run message page without dropping the visible boundary row."""
+    has_more = len(rows) > limit
+    if not has_more:
+        return rows, False
+
+    if after_seq is not None:
+        return rows[:limit], True
+
+    return rows[-limit:], True
+
+
 class RunCreateRequest(BaseModel):
     assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
     input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
@@ -396,8 +408,7 @@ async def list_run_messages(
         before_seq=before_seq,
         after_seq=after_seq,
     )
-    has_more = len(rows) > limit
-    data = rows[:limit] if has_more else rows
+    data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
     return {"data": data, "has_more": has_more}
 
 

@@ -97,6 +97,55 @@ def test_run_messages_has_more_true_when_extra_row_returned():
     body = response.json()
     assert body["has_more"] is True
     assert len(body["data"]) == 50  # trimmed to limit
+    assert [m["seq"] for m in body["data"]] == list(range(2, 52))
+
+
+def test_run_messages_default_page_keeps_newest_messages_when_extra_row_returned():
+    """Default latest-page trimming drops the older sentinel row, not the newest message."""
+    rows = [_make_message(i) for i in range(16, 67)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-2/messages")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is True
+    assert [m["seq"] for m in body["data"]] == list(range(17, 67))
+
+
+def test_run_messages_before_seq_page_keeps_newest_side_when_extra_row_returned():
+    """Backward pagination trims the older sentinel so adjacent pages do not miss the boundary message."""
+    rows = [_make_message(i) for i in range(1, 18)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-2/messages?before_seq=18&limit=16")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is True
+    assert [m["seq"] for m in body["data"]] == list(range(2, 18))
+
+
+def test_run_messages_after_seq_page_keeps_oldest_side_when_extra_row_returned():
+    """Forward pagination still trims the newer sentinel row."""
+    rows = [_make_message(i) for i in range(11, 62)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-2/messages?after_seq=10")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is True
+    assert [m["seq"] for m in body["data"]] == list(range(11, 61))
 
 
 def test_run_messages_passes_after_seq_to_event_store():
