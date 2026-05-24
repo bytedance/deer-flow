@@ -73,6 +73,15 @@ export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
  * middleware). Both shapes converge on the same {@link SubtaskStatus}
  * vocabulary the card UI renders.
  *
+ * When the structured field is present, the prefix parser is still run
+ * so the success `result` body and the wrapped-error message can be
+ * back-filled from `content`. Today the backend only stamps the
+ * `subagent_status` enum value — the human-facing payload still lives
+ * in `content`, so dropping the prefix parse would regress the subtask
+ * card display. Structured fields win on conflict: if `subagent_status`
+ * and the text disagree, the text-derived `result`/`error` are
+ * discarded so a malformed wrapper can't sneak through.
+ *
  * Returning `in_progress` is the **deliberate** fallback for content that
  * matches none of the known prefixes and carries no structured stamp.
  * LangChain only ever emits a `ToolMessage` once the tool itself has
@@ -85,13 +94,37 @@ export function parseSubtaskResult(
   text: string,
   additionalKwargs?: Record<string, unknown> | null,
 ): SubtaskResultUpdate {
+  const fromText = parseFromText(text.trim());
   const structured = readStructuredStatus(additionalKwargs);
-  if (structured) {
-    return structured;
+  if (!structured) {
+    return fromText;
   }
 
-  const trimmed = text.trim();
+  const update: SubtaskResultUpdate = { status: structured.status };
+  // Structured `subagent_error` wins; otherwise inherit the text-derived
+  // error only when both sides agree on the status (so a "Task Succeeded"
+  // body can't bleed into a `failed` structured stamp and vice versa).
+  if (structured.error) {
+    update.error = structured.error;
+  } else if (
+    fromText.status === structured.status &&
+    fromText.error !== undefined
+  ) {
+    update.error = fromText.error;
+  }
+  // Result body only matters for `completed`; require text agreement so
+  // a lying success prefix under a `failed` stamp is dropped.
+  if (
+    structured.status === "completed" &&
+    fromText.status === "completed" &&
+    fromText.result !== undefined
+  ) {
+    update.result = fromText.result;
+  }
+  return update;
+}
 
+function parseFromText(trimmed: string): SubtaskResultUpdate {
   if (trimmed.startsWith(SUCCESS_PREFIX)) {
     return {
       status: "completed",
@@ -127,9 +160,14 @@ export function parseSubtaskResult(
   return { status: "in_progress" };
 }
 
+interface StructuredStatus {
+  status: SubtaskStatus;
+  error?: string;
+}
+
 function readStructuredStatus(
   additionalKwargs: Record<string, unknown> | null | undefined,
-): SubtaskResultUpdate | null {
+): StructuredStatus | null {
   if (!additionalKwargs) return null;
   const rawStatus = additionalKwargs[SUBAGENT_STATUS_KEY];
   if (typeof rawStatus !== "string") return null;
@@ -142,9 +180,9 @@ function readStructuredStatus(
     return null;
   }
   const rawError = additionalKwargs[SUBAGENT_ERROR_KEY];
-  const update: SubtaskResultUpdate = { status: mapped };
+  const result: StructuredStatus = { status: mapped };
   if (typeof rawError === "string" && rawError.trim()) {
-    update.error = rawError;
+    result.error = rawError;
   }
-  return update;
+  return result;
 }

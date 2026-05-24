@@ -1,5 +1,4 @@
 {
-  "$schema": "./subagent_status_contract.schema.json",
   "version": 1,
   "description": "Cross-language contract test fixture for the subagent status field. The backend stamps ToolMessage.additional_kwargs.subagent_status using these prefixes; the frontend reads the structured field and falls back to the same prefixes. Both sides' tests load this file and must agree.",
   "valid_status_values": ["completed", "failed", "cancelled", "timed_out", "polling_timed_out"],

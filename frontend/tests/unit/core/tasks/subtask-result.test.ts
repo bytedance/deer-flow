@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -21,9 +21,13 @@ interface ContractFile {
   cases: ContractCase[];
 }
 
-const CONTRACT_PATH = resolve(
-  __dirname,
-  "../../../../../contracts/subagent_status_contract.json",
+// The frontend package is ESM (`"type": "module"`), so `__dirname` is not
+// defined. Resolve the cross-language fixture relative to this module URL.
+const CONTRACT_PATH = fileURLToPath(
+  new URL(
+    "../../../../../contracts/subagent_status_contract.json",
+    import.meta.url,
+  ),
 );
 const CONTRACT: ContractFile = JSON.parse(
   readFileSync(CONTRACT_PATH, "utf-8"),
@@ -210,6 +214,46 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
       [SUBAGENT_STATUS_KEY]: "failed",
     });
     expect(parsed.status).toBe("failed");
+    // The misleading success body must be dropped — `result` is reserved
+    // for the completed pill, and the suspicious text isn't replayed as
+    // an error either.
+    expect(parsed.result).toBeUndefined();
+    expect(parsed.error).toBeUndefined();
+  });
+
+  it("back-fills `result` from the success-prefixed content when structured says completed", () => {
+    // The backend currently stamps `subagent_status: completed` but the
+    // success body still lives in `content`. Without back-fill the card
+    // would render an empty completed pill (regression flagged in PR #3154
+    // Copilot review).
+    const parsed = parseSubtaskResult(
+      "Task Succeeded. Result: investigated and produced a 3-page report",
+      { [SUBAGENT_STATUS_KEY]: "completed" },
+    );
+    expect(parsed.status).toBe("completed");
+    expect(parsed.result).toBe("investigated and produced a 3-page report");
+  });
+
+  it("back-fills `error` from a wrapped-error body when structured says failed and no subagent_error", () => {
+    // Same regression on the failure side: the wrapper text is the only
+    // place the diagnostic message exists when the backend stamps the
+    // enum but not `subagent_error`.
+    const parsed = parseSubtaskResult(
+      "Error: Tool 'task' failed with TypeError: boom",
+      { [SUBAGENT_STATUS_KEY]: "failed" },
+    );
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toContain("TypeError: boom");
+  });
+
+  it("leaves `error` undefined when structured says failed with no error and unrecognised text", () => {
+    // Don't dump arbitrary content into the error field — better to render
+    // an empty `failed` pill than to surface noise.
+    const parsed = parseSubtaskResult("partial streaming chunk", {
+      [SUBAGENT_STATUS_KEY]: "failed",
+    });
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toBeUndefined();
   });
 });
 
