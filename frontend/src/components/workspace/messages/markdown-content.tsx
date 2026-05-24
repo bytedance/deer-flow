@@ -7,7 +7,7 @@ import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
-import { streamdownPlugins } from "@/core/streamdown";
+import { normalizeMermaidMarkdown, streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -33,6 +33,10 @@ export function MarkdownContent({
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
+  const normalizedContent = useMemo(
+    () => normalizeMermaidMarkdown(content),
+    [content],
+  );
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -70,7 +74,7 @@ export function MarkdownContent({
       rehypePlugins={rehypePlugins}
       components={components}
     >
-      {content}
+      {normalizedContent}
     </MessageResponse>
   );
 }
