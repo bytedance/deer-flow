@@ -1,12 +1,63 @@
-"""Tests for the in-memory StreamBridge implementation."""
+"""Tests for StreamBridge implementations."""
 
 import asyncio
 import re
+from collections import defaultdict
 
 import anyio
 import pytest
 
-from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, make_stream_bridge
+from deerflow.config.stream_bridge_config import set_stream_bridge_config
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, RedisStreamBridge, make_stream_bridge
+
+
+def _stream_id_gt(left: str, right: str) -> bool:
+    left_ms, left_seq = left.split("-", 1)
+    right_ms, right_seq = right.split("-", 1)
+    return (int(left_ms), int(left_seq)) > (int(right_ms), int(right_seq))
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.streams = defaultdict(list)
+        self.conditions = defaultdict(asyncio.Condition)
+        self.counters = defaultdict(int)
+        self.deleted = []
+        self.closed = False
+
+    async def xadd(self, name, fields, maxlen=None, approximate=True):
+        self.counters[name] += 1
+        event_id = f"{self.counters[name]}-0"
+        async with self.conditions[name]:
+            self.streams[name].append((event_id, dict(fields)))
+            if maxlen is not None and len(self.streams[name]) > maxlen:
+                del self.streams[name][: len(self.streams[name]) - maxlen]
+            self.conditions[name].notify_all()
+        return event_id
+
+    async def xread(self, streams, count=None, block=None):
+        [(name, last_id)] = list(streams.items())
+        timeout = None if block is None else block / 1000
+        while True:
+            async with self.conditions[name]:
+                entries = [(event_id, fields) for event_id, fields in self.streams[name] if _stream_id_gt(event_id, last_id)]
+                if entries:
+                    return [(name, entries[:count] if count is not None else entries)]
+                if timeout is None:
+                    return []
+                try:
+                    await asyncio.wait_for(self.conditions[name].wait(), timeout=timeout)
+                except TimeoutError:
+                    return []
+
+    async def delete(self, name):
+        self.deleted.append(name)
+        self.streams.pop(name, None)
+        return 1
+
+    async def aclose(self):
+        self.closed = True
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for MemoryStreamBridge
@@ -325,6 +376,103 @@ async def test_concurrent_tasks_end_sentinel():
 
 
 # ---------------------------------------------------------------------------
+# Unit tests for RedisStreamBridge
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def redis_bridge() -> RedisStreamBridge:
+    return RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=_FakeRedis())
+
+
+@pytest.mark.anyio
+async def test_redis_publish_subscribe(redis_bridge: RedisStreamBridge):
+    """Redis bridge should deliver events in order and terminate on end."""
+    run_id = "redis-run-1"
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await redis_bridge.publish(run_id, "values", {"messages": []})
+    await redis_bridge.publish_end(run_id)
+
+    received = []
+    async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["metadata", "values"]
+    assert received[0].data == {"run_id": run_id}
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_replays_after_last_event_id(redis_bridge: RedisStreamBridge):
+    """Redis XREAD should resume after Last-Event-ID."""
+    run_id = "redis-run-replay"
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await redis_bridge.publish(run_id, "values", {"step": 1})
+    await redis_bridge.publish_end(run_id)
+
+    first_pass = []
+    async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=1.0):
+        first_pass.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    received = []
+    async for entry in redis_bridge.subscribe(run_id, last_event_id=first_pass[0].id, heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["values"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_heartbeat(redis_bridge: RedisStreamBridge):
+    """Redis bridge should yield heartbeats when XREAD times out."""
+    received = []
+    async for entry in redis_bridge.subscribe("redis-run-heartbeat", heartbeat_interval=0.01):
+        received.append(entry)
+        if entry is HEARTBEAT_SENTINEL:
+            break
+
+    assert received == [HEARTBEAT_SENTINEL]
+
+
+@pytest.mark.anyio
+async def test_redis_publish_end_preserves_data_history_capacity(redis_bridge: RedisStreamBridge):
+    """The internal end marker should not evict the configured data history."""
+    run_id = "redis-run-end-capacity"
+
+    await redis_bridge.publish(run_id, "event-1", {"n": 1})
+    await redis_bridge.publish(run_id, "event-2", {"n": 2})
+    await redis_bridge.publish_end(run_id)
+
+    received = []
+    async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["event-1", "event-2"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_cleanup_deletes_stream(redis_bridge: RedisStreamBridge):
+    fake = redis_bridge._redis
+    run_id = "redis-run-cleanup"
+
+    await redis_bridge.publish(run_id, "event", {})
+    await redis_bridge.cleanup(run_id)
+
+    assert fake.deleted == ["deerflow:stream_bridge:redis-run-cleanup"]
+
+
+# ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------
 
@@ -334,3 +482,16 @@ async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+
+
+@pytest.mark.anyio
+async def test_make_stream_bridge_uses_docker_redis_env(monkeypatch):
+    """Docker can enable Redis bridge without editing config.yaml."""
+    set_stream_bridge_config(None)
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    try:
+        async with make_stream_bridge() as bridge:
+            assert isinstance(bridge, RedisStreamBridge)
+            assert bridge._redis_url == "redis://redis:6379/0"
+    finally:
+        set_stream_bridge_config(None)

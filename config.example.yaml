@@ -965,6 +965,22 @@ run_events:
   track_token_usage: true
 
 # ============================================================================
+# Stream Bridge Configuration
+# ============================================================================
+# The stream bridge carries live agent events from gateway workers to SSE
+# clients. Docker Compose sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL automatically,
+# so Docker deployments use Redis Streams even if this section is omitted.
+#
+# stream_bridge:
+#   type: memory                 # single-process only
+#   queue_maxsize: 256
+#
+# stream_bridge:
+#   type: redis                  # recommended for Docker / multi-worker gateway
+#   redis_url: redis://redis:6379/0
+#   queue_maxsize: 256
+
+# ============================================================================
 # IM Channels Configuration
 # ============================================================================
 # Connect DeerFlow to external messaging platforms.

@@ -12,11 +12,11 @@ class StreamBridgeConfig(BaseModel):
 
     type: StreamBridgeType = Field(
         default="memory",
-        description="Stream bridge backend type. 'memory' uses in-process asyncio.Queue (single-process only). 'redis' uses Redis Streams (planned for Phase 2, not yet implemented).",
+        description="Stream bridge backend type. 'memory' uses an in-process event log (single-process only). 'redis' uses Redis Streams for multi-worker Docker deployments.",
     )
     redis_url: str | None = Field(
         default=None,
-        description="Redis URL for the redis stream bridge type. Example: 'redis://localhost:6379/0'.",
+        description="Redis URL for the redis stream bridge type. If omitted, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
     )
     queue_maxsize: int = Field(
         default=256,

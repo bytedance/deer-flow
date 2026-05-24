@@ -399,6 +399,6 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        if record.status in (RunStatus.pending, RunStatus.running):
+        if not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
