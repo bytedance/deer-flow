@@ -9,6 +9,7 @@ from wizard.ui import (
     ask_choice,
     ask_secret,
     ask_text,
+    ask_yes_no,
     print_header,
     print_info,
     print_success,
@@ -21,6 +22,26 @@ class LLMStepResult:
     model_name: str
     api_key: str | None
     base_url: str | None = None
+    extra_model_config: dict | None = None
+
+
+def _should_prompt_for_thinking_support(provider: LLMProvider) -> bool:
+    """Return whether setup needs user-provided thinking capability metadata."""
+    if provider.extra_config.get("supports_thinking") is not None:
+        return False
+    return provider.use == "langchain_openai:ChatOpenAI" and provider.name in {"openrouter", "other"}
+
+
+def _ask_capability_metadata(provider: LLMProvider) -> dict:
+    extra_model_config: dict = {}
+    if _should_prompt_for_thinking_support(provider):
+        print_header("Model capabilities")
+        supports_thinking = ask_yes_no(
+            "Does this model support thinking/reasoning mode?",
+            default=False,
+        )
+        extra_model_config["supports_thinking"] = supports_thinking
+    return extra_model_config
 
 
 def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
@@ -48,7 +69,9 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         print_header(f"{step_label} · Connection details")
         base_url = ask_text("Base URL (e.g. https://api.openai.com/v1)", required=True)
         model_name = ask_text("Model name", default=provider.default_model)
-    elif provider.auth_hint:
+    extra_model_config = _ask_capability_metadata(provider)
+
+    if provider.auth_hint:
         print_header(f"{step_label} · Authentication")
         print_info(provider.auth_hint)
         api_key = None
@@ -57,6 +80,7 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
             model_name=model_name,
             api_key=api_key,
             base_url=base_url,
+            extra_model_config=extra_model_config or None,
         )
 
     print_header(f"{step_label} · Enter your API Key")
@@ -73,4 +97,5 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         model_name=model_name,
         api_key=api_key,
         base_url=base_url,
+        extra_model_config=extra_model_config or None,
     )
