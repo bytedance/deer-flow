@@ -25,6 +25,8 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.thread_state import ThreadState
+
 
 def _todos_in_messages(messages: list[Any]) -> bool:
     """Return True if any AIMessage in *messages* contains a write_todos tool call."""
@@ -111,7 +113,17 @@ class TodoMiddleware(TodoListMiddleware):
     history (e.g., after summarization), the model loses awareness of the current
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
+
+    Overrides ``state_schema`` to use ``ThreadState`` instead of the base class
+    ``PlanningState``.  This keeps a single source of truth for the ``todos``
+    channel: ``ThreadState.todos`` carries the ``merge_todos`` reducer (a
+    ``BinaryOperatorAggregate``), while ``PlanningState.todos`` would declare
+    a ``LastValue`` channel.  When both are present LangGraph raises
+    ``ValueError: Channel 'todos' already exists with a different type``
+    (see #3199).
     """
+
+    state_schema = ThreadState
 
     @override
     def before_model(

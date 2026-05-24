@@ -17,6 +17,7 @@ from deerflow.agents.middlewares.todo_middleware import (
     _reminder_in_messages,
     _todos_in_messages,
 )
+from deerflow.agents.thread_state import ThreadState
 
 
 def _ai_with_write_todos():
@@ -644,3 +645,30 @@ class TestAwrapModelCall:
         injected_messages = request.override.call_args.kwargs["messages"]
         assert injected_messages[-1].name == "todo_completion_reminder"
         handler.assert_awaited_once_with("patched-request")
+
+
+class TestTodoMiddlewareStateSchema:
+    """Regression guard for #3199: TodoMiddleware must use ThreadState as its
+    state_schema so that the ``todos`` channel is defined once (with the
+    ``merge_todos`` reducer) instead of conflicting with PlanningState's
+    ``LastValue`` channel.
+    """
+
+    def test_state_schema_is_thread_state(self):
+        assert TodoMiddleware.state_schema is ThreadState
+
+    def test_no_channel_conflict_when_combined_with_thread_state(self):
+        """Creating an agent graph with TodoMiddleware + ThreadState must not
+        raise ``ValueError: Channel 'todos' already exists with a different type``.
+        """
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[AIMessage(content="done")],
+        )
+        mw = TodoMiddleware()
+        # This would raise ValueError before the fix.
+        graph = create_agent(model=model, tools=[], middleware=[mw])
+        result = graph.invoke(
+            {"messages": [("user", "hello")]},
+            context={"thread_id": "regression-3199", "run_id": "run-1"},
+        )
+        assert result is not None
