@@ -8,10 +8,7 @@ import type {
 } from "@/core/threads/token-usage";
 import { cn } from "@/lib/utils";
 
-import {
-  ContextUsageBar,
-  breakdownToSegments,
-} from "./context-usage-bar";
+import { ContextUsageBar, breakdownToSegments } from "./context-usage-bar";
 import { formatContextUsagePercentage } from "./context-usage-format";
 
 interface ContextUsageBreakdownProps {
@@ -89,9 +86,7 @@ export function ContextUsageBreakdown({
                   aria-hidden="true"
                   className={cn(
                     "inline-block size-2 rounded-sm",
-                    row.active
-                      ? "bg-primary/80"
-                      : "bg-muted-foreground/40",
+                    row.active ? "bg-primary/80" : "bg-muted-foreground/40",
                   )}
                 />
                 {labelForRow(row)}
@@ -100,9 +95,7 @@ export function ContextUsageBreakdown({
                 <span>{formatTokenCount(row.tokens)}</span>
                 {rowPercent != null && (
                   <span className="text-muted-foreground/60 w-12 text-right">
-                    {rowPercent < 0.05
-                      ? "0.0%"
-                      : `${rowPercent.toFixed(1)}%`}
+                    {rowPercent < 0.05 ? "0.0%" : `${rowPercent.toFixed(1)}%`}
                   </span>
                 )}
               </span>
