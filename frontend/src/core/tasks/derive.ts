@@ -16,9 +16,9 @@ import type { Subtask } from "./types";
  * and the kind of pattern that masks card-stuck regressions like
  * `#3107` BUG-007.
  *
- * Replace it with a pure function over the message list. The result is
- * passed into `SubtasksProvider` via `setBaseTasksFromMessages`, batched
- * inside an effect, so render stays read-only. The SSE-driven
+ * Replace it with a pure function over the message list. `MessageList`
+ * computes the map inside a `useMemo` and hands each entry to
+ * `SubtaskCard` as a prop, so render stays read-only. The SSE-driven
  * `latestMessage` path stays separate (see `useUpdateLatestMessage`).
  */
 export function buildSubtaskMapFromMessages(

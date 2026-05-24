@@ -1,3 +1,10 @@
+/**
+ * @vitest-environment node
+ *
+ * jsdom's `Blob.prototype.text()` is broken (returns the literal
+ * "[object Blob]") so the data-URL/file rewrap assertions below have
+ * to run under the real Node Web Blob.
+ */
 import { afterEach, expect, test, vi } from "vitest";
 
 import {

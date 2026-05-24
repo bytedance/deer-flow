@@ -363,11 +363,10 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:subagent") {
-            // The subtask context is fed by `derivedSubtasks` / the effect
-            // above — render only consumes it. Collect the per-group task
-            // *references* (used downstream to build subtask cards and
-            // count rendered subtasks) directly from the AI tool_calls so
-            // we do not mutate any shared state here.
+            // `derivedSubtasks` is computed once via `useMemo` above from
+            // the thread message list. Render only reads from it; the
+            // per-group task *references* below come from the AI
+            // tool_calls so no shared state is mutated here.
             const tasks = new Set<Subtask>();
             for (const message of group.messages) {
               if (message.type !== "ai") continue;
