@@ -48,7 +48,9 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "run_events": ("make_run_event_store() picks the memory- vs SQL-backed implementation at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
     "stream_bridge": ("make_stream_bridge() constructs the stream-bridge singleton once during startup."),
     "sandbox": ("get_sandbox_provider() caches the provider singleton (``_default_sandbox_provider``); a different ``sandbox.use`` class path only takes effect on next process start."),
-    "log_level": ("apply_logging_level() is called only in app.py startup and mutates the root logger level; a freshly reloaded AppConfig does not retrigger it."),
+    "log_level": (
+        "apply_logging_level() runs only during app.py startup; it sets the deerflow/app logger levels and may lower root handler thresholds so configured messages can propagate. A freshly reloaded AppConfig does not retrigger it."
+    ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
     # consumed directly by ``start_channel_service()`` once at lifespan
     # startup and the live channel clients are not rebuilt on
@@ -72,12 +74,23 @@ def is_startup_only_field(field_path: str) -> bool:
     return field_path in STARTUP_ONLY_FIELDS
 
 
-def format_field_description(field_path: str) -> str:
+def format_field_description(field_path: str, *, field_doc: str | None = None) -> str:
     """Build the standardised description for a registered field.
 
     Used inside ``AppConfig`` ``Field(description=...)`` so the hover
     text in IDEs matches the registry and the drift tests can pin one
     side against the other.
+
+    Args:
+        field_path: A registered top-level field path (e.g. ``"log_level"``).
+        field_doc: Optional human-facing description for the field itself
+            (allowed values, semantics, etc.). When supplied, it is
+            appended after the ``startup-only:`` marker block separated by
+            a blank line so IDE hover shows both the restart-required
+            reason *and* the field's normal documentation. Composition
+            keeps the marker as the leading token machine-readable tooling
+            pivots on while restoring the prose that ``Field(description=)``
+            used to carry before the registry took over.
 
     Raises:
         KeyError: when *field_path* is not registered. This is deliberate
@@ -85,4 +98,7 @@ def format_field_description(field_path: str) -> str:
             the drift coverage.
     """
     reason = STARTUP_ONLY_FIELDS[field_path]
-    return f"{STARTUP_ONLY_PREFIX} {reason}"
+    header = f"{STARTUP_ONLY_PREFIX} {reason}"
+    if field_doc is None:
+        return header
+    return f"{header}\n\n{field_doc.strip()}"

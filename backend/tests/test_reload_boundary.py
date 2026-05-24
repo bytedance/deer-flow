@@ -63,6 +63,40 @@ def test_format_field_description_rejects_unknown_field():
         format_field_description("not_in_registry")
 
 
+def test_format_field_description_appends_optional_field_doc():
+    """The formatter composes the startup-only marker with the field's own
+    human-facing description when supplied.
+
+    The original ``Field(description=)`` used to document allowed values
+    (e.g. ``log_level`` listed ``debug/info/warning/error``); registry
+    adoption must not drop that. The composed output keeps the marker as
+    the leading token so machine-readable tooling still pivots on it,
+    then appends the prose after a blank line.
+    """
+    text = format_field_description("log_level", field_doc="Logging level (debug/info/warning/error).")
+    assert text.startswith(STARTUP_ONLY_PREFIX)
+    assert STARTUP_ONLY_FIELDS["log_level"] in text
+    assert "debug/info/warning/error" in text
+
+
+def test_appconfig_descriptions_retain_original_field_documentation():
+    """``AppConfig.model_fields[name].description`` for restart-required
+    fields should still carry the original human-facing field doc so IDE
+    hover documents what the field is *and* why a restart is needed."""
+    descriptions = {
+        "log_level": "debug/info/warning/error",
+        "database": "memory, sqlite, or postgres",
+        "sandbox": "Sandbox provider",
+        "run_events": "memory for dev",
+        "checkpointer": "state-persistence checkpointer",
+        "stream_bridge": "Stream bridge",
+    }
+    for field_name, expected_substring in descriptions.items():
+        description = AppConfig.model_fields[field_name].description or ""
+        assert description.startswith(STARTUP_ONLY_PREFIX), f"AppConfig.{field_name} missing startup-only marker"
+        assert expected_substring in description, f"AppConfig.{field_name} description lost original field doc; got {description!r}"
+
+
 def test_appconfig_schema_marks_registered_fields_with_prefix():
     """Every registry entry that corresponds to a top-level AppConfig field
     must carry the standardized ``startup-only:`` prefix in its Pydantic
