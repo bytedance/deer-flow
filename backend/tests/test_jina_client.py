@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from langchain_core.tools import ToolException
 
 import deerflow.community.jina_ai.jina_client as jina_client_module
 from deerflow.community.jina_ai.jina_client import JinaClient
@@ -168,8 +169,8 @@ async def test_crawl_no_auth_header_without_api_key(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_web_fetch_tool_returns_error_on_crawl_failure(monkeypatch):
-    """Test that web_fetch_tool short-circuits and returns the error string when crawl fails."""
+async def test_web_fetch_tool_raises_tool_exception_on_crawl_failure(monkeypatch):
+    """Provider failures should become structured tool errors instead of success text."""
 
     async def mock_crawl(self, url, **kwargs):
         return "Error: Jina API returned status 429: Rate limited"
@@ -178,9 +179,10 @@ async def test_web_fetch_tool_returns_error_on_crawl_failure(monkeypatch):
     mock_config.get_tool_config.return_value = None
     monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
     monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
-    result = await web_fetch_tool.ainvoke("https://example.com")
-    assert result.startswith("Error:")
-    assert "429" in result
+    with pytest.raises(ToolException) as exc_info:
+        await web_fetch_tool.ainvoke("https://example.com")
+
+    assert "Jina API returned status 429" in str(exc_info.value)
 
 
 @pytest.mark.anyio
