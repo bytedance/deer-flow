@@ -489,6 +489,13 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request)
 
+    try:
+        from app.gateway.checkpoint_maintenance import schedule_app_checkpoint_thread_migration
+
+        schedule_app_checkpoint_thread_migration(request.app, str(user.id))
+    except Exception:
+        logger.exception("Failed to schedule legacy checkpoint thread migration after setup")
+
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
 
 
