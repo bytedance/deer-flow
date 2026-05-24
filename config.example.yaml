@@ -799,9 +799,9 @@ summarization:
   # Summarization runs when ANY threshold is met (OR logic)
   # You can specify a single trigger or a list of triggers
   trigger:
-    # Trigger when token count reaches 15564
+    # Trigger when token count reaches 32000
     - type: tokens
-      value: 15564
+      value: 32000
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50
