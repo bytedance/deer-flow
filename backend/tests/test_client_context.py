@@ -39,6 +39,19 @@ def test_sanitize_client_context_keeps_only_prompt_relevant_fields():
     }
 
 
+def test_sanitize_client_context_limits_capabilities_and_preferences():
+    client = sanitize_client_context(
+        {
+            "capabilities": {f"cap_{i:02d}": True for i in range(40)},
+            "preferences": {f"pref_{i:02d}": "present" for i in range(40)},
+        }
+    )
+
+    assert client is not None
+    assert list(client["capabilities"]) == [f"cap_{i:02d}" for i in range(32)]
+    assert list(client["preferences"]) == [f"pref_{i:02d}" for i in range(32)]
+
+
 def test_render_client_context_for_prompt_escapes_and_formats():
     rendered = render_client_context_for_prompt(
         {

@@ -24,8 +24,13 @@ Reminder format:
 Date-update format:
 
     <system-reminder>
+    <client_context>...</client_context>
+
     <current_date>2026-05-09, Saturday</current_date>
     </system-reminder>
+
+If no client context is active during a date update, the ``<client_context>``
+block is omitted.
 """
 
 from __future__ import annotations
@@ -162,9 +167,10 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _build_date_update_reminder(self, client_context: str | None = None) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        lines = ["<system-reminder>", f"<current_date>{current_date}</current_date>"]
+        lines = ["<system-reminder>"]
         if client_context:
-            lines.extend(["", client_context])
+            lines.extend([client_context, ""])
+        lines.append(f"<current_date>{current_date}</current_date>")
         lines.append("</system-reminder>")
         return "\n".join(lines)
 

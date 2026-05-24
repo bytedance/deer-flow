@@ -117,6 +117,7 @@ def test_client_context_included_when_present():
     assert "unsupported_capabilities: images" in reminder_content
     assert "preferences: csv=present" in reminder_content
     assert "access_token" not in reminder_content
+    assert reminder_content.index("<client_context>") < reminder_content.index("<current_date>")
 
 
 def test_client_context_update_injected_when_context_changes_same_day():
@@ -377,6 +378,28 @@ def test_midnight_crossing_injects_date_update_as_separate_message():
     # Original user text appended with derived ID
     assert msgs[1].id == "msg-2__user"
     assert msgs[1].content == "Good morning"
+
+
+def test_midnight_crossing_keeps_client_context_before_date_update():
+    mw = _make_middleware()
+    reminder_content = "<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>"
+    state = {
+        "messages": [
+            _reminder_msg(reminder_content, "msg-1"),
+            HumanMessage(content="Hello", id="msg-1__user"),
+            AIMessage(content="Response"),
+            HumanMessage(content="Good morning", id="msg-2"),
+        ]
+    }
+    runtime = _fake_runtime({"client": {"name": "analytics-ui", "capabilities": {"charts": True}}})
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-09, Saturday"
+        result = mw.before_agent(state, runtime)
+
+    content = result["messages"][0].content
+    assert "name: analytics-ui" in content
+    assert content.index("<client_context>") < content.index("<current_date>")
 
 
 def test_midnight_crossing_id_swap():

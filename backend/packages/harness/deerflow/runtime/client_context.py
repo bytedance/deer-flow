@@ -11,6 +11,7 @@ import math
 import re
 from collections.abc import Mapping
 from html import escape
+from itertools import islice
 from typing import Any
 
 _CLIENT_CONTEXT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
@@ -78,7 +79,7 @@ def sanitize_client_context(raw_client: Any) -> dict[str, Any] | None:
     raw_capabilities = raw_client.get("capabilities")
     if isinstance(raw_capabilities, Mapping):
         capabilities: dict[str, bool] = {}
-        for raw_key, raw_value in list(raw_capabilities.items())[:_MAX_CLIENT_CONTEXT_ITEMS]:
+        for raw_key, raw_value in islice(raw_capabilities.items(), _MAX_CLIENT_CONTEXT_ITEMS):
             key = _clean_key(raw_key)
             if key is None or not isinstance(raw_value, bool):
                 continue
@@ -89,7 +90,7 @@ def sanitize_client_context(raw_client: Any) -> dict[str, Any] | None:
     raw_preferences = raw_client.get("preferences")
     if isinstance(raw_preferences, Mapping):
         preferences: dict[str, str | int | float | bool] = {}
-        for raw_key, raw_value in list(raw_preferences.items())[:_MAX_CLIENT_CONTEXT_ITEMS]:
+        for raw_key, raw_value in islice(raw_preferences.items(), _MAX_CLIENT_CONTEXT_ITEMS):
             key = _clean_key(raw_key)
             value = _clean_preference_value(raw_value)
             if key is None or value is None:
