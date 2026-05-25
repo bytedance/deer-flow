@@ -365,6 +365,37 @@ def test_import_memory_data_saves_and_returns_imported_memory() -> None:
     assert result == imported_memory
 
 
+def test_import_memory_data_returns_normalized_legacy_without_cognitive_style() -> None:
+    """Backend import reloads via storage.load(), which normalizes legacy payloads."""
+    legacy = {
+        "version": "1.0",
+        "lastUpdated": "2026-01-01T00:00:00Z",
+        "user": {
+            "workContext": {"summary": "work", "updatedAt": "2026-01-01T00:00:00Z"},
+            "personalContext": {"summary": "", "updatedAt": ""},
+            "topOfMind": {"summary": "", "updatedAt": ""},
+        },
+        "history": {
+            "recentMonths": {"summary": "", "updatedAt": ""},
+            "earlierContext": {"summary": "", "updatedAt": ""},
+            "longTermBackground": {"summary": "", "updatedAt": ""},
+        },
+        "facts": [],
+    }
+    from deerflow.agents.memory.storage import normalize_memory_data
+
+    normalized = normalize_memory_data(legacy)
+    mock_storage = MagicMock()
+    mock_storage.save.return_value = True
+    mock_storage.load.return_value = normalized
+
+    with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
+        result = import_memory_data(legacy)
+
+    mock_storage.save.assert_called_once_with(legacy, None, user_id=None)
+    assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+
+
 def test_update_memory_fact_updates_only_matching_fact() -> None:
     current_memory = _make_memory(
         facts=[

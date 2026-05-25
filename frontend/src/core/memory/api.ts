@@ -78,8 +78,7 @@ async function readMemoryResponse(
     );
   }
 
-  const memory = (await response.json()) as UserMemory;
-  return normalizeUserMemory(memory);
+  return normalizeUserMemory(await response.json());
 }
 
 export async function loadMemory(): Promise<UserMemory> {

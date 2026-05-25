@@ -1,6 +1,6 @@
 # Memory: Cognitive Style
 
-Design note for contributors, reviewers, and PR readers. Explains why `user.cognitiveStyle` is a first-class field in DeerFlow memory.
+Design note for contributors. Explains `user.cognitiveStyle` and related memory/prompt touchpoints.
 
 ## One-line pitch
 
@@ -54,12 +54,31 @@ So: conversations **trigger** the memory job often; **cognitiveStyle text change
 | **cognitiveStyle** | How they reason, structure answers, give feedback | Cross-session, **slow** |
 | **fact (`cognitive`)** | One line habit or meta-preference | Cross-session, ranked by confidence |
 
+## Adding a new memory field (schema evolution)
+
+When extending `memory.json` (new `user.*` or `history.*` section, or fact category), keep **read**, **import**, and **API** paths aligned so older exports still work.
+
+| Step | Location |
+|------|----------|
+| 1. Backend normalize | `deerflow/agents/memory/storage.py` — add key to the `user` / `history` loops in `normalize_memory_data()`; update `create_empty_memory()` |
+| 2. Frontend normalize | `frontend/src/core/memory/import-memory.ts` — add key to `USER_SECTION_KEYS` or `HISTORY_SECTION_KEYS` |
+| 3. Types & API models | `frontend/src/core/memory/types.ts`, `backend/app/gateway/routers/memory.py` (`UserContext` / `HistoryContext`) |
+| 4. Updater prompt | `deerflow/agents/memory/prompt.py` — `MEMORY_UPDATE_PROMPT` section + injection in `format_memory_for_injection()`; if adding a **fact category**, also sync `FACT_EXTRACTION_PROMPT` JSON union and `Categories:` list |
+| 5. Settings UI & i18n | `memory-settings-page.tsx`, `en-US.ts` / `zh-CN.ts` |
+| 6. Tests | Backend: `tests/test_memory_normalize.py` (legacy fixture missing the new field). Frontend: `tests/unit/core/memory/import-memory.test.ts` |
+| 7. Import path | Settings import must use `normalizeMemoryPayload()` — **do not** require the new field in a strict-only type guard |
+
+**Avoid:** backend `normalize_memory_data()` accepting legacy files while frontend import rejects them (strict `isImportedMemory`-style checks without normalize first).
+
 ## Verification
 
 ```bash
 cd backend
-PYTHONPATH=. uv run pytest tests/test_memory_updater.py -v -k cognitive
+PYTHONPATH=. uv run pytest tests/test_memory_normalize.py tests/test_memory_updater.py -v -k cognitive
 PYTHONPATH=. uv run pytest tests/test_memory_router.py -v
+
+cd ../frontend
+pnpm test tests/unit/core/memory
 ```
 
 Manual:
@@ -115,3 +134,7 @@ Manual:
 |------|------|
 | Skill | 某类任务的步骤与模板（可共享、可安装） |
 | `cognitiveStyle` | 该用户稳定的回复结构、讨论深度、反馈习惯（按用户持久化） |
+
+### 以后新增 memory 字段时
+
+按上文 **Adding a new memory field** 清单同步改后端 `normalize_memory_data()` 与前端 `normalizeMemoryPayload()`；导入走 normalize，不要只对完整新 schema 做严校验。

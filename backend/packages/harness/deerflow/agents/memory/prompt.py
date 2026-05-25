@@ -157,6 +157,7 @@ Categories:
 - knowledge: User's expertise or knowledge areas
 - context: Background context (location, job, projects)
 - behavior: Behavioral patterns
+- cognitive: Stable thinking and collaboration habits (reasoning style, depth, structure)
 - goal: User's goals or objectives
 - correction: Explicit corrections or mistakes to avoid repeating
 

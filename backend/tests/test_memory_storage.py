@@ -93,6 +93,41 @@ class TestFileMemoryStorage:
                 assert isinstance(memory, dict)
                 assert memory["version"] == "1.0"
 
+    def test_load_normalizes_legacy_json_without_cognitive_style(self, tmp_path):
+        """Legacy memory.json on disk must gain cognitiveStyle on load (import/API read path)."""
+        import json
+
+        memory_file = tmp_path / "memory.json"
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "2026-01-01T00:00:00Z",
+            "user": {
+                "workContext": {"summary": "work", "updatedAt": "2026-01-01T00:00:00Z"},
+                "personalContext": {"summary": "", "updatedAt": ""},
+                "topOfMind": {"summary": "", "updatedAt": ""},
+            },
+            "history": {
+                "recentMonths": {"summary": "", "updatedAt": ""},
+                "earlierContext": {"summary": "", "updatedAt": ""},
+                "longTermBackground": {"summary": "", "updatedAt": ""},
+            },
+            "facts": [],
+        }
+        memory_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.memory_file = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
+                storage = FileMemoryStorage()
+                loaded = storage.load()
+
+        assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+        assert loaded["user"]["workContext"]["summary"] == "work"
+
     def test_save_writes_to_file(self, tmp_path):
         """Should save memory data to file."""
         memory_file = tmp_path / "memory.json"
