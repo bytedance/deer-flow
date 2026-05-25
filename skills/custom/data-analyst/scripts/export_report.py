@@ -30,8 +30,9 @@ INPUT_FILENAME = "daily_kpi.json"
 WEEKLY_INPUT_FILENAME = "weekly_kpi.json"
 MONTHLY_INPUT_FILENAME = "monthly_kpi.json"
 DIAGNOSIS_INPUT_FILENAME = "diagnosis_features.json"
+MONITORING_INPUT_FILENAME = "monitoring_features.json"
 SUPPORTED_FORMATS = {"md", "pdf"}
-SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "diagnosis"}
+SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "diagnosis", "monitoring"}
 
 
 TYPE_DISPLAY = {
@@ -74,6 +75,13 @@ def _output_dir(report_type: str = "daily") -> Path:
         return Path(
             os.environ.get(
                 "DIAGNOSIS_OUTPUT_DIR",
+                os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            )
+        )
+    if report_type == "monitoring":
+        return Path(
+            os.environ.get(
+                "MONITORING_REPORT_OUTPUT_DIR",
                 os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
             )
         )
@@ -910,6 +918,23 @@ def _markdown_to_html(md: str, payload: dict | None = None, chart_images: list[s
     )
 
 
+def _monitoring_html(payload: dict) -> str:
+    """Minimal HTML wrapper for monitoring PDF export."""
+    md = render_monitoring_markdown(payload)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>监测分析报告</title>
+<style>
+body {{ font-family: "Microsoft YaHei", "PingFang SC", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; }}
+h1 {{ border-bottom: 2px solid #5470C6; padding-bottom: 8px; }}
+h2 {{ color: #5470C6; margin-top: 24px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 14px; }}
+th {{ background: #f5f5f5; }}
+</style></head>
+<body>{md.replace(chr(10), "<br>")}</body></html>"""
+
+
 def _write_pdf(html: str, out_path: Path) -> None:
     """Write HTML string to PDF. Requires weasyprint."""
     try:
@@ -920,6 +945,109 @@ def _write_pdf(html: str, out_path: Path) -> None:
             "Install it with: pip install weasyprint"
         ) from None
     WeasyprintHTML(string=html).write_pdf(str(out_path))
+
+
+def render_monitoring_markdown(payload: dict, thread_id: str | None = None) -> str:
+    """Render monitoring analysis report as Markdown.
+
+    Covers all four analysis types: trend, anomaly, kpi_dashboard, correlation.
+    """
+    analysis_type = payload.get("analysis_type", "trend")
+    type_labels = {
+        "trend": "趋势分析",
+        "anomaly": "异常检测",
+        "kpi_dashboard": "KPI 健康看板",
+        "correlation": "关联分析",
+    }
+    type_label = type_labels.get(analysis_type, analysis_type)
+
+    lines: list[str] = []
+    lines.append(f"# 监测分析报告 — {type_label}")
+    lines.append("")
+
+    # Scope
+    time_range = payload.get("time_range", {})
+    equipment_summary = payload.get("equipment_summary", [])
+    eq_names = ", ".join(e.get("equipment_name", e.get("equipment_id", "?")) for e in equipment_summary[:5])
+    if len(equipment_summary) > 5:
+        eq_names += f" 等 {len(equipment_summary)} 台"
+    lines.append(f"**分析类型**：{type_label}　|　**时间范围**：{time_range.get('start', '?')} ~ {time_range.get('end', '?')}　|　**设备**：{eq_names}")
+    lines.append("")
+
+    # Key Findings
+    findings = payload.get("findings", [])
+    lines.append("## 关键发现")
+    lines.append("")
+    if findings:
+        for i, f in enumerate(findings[:5], 1):
+            severity = f.get("severity", "info")
+            sev_icon = {"critical": "🔴", "warning": "🟡", "high": "🟠", "info": "🔵"}.get(severity, "⚪")
+            desc = f.get("description", "")
+            lines.append(f"{i}. {sev_icon} **{f.get('metric', '')}**：{desc}")
+    else:
+        lines.append("监测期间未发现显著异常。")
+    lines.append("")
+
+    # Evidence / Detail
+    evidence = payload.get("evidence", [])
+    if evidence and isinstance(evidence, list) and len(evidence) > 0:
+        lines.append("## 分析详情")
+        lines.append("")
+        if analysis_type == "anomaly":
+            lines.append("| 时间 | 指标 | 测量值 | 阈值 | 偏差(%) | 严重等级 | 检测方法 | 异常模式 |")
+            lines.append("|------|------|--------|------|---------|----------|----------|----------|")
+            for a in evidence[:20]:
+                lines.append(
+                    f"| {a.get('timestamp', '')} | {a.get('metric_name', '')} | "
+                    f"{a.get('value', '')}{a.get('unit', '')} | {a.get('threshold_upper', '-')} | "
+                    f"{a.get('deviation_pct', '')}% | {a.get('severity', '')} | "
+                    f"{', '.join(a.get('methods', []))} | {a.get('pattern', '')} |"
+                )
+        elif analysis_type == "trend":
+            lines.append("| 指标 | 方向 | 变化率/天 | 波动率 | 置信度 |")
+            lines.append("|------|------|-----------|--------|--------|")
+            for f_item in findings[:10]:
+                lines.append(
+                    f"| {f_item.get('metric', '')} | {f_item.get('direction', '')} | "
+                    f"{f_item.get('slope', '')} | {f_item.get('volatility', '')} | "
+                    f"{f_item.get('confidence', '')} |"
+                )
+        elif analysis_type == "kpi_dashboard":
+            lines.append("| 设备 | 指标 | 当前值 | 目标范围 | 达标 |")
+            lines.append("|------|------|--------|----------|------|")
+            for k in evidence[:30]:
+                compliant = "✅" if k.get("compliant") else "❌"
+                lines.append(
+                    f"| {k.get('equipment_name', '')} | {k.get('metric_name', '')} | "
+                    f"{k.get('value', '')}{k.get('unit', '')} | "
+                    f"{k.get('target_min', '')}-{k.get('target_max', '')} | {compliant} |"
+                )
+        elif analysis_type == "correlation":
+            for s in evidence[:5]:
+                lines.append(f"- **{s.get('name_a', '')} ↔ {s.get('name_b', '')}**：{s.get('direction', '')} r={s.get('r', '')}（{s.get('strength', '')}相关）")
+    lines.append("")
+
+    # Data Quality
+    data_quality = payload.get("data_quality", [])
+    if data_quality:
+        lines.append("## 数据质量说明")
+        lines.append("")
+        for dq in data_quality:
+            lines.append(f"- {dq}")
+        lines.append("")
+
+    # Recommendations
+    recommendations = payload.get("recommendations", [])
+    if recommendations:
+        lines.append("## 处置建议")
+        lines.append("")
+        for i, rec in enumerate(recommendations[:5], 1):
+            priority = rec.get("priority", "normal")
+            pri_label = {"urgent": "紧急", "important": "重要", "normal": "一般", "observe": "观察"}.get(priority, priority)
+            lines.append(f"{i}. [{pri_label}] {rec.get('action', '')}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def write_report(
@@ -948,6 +1076,13 @@ def write_report(
             _write_pdf(html, out_path)
         else:
             content = render_diagnosis_markdown(payload)
+            out_path.write_text(content, encoding="utf-8")
+    elif report_type == "monitoring":
+        if fmt == "pdf":
+            html = _monitoring_html(payload)
+            _write_pdf(html, out_path)
+        else:
+            content = render_monitoring_markdown(payload)
             out_path.write_text(content, encoding="utf-8")
     elif report_type == "monthly":
         if fmt == "pdf":
@@ -1002,6 +1137,8 @@ def load_payload(path: Path | None = None, report_type: str = "daily") -> dict:
             filename = WEEKLY_INPUT_FILENAME
         elif report_type == "diagnosis":
             filename = DIAGNOSIS_INPUT_FILENAME
+        elif report_type == "monitoring":
+            filename = MONITORING_INPUT_FILENAME
         else:
             filename = INPUT_FILENAME
         target = _output_dir(report_type) / filename

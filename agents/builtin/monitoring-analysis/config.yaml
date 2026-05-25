@@ -1,6 +1,6 @@
 name: monitoring-analysis
 display_name: "监测分析"
-description: "擅长数据处理、统计分析、可视化和洞察提取"
+description: "擅长设备状态趋势分析、异常检测、KPI健康评估和多参数关联分析"
 icon: "📊"
 order: 3
 model: null
@@ -11,8 +11,24 @@ skills:
   - data-analyst
 mcp_servers: null
 tags:
-  - data
-  - analysis
   - monitoring
+  - analysis
+  - trend
+  - anomaly
+  - kpi
+  - correlation
+starters:
+  - label: "分析设备运行趋势"
+    prompt: "分析设备运行趋势"
+    auto_start: true
+  - label: "检测设备异常"
+    prompt: "检测设备监测异常"
+    auto_start: true
+  - label: "KPI健康评估"
+    prompt: "查看设备KPI健康状态"
+    auto_start: false
+  - label: "多参数关联分析"
+    prompt: "分析多参数关联关系"
+    auto_start: false
 advanced:
   subagent_enabled: false
