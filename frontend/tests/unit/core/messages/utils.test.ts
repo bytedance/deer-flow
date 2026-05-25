@@ -114,7 +114,9 @@ describe("inline <think> tag splitting", () => {
     const message = aiMessage(
       "Here is part of the answer.<think>but wait, let me reconsider",
     );
-    expect(extractContentFromMessage(message)).toBe("Here is part of the answer.");
+    expect(extractContentFromMessage(message)).toBe(
+      "Here is part of the answer.",
+    );
     expect(extractReasoningContentFromMessage(message)).toBe(
       "but wait, let me reconsider",
     );
