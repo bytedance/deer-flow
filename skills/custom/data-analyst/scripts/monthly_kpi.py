@@ -46,7 +46,7 @@ DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "monthly_data.json"
 OUTPUT_FILENAME = "monthly_kpi.json"
 
-# MTTR / downtime_count / alarm_count / energy_consumption are lower-is-better
+# MTTR / downtime_count / alarm_count are lower-is-better
 # by virtue of NOT being in KPI_BETTER_WHEN_HIGHER.
 
 TOP_N_LIMIT = 10

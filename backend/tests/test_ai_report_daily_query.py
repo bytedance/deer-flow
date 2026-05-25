@@ -213,9 +213,9 @@ def test_main_deduplicates_equipment_and_kpis(query_daily, monkeypatch, capsys, 
 
 
 def test_new_kpi_units_registered(query_daily):
-    """All 12 KPI keys must be in KPI_UNITS."""
+    """All 11 KPI keys must be in KPI_UNITS."""
     expected = {
-        "runtime_rate", "downtime_count", "alarm_count", "output", "energy_consumption",
+        "runtime_rate", "downtime_count", "alarm_count", "output",
         "corrosion_rate", "thickness_loss", "vibration_level", "bearing_temp",
         "flow_rate", "outlet_pressure", "valve_temp",
     }
@@ -463,8 +463,7 @@ def test_kpi_substitution_for_rotating_machinery(query_daily, monkeypatch, capsy
 
 def test_constants_match_list_equipment(query_daily):
     """The per-type KPI lists in query_daily must match list_equipment's
-    EQUIPMENT_TYPE_KPIS (minus energy_consumption which is intentionally
-    excluded from the KPI_FEATURE_MAP)."""
+    EQUIPMENT_TYPE_KPIS."""
     import importlib.util
     le_path = SCRIPT_PATH.parent / "list_equipment.py"
     spec = importlib.util.spec_from_file_location("list_equipment", le_path)
@@ -472,6 +471,6 @@ def test_constants_match_list_equipment(query_daily):
     spec.loader.exec_module(le)
 
     for eq_type in ["rotating_machinery", "pump", "reciprocating_machinery", "static_equipment"]:
-        le_kpis = [k for k in le.EQUIPMENT_TYPE_KPIS[eq_type] if k != "energy_consumption"]
+        le_kpis = le.EQUIPMENT_TYPE_KPIS[eq_type]
         qd_kpis = query_daily._EQUIPMENT_TYPE_DEFAULT_KPIS[eq_type]
         assert qd_kpis == le_kpis, f"KPI mismatch for {eq_type}: query_daily={qd_kpis} vs list_equipment={le_kpis}"

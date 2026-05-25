@@ -58,7 +58,6 @@ METRIC_CATALOG = {
     "bearing_temp": {"name": "轴承温度", "unit": "℃", "amplitude": 4.0, "base": 65.0, "better_when_higher": False},
     "outlet_pressure": {"name": "出口压力", "unit": "MPa", "amplitude": 0.15, "base": 1.0, "better_when_higher": True},
     "flow_rate": {"name": "流量", "unit": "m³/h", "amplitude": 20.0, "base": 120.0, "better_when_higher": True},
-    "energy_consumption": {"name": "能耗", "unit": "kWh", "amplitude": 100.0, "base": 800.0, "better_when_higher": False},
 }
 
 
