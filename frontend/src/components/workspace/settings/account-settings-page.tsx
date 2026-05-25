@@ -18,10 +18,6 @@ export function AccountSettingsPage() {
         <div className="space-y-2">
           <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
             <span className="text-muted-foreground text-sm">
-              {t.settings.account.email}
-            </span>
-            <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-            <span className="text-muted-foreground text-sm">
               {t.settings.account.realName}
             </span>
             <span className="text-sm font-medium">{user?.real_name || "—"}</span>
