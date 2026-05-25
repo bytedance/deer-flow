@@ -239,7 +239,7 @@ rag:
   max_injection_chunks: 3
   max_injection_tokens: 2000
 run_events:
-  backend: memory
+  backend: db
   max_trace_content: 10240
   track_token_usage: true
 audio_input:

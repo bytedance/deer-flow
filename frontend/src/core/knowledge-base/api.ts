@@ -8,7 +8,10 @@ import {
 import type {
   CreateDocumentRequest,
   CreateKBRequest,
+  DocumentIndexStatus,
   GrantPermissionRequest,
+  HealthSummary,
+  IndexStats,
   KBPermission,
   KnowledgeBase,
   KnowledgeBaseDocument,
@@ -113,6 +116,19 @@ export async function getDocument(
     throw new Error(`Failed to get document: ${res.statusText}`);
   }
   return res.json() as Promise<KnowledgeBaseDocument>;
+}
+
+export async function getDocumentIndexStatus(
+  kbId: string,
+  docId: string,
+): Promise<DocumentIndexStatus> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/documents/${docId}/index-status`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to get document index status: ${res.statusText}`);
+  }
+  return res.json() as Promise<DocumentIndexStatus>;
 }
 
 export async function createDocument(
@@ -317,4 +333,28 @@ export async function listAdminKnowledgeBases(params?: {
     );
   }
   return res.json() as Promise<KnowledgeBase[]>;
+}
+
+// ---------------------------------------------------------------------------
+// Index stats (observability)
+// ---------------------------------------------------------------------------
+
+export async function getIndexStats(kbId: string): Promise<IndexStats> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/${kbId}/index-stats`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to get index stats: ${res.statusText}`);
+  }
+  return res.json() as Promise<IndexStats>;
+}
+
+export async function getHealthSummary(): Promise<HealthSummary> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/knowledge-bases/health-summary`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to get health summary: ${res.statusText}`);
+  }
+  return res.json() as Promise<HealthSummary>;
 }

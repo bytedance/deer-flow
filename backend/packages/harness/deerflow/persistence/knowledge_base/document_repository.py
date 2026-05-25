@@ -319,3 +319,44 @@ class DocumentRepository:
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount > 0
+
+    async def count_docs_by_status_for_kb(self, kb_id: str) -> dict[str, int]:
+        """Count non-deleted documents grouped by index_status for a KB."""
+        from sqlalchemy import func
+
+        async with self._sf() as session:
+            stmt = (
+                select(KnowledgeBaseDocumentRow.index_status, func.count(KnowledgeBaseDocumentRow.id))
+                .where(
+                    KnowledgeBaseDocumentRow.knowledge_base_id == kb_id,
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .group_by(KnowledgeBaseDocumentRow.index_status)
+            )
+            result = await session.execute(stmt)
+            return dict(result.all())
+
+    async def count_docs_by_status_for_kbs(self, kb_ids: list[str]) -> dict[str, dict[str, int]]:
+        """Count non-deleted documents grouped by (kb_id, index_status) for multiple KBs."""
+        from sqlalchemy import func
+
+        if not kb_ids:
+            return {}
+        async with self._sf() as session:
+            stmt = (
+                select(
+                    KnowledgeBaseDocumentRow.knowledge_base_id,
+                    KnowledgeBaseDocumentRow.index_status,
+                    func.count(KnowledgeBaseDocumentRow.id),
+                )
+                .where(
+                    KnowledgeBaseDocumentRow.knowledge_base_id.in_(kb_ids),
+                    KnowledgeBaseDocumentRow.deleted_at.is_(None),
+                )
+                .group_by(KnowledgeBaseDocumentRow.knowledge_base_id, KnowledgeBaseDocumentRow.index_status)
+            )
+            result = await session.execute(stmt)
+            grouped: dict[str, dict[str, int]] = {}
+            for kb_id, status, count in result.all():
+                grouped.setdefault(kb_id, {})[status] = count
+            return grouped

@@ -15,11 +15,10 @@ export type ClosurePriority = "urgent" | "important" | "normal" | "observe";
 
 export type ClosureSourceType =
   | "diagnosis"
-  | "daily_report"
-  | "weekly_report"
-  | "monthly_report"
-  | "custom_report"
-  | "manual";
+  | "report"
+  | "inspection"
+  | "manual"
+  | "chat";
 
 export type ClosureAction =
   | "assign"
@@ -92,6 +91,7 @@ export interface ListClosureTicketsParams {
   assignee_id?: string;
   created_by?: string;
   source_type?: ClosureSourceType;
+  source_run_id?: string;
   priority?: ClosurePriority;
   is_overdue?: boolean;
   created_at_gte?: string;

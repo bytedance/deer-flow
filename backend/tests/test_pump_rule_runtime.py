@@ -181,6 +181,113 @@ async def test_pump_rule_runtime_detects_unbalance(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pump_rule_comparison_unbalance_detailed(monkeypatch, tmp_path):
+    """Task 6.3: compare unbalance fixture output against reference /malfunction behavior.
+
+    Verifies fault type, probability range, evidence point IDs, and base frequency.
+    """
+    monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("PUMP_RULE_FIXTURE", str(FIXTURE_DIR / "unbalance.json"))
+
+    from pump_rule import close_all_clients, run_diagnosis
+
+    try:
+        result = await run_diagnosis("PUMP1", "BRG1", "2026-02-19T08:00:00")
+    finally:
+        await close_all_clients()
+
+    payload = result.model_dump()
+
+    # --- base frequency: waveform is 25 Hz pure sine at 200 Hz sampling ---
+    assert payload["base_freq"] == pytest.approx(25.0, abs=0.5)
+
+    # --- malfunction findings: fault type & probability range ---
+    malfunctions = payload["malfunction_findings"]
+    unbalance_items = [item for item in malfunctions if item["type"] == "unbalance"]
+    assert len(unbalance_items) == 1, f"Expected exactly 1 unbalance finding, got {unbalance_items}"
+    unbalance = unbalance_items[0]
+    assert unbalance["name"] == "不平衡或刚性不足"
+    # unbalance probability capped at 0.85 by _clip_probability(max_probability, 0.85)
+    assert 0.5 <= unbalance["probability"] <= 0.88, (
+        f"Unbalance probability {unbalance['probability']} out of expected [0.5, 0.88]"
+    )
+
+    # --- evidence: VIB1 must appear as evidence point ---
+    for evidence_item in payload["evidence"]:
+        if evidence_item.get("category") == "rule":
+            point_str = str(evidence_item.get("point") or "")
+            assert "VIB1" in point_str, (
+                f"Evidence point {point_str!r} does not reference VIB1"
+            )
+
+    # --- health findings: v_rms > D threshold (7.0) should trigger D zone ---
+    health_statuses = {item["status"] for item in payload["health_findings"]}
+    assert ("D" in health_statuses or "C" in health_statuses), (
+        f"Expected C/D-zone health finding (v_rms > 4.0), got statuses: {health_statuses}"
+    )
+    # C_His verifies 12h window check is active
+    assert "C_His" in health_statuses, (
+        f"Expected 12h-in-C-zone finding, got statuses: {health_statuses}"
+    )
+
+    # --- evidence spectrum row: 1X energy ratio should be high for unbalance ---
+    spectrum_rows = [item for item in payload["evidence"] if item.get("category") == "spectrum"]
+    one_x_rows = [item for item in spectrum_rows if "1X" in str(item.get("feature") or "")]
+    assert one_x_rows, "Expected 1X energy ratio evidence row"
+    for row in one_x_rows:
+        energy = float(row.get("value") or 0)
+        assert energy >= 0.5, f"1X energy ratio {energy} should be >= 0.5 for unbalance"
+
+
+@pytest.mark.asyncio
+async def test_pump_rule_comparison_no_findings_detailed(monkeypatch, tmp_path):
+    """Task 6.3: compare no_findings fixture output against reference /malfunction behavior.
+
+    Verifies clean output: no malfunctions, no health findings, base frequency still detectable.
+    """
+    monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("PUMP_RULE_FIXTURE", str(FIXTURE_DIR / "no_findings.json"))
+
+    from pump_rule import close_all_clients, run_diagnosis
+
+    try:
+        result = await run_diagnosis("PUMP1", "BRG1", "2026-02-19T08:00:00")
+    finally:
+        await close_all_clients()
+
+    payload = result.model_dump()
+
+    # --- base frequency: waveform still has 25 Hz component ---
+    assert payload["base_freq"] is not None, "Base frequency should be detectable even without faults"
+    assert payload["base_freq"] == pytest.approx(25.0, abs=1.0)
+
+    # --- malfunction findings: must be empty (v_rms=1.0 < c_threshold=4.0) ---
+    assert payload["malfunction_findings"] == [], (
+        f"Expected no malfunction findings, got: {payload['malfunction_findings']}"
+    )
+
+    # --- health findings: v_rms=1.0 < B=3.0 so no vibration health findings ---
+    # Temperature trend may trigger due to slow rise in fixture, but no vibration issues
+    vibration_health = [
+        item for item in payload["health_findings"]
+        if "Rms" in str(item.get("status") or "") or "Acc" in str(item.get("status") or "")
+        or item.get("status") in ("C", "D", "C_His")
+    ]
+    assert not vibration_health, (
+        f"Expected no vibration health findings (v_rms=1.0 < B=3.0), got: {vibration_health}"
+    )
+
+    # --- warnings: should not contain base frequency failure ---
+    base_freq_warnings = [w for w in payload["warnings"] if "基频" in str(w)]
+    assert not base_freq_warnings, (
+        f"Unexpected base frequency warnings: {base_freq_warnings}"
+    )
+
+    # --- target info: same bearing target ---
+    assert payload["target_info"]["target_kind"] == "bearing"
+
+
+@pytest.mark.asyncio
 async def test_pump_rule_runtime_allows_no_findings(monkeypatch, tmp_path):
     monkeypatch.setenv("DIAGNOSIS_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("PUMP_RULE_FIXTURE", str(FIXTURE_DIR / "no_findings.json"))

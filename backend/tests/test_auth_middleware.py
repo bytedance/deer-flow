@@ -393,7 +393,7 @@ class TestJwtAuth:
             resp = client.get("/api/protected", headers={"Authorization": "Bearer ins-base-token"})
 
         assert resp.status_code == 503
-        assert resp.json()["detail"] == "Authentication service unavailable"
+        assert resp.json()["detail"]["code"] == "provider_unavailable"
 
 
 class TestApiKeyAuth:
@@ -431,7 +431,7 @@ class TestTenantEnforcement:
         client = TestClient(_make_app(tenant_store=store))
         resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "ghost"})
         assert resp.status_code == 403
-        assert resp.json()["code"] == "tenant_not_found"
+        assert resp.json()["detail"]["code"] == "tenant_not_found"
 
     def test_disabled_tenant_returns_403(self):
         load_auth_config_from_dict({"enabled": False})
@@ -440,7 +440,7 @@ class TestTenantEnforcement:
         client = TestClient(_make_app(tenant_store=store))
         resp = client.get("/api/protected", headers={"X-DeerFlow-Tenant": "disabled-org"})
         assert resp.status_code == 403
-        assert resp.json()["code"] == "tenant_disabled"
+        assert resp.json()["detail"]["code"] == "tenant_disabled"
 
     def test_admin_paths_skip_enforcement(self):
         load_auth_config_from_dict({"enabled": False})

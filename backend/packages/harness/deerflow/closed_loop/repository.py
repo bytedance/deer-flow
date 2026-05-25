@@ -188,6 +188,7 @@ class ClosureRepository:
         assignee_id: str | None = None,
         created_by: str | None = None,
         source_type: str | None = None,
+        source_run_id: str | None = None,
         priority: str | None = None,
         is_overdue: bool | None = None,
         created_at_gte: datetime | None = None,
@@ -214,6 +215,8 @@ class ClosureRepository:
             clauses.append(ClosureTicketRow.created_by == created_by)
         if source_type is not None:
             clauses.append(ClosureTicketRow.source_type == source_type)
+        if source_run_id is not None:
+            clauses.append(ClosureTicketRow.source_run_id == source_run_id)
         if priority is not None:
             clauses.append(ClosureTicketRow.priority == priority)
         if is_overdue is not None:

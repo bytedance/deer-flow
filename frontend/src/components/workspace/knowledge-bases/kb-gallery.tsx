@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpenIcon, PlusIcon } from "lucide-react";
+import { BookOpenIcon, HeartPulseIcon, PlusIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -14,8 +14,9 @@ import type { KnowledgeBase } from "@/core/knowledge-base";
 
 import { KBCard } from "./kb-card";
 import { KBFormDialog } from "./kb-form-dialog";
+import { KbHealthSummary } from "./kb-health-summary";
 
-type TabValue = "all" | "mine" | "tenant" | "public" | "admin";
+type TabValue = "all" | "mine" | "tenant" | "public" | "admin" | "health";
 
 export function KBGallery() {
   const { t } = useI18n();
@@ -80,6 +81,10 @@ export function KBGallery() {
     );
   }
 
+  function renderHealth() {
+    return <KbHealthSummary />;
+  }
+
   return (
     <div className="flex size-full flex-col">
       <div className="flex items-center justify-between border-b px-6 py-4">
@@ -110,9 +115,15 @@ export function KBGallery() {
               {t.knowledgeBase.tabPublic}
             </TabsTrigger>
             <TabsTrigger value="admin">{t.knowledgeBase.tabAdmin}</TabsTrigger>
+            <TabsTrigger value="health">
+              <HeartPulseIcon className="mr-1 h-3.5 w-3.5" />
+              Health
+            </TabsTrigger>
           </TabsList>
 
-          <TabsContent value={activeTab}>{renderGrid(filteredKBs)}</TabsContent>
+          <TabsContent value={activeTab}>
+            {activeTab === "health" ? renderHealth() : renderGrid(filteredKBs)}
+          </TabsContent>
         </Tabs>
       </div>
 

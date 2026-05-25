@@ -39,6 +39,7 @@ class RagDecisionEvent:
     query: str = ""
     selected_kb_ids: list[str] = field(default_factory=list)
     accessible_kb_ids: list[str] = field(default_factory=list)
+    denied_kb_ids: list[str] = field(default_factory=list)
     chunks_returned: int = 0
     chunks_injected: int = 0
     score_strategy: str | None = None

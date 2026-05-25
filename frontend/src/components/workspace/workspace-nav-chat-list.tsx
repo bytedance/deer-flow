@@ -10,6 +10,7 @@ import {
   FileTextIcon,
   HistoryIcon,
   MessagesSquare,
+  Settings2Icon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -161,6 +162,21 @@ export function WorkspaceNavChatList() {
             >
               <BookOpenIcon />
               <span>{t.sidebar.knowledgeBases}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/capabilities")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/capabilities"
+            >
+              <Settings2Icon className="size-4" />
+              <span>平台能力</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

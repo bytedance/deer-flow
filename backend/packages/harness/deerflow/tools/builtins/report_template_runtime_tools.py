@@ -30,6 +30,7 @@ from langgraph.config import get_config
 
 from deerflow.config.paths import get_paths
 from deerflow.report_templates.records import (
+    ReportRunErrorCode,
     ReportRunRecord,
     builtin_version_ref,
     new_report_run_id,
@@ -62,6 +63,7 @@ from deerflow.report_templates.runtime.state import (
     StateNotFoundError,
     StateTransitionError,
     expect_status,
+    mark_cancelled,
     mark_failed,
     read_state,
     transition,
@@ -88,6 +90,7 @@ from deerflow.report_templates.service import (
     principal_from_runnable_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.knowledge_base.retrieval import normalize_kb_selection
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,7 @@ def _ok(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
@@ -116,6 +120,98 @@ def _thread_id_from_config() -> str:
     if not thread_id:
         raise RuntimeError("thread_id missing from RunnableConfig.configurable")
     return str(thread_id)
+
+
+def _extract_kb_sources() -> list[dict[str, Any]]:
+    """Snapshot the current KB selection from the runtime context.
+
+    Returns a list of ``{"selected_ids": [...], "source": "runtime"|"thread_metadata"}``
+    entries — empty list when no KB selection is active.
+    """
+    cfg = get_config() or {}
+    configurable = cfg.get("configurable") or {}
+    runtime = configurable.get("__pregel_runtime")
+    if runtime is None:
+        return []
+    context = getattr(runtime, "context", None) or {}
+    raw = context.get("knowledge_base_selection")
+    selection = normalize_kb_selection(raw)
+    if selection is None:
+        # KB selection was present but invalid/empty → treat as unavailable.
+        if isinstance(raw, dict) and raw.get("enabled") and isinstance(raw.get("selected_ids"), list) and len(raw.get("selected_ids", [])) > 0:
+            return [{"selected_ids": [str(i) for i in raw["selected_ids"]], "source": "runtime", "unavailable": True}]
+        return []
+    return [{"selected_ids": selection.get("selected_ids", []), "source": "runtime"}]
+
+
+def _update_run_record(
+    *,
+    thread_id: str,
+    report_run_id: str,
+    template_id: str,
+    **fields: Any,
+) -> None:
+    """Patch fields on the persisted ReportRunRecord (non-fatal on failure)."""
+    try:
+        principal = principal_from_runnable_config(get_config())
+        repo = get_repository()
+        scope = Scope.private(principal.user_id)
+        record = repo.get_report_run(scope, template_id, report_run_id)
+        if record is None:
+            scope = Scope.tenant(principal.tenant_id)
+            record = repo.get_report_run(scope, template_id, report_run_id)
+        if record is None:
+            logger.warning("_update_run_record: run %r not found", report_run_id)
+            return
+        for key, value in fields.items():
+            setattr(record, key, value)
+        repo.update_report_run(scope=scope, record=record)
+    except Exception:
+        logger.warning("_update_run_record failed (non-fatal)", exc_info=True)
+
+
+def _update_run_artifact_paths(
+    *,
+    thread_id: str,
+    report_run_id: str,
+    template_id: str,
+    md_path: str,
+    pdf_path: str | None,
+    pdf_skipped_reason: str | None,
+) -> None:
+    _update_run_record(
+        thread_id=thread_id,
+        report_run_id=report_run_id,
+        template_id=template_id,
+        artifact_paths={"md": md_path, "pdf": pdf_path},
+        pdf_skipped_reason=pdf_skipped_reason,
+    )
+
+
+def _check_template_status(template_id: str) -> str:
+    """Return ``"available"``, ``"archived"``, or ``"deleted"`` for a template."""
+    try:
+        principal = principal_from_runnable_config(get_config())
+        repo = get_repository()
+        scope = Scope.private(principal.user_id)
+        try:
+            rec = repo.get_template(scope, template_id)
+        except TemplateNotFoundError:
+            scope = Scope.tenant(principal.tenant_id)
+            try:
+                rec = repo.get_template(scope, template_id)
+            except TemplateNotFoundError:
+                scope = Scope.builtin()
+                try:
+                    rec = repo.get_template(scope, template_id)
+                except TemplateNotFoundError:
+                    return "deleted"
+        if rec.status == "archived":
+            return "archived"
+        return "available"
+    except Exception:
+        logger.debug("_check_template_status failed", exc_info=True)
+        return "available"  # err on the side of letting the run continue
 
 
 def _run_output_dir(thread_id: str, report_run_id: str) -> Path:
@@ -132,7 +228,11 @@ def _run_output_dir(thread_id: str, report_run_id: str) -> Path:
 
 
 def _locate_active_run_dir(thread_id: str) -> Path | None:
-    """Find the most recently updated run dir under the thread's outputs."""
+    """Find the most recently updated **non-terminal** run dir under the thread's outputs.
+
+    Terminal states (exported / failed / cancelled) are skipped so ``resume_run``
+    only returns runs that can actually be continued.
+    """
     paths = get_paths()
     outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
     runs_root = outputs_dir / "report-runs"
@@ -141,8 +241,18 @@ def _locate_active_run_dir(thread_id: str) -> Path | None:
     candidates = [p for p in runs_root.iterdir() if (p / "status.json").exists()]
     if not candidates:
         return None
-    candidates.sort(key=lambda p: (p / "status.json").stat().st_mtime, reverse=True)
-    return candidates[0]
+    active = []
+    for p in candidates:
+        try:
+            st = read_state(p)
+            if st.status not in ("exported", "failed", "cancelled"):
+                active.append(p)
+        except Exception:
+            continue
+    if not active:
+        return None
+    active.sort(key=lambda p: (p / "status.json").stat().st_mtime, reverse=True)
+    return active[0]
 
 
 def _load_dsl_for(state: RuntimeState) -> dict[str, Any]:
@@ -209,9 +319,18 @@ def report_template_prepare_run_tool(
             scope = Scope.private(principal.user_id)
             try:
                 version = repo.get_version(scope, template_id, template_version)
+                rec = repo.get_template(scope, template_id)
             except (TemplateNotFoundError, VersionNotFoundError):
                 scope = Scope.tenant(principal.tenant_id)
                 version = repo.get_version(scope, template_id, template_version)
+                rec = repo.get_template(scope, template_id)
+            # Reject archived templates — they can't produce new runs.
+            if rec.status == "archived":
+                return _err(
+                    ReportRunErrorCode.TEMPLATE_UNAVAILABLE,
+                    f"template {template_id!r} is archived and cannot be run. "
+                    "Fork the template to create an editable copy, or use a published template instead.",
+                )
             dsl = version.dsl
             version_to_record = template_version
             version_ref = f"v{template_version}"
@@ -222,6 +341,8 @@ def report_template_prepare_run_tool(
         nonce = uuid.uuid4().hex
         first_step_id = (dsl.get("form_steps") or [{}])[0].get("id")
 
+        knowledge_sources = _extract_kb_sources()
+
         state = RuntimeState(
             report_run_id=report_run_id,
             thread_id=thread_id,
@@ -231,6 +352,7 @@ def report_template_prepare_run_tool(
             status="pending",
             nonce=nonce,
             expected_step=first_step_id,
+            knowledge_sources=knowledge_sources,
             created_at=now_iso(),
         )
         write_state(run_dir, state)
@@ -263,6 +385,8 @@ def report_template_prepare_run_tool(
                 tenant_id=principal.tenant_id,
                 idempotency_key=idempotency_key,
                 status="pending",
+                knowledge_sources=knowledge_sources,
+                trigger_type="manual",
                 created_at=state.created_at,
             )
             repo.create_report_run(scope=scope, record=run_record)
@@ -444,9 +568,12 @@ def report_template_run_data_steps_tool(report_run_id: str) -> str:
                 context=context,
             )
         except (DataRunnerError, ScriptExecutionError, ScriptTimeoutError, UnknownScriptError) as e:
-            mark_failed(state, code="DATA_STEP_FAILED", message=str(e))
+            step_id = getattr(e, "details", {}).get("step_id") if hasattr(e, "details") else None
+            code = ReportRunErrorCode.DATA_STEP_FAILED
+            msg = f"[{step_id}] {e}" if step_id else str(e)
+            mark_failed(state, code=code, message=msg)
             write_state(run_dir, state)
-            return _err("DATA_STEP_FAILED", str(e))
+            return _err(code, msg)
 
         state.step_outputs.update(new_outputs)
         transition(state, "data_complete")
@@ -504,6 +631,14 @@ def report_template_assemble_payload_tool(report_run_id: str) -> str:
         )
         transition(state, "payload_ready")
         write_state(run_dir, state)
+
+        _update_run_record(
+            thread_id=thread_id,
+            report_run_id=report_run_id,
+            template_id=state.template_id,
+            report_payload_path=str(payload_path),
+        )
+
         return _ok(
             {
                 "payload_path": str(payload_path),
@@ -528,6 +663,12 @@ def report_template_assemble_payload_tool(report_run_id: str) -> str:
 @tool("report_template_render_report", parse_docstring=True)
 def report_template_render_report_tool(report_run_id: str) -> str:
     """Push one GenUI block per ``report_payload.sections[]`` to the SSE stream.
+
+    Blocks are persisted in-memory by ``push_block_to_sse`` (86400 s TTL) and
+    recovered via ``GET /api/threads/{id}/ui-blocks``.  We intentionally do NOT
+    embed ``<!--ui_block:...-->`` markers in the tool output because they would
+    be re-extracted from message history on every subsequent run, causing blocks
+    from earlier report runs to leak into later ones.
 
     Args:
         report_run_id: ``rr_...``.
@@ -590,6 +731,17 @@ def report_template_export_tool(report_run_id: str, pdf: bool = True) -> str:
             return _err("EXPORT_FAILED", str(e))
         transition(state, "exported")
         write_state(run_dir, state)
+
+        # Persist artifact paths to the ReportRun index record.
+        _update_run_artifact_paths(
+            thread_id=thread_id,
+            report_run_id=report_run_id,
+            template_id=state.template_id,
+            md_path=result.md_path,
+            pdf_path=result.pdf_path,
+            pdf_skipped_reason=result.pdf_skipped_reason,
+        )
+
         return _ok(
             {
                 "md_path": result.md_path,
@@ -620,6 +772,10 @@ def report_template_resume_run_tool() -> str:
         JSON snapshot of the latest ``status.json`` (or ``{"error": ...}``).
         The LLM uses the ``status`` + ``expected_step`` fields to pick the
         next tool to call.
+
+        When the target template has been archived or deleted since the run
+        was created, the tool returns ``TEMPLATE_UNAVAILABLE`` with guidance
+        that the LLM should surface to the user.
     """
     try:
         thread_id = _thread_id_from_config()
@@ -627,6 +783,22 @@ def report_template_resume_run_tool() -> str:
         if latest is None:
             return _err("NO_ACTIVE_RUN", "no ReportRun found in this thread")
         state = read_state(latest)
+
+        # Check template availability on resume — archived templates cannot be run further.
+        template_status = _check_template_status(state.template_id)
+        if template_status == "archived":
+            return _err(
+                ReportRunErrorCode.TEMPLATE_UNAVAILABLE,
+                f"Template {state.template_id!r} was archived after this run started. "
+                "You cannot resume an archived template. Create a new run from an available template instead.",
+            )
+        elif template_status == "deleted":
+            return _err(
+                ReportRunErrorCode.TEMPLATE_UNAVAILABLE,
+                f"Template {state.template_id!r} was deleted after this run started. "
+                "The run cannot be resumed because the template no longer exists.",
+            )
+
         return _ok(
             {
                 "report_run_id": state.report_run_id,
@@ -637,6 +809,7 @@ def report_template_resume_run_tool() -> str:
                 "completed_steps": list(state.completed_steps),
                 "error_code": state.error_code,
                 "error_message": state.error_message,
+                "knowledge_sources": list(state.knowledge_sources),
                 "run_output_dir": str(latest),
             }
         )

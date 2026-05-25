@@ -12,6 +12,7 @@ from fastapi import HTTPException, Request, Response
 from starlette.responses import JSONResponse
 
 from app.gateway.auth.api_key_handler import verify_and_track_api_key
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.auth.jwt_handler import decode_token
 from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
@@ -43,8 +44,10 @@ def _is_admin_path(path: str) -> bool:
     return path.startswith("/api/admin/")
 
 
-def _json_error(status_code: int, detail: str) -> JSONResponse:
+def _json_error(status_code: int, detail: str | AuthErrorResponse) -> JSONResponse:
     """Return a JSON error response (avoids HTTPException + BaseHTTPMiddleware issues)."""
+    if isinstance(detail, AuthErrorResponse):
+        return JSONResponse(status_code=status_code, content={"detail": detail.model_dump()})
     return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
@@ -65,12 +68,22 @@ async def _check_tenant_active(tenant_id: str, request: Request) -> JSONResponse
         )
         return JSONResponse(
             status_code=403,
-            content={"detail": f"Tenant {tenant_id!r} does not exist", "code": "tenant_not_found"},
+            content={
+                "detail": AuthErrorResponse(
+                    code=AuthErrorCode.TENANT_NOT_FOUND,
+                    message=f"Tenant {tenant_id!r} does not exist",
+                ).model_dump()
+            },
         )
     if not tc.is_active:
         return JSONResponse(
             status_code=403,
-            content={"detail": f"Tenant {tenant_id!r} is disabled", "code": "tenant_disabled"},
+            content={
+                "detail": AuthErrorResponse(
+                    code=AuthErrorCode.TENANT_DISABLED,
+                    message=f"Tenant {tenant_id!r} is disabled",
+                ).model_dump()
+            },
         )
     return None
 
@@ -155,14 +168,32 @@ def create_auth_middleware():
                                 return await call_next(request)
                             finally:
                                 reset_tenant_id(ctx_token)
-                except AuthProviderUnavailableError:
-                    logger.exception("InsBase auth provider unavailable for path=%s", request.url.path)
-                    return _json_error(503, "Authentication service unavailable")
+                except AuthProviderUnavailableError as exc:
+                    logger.exception(
+                        "InsBase auth provider unavailable for path=%s — translated_code=%s",
+                        request.url.path, AuthErrorCode.PROVIDER_UNAVAILABLE.value,
+                    )
+                    return _json_error(
+                        503,
+                        AuthErrorResponse(
+                            code=AuthErrorCode.PROVIDER_UNAVAILABLE,
+                            message="Authentication service unavailable",
+                        ),
+                    )
                 except Exception:
-                    logger.exception("InsBase token verification failed for path=%s", request.url.path)
+                    logger.exception(
+                        "InsBase token verification failed for path=%s — translated_code=%s",
+                        request.url.path, AuthErrorCode.TOKEN_INVALID.value,
+                    )
 
             logger.warning("create_auth_middleware (ins_base): no valid token for path=%s", request.url.path)
-            return _json_error(401, "Missing or invalid authentication token")
+            return _json_error(
+                401,
+                AuthErrorResponse(
+                    code=AuthErrorCode.NOT_AUTHENTICATED,
+                    message="Missing or invalid authentication token",
+                ),
+            )
 
         # Auth enabled: resolve token from Authorization header or access_token cookie.
         # Cookie-based auth is the primary frontend mechanism (HttpOnly cookie set
@@ -180,7 +211,13 @@ def create_auth_middleware():
             if token_value.startswith("df-"):
                 meta = verify_and_track_api_key(token_value)
                 if meta is None:
-                    return _json_error(401, "Invalid or revoked API key")
+                    return _json_error(
+                        401,
+                        AuthErrorResponse(
+                            code=AuthErrorCode.INVALID_CREDENTIALS,
+                            message="Invalid or revoked API key",
+                        ),
+                    )
                 tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
                 try:
                     validate_tenant_id(tenant_id)
@@ -205,10 +242,22 @@ def create_auth_middleware():
             try:
                 payload = decode_token(token_value)
             except ValueError as e:
-                return _json_error(401, str(e))
+                return _json_error(
+                    401,
+                    AuthErrorResponse(
+                        code=AuthErrorCode.TOKEN_INVALID,
+                        message=str(e),
+                    ),
+                )
 
             if payload.get("type") != "access":
-                return _json_error(401, "Token is not an access token")
+                return _json_error(
+                    401,
+                    AuthErrorResponse(
+                        code=AuthErrorCode.TOKEN_INVALID,
+                        message="Token is not an access token",
+                    ),
+                )
 
             tenant_id = payload.get("tenant_id", "default")
             try:
@@ -261,6 +310,12 @@ def create_auth_middleware():
 
         else:
             logger.warning("create_auth_middleware: no Bearer token or cookie for path=%s", request.url.path)
-            return _json_error(401, "Missing or invalid Authorization header")
+            return _json_error(
+                401,
+                AuthErrorResponse(
+                    code=AuthErrorCode.NOT_AUTHENTICATED,
+                    message="Missing or invalid Authorization header",
+                ),
+            )
 
     return auth_middleware

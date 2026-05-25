@@ -342,6 +342,21 @@ export const enUS: Translations = {
     groupPublic: "Public",
     visibilityHintTenant: "Only tenant admins can create",
     visibilityHintPublic: "Only super admins can create",
+    // Index progress
+    indexingInProgress: "Indexing...",
+    indexComplete: "Index complete",
+    indexFailed: "Index failed",
+    // Index health
+    indexHealth: "Index Health",
+    indexedCount: "Indexed",
+    failedCount: "Failed",
+    pendingCount: "Pending",
+    indexingCount: "Indexing",
+    indexDuration: "Avg index duration",
+    retrievalLatency: "Retrieval latency (P95)",
+    retrievalLatencyAvg: "Retrieval latency (Avg)",
+    totalQueries: "Total queries",
+    noIndexData: "No index data yet",
   },
 
   // Breadcrumb
@@ -412,6 +427,19 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+  },
+
+  // Failure classification (ISSUE-02)
+  failure: {
+    execution_failed: "An internal error occurred while processing your request. Please try again or contact support.",
+    upload_failed: "File upload failed. Please check the file format and size, then re-upload.",
+    external_dependency_unavailable: "An external service (AI model or data source) is temporarily unavailable. Please wait a moment and try again.",
+    action_retry: "Retry",
+    action_reupload: "Re-upload",
+    action_wait_retry: "Wait and retry",
+    layer_runtime: "Runtime",
+    layer_gateway: "Gateway",
+    layer_external: "External",
   },
 
   subtasks: {

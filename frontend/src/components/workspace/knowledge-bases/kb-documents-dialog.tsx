@@ -26,6 +26,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateDocument,
   useDeleteDocument,
+  useDocumentIndexStatus,
   useDocuments,
   useReindexDocument,
   useSearchKnowledgeBase,
@@ -33,6 +34,8 @@ import {
   useUploadDocument,
 } from "@/core/knowledge-base";
 import type { KnowledgeBase, KnowledgeBaseDocument, SearchResultItem } from "@/core/knowledge-base";
+
+import { KbIndexHealthCard } from "./kb-index-health-card";
 
 interface KBDocumentsDialogProps {
   open: boolean;
@@ -85,6 +88,8 @@ export function KBDocumentsDialog({
         </DialogHeader>
 
         <div className="flex flex-col gap-4 py-2">
+          <KbIndexHealthCard kbId={knowledgeBase.id} />
+
           <div className="flex items-center justify-between">
             <span className="text-muted-foreground text-sm">
               {documents.length} {t.knowledgeBase.documentCount}
@@ -148,6 +153,12 @@ function AddDocumentForm({
   const [file, setFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Track the just-uploaded document for index progress polling
+  const [trackingDocId, setTrackingDocId] = useState<string | null>(null);
+  const indexStatus = useDocumentIndexStatus(kbId, trackingDocId, {
+    enabled: trackingDocId !== null,
+  });
+
   async function handleTextSubmit() {
     if (!title.trim() || !content.trim()) return;
     try {
@@ -164,15 +175,79 @@ function AddDocumentForm({
   async function handleFileSubmit() {
     if (!file) return;
     try {
-      await uploadDoc.mutateAsync({
+      const doc = await uploadDoc.mutateAsync({
         file,
         title: title.trim() || undefined,
       });
-      toast.success(t.knowledgeBase.uploadSuccess);
-      onDone();
+      setTrackingDocId(doc.id);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  // When index status resolves to terminal, act accordingly
+  const status = indexStatus.data?.index_status;
+  const isTerminal = status === "indexed" || status === "failed";
+
+  // Show upload progress tracker after successful upload
+  if (trackingDocId) {
+    const isIndexing = status === "pending" || status === "indexing";
+    return (
+      <div className="bg-muted/50 flex flex-col gap-3 rounded-lg border p-4">
+        <div className="flex items-center gap-2">
+          <FileTextIcon className="text-muted-foreground h-4 w-4" />
+          <span className="text-sm font-medium truncate">
+            {title || file?.name || trackingDocId}
+          </span>
+        </div>
+
+        {isIndexing && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <RefreshCwIcon className="h-3.5 w-3.5 animate-spin" />
+            <span>{t.knowledgeBase.indexingInProgress}</span>
+          </div>
+        )}
+
+        {status === "indexed" && (
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-xs">
+              {indexStatus.data?.chunk_count ?? 0} {t.knowledgeBase.chunks}
+            </Badge>
+            <span className="text-sm text-muted-foreground">{t.knowledgeBase.indexComplete}</span>
+          </div>
+        )}
+
+        {status === "failed" && (
+          <div className="flex flex-col gap-2">
+            <div className="text-destructive text-sm font-medium">
+              {t.knowledgeBase.indexFailed}
+            </div>
+            {indexStatus.data?.index_error && (
+              <p className="text-destructive/80 text-xs">{indexStatus.data.index_error}</p>
+            )}
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setTrackingDocId(null);
+                }}
+              >
+                {t.common.cancel}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {isTerminal && (
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={onDone}>
+              {t.common.close}
+            </Button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -284,6 +359,7 @@ function DocumentRow({ doc, kbId }: { doc: KnowledgeBaseDocument; kbId: string }
   const [editing, setEditing] = useState(false);
   const statusMeta = getDocumentStatusMeta(doc, t);
   const indexing = isDocumentIndexing(doc.index_status);
+  const isFailed = doc.index_status === "failed";
 
   async function handleDelete() {
     if (!confirm(t.knowledgeBase.deleteDocumentConfirm)) return;
@@ -331,13 +407,30 @@ function DocumentRow({ doc, kbId }: { doc: KnowledgeBaseDocument; kbId: string }
             {doc.chunk_count} {t.knowledgeBase.chunks}
           </Badge>
         </div>
-        {doc.index_status === "failed" && doc.index_error ? (
-          <p
-            className="text-destructive mt-1 truncate pl-6 text-xs"
-            title={doc.index_error}
-          >
-            {doc.index_error}
-          </p>
+        {isFailed && doc.index_error ? (
+          <div className="mt-1.5 pl-6">
+            <p className="text-destructive text-xs font-medium">
+              {t.knowledgeBase.indexFailed}
+            </p>
+            <p
+              className="text-destructive/70 mt-0.5 text-xs"
+              title={doc.index_error}
+            >
+              {doc.index_error}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs mt-1.5 h-7"
+              onClick={handleReindex}
+              disabled={reindexMutation.isPending}
+            >
+              <RefreshCwIcon
+                className={`mr-1 h-3 w-3 ${reindexMutation.isPending ? "animate-spin" : ""}`}
+              />
+              {t.knowledgeBase.reindex}
+            </Button>
+          </div>
         ) : null}
       </div>
       <div className="flex shrink-0 gap-1">

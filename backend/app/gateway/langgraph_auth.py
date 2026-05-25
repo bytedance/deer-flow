@@ -21,6 +21,7 @@ import secrets
 from langgraph_sdk import Auth
 
 from deerflow.config.auth_config import get_auth_config
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 
 auth = Auth()
 
@@ -67,13 +68,19 @@ def _check_csrf(request) -> None:
     if not cookie_token or not header_token:
         raise Auth.exceptions.HTTPException(
             status_code=403,
-            detail="CSRF token missing. Include X-CSRF-Token header.",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.PERMISSION_DENIED,
+                message="CSRF token missing. Include X-CSRF-Token header.",
+            ).model_dump(),
         )
 
     if not secrets.compare_digest(cookie_token, header_token):
         raise Auth.exceptions.HTTPException(
             status_code=403,
-            detail="CSRF token mismatch.",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.PERMISSION_DENIED,
+                message="CSRF token mismatch.",
+            ).model_dump(),
         )
 
 
@@ -93,7 +100,10 @@ async def authenticate(request):
     if not token:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Not authenticated",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.NOT_AUTHENTICATED,
+                message="Not authenticated",
+            ).model_dump(),
         )
 
     config = get_auth_config()
@@ -104,14 +114,20 @@ async def authenticate(request):
         if ins_provider is None:
             raise Auth.exceptions.HTTPException(
                 status_code=503,
-                detail="ins-base auth provider not available",
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.PROVIDER_UNAVAILABLE,
+                    message="ins-base auth provider not available",
+                ).model_dump(),
             )
 
         user = await ins_provider.get_user(token)
         if user is None:
             raise Auth.exceptions.HTTPException(
                 status_code=401,
-                detail="Invalid or expired token",
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.TOKEN_INVALID,
+                    message="Invalid or expired token",
+                ).model_dump(),
             )
 
         user_data = getattr(user, "ins_base_user_data", {})
@@ -125,7 +141,10 @@ async def authenticate(request):
     if isinstance(payload, TokenError):
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Invalid token",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_INVALID,
+                message="Invalid token",
+            ).model_dump(),
         )
 
     await _ensure_engine()
@@ -135,12 +154,18 @@ async def authenticate(request):
     if user is None:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="User not found",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.USER_NOT_FOUND,
+                message="User not found",
+            ).model_dump(),
         )
     if user.token_version != payload.ver:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Token revoked (password changed)",
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_INVALID,
+                message="Token revoked (password changed)",
+            ).model_dump(),
         )
 
     return payload.sub

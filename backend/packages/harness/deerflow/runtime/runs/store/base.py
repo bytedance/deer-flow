@@ -28,6 +28,8 @@ class RunStore(abc.ABC):
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         error: str | None = None,
+        failure_category: str | None = None,
+        failed_layer: str | None = None,
         created_at: str | None = None,
     ) -> None:
         pass
@@ -53,6 +55,8 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
+        failure_category: str | None = None,
+        failed_layer: str | None = None,
     ) -> None:
         pass
 

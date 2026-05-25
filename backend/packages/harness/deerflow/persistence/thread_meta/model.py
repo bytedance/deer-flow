@@ -19,6 +19,7 @@ class ThreadMetaRow(Base):
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default", index=True)
     display_name: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(String(20), default="idle")
+    # Canonical: "idle" | "active" | "archived" (aggregated from Run statuses)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))

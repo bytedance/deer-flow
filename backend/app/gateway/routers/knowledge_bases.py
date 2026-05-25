@@ -16,6 +16,10 @@ from app.gateway.routers.knowledge_base_schemas import (
     DocumentIndexStatusResponse,
     DocumentResponse,
     GrantPermissionRequest,
+    HealthSummaryResponse,
+    IndexStatsResponse,
+    KnowledgeBaseDetailResponse,
+    KnowledgeBaseListResponse,
     KnowledgeBaseResponse,
     PermissionResponse,
     SearchRequest,
@@ -84,7 +88,7 @@ async def _enrich_permissions(items: list[dict], svc, user) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[KnowledgeBaseResponse])
+@router.get("", response_model=list[KnowledgeBaseListResponse])
 async def list_knowledge_bases(
     request: Request,
     visibility: str | None = None,
@@ -102,6 +106,7 @@ async def list_knowledge_bases(
     )
     await _enrich_owner_display_names(items)
     await _enrich_permissions(items, svc, user)
+    await svc.enrich_list_with_index_counts(items)
     return items
 
 
@@ -134,7 +139,7 @@ async def create_knowledge_base(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/admin/all", response_model=list[KnowledgeBaseResponse])
+@router.get("/admin/all", response_model=list[KnowledgeBaseListResponse])
 async def list_admin_knowledge_bases(
     request: Request,
     visibility: str | None = None,
@@ -155,10 +160,25 @@ async def list_admin_knowledge_bases(
         raise HTTPException(status_code=403, detail="Admin role required")
     await _enrich_owner_display_names(items)
     await _enrich_permissions(items, svc, user)
+    await svc.enrich_list_with_index_counts(items)
     return items
 
 
-@router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
+@router.get("/health-summary", response_model=HealthSummaryResponse)
+async def get_health_summary(request: Request):
+    """Return cross-KB global health summary.
+
+    Aggregates index success rates, retrieval latency, and failure
+    distributions across all knowledge bases accessible to the user.
+    """
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    return await svc.get_health_summary(
+        tenant_id=user.tenant_id, user_id=str(user.id)
+    )
+
+
+@router.get("/{kb_id}", response_model=KnowledgeBaseDetailResponse)
 async def get_knowledge_base(
     kb_id: str,
     request: Request,
@@ -171,6 +191,23 @@ async def get_knowledge_base(
     if kb is None:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     await _enrich_owner_display_names([kb])
+
+    doc_status = await svc._doc_repo.count_docs_by_status_for_kb(kb_id)
+    kb["indexed_count"] = doc_status.get("ready", 0)
+    kb["indexing_count"] = doc_status.get("indexing", 0)
+    kb["failed_count"] = doc_status.get("failed", 0)
+
+    failed_jobs = await svc._job_repo.failed_jobs_by_kb(kb_id)
+    kb["recent_failures"] = [
+        {
+            "job_id": j.get("id"),
+            "doc_id": j.get("document_id"),
+            "error": j.get("error"),
+            "finished_at": j.get("finished_at"),
+        }
+        for j in failed_jobs
+    ]
+
     return kb
 
 
@@ -424,6 +461,31 @@ async def reindex_all(
     except PermissionError:
         raise HTTPException(status_code=403, detail="Admin role required")
     return report
+
+
+# ---------------------------------------------------------------------------
+# Index Stats (observability)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{kb_id}/index-stats", response_model=IndexStatsResponse)
+async def get_index_stats(
+    kb_id: str,
+    request: Request,
+):
+    """Return aggregated index health stats for a knowledge base.
+
+    Includes per-status document counts, failure classification,
+    average index job duration, and recent failure details.
+    """
+    user = await get_current_user_from_request(request)
+    svc = _get_kb_service(request)
+    stats = await svc.get_index_stats(
+        kb_id, tenant_id=user.tenant_id, user_id=str(user.id)
+    )
+    if stats is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return stats
 
 
 # ---------------------------------------------------------------------------

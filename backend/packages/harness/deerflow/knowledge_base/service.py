@@ -719,25 +719,221 @@ class KnowledgeBaseService:
         kb_id: str,
         *,
         tenant_id: str,
-        owner_user_id: str,
+        user_id: str,
         query: str,
         top_k: int = 5,
     ) -> list[dict[str, Any]]:
+        import time
+
         from deerflow.rag.job_context import kb_context
         from deerflow.rag.retrieval import DocumentRetriever
 
-        kb = await self._kb_repo.get(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+        kb = await self._kb_repo.get_accessible(kb_id, tenant_id=tenant_id, user_id=user_id)
         if kb is None:
             raise ValueError(f"Knowledge base {kb_id} not found")
 
         retriever = DocumentRetriever()
-        with kb_context(tenant_id=tenant_id, user_id=owner_user_id):
+        t0 = time.monotonic()
+        with kb_context(tenant_id=tenant_id, user_id=user_id):
             result = retriever.retrieve(query, collection=kb["collection_name"], top_k=top_k)
+        latency_ms = (time.monotonic() - t0) * 1000
+
+        from deerflow.knowledge_base.telemetry import get_kb_telemetry
+
+        telemetry = get_kb_telemetry()
+        telemetry.record_latency(kb_id, latency_ms)
+        telemetry.record_event("search", {
+            "kb_id": kb_id,
+            "tenant_id": tenant_id,
+            "top_k": top_k,
+            "result_count": len(result.results),
+            "latency_ms": round(latency_ms, 2),
+        })
 
         return [
             {"chunk_id": r.chunk_id, "content": r.content, "score": r.score, "metadata": r.metadata}
             for r in result.results
         ]
+
+    # ------------------------------------------------------------------
+    # Index stats (observability)
+    # ------------------------------------------------------------------
+
+    async def get_index_stats(
+        self,
+        kb_id: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Return aggregated index health stats for a knowledge base."""
+        kb = await self._kb_repo.get_accessible(kb_id, tenant_id=tenant_id, user_id=user_id)
+        if kb is None:
+            return None
+
+        doc_status = await self._doc_repo.count_docs_by_status_for_kb(kb_id)
+        job_stats = await self._job_repo.stats_by_kb(kb_id)
+        failed_jobs = await self._job_repo.failed_jobs_by_kb(kb_id)
+
+        from deerflow.knowledge_base.index_error_classifier import classify_failures
+
+        failure_by_type = classify_failures(failed_jobs)
+
+        from deerflow.knowledge_base.telemetry import get_kb_telemetry
+
+        latency = get_kb_telemetry().latency_stats(kb_id)
+
+        return {
+            "total": sum(doc_status.values()),
+            "ready": doc_status.get("ready", 0),
+            "pending": doc_status.get("pending", 0),
+            "indexing": doc_status.get("indexing", 0),
+            "failed": doc_status.get("failed", 0),
+            "cancelled": doc_status.get("cancelled", 0),
+            "failure_by_type": failure_by_type,
+            "avg_index_duration_ms": job_stats.get("avg_index_duration_ms", 0.0),
+            "avg_retrieval_latency_ms": latency.get("avg_ms", 0.0),
+            "p95_retrieval_latency_ms": latency.get("p95_ms", 0.0),
+            "total_queries": latency.get("total_queries", 0),
+            "recent_failures": [
+                {
+                    "job_id": j.get("id"),
+                    "doc_id": j.get("document_id"),
+                    "error": j.get("error"),
+                    "finished_at": j.get("finished_at"),
+                }
+                for j in failed_jobs
+            ],
+        }
+
+    async def get_health_summary(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Return cross-KB global health summary.
+
+        Aggregates index success rates, retrieval latency, and failure
+        distributions across all knowledge bases accessible to the user.
+        """
+        from deerflow.knowledge_base.index_error_classifier import classify_failures
+        from deerflow.knowledge_base.telemetry import get_kb_telemetry
+
+        kbs = await self._kb_repo.list_accessible(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=500,
+            offset=0,
+        )
+
+        if not kbs:
+            return {
+                "total_kbs": 0,
+                "documents": {"total": 0, "ready": 0, "pending": 0, "indexing": 0, "failed": 0, "cancelled": 0},
+                "index_success_rate": 0.0,
+                "failure_by_type": {},
+                "retrieval": {"avg_latency_ms": 0.0, "p95_latency_ms": 0.0, "total_queries": 0},
+                "recent_failures": [],
+                "per_kb": [],
+            }
+
+        per_kb: list[dict[str, Any]] = []
+        total_docs = 0
+        ready_docs = 0
+        pending_docs = 0
+        indexing_docs = 0
+        failed_docs = 0
+        cancelled_docs = 0
+        all_failure_by_type: dict[str, int] = {}
+        all_recent_failures: list[dict[str, Any]] = []
+        total_retrieval_queries = 0
+        weighted_latency_sum = 0.0
+
+        for kb in kbs:
+            kb_id = kb["id"]
+            stats = await self.get_index_stats(kb_id, tenant_id=tenant_id, user_id=user_id)
+            if stats is None:
+                continue
+
+            total_docs += stats["total"]
+            ready_docs += stats["ready"]
+            pending_docs += stats["pending"]
+            indexing_docs += stats["indexing"]
+            failed_docs += stats["failed"]
+            cancelled_docs += stats["cancelled"]
+
+            for cat, count in (stats.get("failure_by_type") or {}).items():
+                all_failure_by_type[cat] = all_failure_by_type.get(cat, 0) + count
+
+            all_recent_failures.extend(stats.get("recent_failures") or [])
+
+            q_count = stats.get("total_queries", 0)
+            avg_ms = stats.get("avg_retrieval_latency_ms", 0.0)
+            total_retrieval_queries += q_count
+            weighted_latency_sum += avg_ms * q_count
+
+            per_kb.append({
+                "kb_id": kb_id,
+                "kb_name": kb.get("name", ""),
+                "total": stats["total"],
+                "ready": stats["ready"],
+                "failed": stats["failed"],
+                "avg_retrieval_latency_ms": avg_ms,
+                "total_queries": q_count,
+            })
+
+        all_recent_failures.sort(key=lambda f: f.get("finished_at") or "", reverse=True)
+        all_recent_failures = all_recent_failures[:20]
+
+        global_avg_latency = round(weighted_latency_sum / total_retrieval_queries, 2) if total_retrieval_queries > 0 else 0.0
+
+        # Aggregate p95 from telemetry samples across all KBs
+        telemetry = get_kb_telemetry()
+        all_latency_samples: list[float] = []
+        with telemetry._lock:
+            for kb_id in (kb["id"] for kb in kbs):
+                samples = telemetry._latencies.get(kb_id, [])
+                all_latency_samples.extend(samples)
+        if all_latency_samples:
+            global_p95 = round(sorted(all_latency_samples)[int(len(all_latency_samples) * 0.95)], 2)
+        else:
+            global_p95 = 0.0
+
+        index_success_rate = round(ready_docs / total_docs, 4) if total_docs > 0 else 0.0
+
+        return {
+            "total_kbs": len(kbs),
+            "documents": {
+                "total": total_docs,
+                "ready": ready_docs,
+                "pending": pending_docs,
+                "indexing": indexing_docs,
+                "failed": failed_docs,
+                "cancelled": cancelled_docs,
+            },
+            "index_success_rate": index_success_rate,
+            "failure_by_type": all_failure_by_type,
+            "retrieval": {
+                "avg_latency_ms": global_avg_latency,
+                "p95_latency_ms": global_p95,
+                "total_queries": total_retrieval_queries,
+            },
+            "recent_failures": all_recent_failures,
+            "per_kb": per_kb,
+        }
+
+    async def enrich_list_with_index_counts(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Add indexed_count and failed_count to each KB dict in a list."""
+        if not items:
+            return items
+        kb_ids = [item["id"] for item in items]
+        doc_counts = await self._doc_repo.count_docs_by_status_for_kbs(kb_ids)
+        for item in items:
+            counts = doc_counts.get(item["id"], {})
+            item["indexed_count"] = counts.get("ready", 0)
+            item["failed_count"] = counts.get("failed", 0)
+        return items
 
     # ------------------------------------------------------------------
     # Startup hooks

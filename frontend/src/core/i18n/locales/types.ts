@@ -255,6 +255,21 @@ export interface Translations {
     groupPublic: string;
     visibilityHintTenant: string;
     visibilityHintPublic: string;
+    // Index progress
+    indexingInProgress: string;
+    indexComplete: string;
+    indexFailed: string;
+    // Index health
+    indexHealth: string;
+    indexedCount: string;
+    failedCount: string;
+    pendingCount: string;
+    indexingCount: string;
+    indexDuration: string;
+    retrievalLatency: string;
+    retrievalLatencyAvg: string;
+    totalQueries: string;
+    noIndexData: string;
   };
 
   // Breadcrumb
@@ -324,6 +339,19 @@ export interface Translations {
   uploads: {
     uploading: string;
     uploadingFiles: string;
+  };
+
+  // Failure classification (ISSUE-02)
+  failure: {
+    execution_failed: string;
+    upload_failed: string;
+    external_dependency_unavailable: string;
+    action_retry: string;
+    action_reupload: string;
+    action_wait_retry: string;
+    layer_runtime: string;
+    layer_gateway: string;
+    layer_external: string;
   };
 
   // Subtasks

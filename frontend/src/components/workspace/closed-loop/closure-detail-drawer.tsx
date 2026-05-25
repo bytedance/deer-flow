@@ -220,14 +220,20 @@ function Row({
 }
 
 function SourceLink({ ticket }: { ticket: ClosureTicket }) {
-  const href =
-    ticket.source_type === "diagnosis" || ticket.source_type === "manual"
-      ? ticket.source_thread_id
-        ? `/workspace/chats/${ticket.source_thread_id}`
-        : null
-      : ticket.source_run_id
-        ? `/workspace/report-runs/${ticket.source_run_id}`
-        : null;
+  let href: string | null = null;
+  let label = "";
+
+  if (ticket.source_type === "report" && ticket.source_run_id) {
+    href = `/workspace/report-runs/${ticket.source_run_id}`;
+    label = "前往报告详情";
+  } else if (ticket.source_type === "diagnosis" && ticket.source_thread_id) {
+    href = `/workspace/chats/${ticket.source_thread_id}`;
+    label = "前往诊断会话";
+  } else if (ticket.source_thread_id) {
+    href = `/workspace/chats/${ticket.source_thread_id}`;
+    label = "前往来源会话";
+  }
+
   if (!href) return null;
   return (
     <section>
@@ -238,7 +244,7 @@ function SourceLink({ ticket }: { ticket: ClosureTicket }) {
         href={href}
         className="text-xs underline-offset-2 hover:underline"
       >
-        前往原始 {ticket.source_type === "diagnosis" ? "诊断会话" : "报告"} →
+        {label} →
       </a>
     </section>
   );

@@ -23,6 +23,26 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from deerflow.shared.status import RunStatus
+
+# ---------------------------------------------------------------------------
+# Error code constants — standardized traceability failure semantics
+# ---------------------------------------------------------------------------
+
+
+class ReportRunErrorCode:
+    """Standardized error code prefixes for the template→run→artifact chain.
+
+    These are set in ``ReportRunRecord.error_code`` by runtime tools when the
+    corresponding failure occurs. The UI maps these prefixes to user-facing messages.
+    """
+
+    TEMPLATE_UNAVAILABLE = "TEMPLATE_UNAVAILABLE"
+    KB_UNAVAILABLE = "KB_UNAVAILABLE"
+    RUN_INTERRUPTED = "RUN_INTERRUPTED"
+    DATA_STEP_FAILED = "DATA_STEP_FAILED"
+
+
 # ---------------------------------------------------------------------------
 # ID validation (§7.1.4)
 # ---------------------------------------------------------------------------
@@ -225,7 +245,7 @@ class ReportTemplateVersionRecord(BaseModel):
 # ReportRun — runs/{id}.json
 # ---------------------------------------------------------------------------
 
-RunStatus = Literal["pending", "running", "succeeded", "failed", "canceled"]
+# ISSUE-02: RunStatus now imported from shared/status.py; "canceled" → "cancelled" spelling unified
 
 
 class ReportRunRecord(BaseModel):
@@ -251,6 +271,8 @@ class ReportRunRecord(BaseModel):
     data_snapshot_paths: list[str] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
+    knowledge_sources: list[dict[str, Any]] = Field(default_factory=list)
+    trigger_type: str = "manual"
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None

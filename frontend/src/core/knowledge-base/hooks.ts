@@ -6,6 +6,9 @@ import {
   createKnowledgeBase,
   deleteDocument,
   deleteKnowledgeBase,
+  getDocumentIndexStatus,
+  getHealthSummary,
+  getIndexStats,
   grantPermission,
   listAdminKnowledgeBases,
   listDocuments,
@@ -21,6 +24,7 @@ import {
 import type {
   CreateDocumentRequest,
   CreateKBRequest,
+  DocumentIndexStatus,
   GrantPermissionRequest,
   KnowledgeBaseDocument,
   UpdateDocumentRequest,
@@ -230,6 +234,31 @@ export function useUploadDocument(kbId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Document index status (lightweight polling for single document)
+// ---------------------------------------------------------------------------
+
+const INDEX_STATUS_POLL_INTERVAL_MS = 2000;
+
+export function useDocumentIndexStatus(
+  kbId: string,
+  docId: string | null,
+  { enabled = true } = {},
+) {
+  return useQuery<DocumentIndexStatus>({
+    queryKey: ["knowledge-bases", kbId, "documents", docId, "index-status"],
+    queryFn: () => getDocumentIndexStatus(kbId, docId!),
+    enabled: enabled && !!kbId && !!docId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.index_status;
+      if (status === "pending" || status === "indexing") {
+        return INDEX_STATUS_POLL_INTERVAL_MS;
+      }
+      return false;
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Permissions
 // ---------------------------------------------------------------------------
 
@@ -298,4 +327,31 @@ export function useAdminKnowledgeBases({
     isLoading,
     error,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Index stats (observability)
+// ---------------------------------------------------------------------------
+
+export function useIndexStats(
+  kbId: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: ["knowledge-bases", kbId, "index-stats"],
+    queryFn: () => getIndexStats(kbId),
+    enabled: enabled && !!kbId,
+    refetchOnWindowFocus: false,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useHealthSummary({ enabled = true }: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ["knowledge-bases", "health-summary"],
+    queryFn: getHealthSummary,
+    enabled,
+    refetchOnWindowFocus: false,
+    refetchInterval: 60_000,
+  });
 }

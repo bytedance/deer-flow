@@ -65,7 +65,7 @@ def _persistence_engine(tmp_path):
 def _setup_config():
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
     from deerflow.config.auth_config import load_auth_config_from_dict
-    load_auth_config_from_dict({"provider": "local", "jwt_secret": _TEST_SECRET})
+    load_auth_config_from_dict({"enabled": True, "provider": "local", "jwt_secret": _TEST_SECRET})
 
 
 # ── CSRF Middleware Path Matching ────────────────────────────────────
@@ -256,6 +256,8 @@ def test_get_current_user_no_cookie_returns_not_authenticated():
     from fastapi import HTTPException
 
     from app.gateway.deps import get_current_user_from_request
+
+    _setup_config()
 
     mock_request = type("MockRequest", (), {"cookies": {}})()
     with pytest.raises(HTTPException) as exc_info:

@@ -7,6 +7,7 @@ import { useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useReportRuns, useReportThreads } from "@/core/report-templates";
 import type { RunStatus } from "@/core/report-templates/types";
+import { buildCrossPageURL, logCrossPageNavigation } from "@/core/models/navigation";
 import { titleOfThread, pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
@@ -17,7 +18,7 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   running: "运行中",
   success: "成功",
   failed: "失败",
-  canceled: "已取消",
+  cancelled: "已取消",
 };
 
 const STATUS_COLOR: Record<RunStatus, string> = {
@@ -25,7 +26,7 @@ const STATUS_COLOR: Record<RunStatus, string> = {
   running: "bg-blue-500/15 text-blue-700 dark:text-blue-300",
   success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
   failed: "bg-red-500/15 text-red-700 dark:text-red-300",
-  canceled: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  cancelled: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
 };
 
 function RunsTab() {
@@ -56,9 +57,11 @@ function RunsTab() {
           <tr>
             <th className="px-3 py-2 text-left font-medium">运行 ID</th>
             <th className="px-3 py-2 text-left font-medium">模板</th>
+            <th className="px-3 py-2 text-left font-medium">版本</th>
             <th className="px-3 py-2 text-left font-medium">状态</th>
             <th className="px-3 py-2 text-left font-medium">创建时间</th>
             <th className="px-3 py-2 text-left font-medium">参数摘要</th>
+            <th className="px-3 py-2 text-left font-medium">来源对话</th>
           </tr>
         </thead>
         <tbody>
@@ -82,6 +85,11 @@ function RunsTab() {
                 >
                   {run.template_version_ref ?? `v${run.template_version}`}
                 </Link>
+              </td>
+              <td className="px-3 py-2 text-xs text-muted-foreground">
+                {run.template_version != null
+                  ? `v${run.template_version}`
+                  : run.template_version_ref ?? "—"}
               </td>
               <td className="px-3 py-2">
                 <span
@@ -107,6 +115,34 @@ function RunsTab() {
                     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
                     .join("  ")}
                 </div>
+              </td>
+              <td className="px-3 py-2">
+                {run.thread_id ? (
+                  <Link
+                    href={buildCrossPageURL(pathOfThread(run.thread_id), {
+                      sourceType: "report",
+                      sourceId: run.id,
+                      threadId: run.thread_id,
+                      runId: run.run_id,
+                    })}
+                    onClick={() =>
+                      logCrossPageNavigation(
+                        {
+                          sourceType: "report",
+                          sourceId: run.id,
+                          threadId: run.thread_id,
+                          runId: run.run_id,
+                        },
+                        "outbound",
+                      )
+                    }
+                    className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
+                  >
+                    {run.thread_id.slice(0, 12)}…
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground text-xs">—</span>
+                )}
               </td>
             </tr>
           ))}

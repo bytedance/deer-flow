@@ -194,6 +194,7 @@ class ClosureService:
             assignee_id=filters.assignee_id,
             created_by=filters.created_by,
             source_type=filters.source_type.value if filters.source_type else None,
+            source_run_id=filters.source_run_id,
             priority=filters.priority.value if filters.priority else None,
             is_overdue=filters.is_overdue,
             created_at_gte=filters.created_at_gte,

@@ -121,7 +121,7 @@ class TestSearchKnowledgeBaseTool:
         ) as mock_multi:
             mock_sf.return_value = MagicMock()
             mock_resolve_ids.return_value = [
-                {"id": "kb-1", "collection_name": "col_1", "name": "KB One"}
+                {"id": "kb-1", "collection_name": "col_1", "name": "KB One", "visibility": "tenant", "tenant_id": "t1", "owner_user_id": "u1", "deleted_at": None}
             ]
             mock_multi.return_value = [
                 SearchResult(

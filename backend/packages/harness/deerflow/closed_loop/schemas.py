@@ -148,6 +148,7 @@ class ListTicketsFilter(BaseModel):
     assignee_id: str | None = None
     created_by: str | None = None
     source_type: ClosureSourceType | None = None
+    source_run_id: str | None = None
     priority: ClosurePriority | None = None
     is_overdue: bool | None = None
 

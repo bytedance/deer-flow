@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from typing import Any
 
 from deerflow.config.rag_config import get_rag_config
 from deerflow.config.tenant import get_current_tenant_id
+from deerflow.knowledge_base.telemetry import get_kb_telemetry
 from deerflow.rag.job_context import kb_context
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.thread_meta import make_thread_store
@@ -251,6 +253,9 @@ def multi_kb_retrieve(
         {kb.get("embedding_model") or "__global__" for kb in eligible_kbs}
     )
 
+    # Track per-KB start times for telemetry latency
+    _start_times: dict[str, float] = {str(kb["id"]): time.time() for kb in eligible_kbs}
+
     if not eligible_kbs:
         logger.info(
             "multi_kb_retrieve: per_kb=%s strategy=%s threshold=%s total=0 top_k=%d "
@@ -272,6 +277,9 @@ def multi_kb_retrieve(
                 try:
                     results = future.result(timeout=timeout_s)
                     per_kb_results.append(results)
+                    kb_id_str = str(kb_id)
+                    latency_ms = (time.time() - _start_times.get(kb_id_str, time.time())) * 1000
+                    get_kb_telemetry().record_latency(kb_id_str, round(latency_ms, 2))
                     if results:
                         scores = [r.score for r in results]
                         raw_max = max(scores)
@@ -290,7 +298,14 @@ def multi_kb_retrieve(
                         }
                     )
                 except TimeoutError:
+                    kb_id_str = str(kb_id)
+                    latency_ms = (time.time() - _start_times.get(kb_id_str, time.time())) * 1000
                     logger.warning("Retrieval timed out for KB %s (limit: %dms)", kb_id, config.per_kb_timeout_ms)
+                    get_kb_telemetry().record_latency(kb_id_str, round(latency_ms, 2))
+                    get_kb_telemetry().record_event("retrieval.timeout", {
+                        "kb_id": kb_id_str,
+                        "timeout_ms": config.per_kb_timeout_ms,
+                    })
                     per_kb_stats.append(
                         {
                             "kb_id": str(kb_id),
@@ -303,7 +318,14 @@ def multi_kb_retrieve(
                         }
                     )
                 except Exception as e:
+                    kb_id_str = str(kb_id)
+                    latency_ms = (time.time() - _start_times.get(kb_id_str, time.time())) * 1000
                     logger.warning("Retrieval failed for KB %s: %s", kb_id, e)
+                    get_kb_telemetry().record_latency(kb_id_str, round(latency_ms, 2))
+                    get_kb_telemetry().record_event("retrieval.failed", {
+                        "kb_id": kb_id_str,
+                        "error_type": type(e).__name__,
+                    })
                     per_kb_stats.append(
                         {
                             "kb_id": str(kb_id),
@@ -317,6 +339,10 @@ def multi_kb_retrieve(
                     )
         except TimeoutError:
             logger.warning("Overall multi-KB retrieval timed out after %dms", int(timeout_s * len(eligible_kbs) * 1000))
+            get_kb_telemetry().record_event("retrieval.timeout", {
+                "kb_id": "__overall__",
+                "timeout_ms": int(timeout_s * len(eligible_kbs) * 1000),
+            })
 
     all_results: list[SearchResult] = []
     score_strategy = (getattr(config, "cross_kb_score_strategy", "absolute") or "absolute").lower()
@@ -366,5 +392,11 @@ def multi_kb_retrieve(
         top_k,
         embedding_models_used,
     )
+
+    get_kb_telemetry().record_event("retrieval.completed", {
+        "total_results": len(deduped),
+        "kb_count": len(eligible_kbs),
+        "per_kb_hits": {s["kb_id"]: s["returned"] for s in per_kb_stats},
+    })
 
     return deduped

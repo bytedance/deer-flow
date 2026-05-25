@@ -66,6 +66,9 @@ class RunResponse(BaseModel):
     multitask_strategy: str = "reject"
     created_at: str = ""
     updated_at: str = ""
+    error: str | None = None
+    failure_category: str | None = None
+    failed_layer: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,9 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         multitask_strategy=record.multitask_strategy,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        error=record.error,
+        failure_category=record.failure_category,
+        failed_layer=record.failed_layer,
     )
 
 

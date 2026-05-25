@@ -24,6 +24,7 @@ Used by:
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, Final
 
@@ -40,6 +41,18 @@ _PUSHABLE_COMPONENTS: Final[frozenset[str]] = frozenset(
 
 class PushBlockError(Exception):
     """Raised when push_block_to_sse cannot deliver the block."""
+
+
+def build_ui_block_marker(block: dict[str, Any]) -> str:
+    """Encode a block as the same marker format used by ``render_ui_tool``.
+
+    Historical GenUI recovery scans message content for ``<!--ui_block:...-->``
+    markers. Report runtime helpers bypass ``render_ui_tool``, so they must
+    synthesize the same marker format explicitly when they want the block to be
+    recoverable from tool-message history.
+    """
+    block_json = json.dumps(block, ensure_ascii=False, separators=(",", ":"))
+    return f"<!--ui_block:{block_json}-->"
 
 
 def push_block_to_sse(

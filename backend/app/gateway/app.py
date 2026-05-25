@@ -21,6 +21,7 @@ from app.gateway.routers import (
     audio,
     auth_router,
     auth,
+    capabilities,
     channels,
     closure_tickets,
     cost,
@@ -708,6 +709,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # System diagnostics (admin-only): pdf-converter status etc.
     app.include_router(system.router)
+
+    # Unified capability configuration view (ISSUE-10)
+    app.include_router(capabilities.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

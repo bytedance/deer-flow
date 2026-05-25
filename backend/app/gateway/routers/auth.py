@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.auth.models import UserResponse
 from app.gateway.auth.ins_base_provider import InsBaseAuthProvider
 from app.gateway.csrf_middleware import is_secure_request
@@ -72,19 +73,37 @@ async def refresh(request: Request, response: Response):
     """
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
-        raise HTTPException(status_code=401, detail="No refresh token")
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.NOT_AUTHENTICATED,
+                message="No refresh token",
+            ).model_dump(),
+        )
 
     from app.gateway.deps import get_ins_base_provider
 
     provider = get_ins_base_provider()
     if provider is None or not isinstance(provider, InsBaseAuthProvider):
-        raise HTTPException(status_code=503, detail="Authentication provider not available")
+        raise HTTPException(
+            status_code=503,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.PROVIDER_UNAVAILABLE,
+                message="Authentication provider not available",
+            ).model_dump(),
+        )
 
     new_token = await provider.refresh_token(refresh_token)
     if new_token is None:
         response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
         response.delete_cookie(key="refresh_token", secure=is_secure_request(request), samesite="lax")
-        raise HTTPException(status_code=401, detail="Refresh token expired or invalid")
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_EXPIRED,
+                message="Refresh token expired or invalid",
+            ).model_dump(),
+        )
 
     _set_session_cookie(response, new_token, request)
     # Keep the same refresh_token cookie (refresh rotation not supported by ins-base)
@@ -102,17 +121,35 @@ async def get_me(request: Request):
     """
     access_token = request.cookies.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.NOT_AUTHENTICATED,
+                message="Not authenticated",
+            ).model_dump(),
+        )
 
     from app.gateway.deps import get_ins_base_provider
 
     provider = get_ins_base_provider()
     if provider is None or not isinstance(provider, InsBaseAuthProvider):
-        raise HTTPException(status_code=503, detail="Authentication provider not available")
+        raise HTTPException(
+            status_code=503,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.PROVIDER_UNAVAILABLE,
+                message="Authentication provider not available",
+            ).model_dump(),
+        )
 
     user = await provider.get_user(access_token)
     if user is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_INVALID,
+                message="Invalid or expired token",
+            ).model_dump(),
+        )
 
     user_data = getattr(user, "ins_base_user_data", {})
     user_id = str(user_data.get("userId", user.id))

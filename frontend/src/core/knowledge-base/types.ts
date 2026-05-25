@@ -18,6 +18,63 @@ export interface KnowledgeBase {
   my_role: string | null;
   can_write: boolean | null;
   can_admin: boolean | null;
+  indexed_count?: number;
+  failed_count?: number;
+  indexing_count?: number;
+  recent_failures?: IndexFailure[];
+}
+
+export interface IndexFailure {
+  job_id: string;
+  doc_id: string;
+  error: string | null;
+  finished_at: string | null;
+}
+
+export interface IndexStats {
+  total: number;
+  ready: number;
+  pending: number;
+  indexing: number;
+  failed: number;
+  cancelled: number;
+  failure_by_type: Record<string, number>;
+  avg_index_duration_ms: number;
+  avg_retrieval_latency_ms: number;
+  p95_retrieval_latency_ms: number;
+  total_queries: number;
+  recent_failures: IndexFailure[];
+}
+
+export interface HealthSummaryPerKb {
+  kb_id: string;
+  kb_name: string;
+  total: number;
+  ready: number;
+  failed: number;
+  avg_retrieval_latency_ms: number;
+  total_queries: number;
+}
+
+export interface HealthSummary {
+  total_kbs: number;
+  index_success_rate: number;
+  failure_by_type: Record<string, number>;
+  documents: {
+    total: number;
+    ready: number;
+    pending: number;
+    indexing: number;
+    failed: number;
+    cancelled: number;
+  };
+  retrieval: {
+    avg_latency_ms: number;
+    p95_latency_ms: number;
+    total_queries: number;
+  };
+  recent_failures: IndexFailure[];
+  per_kb: HealthSummaryPerKb[];
 }
 
 export interface KBPermission {
@@ -74,6 +131,16 @@ export interface UpdateDocumentRequest {
   content?: string;
   content_format?: string;
   source_name?: string | null;
+}
+
+export interface DocumentIndexStatus {
+  id: string;
+  knowledge_base_id: string;
+  index_status: string;
+  index_error: string | null;
+  index_queued_at: string | null;
+  last_indexed_at: string | null;
+  chunk_count: number;
 }
 
 export interface SearchResultItem {

@@ -213,6 +213,10 @@ def test_require_auth_sets_auth_context():
     """require_auth rejects unauthenticated requests with 401."""
     from fastapi import Request
 
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
+
     app = FastAPI()
 
     @app.get("/test")
@@ -246,6 +250,10 @@ def test_require_permission_requires_auth():
     """require_permission raises 401 when not authenticated."""
     from fastapi import Request
 
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
+
     app = FastAPI()
 
     @app.get("/test")
@@ -256,12 +264,16 @@ def test_require_permission_requires_auth():
     with TestClient(app) as client:
         response = client.get("/test")
         assert response.status_code == 401
-        assert "Authentication required" in response.json()["detail"]
+        assert "Authentication required" in str(response.json()["detail"])
 
 
 def test_require_permission_denies_wrong_permission():
     """User without required permission gets 403."""
     from fastapi import Request
+
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"enabled": True, "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
 
     app = FastAPI()
     user = User(id=uuid4(), email="test@example.com", password_hash="hash")
@@ -277,7 +289,7 @@ def test_require_permission_denies_wrong_permission():
         with TestClient(app) as client:
             response = client.get("/test")
             assert response.status_code == 403
-            assert "Permission denied" in response.json()["detail"]
+            assert "Permission denied" in str(response.json()["detail"])
 
 
 # ── Weak JWT secret warning ──────────────────────────────────────────────────
@@ -447,7 +459,7 @@ def test_token_version_mismatch_rejects():
     os.environ["AUTH_JWT_SECRET"] = "test-secret-key-for-jwt-testing-minimum-32-chars"
     from deerflow.config.auth_config import load_auth_config_from_dict
 
-    load_auth_config_from_dict({"provider": "local", "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
+    load_auth_config_from_dict({"enabled": True, "provider": "local", "jwt_secret": "test-secret-key-for-jwt-testing-minimum-32-chars"})
 
     user_id = str(uuid4())
     token = create_access_token(user_id, token_version=0)

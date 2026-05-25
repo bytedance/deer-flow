@@ -38,19 +38,37 @@ const AUTH_ERROR_CODES = [
   "token_invalid",
   "user_not_found",
   "provider_not_found",
+  "provider_unavailable",
   "not_authenticated",
+  "permission_denied",
+  "system_already_initialized",
+  "tenant_selection_required",
+  "tenant_config_error",
+  "tenant_not_found",
+  "tenant_disabled",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];
 
+const AUTH_ERROR_CATEGORIES = [
+  "AUTH_INVALID_TOKEN",
+  "AUTH_FORBIDDEN",
+  "TENANT_CONFIG_ERROR",
+  "AUTH_UPSTREAM_UNAVAILABLE",
+] as const;
+
+export type AuthErrorCategory = (typeof AUTH_ERROR_CATEGORIES)[number];
+
 export interface AuthErrorResponse {
   code: AuthErrorCode;
   message: string;
+  category?: AuthErrorCategory;
 }
 
 const AuthErrorSchema = z.object({
   code: z.enum(AUTH_ERROR_CODES),
   message: z.string(),
+  category: z.enum(AUTH_ERROR_CATEGORIES).optional(),
 });
 
 const ErrorDetailSchema = z.object({
@@ -59,12 +77,36 @@ const ErrorDetailSchema = z.object({
   loc: z.array(z.string()),
 });
 
+/**
+ * User-facing messages keyed by error code. Falls back to the server's
+ * ``message`` field when a code is not listed here.
+ */
+const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
+  invalid_credentials: "Invalid credentials. Please check your login details.",
+  token_expired: "Your session has expired. Please log in again.",
+  token_invalid: "Invalid token. Please re-authenticate.",
+  user_not_found: "User account not found.",
+  provider_not_found: "Authentication provider is not configured.",
+  provider_unavailable: "Authentication service is temporarily unavailable. Please try again later.",
+  not_authenticated: "Authentication required. Please log in.",
+  permission_denied: "You do not have permission to perform this action.",
+  system_already_initialized: "System has already been initialized.",
+  tenant_selection_required: "Tenant selection is required.",
+  tenant_config_error: "Tenant configuration error. Please contact your administrator.",
+  tenant_not_found: "The requested tenant does not exist.",
+  tenant_disabled: "This tenant has been disabled. Please contact your administrator.",
+};
+
+export function authErrorMessage(code: AuthErrorCode): string {
+  return AUTH_ERROR_MESSAGES[code] ?? "An authentication error occurred.";
+}
+
 export function parseAuthError(data: unknown): AuthErrorResponse {
   // Try top-level {code, message} first
   const parsed = AuthErrorSchema.safeParse(data);
   if (parsed.success) return parsed.data;
 
-  // Unwrap FastAPI's {detail: {code, message}} envelope
+  // Unwrap FastAPI's {detail: {code, message, category?}} envelope
   if (typeof data === "object" && data !== null && "detail" in data) {
     const detail = (data as Record<string, unknown>).detail;
     const nested = AuthErrorSchema.safeParse(detail);

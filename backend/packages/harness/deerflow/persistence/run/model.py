@@ -18,13 +18,18 @@ class RunRow(Base):
     assistant_id: Mapped[str | None] = mapped_column(String(128))
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
-    # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
+    # Canonical: "pending" | "running" | "success" | "failed" | "cancelled"
+    # Deprecated (→ "failed"): "error", "timeout", "interrupted"
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    failure_category: Mapped[str | None] = mapped_column(String(40))
+    # execution_failed | upload_failed | external_dependency_unavailable
+    failed_layer: Mapped[str | None] = mapped_column(String(20))
+    # runtime | gateway | external
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)

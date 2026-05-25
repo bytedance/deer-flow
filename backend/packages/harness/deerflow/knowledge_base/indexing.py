@@ -7,6 +7,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.knowledge_base.index_error_classifier import classify_index_error
+from deerflow.knowledge_base.telemetry import get_kb_telemetry
 from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
 from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
 from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
@@ -104,6 +106,11 @@ class IndexingService:
                 if result.chunk_ids:
                     store.delete(collection_name, result.chunk_ids)
                 await self._job_repo.update_status(job_id, status="cancelled", finished_at=datetime.now(UTC))
+                get_kb_telemetry().record_event("index_cancelled", {
+                    "kb_id": kb_id,
+                    "doc_id": doc_id,
+                    "reason": "version_mismatch",
+                })
                 return job
 
             # B.3.2 lazy backfill: first index job confirms the dim.
@@ -145,6 +152,12 @@ class IndexingService:
             # Update KB stats
             await self._update_kb_stats(kb_id)
 
+            get_kb_telemetry().record_event("index_success", {
+                "kb_id": kb_id,
+                "doc_id": doc_id,
+                "chunk_count": result.chunk_count,
+            })
+
             return await self._job_repo.get(job_id) or job
 
         except EmbeddingDimensionMismatchError as e:
@@ -158,11 +171,21 @@ class IndexingService:
             await self._job_repo.update_status(
                 job_id, status="failed", error=str(e), finished_at=datetime.now(UTC)
             )
+            get_kb_telemetry().record_event("index_failed", {
+                "kb_id": kb_id,
+                "doc_id": doc_id,
+                "error_category": classify_index_error(str(e)),
+            })
             return await self._job_repo.get(job_id) or job
         except Exception as e:
             logger.error("Index job %s failed: %s", job_id, e)
             await self._doc_repo.update_index_status(doc_id, index_status="failed", index_error=str(e), index_job_id=job_id)
             await self._job_repo.update_status(job_id, status="failed", error=str(e), finished_at=datetime.now(UTC))
+            get_kb_telemetry().record_event("index_failed", {
+                "kb_id": kb_id,
+                "doc_id": doc_id,
+                "error_category": classify_index_error(str(e)),
+            })
             return await self._job_repo.get(job_id) or job
 
     async def _update_kb_stats(self, kb_id: str) -> None:

@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import type { UploadStatus } from "../models/status";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -405,7 +407,7 @@ export interface FileInMessage {
   filename: string;
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
-  status?: "uploading" | "uploaded";
+  status?: UploadStatus;
 }
 
 /**

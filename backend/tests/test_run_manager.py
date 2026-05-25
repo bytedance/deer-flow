@@ -60,7 +60,7 @@ async def test_cancel(manager: RunManager):
     cancelled = await manager.cancel(record.run_id)
     assert cancelled is True
     assert record.abort_event.is_set()
-    assert record.status == RunStatus.interrupted
+    assert record.status == RunStatus.cancelled
 
 
 @pytest.mark.anyio
@@ -122,9 +122,16 @@ async def test_cleanup(manager: RunManager):
 async def test_set_status_with_error(manager: RunManager):
     """Error message should be stored on the record."""
     record = await manager.create("thread-1")
-    await manager.set_status(record.run_id, RunStatus.error, error="Something went wrong")
-    assert record.status == RunStatus.error
+    await manager.set_status(
+        record.run_id, RunStatus.failed,
+        error="Something went wrong",
+        failure_category="execution_failed",
+        failed_layer="runtime",
+    )
+    assert record.status == RunStatus.failed
     assert record.error == "Something went wrong"
+    assert record.failure_category == "execution_failed"
+    assert record.failed_layer == "runtime"
 
 
 @pytest.mark.anyio

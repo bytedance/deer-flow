@@ -6,7 +6,12 @@ from typing import Any
 
 import pytest
 
-from deerflow.report_templates.push_block import PushBlockError, push_block_to_sse
+from deerflow.agents.genui_persistence import extract_blocks_from_messages
+from deerflow.report_templates.push_block import (
+    PushBlockError,
+    build_ui_block_marker,
+    push_block_to_sse,
+)
 
 
 @pytest.fixture
@@ -78,6 +83,26 @@ class TestPushBlock:
     def test_table_component_accepted(self, patched_runtime, captured_writes):
         result = push_block_to_sse("table", {"columns": ["a"], "data": [["1"]]})
         assert result["component"] == "table"
+
+    def test_build_ui_block_marker_round_trips_via_history_extractor(self):
+        block = {
+            "schema_version": "1.0",
+            "type": "ui_block",
+            "action": "create",
+            "block_id": "report-block-1",
+            "component": "markdown",
+            "props": {"content": "hello"},
+            "interactive": False,
+        }
+
+        marker = build_ui_block_marker(block)
+        extracted = extract_blocks_from_messages(
+            [{"content": f'{{"status":"rendered"}}\n{marker}'}]
+        )
+
+        assert len(extracted) == 1
+        assert extracted[0]["block_id"] == "report-block-1"
+        assert extracted[0]["component"] == "markdown"
 
     def test_rejects_interactive_components(self, patched_runtime):
         with pytest.raises(PushBlockError, match="not pushable"):

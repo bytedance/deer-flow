@@ -147,6 +147,16 @@ export function KBCard({ knowledgeBase }: KBCardProps) {
             <span>
               {knowledgeBase.chunk_count} {t.knowledgeBase.chunks}
             </span>
+            {knowledgeBase.indexed_count !== undefined && (
+              <span className="text-green-600">
+                {knowledgeBase.indexed_count} {t.knowledgeBase.indexedCount}
+              </span>
+            )}
+            {knowledgeBase.failed_count !== undefined && knowledgeBase.failed_count > 0 && (
+              <span className="text-red-600">
+                {knowledgeBase.failed_count} {t.knowledgeBase.failedCount}
+              </span>
+            )}
           </div>
         </CardContent>
 

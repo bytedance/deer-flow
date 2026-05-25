@@ -19,6 +19,7 @@ _RUNTIME_EXPORTS = {
     "RunRecord": ".runs",
     "RunStatus": ".runs",
     "UnsupportedStrategyError": ".runs",
+    "canonical_run_status": ".runs",
     "run_agent": ".runs",
     "serialize": ".serialization",
     "serialize_channel_values": ".serialization",

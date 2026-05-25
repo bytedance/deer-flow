@@ -41,6 +41,7 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
+    "integration: integration tests that require external services (DB, embedding provider, etc.)",
 ]
 
 [tool.uv]

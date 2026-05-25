@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Status values
 # ---------------------------------------------------------------------------
 
-RunStatus = Literal[
+StepStatus = Literal[
     "pending",
     "awaiting_step",
     "ready_for_data",
@@ -74,7 +74,7 @@ RunStatus = Literal[
     "rendered",
     "exported",
     "failed",
-    "canceled",
+    "cancelled",
 ]
 
 STATUS_FILE_NAME = "status.json"
@@ -126,7 +126,7 @@ class RuntimeState:
     template_id: str = ""
     template_version: int | None = None  # None for builtin
     template_version_ref: str | None = None
-    status: RunStatus = "pending"
+    status: StepStatus = "pending"
     nonce: str = ""
     expected_step: str | None = None  # step_id awaiting submission
     completed_steps: list[str] = field(default_factory=list)
@@ -135,6 +135,7 @@ class RuntimeState:
     parameters_summary: dict[str, Any] = field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None
+    knowledge_sources: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -155,6 +156,7 @@ class RuntimeState:
             "parameters_summary": dict(self.parameters_summary),
             "error_code": self.error_code,
             "error_message": self.error_message,
+            "knowledge_sources": list(self.knowledge_sources),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -179,6 +181,7 @@ class RuntimeState:
             error_message=data.get("error_message"),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            knowledge_sources=list(data.get("knowledge_sources", [])),
         )
 
 
@@ -202,6 +205,9 @@ def read_state(run_dir: Path) -> RuntimeState:
     if not status_path.exists():
         raise StateNotFoundError(f"status file not found at {status_path}")
     raw = json.loads(status_path.read_text(encoding="utf-8"))
+    # ISSUE-02: backward-compat — map old "canceled" to canonical "cancelled"
+    if raw.get("status") == "canceled":
+        raw["status"] = "cancelled"
     return RuntimeState.from_dict(raw)
 
 
@@ -234,20 +240,20 @@ def write_state(run_dir: Path, state: RuntimeState) -> None:
 # ---------------------------------------------------------------------------
 
 
-_ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
+_ALLOWED_TRANSITIONS: dict[StepStatus, set[StepStatus]] = {
     "pending": {"awaiting_step", "ready_for_data", "failed"},
-    "awaiting_step": {"awaiting_step", "ready_for_data", "failed", "canceled"},
+    "awaiting_step": {"awaiting_step", "ready_for_data", "failed", "cancelled"},
     "ready_for_data": {"data_complete", "failed"},
     "data_complete": {"payload_ready", "failed"},
     "payload_ready": {"rendered", "failed"},
     "rendered": {"exported", "failed"},
     "exported": set(),
     "failed": set(),
-    "canceled": set(),
+    "cancelled": set(),
 }
 
 
-def expect_status(state: RuntimeState, *allowed: RunStatus) -> None:
+def expect_status(state: RuntimeState, *allowed: StepStatus) -> None:
     """Raise ``StateTransitionError`` if ``state.status`` is not in ``allowed``.
 
     Used by every tool entry point to fail fast before any side-effect.
@@ -256,7 +262,7 @@ def expect_status(state: RuntimeState, *allowed: RunStatus) -> None:
         raise StateTransitionError(expected=list(allowed), actual=state.status)
 
 
-def transition(state: RuntimeState, new_status: RunStatus) -> None:
+def transition(state: RuntimeState, new_status: StepStatus) -> None:
     """Mutate ``state.status`` if the transition is in the allowed graph."""
     if new_status not in _ALLOWED_TRANSITIONS.get(state.status, set()):
         raise StateTransitionError(
@@ -272,6 +278,14 @@ def mark_failed(state: RuntimeState, *, code: str, message: str) -> None:
     state.error_code = code
     state.error_message = message
     state.status = "failed"
+    _record_terminal_outcome(state)
+
+
+def mark_cancelled(state: RuntimeState, *, code: str = "RUN_INTERRUPTED", message: str = "Report run was cancelled") -> None:
+    """Set the state to ``cancelled`` (terminal)."""
+    state.error_code = code
+    state.error_message = message
+    state.status = "cancelled"
     _record_terminal_outcome(state)
 
 
@@ -293,7 +307,7 @@ def _record_terminal_outcome(state: RuntimeState) -> None:
     transition writes a telemetry event. Tracking is in-process only; the
     JSONL sink is what gives us cross-process audit (charter §4.1).
     """
-    if state.status not in {"exported", "failed", "canceled"}:
+    if state.status not in {"exported", "failed", "cancelled"}:
         return
     key = (state.report_run_id, state.status)
     with _emitted_lock:

@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCreateClosureTicket } from "@/core/closed-loop";
 import type {
   ClosurePriority,
+  ClosureSourceType,
   CreateClosureTicketRequest,
 } from "@/core/closed-loop";
 
@@ -28,12 +29,29 @@ const PRIORITY_OPTIONS: { value: ClosurePriority; label: string }[] = [
   { value: "observe", label: "观察（30d）" },
 ];
 
+export interface CreateTicketSourceContext {
+  source_type: ClosureSourceType;
+  source_run_id?: string;
+  source_thread_id?: string;
+  title?: string;
+  description?: string;
+  device_id?: string;
+  device_name?: string;
+  metadata?: Record<string, unknown>;
+}
+
 interface CreateClosureTicketDialogProps {
   onCreated?: (ticketId: string) => void;
+  sourceContext?: CreateTicketSourceContext;
+  triggerLabel?: string;
+  triggerVariant?: "default" | "outline" | "ghost";
 }
 
 export function CreateClosureTicketDialog({
   onCreated,
+  sourceContext,
+  triggerLabel,
+  triggerVariant = "default",
 }: CreateClosureTicketDialogProps) {
   const [open, setOpen] = useState(false);
   const create = useCreateClosureTicket();
@@ -46,12 +64,26 @@ export function CreateClosureTicketDialog({
   const [severity, setSeverity] = useState("");
 
   function reset() {
-    setTitle("");
-    setDescription("");
-    setDeviceId("");
-    setDeviceName("");
-    setPriority("normal");
-    setSeverity("");
+    if (sourceContext) {
+      setTitle(sourceContext.title ?? "");
+      setDescription(sourceContext.description ?? "");
+      setDeviceId(sourceContext.device_id ?? "");
+      setDeviceName(sourceContext.device_name ?? "");
+      setPriority("normal");
+      setSeverity("");
+    } else {
+      setTitle("");
+      setDescription("");
+      setDeviceId("");
+      setDeviceName("");
+      setPriority("normal");
+      setSeverity("");
+    }
+  }
+
+  function openDialog() {
+    reset();
+    setOpen(true);
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -61,15 +93,34 @@ export function CreateClosureTicketDialog({
       toast.error("请填写标题");
       return;
     }
+
+    const sourceType: ClosureSourceType = sourceContext?.source_type ?? "manual";
     const request: CreateClosureTicketRequest = {
       title: trimmed,
-      source_type: "manual",
+      source_type: sourceType,
       priority,
     };
     if (description.trim()) request.description = description.trim();
     if (deviceId.trim()) request.device_id = deviceId.trim();
     if (deviceName.trim()) request.device_name = deviceName.trim();
     if (severity.trim()) request.severity = severity.trim();
+    if (sourceContext?.source_run_id) {
+      request.source_run_id = sourceContext.source_run_id;
+    }
+    if (sourceContext?.source_thread_id) {
+      request.source_thread_id = sourceContext.source_thread_id;
+    }
+    if (sourceContext?.metadata || (sourceContext?.source_run_id)) {
+      request.metadata = {
+        ...(sourceContext?.metadata ?? {}),
+      };
+      if (sourceContext?.source_run_id && !request.metadata?.report_run_id) {
+        request.metadata = {
+          ...request.metadata,
+          report_run_id: sourceContext.source_run_id,
+        };
+      }
+    }
 
     try {
       const ticket = await create.mutateAsync(request);
@@ -93,17 +144,20 @@ export function CreateClosureTicketDialog({
       <Button
         type="button"
         size="sm"
-        onClick={() => setOpen(true)}
+        onClick={openDialog}
         className="gap-1.5"
+        variant={triggerVariant}
       >
         <PlusIcon className="size-4" />
-        新建整改单
+        {triggerLabel ?? "新建整改单"}
       </Button>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>新建整改单</DialogTitle>
           <DialogDescription>
-            手工登记一条闭环单，来源标记为 manual。受理人可在派单时指定。
+            {sourceContext
+              ? `来源: ${sourceContext.source_type}${sourceContext.source_run_id ? ` · Run ${sourceContext.source_run_id}` : ""}`
+              : "手工登记一条闭环单，来源标记为 manual。受理人可在派单时指定。"}
           </DialogDescription>
         </DialogHeader>
         <form

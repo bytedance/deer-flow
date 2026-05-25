@@ -44,10 +44,43 @@ def _scopes_for_listing(principal):
     yield Scope.tenant(principal.tenant_id)
 
 
+def _count_data_files(run) -> int:
+    """Count JSON files under ``{run_output_dir}/data/`` for a run record."""
+    for path_attr in ("parameters_path", "report_payload_path"):
+        path_str = getattr(run, path_attr, None)
+        if path_str:
+            data_dir = Path(path_str).parent / "data"
+            try:
+                if data_dir.is_dir():
+                    return sum(1 for f in data_dir.iterdir() if f.suffix == ".json")
+            except OSError:
+                return 0
+    return 0
+
+
+def _list_data_files(run) -> list[dict[str, str]]:
+    """List JSON files under ``{run_output_dir}/data/`` with name + download path."""
+    files: list[dict[str, str]] = []
+    for path_attr in ("parameters_path", "report_payload_path"):
+        path_str = getattr(run, path_attr, None)
+        if path_str:
+            data_dir = Path(path_str).parent / "data"
+            try:
+                if data_dir.is_dir():
+                    for f in sorted(data_dir.iterdir()):
+                        if f.suffix == ".json":
+                            files.append({"name": f.name, "path": str(f)})
+                    return files
+            except OSError:
+                return []
+    return []
+
+
 @router.get("", summary="List report runs visible to current user")
 async def list_report_runs(
     request: Request,
     template_id: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ):
     principal = _principal_from_request(request)
@@ -66,11 +99,11 @@ async def list_report_runs(
             except Exception:  # noqa: BLE001
                 continue
             for r in step_runs:
-                # Permission gate: owners + superadmin only (tenant runs leak only
-                # to tenant_admin in current MVP — we filter strictly to owner_id).
                 if r.user_id != principal.user_id and not principal.is_superadmin:
                     continue
-                runs.append(r.model_dump())
+                if thread_id and r.thread_id != thread_id:
+                    continue
+                runs.append({**r.model_dump(), "data_file_count": _count_data_files(r)})
     runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return {"runs": runs[:limit]}
 
@@ -94,7 +127,7 @@ async def get_report_run(report_run_id: str, request: Request):
                 continue
             if run.user_id != principal.user_id and not principal.is_superadmin:
                 raise HTTPException(status_code=403, detail="not your report run")
-            return {"run": run.model_dump()}
+            return {"run": {**run.model_dump(), "data_files": _list_data_files(run)}}
     raise HTTPException(status_code=404, detail=f"report_run {report_run_id!r} not found")
 
 

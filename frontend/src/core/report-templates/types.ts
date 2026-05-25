@@ -57,12 +57,15 @@ export interface ValidationReport {
   warnings: ValidationIssue[];
 }
 
-export type RunStatus =
-  | "pending"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "canceled";
+export interface KnowledgeSource {
+  selected_ids?: string[];
+  source?: string;
+  resolved_kbs?: { id: string; name: string; collection_name: string }[];
+}
+
+// ISSUE-02: RunStatus imported from central @/core/models/status; "canceled" → "cancelled"
+import type { RunStatus } from "@/core/models/status";
+export type { RunStatus };
 
 export interface ReportRun {
   id: string;
@@ -81,11 +84,20 @@ export interface ReportRun {
   artifact_paths: Record<string, string | null>;
   pdf_skipped_reason: string | null;
   data_snapshot_paths: string[];
+  data_files?: DataFileEntry[];
+  data_file_count?: number;
   error_code: string | null;
   error_message: string | null;
+  knowledge_sources: KnowledgeSource[];
+  trigger_type: string;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface DataFileEntry {
+  name: string;
+  path: string;
 }
 
 // ---- Request payloads ----

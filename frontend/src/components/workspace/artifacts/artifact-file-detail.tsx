@@ -32,6 +32,7 @@ import { CodeEditor } from "@/components/workspace/code-editor";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { logCrossPageNavigation } from "@/core/models/navigation";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
@@ -193,6 +194,14 @@ export function ArtifactFileDetail({
                 label={t.common.openInNewWindow}
                 tooltip={t.common.openInNewWindow}
                 onClick={() => {
+                  logCrossPageNavigation(
+                    {
+                      sourceType: "chat",
+                      sourceId: threadId,
+                      threadId,
+                    },
+                    "outbound",
+                  );
                   const w = window.open(
                     urlOfArtifact({ filepath, threadId, isMock }),
                     "_blank",

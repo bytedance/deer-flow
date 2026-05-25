@@ -27,7 +27,9 @@ def test_auth_error_response_serialization():
         message="Token has expired",
     )
     d = err.model_dump()
-    assert d == {"code": "token_expired", "message": "Token has expired"}
+    assert d["code"] == "token_expired"
+    assert d["message"] == "Token has expired"
+    assert d["category"] == "AUTH_INVALID_TOKEN"
 
 
 def test_auth_error_response_from_dict():

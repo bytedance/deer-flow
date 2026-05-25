@@ -38,11 +38,10 @@ const PRIORITY_LABEL: Record<ClosurePriority, string> = {
 
 const SOURCE_LABEL: Record<ClosureSourceType, string> = {
   diagnosis: "诊断",
-  daily_report: "日报",
-  weekly_report: "周报",
-  monthly_report: "月报",
-  custom_report: "自定义",
+  report: "报告",
+  inspection: "巡检",
   manual: "手工",
+  chat: "会话",
 };
 
 export interface ClosureListProps {

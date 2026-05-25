@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
+import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import {
   ChatBox,
   useSpecificChatMode,
@@ -127,7 +129,8 @@ export default function ChatPage() {
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
-            <div className="flex w-full items-center text-sm font-medium">
+            <div className="flex w-full items-center gap-3 text-sm font-medium">
+              <SourceBreadcrumb className="shrink-0" />
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex items-center gap-2">
@@ -140,6 +143,7 @@ export default function ChatPage() {
                 }
               />
               <ExportTrigger threadId={threadId} />
+              <ChatReportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>

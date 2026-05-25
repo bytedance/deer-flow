@@ -36,6 +36,8 @@ class RunRecord:
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
+    failure_category: str | None = None
+    failed_layer: str | None = None
 
 
 class RunManager:
@@ -65,6 +67,8 @@ class RunManager:
                 metadata=record.metadata or {},
                 kwargs=record.kwargs or {},
                 created_at=record.created_at,
+                failure_category=record.failure_category,
+                failed_layer=record.failed_layer,
             )
         except Exception:
             logger.warning("Failed to persist run %s to store", record.run_id, exc_info=True)
@@ -119,7 +123,15 @@ class RunManager:
             # us deterministic newest-first results even when timestamps tie.
             return [r for r in self._runs.values() if r.thread_id == thread_id]
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+    async def set_status(
+        self,
+        run_id: str,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        failure_category: str | None = None,
+        failed_layer: str | None = None,
+    ) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -130,12 +142,26 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
+            if failure_category is not None:
+                record.failure_category = failure_category
+            if failed_layer is not None:
+                record.failed_layer = failed_layer
         if self._store is not None:
             try:
-                await self._store.update_status(run_id, status.value, error=error)
+                await self._store.update_status(
+                    run_id, status.value,
+                    error=error,
+                    failure_category=failure_category,
+                    failed_layer=failed_layer,
+                )
             except Exception:
                 logger.warning("Failed to persist status update for run %s", run_id, exc_info=True)
-        logger.info("Run %s -> %s", run_id, status.value)
+        logger.info(
+            "Run %s -> %s (category=%s, layer=%s)",
+            run_id, status.value,
+            failure_category or "-",
+            failed_layer or "-",
+        )
 
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
         """Request cancellation of a run.
@@ -157,7 +183,7 @@ class RunManager:
             record.abort_event.set()
             if record.task is not None and not record.task.done():
                 record.task.cancel()
-            record.status = RunStatus.interrupted
+            record.status = RunStatus.cancelled
             record.updated_at = _now_iso()
         logger.info("Run %s cancelled (action=%s)", run_id, action)
         return True
@@ -201,7 +227,7 @@ class RunManager:
                     r.abort_event.set()
                     if r.task is not None and not r.task.done():
                         r.task.cancel()
-                    r.status = RunStatus.interrupted
+                    r.status = RunStatus.cancelled
                     r.updated_at = now
                 logger.info(
                     "Cancelled %d inflight run(s) on thread %s (strategy=%s)",

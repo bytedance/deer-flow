@@ -82,7 +82,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         # persistence backend and tenant isolation as threads.
         set_gateway_store(app.state.store)
 
-        # Initialize repositories — one get_session_factory() call for all.
+        # Initialize repositories -- one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
@@ -171,7 +171,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
                 recovered = await index_dispatcher.recover()
                 if recovered:
                     logger.info("IndexingDispatcher recovered %d orphan job(s)", recovered)
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover -- defensive
                 logger.warning("IndexingDispatcher recover() failed at startup: %s", exc)
 
             app.state.kb_service = kb_service
@@ -184,9 +184,9 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
                     report.get("marked_stale", 0),
                     report.get("errors", 0),
                 )
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover -- defensive
                 logger.warning(
-                    "kb_service.startup_consistency_check failed: %s — startup continues", exc
+                    "kb_service.startup_consistency_check failed: %s -- startup continues", exc
                 )
         else:
             app.state.kb_service = None
@@ -239,7 +239,7 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 # ---------------------------------------------------------------------------
-# Getters – called by routers per-request
+# Getters -- called by routers per-request
 # ---------------------------------------------------------------------------
 
 
@@ -344,7 +344,7 @@ _cached_ins_base_provider: object | None = None
 def get_local_provider() -> LocalAuthProvider:
     """Get or create the cached LocalAuthProvider singleton.
 
-    Must be called after ``init_engine_from_config()`` — the shared
+    Must be called after ``init_engine_from_config()`` -- the shared
     session factory is required to construct the user repository.
     """
     global _cached_local_provider, _cached_repo
@@ -354,7 +354,7 @@ def get_local_provider() -> LocalAuthProvider:
 
         sf = get_session_factory()
         if sf is None:
-            raise HTTPException(status_code=503, detail="Database not available — persistence engine not initialized")
+            raise HTTPException(status_code=503, detail="Database not available -- persistence engine not initialized")
         _cached_repo = SQLiteUserRepository(sf)
     if _cached_local_provider is None:
         from app.gateway.auth.local_provider import LocalAuthProvider
@@ -383,7 +383,7 @@ def get_ins_base_provider():
 
     rpc_client = get_rpc_client()
     if rpc_client is None:
-        logger.warning("RPC client is not configured — InsBaseAuthProvider not available")
+        logger.warning("RPC client is not configured -- InsBaseAuthProvider not available")
         return None
 
     from deerflow.persistence.engine import get_session_factory
@@ -496,7 +496,7 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
         )
 
-    # Token version mismatch → password was changed, token is stale
+    # Token version mismatch -> password was changed, token is stale
     if user.token_version != payload.ver:
         raise HTTPException(
             status_code=401,

@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException, Request
 
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
 
@@ -105,7 +107,13 @@ class AuthContext:
             HTTPException 401 if not authenticated
         """
         if not self.user:
-            raise HTTPException(status_code=401, detail="Authentication required")
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.NOT_AUTHENTICATED,
+                    message="Authentication required",
+                ).model_dump(),
+            )
         return self.user
 
 
@@ -195,7 +203,13 @@ def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
         request.state.auth = auth_context
 
         if not auth_context.is_authenticated:
-            raise HTTPException(status_code=401, detail="Authentication required")
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(
+                    code=AuthErrorCode.NOT_AUTHENTICATED,
+                    message="Authentication required",
+                ).model_dump(),
+            )
 
         return await func(*args, **kwargs)
 
@@ -265,13 +279,16 @@ def require_permission(
                 request.state.auth = auth
 
             if not auth.is_authenticated:
-                raise HTTPException(status_code=401, detail="Authentication required")
+                raise HTTPException(
+                    status_code=401,
+                    detail=AuthErrorResponse(code=AuthErrorCode.NOT_AUTHENTICATED, message="Authentication required").model_dump(),
+                )
 
             # Check permission
             if not auth.has_permission(resource, action):
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Permission denied: {resource}:{action}",
+                    detail=AuthErrorResponse(code=AuthErrorCode.PERMISSION_DENIED, message=f"Permission denied: {resource}:{action}").model_dump(),
                 )
 
             # Owner check for thread-specific resources.

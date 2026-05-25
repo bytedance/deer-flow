@@ -313,6 +313,21 @@ export const zhCN: Translations = {
     groupPublic: "公共",
     visibilityHintTenant: "仅租户管理员可创建",
     visibilityHintPublic: "仅超级管理员可创建",
+    // Index progress
+    indexingInProgress: "索引中…",
+    indexComplete: "索引完成",
+    indexFailed: "索引失败",
+    // Index health
+    indexHealth: "索引健康度",
+    indexedCount: "已索引",
+    failedCount: "失败",
+    pendingCount: "等待中",
+    indexingCount: "索引中",
+    indexDuration: "平均索引耗时",
+    retrievalLatency: "检索延迟 (P95)",
+    retrievalLatencyAvg: "检索延迟 (Avg)",
+    totalQueries: "检索次数",
+    noIndexData: "暂无索引数据",
   },
 
   // Breadcrumb
@@ -381,6 +396,19 @@ export const zhCN: Translations = {
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
+  },
+
+  // Failure classification (ISSUE-02)
+  failure: {
+    execution_failed: "处理请求时发生内部错误，请重试或联系技术支持。",
+    upload_failed: "文件上传失败，请检查文件格式和大小后重新上传。",
+    external_dependency_unavailable: "外部服务（AI 模型或数据源）暂时不可用，请稍后重试。",
+    action_retry: "重试",
+    action_reupload: "重新上传",
+    action_wait_retry: "等待后重试",
+    layer_runtime: "运行时",
+    layer_gateway: "网关",
+    layer_external: "外部",
   },
 
   subtasks: {

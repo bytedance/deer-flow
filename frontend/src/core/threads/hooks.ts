@@ -12,6 +12,7 @@ import { fetchGateway, getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
+import type { ArtifactStatus, UploadStatus } from "../models/status";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import { getCurrentTenantId } from "../tenant";
@@ -98,6 +99,21 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+/** Extract failure metadata from a structured stream error for layer-aware display. */
+function extractFailureMeta(
+  error: unknown,
+): { category: string | null; layer: string | null } {
+  if (typeof error === "object" && error !== null) {
+    const category = Reflect.get(error, "failure_category");
+    const layer = Reflect.get(error, "failed_layer");
+    return {
+      category: typeof category === "string" ? category : null,
+      layer: typeof layer === "string" ? layer : null,
+    };
+  }
+  return { category: null, layer: null };
 }
 
 export function useThreadStream({
@@ -307,7 +323,13 @@ export function useThreadStream({
     },
     onError(error) {
       setOptimisticMessages([]);
-      toast.error(getStreamErrorMessage(error));
+      const message = getStreamErrorMessage(error);
+      const { category, layer } = extractFailureMeta(error);
+      if (category === "external_dependency_unavailable") {
+        toast.error(message, { description: "外部服务暂不可用，请稍后重试" });
+      } else {
+        toast.error(message);
+      }
       sseManagerRef.current?.scheduleReconnect();
     },
     onFinish(state) {
@@ -372,7 +394,7 @@ export function useThreadStream({
         (f) => ({
           filename: f.filename ?? "",
           size: 0,
-          status: "uploading" as const,
+          status: "uploading" satisfies UploadStatus,
         }),
       );
 
@@ -442,7 +464,7 @@ export function useThreadStream({
                   filename: info.filename,
                   size: info.size,
                   path: info.virtual_path,
-                  status: "uploaded" as const,
+                  status: "ready" satisfies UploadStatus,
                 }),
               );
               setOptimisticMessages((messages) => {
@@ -478,7 +500,7 @@ export function useThreadStream({
             filename: info.filename,
             size: info.size,
             path: info.virtual_path,
-            status: "uploaded" as const,
+            status: "ready" satisfies UploadStatus,
           }),
         );
 

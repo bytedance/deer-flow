@@ -302,7 +302,12 @@ async def run_agent(
         if record.abort_event.is_set():
             action = record.abort_action
             if action == "rollback":
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                await run_manager.set_status(
+                    run_id, RunStatus.failed,
+                    error="Rolled back by user",
+                    failure_category="execution_failed",
+                    failed_layer="runtime",
+                )
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         checkpointer=checkpointer,
@@ -316,14 +321,19 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+                await run_manager.set_status(run_id, RunStatus.cancelled)
         else:
             await run_manager.set_status(run_id, RunStatus.success)
 
     except asyncio.CancelledError:
         action = record.abort_action
         if action == "rollback":
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+            await run_manager.set_status(
+                run_id, RunStatus.failed,
+                error="Rolled back by user",
+                failure_category="execution_failed",
+                failed_layer="runtime",
+            )
             try:
                 await _rollback_to_pre_run_checkpoint(
                     checkpointer=checkpointer,
@@ -337,19 +347,29 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await run_manager.set_status(run_id, RunStatus.interrupted)
+            await run_manager.set_status(run_id, RunStatus.cancelled)
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
         error_msg = f"{exc}"
-        logger.exception("Run %s failed: %s", run_id, error_msg)
-        await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+        logger.exception(
+            "Run %s failed: %s (failure_category=execution_failed, failed_layer=runtime)",
+            run_id, error_msg,
+        )
+        await run_manager.set_status(
+            run_id, RunStatus.failed,
+            error=error_msg,
+            failure_category="execution_failed",
+            failed_layer="runtime",
+        )
         await bridge.publish(
             run_id,
             "error",
             {
                 "message": error_msg,
                 "name": type(exc).__name__,
+                "failure_category": "execution_failed",
+                "failed_layer": "runtime",
             },
         )
 
@@ -452,7 +472,8 @@ async def run_agent(
         # Update threads_meta status based on run outcome
         if thread_store is not None:
             try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
+                # Thread is idle when no active runs exist (regardless of outcome)
+                final_status = "idle"
                 await thread_store.update_status(thread_id, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)

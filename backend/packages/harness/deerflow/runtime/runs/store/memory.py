@@ -28,6 +28,8 @@ class MemoryRunStore(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        failure_category=None,
+        failed_layer=None,
         created_at=None,
     ):
         now = datetime.now(UTC).isoformat()
@@ -42,6 +44,8 @@ class MemoryRunStore(RunStore):
             "metadata": metadata or {},
             "kwargs": kwargs or {},
             "error": error,
+            "failure_category": failure_category,
+            "failed_layer": failed_layer,
             "created_at": created_at or now,
             "updated_at": now,
             "_seq": self._seq,
@@ -55,11 +59,15 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: (r["created_at"], r.get("_seq", 0)), reverse=True)
         return results[:limit]
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, failure_category=None, failed_layer=None):
         if run_id in self._runs:
             self._runs[run_id]["status"] = status
             if error is not None:
                 self._runs[run_id]["error"] = error
+            if failure_category is not None:
+                self._runs[run_id]["failure_category"] = failure_category
+            if failed_layer is not None:
+                self._runs[run_id]["failed_layer"] = failed_layer
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def delete(self, run_id):
@@ -80,7 +88,7 @@ class MemoryRunStore(RunStore):
         return results
 
     async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in ("success", "error")]
+        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in ("success", "failed")]
         by_model: dict[str, dict] = {}
         for r in completed:
             model = r.get("model_name") or "unknown"
