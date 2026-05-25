@@ -219,6 +219,7 @@ def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
+    provider.needs_upload_permission_adjustment = False
     provider.acquire.return_value = "local"
     sandbox = MagicMock()
     provider.get.return_value = sandbox
@@ -228,12 +229,17 @@ def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_make_file_sandbox_writable") as make_writable,
+        patch.object(uploads, "_make_file_sandbox_readable") as make_readable,
     ):
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
         result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert result.success is True
     make_writable.assert_not_called()
+    # Readable adjustment is now always applied regardless of sandbox type
+    make_readable.assert_called_once()
+    called_path = make_readable.call_args[0][0]
+    assert called_path.name == "notes.txt"
 
 
 def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
@@ -429,6 +435,59 @@ def test_make_file_sandbox_writable_skips_symlinks(tmp_path):
         uploads._make_file_sandbox_writable(file_path)
 
     chmod.assert_not_called()
+
+
+def test_make_file_sandbox_readable_adds_read_bits_for_regular_files(tmp_path):
+    file_path = tmp_path / "data.csv"
+    file_path.write_bytes(b"csv-data")
+    # Simulate the 0o600 permissions set by open_upload_file_no_symlink
+    file_path.chmod(0o600)
+
+    uploads._make_file_sandbox_readable(file_path)
+
+    updated_mode = stat.S_IMODE(file_path.stat().st_mode)
+    assert updated_mode & stat.S_IRUSR
+    assert updated_mode & stat.S_IRGRP
+    assert updated_mode & stat.S_IROTH
+
+
+def test_make_file_sandbox_readable_skips_symlinks(tmp_path):
+    file_path = tmp_path / "target-link.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    symlink_stat = MagicMock(st_mode=stat.S_IFLNK)
+
+    with (
+        patch.object(uploads.os, "lstat", return_value=symlink_stat),
+        patch.object(uploads.os, "chmod") as chmod,
+    ):
+        uploads._make_file_sandbox_readable(file_path)
+
+    chmod.assert_not_called()
+
+
+def test_upload_files_adjusts_read_permissions_for_mounted_non_local_sandbox(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    # AIO sandbox with LocalContainerBackend: uses_thread_data_mounts=True
+    # but needs_upload_permission_adjustment=True (default)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    provider.needs_upload_permission_adjustment = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_make_file_sandbox_readable") as make_readable,
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    make_readable.assert_called_once()
+    called_path = make_readable.call_args[0][0]
+    assert called_path.name == "notes.txt"
 
 
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
