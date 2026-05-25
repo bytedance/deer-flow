@@ -287,8 +287,12 @@ function splitInlineReasoning(content: string) {
   // reasoning slot instead of letting it render as message content (the
   // raw-HTML markdown pipeline would otherwise paint the inner text on
   // screen until the closing tag lands).
+  //
+  // Skip when the opener sits right after a backtick — that is the model
+  // talking about `<think>` literally inside markdown inline code, not
+  // actually streaming reasoning.
   const openTagIndex = cleaned.indexOf(THINK_OPEN_TAG);
-  if (openTagIndex !== -1) {
+  if (openTagIndex !== -1 && cleaned[openTagIndex - 1] !== "`") {
     const tail = cleaned.slice(openTagIndex + THINK_OPEN_TAG.length).trim();
     if (tail) {
       reasoningParts.push(tail);

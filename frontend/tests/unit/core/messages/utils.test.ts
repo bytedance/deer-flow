@@ -150,6 +150,27 @@ describe("inline <think> tag splitting", () => {
     expect(extractReasoningContentFromMessage(message)).toBeNull();
     expect(hasReasoning(message)).toBe(false);
   });
+
+  test("a literal <think> inside markdown inline code is not treated as reasoning", () => {
+    const message = aiMessage(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a backtick-prefixed <think> mid-stream is not split into reasoning", () => {
+    // Simulates the moment the model has emitted the opening backtick and
+    // `<think>` for a literal documentation reference, before the closing
+    // backtick arrives. The pre-fix behaviour would have permanently
+    // truncated the content here.
+    const message = aiMessage("Documentation: `<think>");
+    expect(extractContentFromMessage(message)).toBe("Documentation: `<think>");
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+  });
 });
 
 test("hides internal todo reminder messages from message groups", () => {
