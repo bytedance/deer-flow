@@ -30,22 +30,35 @@ propagates as ``{"error": ...}`` on stdout.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import math
 import os
-import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _report_common import (
+    VALID_SCOPES,
+    VALID_TYPES,
+    aggregate_kpis,
+    dedupe_preserve_order,
+    detect_equipment_type,
+    error_output,
+    has_previous_year_data_weekly,
+    load_sibling_module,
+    load_sibling_module_required,
+    parse_csv,
+    resolve_equipment_by_scope,
+    validate_equipment_ids,
+    validate_kpi_keys,
+)
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 OUTPUT_FILENAME = "weekly_data.json"
-EQUIPMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
 
-VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
-VALID_SCOPES = {"all", "area", "specific"}
 VALID_COMPARES = {"previous_week", "previous_year", "none"}
 
 DAY_COUNT = 7
@@ -61,79 +74,6 @@ def _runtime_data_dir(output_dir: str | None) -> Path | None:
     if not output_dir:
         return None
     return Path(output_dir) / "data"
-
-
-def _load_ins_provider():
-    """Load the sibling InS provider module by file path."""
-    module = sys.modules.get("_ins_provider")
-    if module is not None:
-        return module
-    script_dir = Path(__file__).parent
-    provider_path = script_dir / "_ins_provider.py"
-    if not provider_path.exists():
-        raise RuntimeError(f"_ins_provider.py not found beside query_weekly.py at {provider_path}")
-    spec = importlib.util.spec_from_file_location("_ins_provider", provider_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("failed to build spec for _ins_provider")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_ins_provider"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get("_ins_provider") is module:
-            del sys.modules["_ins_provider"]
-        raise
-    return module
-
-
-def _load_list_equipment():
-    module = sys.modules.get("list_equipment")
-    if module is not None:
-        return module
-    script_dir = Path(__file__).parent
-    le_path = script_dir / "list_equipment.py"
-    if not le_path.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("list_equipment", le_path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["list_equipment"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get("list_equipment") is module:
-            del sys.modules["list_equipment"]
-        raise
-    return module
-
-
-def _detect_equipment_type(equipment_ids: list[str]) -> str:
-    """Derive ``eq_type`` from the org tree so per-type KPI mappings apply.
-
-    See :func:`query_daily._detect_equipment_type` for rationale.
-    """
-    if not equipment_ids:
-        return "all"
-    module = _load_list_equipment()
-    if module is None:
-        return "all"
-    user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
-    if not user_id:
-        return "all"
-    try:
-        org_result = module._query_from_org_tree(user_id, "all", "specific", ",".join(equipment_ids))
-    except Exception:
-        return "all"
-    if org_result is None:
-        return "all"
-    devices = org_result.get("equipment", [])
-    if not devices:
-        return "all"
-    org_types = {d.get("org_type") for d in devices}
-    if len(org_types) == 1:
-        return org_types.pop()
-    return "all"
 
 
 def _is_monday(date_str: str) -> bool:
@@ -154,19 +94,6 @@ def _previous_period(week_start: str, compare: str) -> tuple[str, str] | None:
     else:
         return None
     return _week_range(prev_start.strftime("%Y-%m-%d"))
-
-
-def _has_previous_year_data(week_start: str) -> bool:
-    """Demo policy: if requested start is >180 days from "today" assume no data.
-
-    This makes ``--compare previous_year`` deterministic in tests while leaving
-    a hook for real connectors to override. Real implementations will plug a
-    catalog probe in here.
-    """
-    # When prev year start would land before 2025-01-01, treat as missing in
-    # demo mode — that boundary matches the demo project's data horizon.
-    prev_year_start = datetime.strptime(week_start, "%Y-%m-%d") - timedelta(days=365)
-    return prev_year_start >= datetime(2025, 1, 1)
 
 
 def fetch_week(
@@ -204,7 +131,7 @@ def fetch_week_with_provenance(
     while reusing one InS client/session across the full window. Any
     ``HttpProviderError`` propagates so the CLI surfaces the failure.
     """
-    ins = _load_ins_provider()
+    ins = load_sibling_module_required("_ins_provider")
     daily_entries = ins.fetch_daily_series_payload(
         start_date=week_start,
         day_count=DAY_COUNT,
@@ -217,7 +144,7 @@ def fetch_week_with_provenance(
     for entry in daily_entries:
         union_alarms.extend(entry.get("alarms", []))
 
-    aggregated = _aggregate_daily(daily_entries, kpi_keys)
+    aggregated = aggregate_kpis(daily_entries, kpi_keys)
     result: dict = {
         "daily": [] if aggregate else daily_entries,
         "aggregated": aggregated,
@@ -230,47 +157,6 @@ def fetch_week_with_provenance(
 
     # Batch weekly fetches always come from the InS provider.
     return result, "ins", []
-
-
-def _aggregate_daily(daily_entries: list[dict], kpi_keys: list[str]) -> dict:
-    kpis_mean: dict[str, float] = {}
-    kpis_max: dict[str, float] = {}
-    kpis_min: dict[str, float] = {}
-    kpis_std: dict[str, float] = {}
-    for key in kpi_keys:
-        values: list[float] = []
-        for entry in daily_entries:
-            v = entry.get("kpis", {}).get(key)
-            if v is None:
-                continue
-            if isinstance(v, (int, float)) and not (isinstance(v, float) and math.isnan(v)):
-                values.append(float(v))
-        if not values:
-            continue
-        mean = sum(values) / len(values)
-        kpis_mean[key] = round(mean, 4)
-        kpis_max[key] = round(max(values), 4)
-        kpis_min[key] = round(min(values), 4)
-        if len(values) > 1:
-            variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-            kpis_std[key] = round(math.sqrt(variance), 4)
-        else:
-            kpis_std[key] = 0.0
-    return {
-        "kpis_mean": kpis_mean,
-        "kpis_max": kpis_max,
-        "kpis_min": kpis_min,
-        "kpis_std": kpis_std,
-    }
-
-
-def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
-    """Resolve equipment using list_equipment.query_equipment, same as daily."""
-    list_eq = _load_list_equipment()
-    if list_eq is None:
-        return []
-    result = list_eq.query_equipment(eq_type, scope, scope_filter, limit=10000)
-    return result.get("equipment", [])
 
 
 def build_result(
@@ -301,7 +187,7 @@ def build_result(
     compare_notes: list[str] = []
     prev_range = _previous_period(week_start, compare)
     if prev_range:
-        if compare == "previous_year" and not _has_previous_year_data(week_start):
+        if compare == "previous_year" and not has_previous_year_data_weekly(week_start):
             compare_warning = "去年同期数据不可用，已跳过同比"
         else:
             compare_period = {"start": prev_range[0], "end": prev_range[1]}
@@ -360,45 +246,6 @@ def write_payload(result: dict, output_dir: Path | None = None) -> Path:
     return out_path
 
 
-def _parse_csv(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
-def _validate_equipment_ids(equipment_ids: list[str]) -> str | None:
-    if not equipment_ids:
-        return "--equipment must be a non-empty CSV"
-    invalid = [item for item in equipment_ids if not EQUIPMENT_ID_PATTERN.fullmatch(item)]
-    if invalid:
-        return "--equipment contains invalid equipment id(s): " + ",".join(invalid)
-    return None
-
-
-def _validate_kpi_keys(kpi_keys: list[str]) -> str | None:
-    if not kpi_keys:
-        return "--kpis must include at least one KPI key"
-    invalid = [item for item in kpi_keys if not KPI_KEY_PATTERN.fullmatch(item)]
-    if invalid:
-        return "--kpis contains invalid KPI key(s): " + ",".join(invalid)
-    return None
-
-
-def _error(message: str) -> int:
-    print(json.dumps({"error": message}, ensure_ascii=False))
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query weekly report data")
     parser.add_argument("--week-start", required=True, help="Week start date YYYY-MM-DD (recommended Monday)")
@@ -434,29 +281,29 @@ def main() -> int:
         try:
             datetime.strptime(args.week_start, "%Y-%m-%d")
         except ValueError as exc:
-            return _error(f"invalid --week-start: {exc}")
+            return error_output(f"invalid --week-start: {exc}")
 
         eq_type = getattr(args, "type")
         if eq_type not in VALID_TYPES:
-            return _error(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
+            return error_output(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
 
         scope = args.scope
 
         if scope is not None:
             if scope not in VALID_SCOPES:
-                return _error(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
-            equipment_records = _resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+                return error_output(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
+            equipment_records = resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
             if not equipment_records:
-                return _error("no equipment matched for the given --type/--scope/--scope-filter")
+                return error_output("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
             equipment_meta = {e["id"]: e for e in equipment_records}
             is_scope_mode = True
         else:
-            equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
-            equipment_error = _validate_equipment_ids(equipment_ids)
+            equipment_ids = dedupe_preserve_order(parse_csv(args.equipment))
+            equipment_error = validate_equipment_ids(equipment_ids)
             if equipment_error:
-                return _error(equipment_error)
-            equipment_names = _parse_csv(args.equipment_names)
+                return error_output(equipment_error)
+            equipment_names = parse_csv(args.equipment_names)
             equipment_meta = None
             if equipment_names:
                 equipment_meta = {
@@ -467,14 +314,14 @@ def main() -> int:
             # When --type is not explicitly overridden, derive it from the org
             # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
             if getattr(args, "type") == "all":
-                detected = _detect_equipment_type(equipment_ids)
+                detected = detect_equipment_type(equipment_ids)
                 if detected != "all":
                     eq_type = detected
 
-        kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or list(DEFAULT_KPIS))
-        kpi_error = _validate_kpi_keys(kpi_keys)
+        kpi_keys = dedupe_preserve_order(parse_csv(args.kpis) or list(DEFAULT_KPIS))
+        kpi_error = validate_kpi_keys(kpi_keys)
         if kpi_error:
-            return _error(kpi_error)
+            return error_output(kpi_error)
 
         result = build_result(
             week_start=args.week_start,

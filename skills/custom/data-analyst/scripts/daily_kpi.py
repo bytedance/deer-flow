@@ -17,40 +17,19 @@ import os
 import sys
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _report_common import (
+    KPI_BETTER_WHEN_HIGHER,
+    KPI_DISPLAY_NAMES,
+    KPI_THRESHOLDS,
+)
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "daily_data.json"
 OUTPUT_FILENAME = "daily_kpi.json"
-
-
-KPI_DISPLAY_NAMES = {
-    "runtime_rate": "运行率",
-    "downtime_count": "停机次数",
-    "alarm_count": "告警数量",
-    "output": "产量",
-    "energy_consumption": "能耗",
-    "corrosion_rate": "腐蚀速率",
-    "thickness_loss": "壁厚减薄量",
-    "vibration_level": "振动水平",
-    "bearing_temp": "轴承温度",
-    "flow_rate": "流量",
-    "outlet_pressure": "出口压力",
-    "valve_temp": "阀温",
-    "vibration_velocity_rms": "振动速度有效值",
-    "vibration_acceleration_peak": "振动加速度峰值",
-    "kurtosis_index": "峭度指标",
-}
-
-KPI_BETTER_WHEN_HIGHER = {"runtime_rate", "output", "flow_rate", "outlet_pressure"}
-
-KPI_THRESHOLDS: dict[str, tuple[str, float]] = {
-    "runtime_rate": ("below", 0.85),
-    "corrosion_rate": ("above", 0.3),
-    "thickness_loss": ("above", 1.5),
-    "vibration_level": ("above", 10.0),
-    "bearing_temp": ("above", 75.0),
-    "valve_temp": ("above", 100.0),
-    "downtime_count": ("above", 5),
-}
 
 
 def _output_dir() -> Path:
@@ -357,7 +336,7 @@ def compute(payload: dict) -> dict:
         "alarm_table": alarm_table,
         "recommendations": recs,
         "aggregation_mode": "grouped" if is_aggregated else "detail",
-        "data_source": payload["data_source"],
+        "data_source": payload.get("data_source", ""),
         "data_notes": list(payload.get("data_notes") or []),
     }
     if is_aggregated:

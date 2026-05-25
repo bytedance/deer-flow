@@ -39,11 +39,9 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import importlib.util
 import json
 import math
 import os
-import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -55,10 +53,35 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _report_common import (
+    KPI_UNITS,
+    VALID_SCOPES,
+    VALID_TYPES,
+    aggregate_kpis,
+    dedupe_preserve_order,
+    detect_equipment_type,
+    error_output,
+    has_previous_year_data_monthly,
+    load_sibling_module_required,
+    month_bounds,
+    parse_csv,
+    parse_report_month,
+    resolve_equipment_by_scope,
+    validate_equipment_ids,
+    validate_equipment_ids_length,
+    validate_kpi_keys,
+)
+
+# Backward-compat aliases for tests and _data_provider_impls
+_parse_report_month = parse_report_month
+_month_bounds = month_bounds
+_validate_equipment_ids = validate_equipment_ids_length
+
 # ---------------------------------------------------------------------------
 # Default target thresholds for达标率 computation.
 # These are reference configuration values (not per-run demo data).
 # ---------------------------------------------------------------------------
+
 
 def _default_targets() -> dict[str, dict]:
     return {
@@ -110,14 +133,10 @@ def _compute_maintenance(daily_entries: list[dict], day_count: int) -> dict:
         "mttr_hours": None,
     }
 
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 OUTPUT_FILENAME = "monthly_data.json"
-EQUIPMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
-REPORT_MONTH_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 
-VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
-VALID_SCOPES = {"all", "area", "specific"}
 VALID_COMPARES = {"previous_month", "previous_year_month", "none"}
 
 # Month-anchored bucket length. Never use ISO weeks.
@@ -125,6 +144,11 @@ BUCKET_DAYS = 7
 DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 # Special KPI keys that monthly always supports as derived metrics.
 SPECIAL_KPIS = {"mtbf", "mttr", "target_rate"}
+
+
+def _load_ins_provider():
+    """Backward-compat wrapper for tests that monkeypatch this name."""
+    return load_sibling_module_required("_ins_provider")
 
 
 def _output_dir() -> Path:
@@ -138,71 +162,6 @@ def _output_dir() -> Path:
             ),
         )
     )
-
-
-def _load_ins_provider():
-    """Load the sibling InS provider module by file path (mirrors query_weekly)."""
-    module = sys.modules.get("_ins_provider")
-    if module is not None:
-        return module
-    script_dir = Path(__file__).parent
-    provider_path = script_dir / "_ins_provider.py"
-    if not provider_path.exists():
-        raise RuntimeError(f"_ins_provider.py not found beside query_monthly.py at {provider_path}")
-    spec = importlib.util.spec_from_file_location("_ins_provider", provider_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("failed to build spec for _ins_provider")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_ins_provider"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get("_ins_provider") is module:
-            del sys.modules["_ins_provider"]
-        raise
-    return module
-
-
-def _load_list_equipment():
-    module = sys.modules.get("list_equipment")
-    if module is not None:
-        return module
-    script_dir = Path(__file__).parent
-    le_path = script_dir / "list_equipment.py"
-    if not le_path.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("list_equipment", le_path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["list_equipment"] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get("list_equipment") is module:
-            del sys.modules["list_equipment"]
-        raise
-    return module
-
-
-def _parse_report_month(value: str) -> tuple[int, int]:
-    if not REPORT_MONTH_PATTERN.fullmatch(value):
-        raise ValueError(f"invalid --report-month: {value} (expected YYYY-MM)")
-    year, month = value.split("-")
-    y, m = int(year), int(month)
-    if not (2000 <= y <= 2100):
-        raise ValueError(f"--report-month year out of range [2000, 2100]: {y}")
-    if not (1 <= m <= 12):
-        raise ValueError(f"--report-month month out of range [01, 12]: {m}")
-    return y, m
-
-
-def _month_bounds(year: int, month: int) -> tuple[str, str, int]:
-    """Return (month_start, month_end, day_count). Uses calendar.monthrange for leap-year safety."""
-    _, day_count = calendar.monthrange(year, month)
-    start = datetime(year, month, 1)
-    end = datetime(year, month, day_count)
-    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), day_count
 
 
 def _build_week_buckets(month_start: str, day_count: int) -> list[dict]:
@@ -243,53 +202,6 @@ def _compare_month_bounds(year: int, month: int, basis: str) -> tuple[int, int]:
     if basis == "previous_year_month":
         return year - 1, month
     raise ValueError(f"unsupported compare basis: {basis}")
-
-
-def _has_previous_year_data(year: int, month: int) -> bool:
-    """Demo policy: previous_year_month is available only if it lands on or after 2024-01.
-
-    Mirrors the weekly script's 2025-01-01 horizon, shifted one year earlier so
-    that 2025-Q1 monthly reports still have a YoY baseline. Real connectors will
-    override this hook.
-    """
-    pyr, pmo = year - 1, month
-    return datetime(pyr, pmo, 1) >= datetime(2024, 1, 1)
-
-
-def _aggregate_kpis(daily_entries: list[dict], kpi_keys: list[str]) -> dict:
-    """Compute mean/max/min/std across a list of {kpis: {...}} entries.
-
-    Returns dict with kpis_mean / kpis_max / kpis_min / kpis_std.
-    """
-    kpis_mean: dict[str, float] = {}
-    kpis_max: dict[str, float] = {}
-    kpis_min: dict[str, float] = {}
-    kpis_std: dict[str, float] = {}
-    for key in kpi_keys:
-        values: list[float] = []
-        for entry in daily_entries:
-            v = entry.get("kpis", {}).get(key)
-            if v is None:
-                continue
-            if isinstance(v, (int, float)) and not (isinstance(v, float) and math.isnan(v)):
-                values.append(float(v))
-        if not values:
-            continue
-        mean = sum(values) / len(values)
-        kpis_mean[key] = round(mean, 4)
-        kpis_max[key] = round(max(values), 4)
-        kpis_min[key] = round(min(values), 4)
-        if len(values) > 1:
-            variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-            kpis_std[key] = round(math.sqrt(variance), 4)
-        else:
-            kpis_std[key] = 0.0
-    return {
-        "kpis_mean": kpis_mean,
-        "kpis_max": kpis_max,
-        "kpis_min": kpis_min,
-        "kpis_std": kpis_std,
-    }
 
 
 def _weighted_aggregate_from_weekly(weekly: list[dict], kpi_keys: list[str]) -> dict:
@@ -357,14 +269,15 @@ def _kpis_target_rate(daily_entries: list[dict], kpi_keys: list[str], targets: d
             if v is None:
                 continue
             total += 1
+            ok = True
             if lo is not None and v < lo:
-                continue
+                ok = False
             if hi is not None and v > hi:
-                continue
-            in_target += 1
-        if total == 0:
-            continue
-        result[key] = round(in_target / total, 4)
+                ok = False
+            if ok:
+                in_target += 1
+        if total > 0:
+            result[key] = round(in_target / total, 4)
     return result
 
 
@@ -406,8 +319,8 @@ def fetch_month_with_provenance(
     instead of masking it with synthetic output.
     """
     ins = _load_ins_provider()
-    year, month = _parse_report_month(report_month)
-    month_start, month_end, day_count = _month_bounds(year, month)
+    year, month = parse_report_month(report_month)
+    month_start, month_end, day_count = month_bounds(year, month)
     week_buckets = _build_week_buckets(month_start, day_count)
 
     daily_entries = ins.fetch_daily_series_payload(
@@ -427,7 +340,7 @@ def fetch_month_with_provenance(
         bdays = bucket["day_count"]
         slice_entries = daily_entries[cursor : cursor + bdays]
         cursor += bdays
-        agg = _aggregate_kpis(slice_entries, kpi_keys)
+        agg = aggregate_kpis(slice_entries, kpi_keys)
         bucket_alarms: list[dict] = []
         for entry in slice_entries:
             bucket_alarms.extend(entry.get("alarms") or [])
@@ -489,14 +402,6 @@ def fetch_month_with_provenance(
     return current, "ins", []
 
 
-def _resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
-    list_eq = _load_list_equipment()
-    if list_eq is None:
-        return []
-    result = list_eq.query_equipment(eq_type, scope, scope_filter, limit=10000)
-    return result.get("equipment", [])
-
-
 def _parse_compare_csv(value: str | None) -> list[str]:
     if not value:
         return ["none"]
@@ -531,8 +436,8 @@ def build_result(
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
     """Build the full payload matching design doc §6.1."""
-    year, month = _parse_report_month(report_month)
-    month_start, month_end, day_count = _month_bounds(year, month)
+    year, month = parse_report_month(report_month)
+    month_start, month_end, day_count = month_bounds(year, month)
     week_buckets = _build_week_buckets(month_start, day_count)
 
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
@@ -550,9 +455,9 @@ def build_result(
 
     for basis in effective_bases:
         py, pm = _compare_month_bounds(year, month, basis)
-        p_start, p_end, _p_day_count = _month_bounds(py, pm)
+        p_start, p_end, _p_day_count = month_bounds(py, pm)
         compare_periods[basis] = {"start": p_start, "end": p_end}
-        if basis == "previous_year_month" and not _has_previous_year_data(year, month):
+        if basis == "previous_year_month" and not has_previous_year_data_monthly(year, month):
             compare_block[basis] = None
             compare_warnings.append("去年同期数据不可用，已跳过同比")
             continue
@@ -626,48 +531,6 @@ def write_payload(result: dict) -> Path:
     return out_path
 
 
-def _parse_csv(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
-def _validate_equipment_ids(equipment_ids: list[str]) -> str | None:
-    if not equipment_ids:
-        return "--equipment must be a non-empty CSV"
-    invalid = [item for item in equipment_ids if not EQUIPMENT_ID_PATTERN.fullmatch(item)]
-    if invalid:
-        return "--equipment contains invalid equipment id(s): " + ",".join(invalid)
-    over_length = [item for item in equipment_ids if len(item) > 64]
-    if over_length:
-        return "--equipment id(s) exceed 64 chars: " + ",".join(over_length)
-    return None
-
-
-def _validate_kpi_keys(kpi_keys: list[str]) -> str | None:
-    if not kpi_keys:
-        return "--kpis must include at least one KPI key"
-    invalid = [item for item in kpi_keys if not KPI_KEY_PATTERN.fullmatch(item)]
-    if invalid:
-        return "--kpis contains invalid KPI key(s): " + ",".join(invalid)
-    return None
-
-
-def _error(message: str) -> int:
-    print(json.dumps({"error": message}, ensure_ascii=False))
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query monthly report data")
     parser.add_argument("--report-month", required=True, help="Report month YYYY-MM")
@@ -701,35 +564,35 @@ def main() -> int:
 
     try:
         try:
-            _parse_report_month(args.report_month)
+            parse_report_month(args.report_month)
         except ValueError as exc:
-            return _error(str(exc))
+            return error_output(str(exc))
 
         eq_type = getattr(args, "type")
         if eq_type not in VALID_TYPES:
-            return _error(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
+            return error_output(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
 
         try:
             compare_bases = _parse_compare_csv(args.compare)
         except ValueError as exc:
-            return _error(str(exc))
+            return error_output(str(exc))
 
         scope = args.scope
         if scope is not None:
             if scope not in VALID_SCOPES:
-                return _error(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
-            equipment_records = _resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+                return error_output(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
+            equipment_records = resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
             if not equipment_records:
-                return _error("no equipment matched for the given --type/--scope/--scope-filter")
+                return error_output("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
             equipment_meta = {e["id"]: e for e in equipment_records}
             is_scope_mode = True
         else:
-            equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
-            equipment_error = _validate_equipment_ids(equipment_ids)
+            equipment_ids = dedupe_preserve_order(parse_csv(args.equipment))
+            equipment_error = validate_equipment_ids_length(equipment_ids)
             if equipment_error:
-                return _error(equipment_error)
-            equipment_names = _parse_csv(args.equipment_names)
+                return error_output(equipment_error)
+            equipment_names = parse_csv(args.equipment_names)
             equipment_meta = None
             if equipment_names:
                 equipment_meta = {
@@ -737,14 +600,20 @@ def main() -> int:
                     for i, eid in enumerate(equipment_ids)
                 }
             is_scope_mode = False
+            # When --type is not explicitly overridden, derive it from the org
+            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
+            if getattr(args, "type") == "all":
+                detected = detect_equipment_type(equipment_ids)
+                if detected != "all":
+                    eq_type = detected
 
-        kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or list(DEFAULT_KPIS))
+        kpi_keys = dedupe_preserve_order(parse_csv(args.kpis) or list(DEFAULT_KPIS))
         # Drop special KPIs (mtbf/mttr/target_rate) from the query layer — they
         # are derived in monthly_kpi.py from the maintenance + aggregated blocks.
         query_kpi_keys = [k for k in kpi_keys if k not in SPECIAL_KPIS]
-        kpi_error = _validate_kpi_keys(query_kpi_keys)
+        kpi_error = validate_kpi_keys(query_kpi_keys)
         if kpi_error:
-            return _error(kpi_error)
+            return error_output(kpi_error)
 
         result = build_result(
             report_month=args.report_month,

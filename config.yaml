@@ -122,7 +122,7 @@ uploads:
   auto_convert_documents: false
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  image: deer-flow-sandbox-features-tool:latest
+  image: deer-flow-sandbox:latest
   environment:
     INS_USERNAME: $INS_USERNAME
     INS_PASSWORD: $INS_PASSWORD

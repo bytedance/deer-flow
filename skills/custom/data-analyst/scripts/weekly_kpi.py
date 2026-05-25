@@ -23,30 +23,20 @@ import os
 import sys
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _report_common import (
+    KPI_BETTER_WHEN_HIGHER,
+    KPI_DISPLAY_NAMES,
+    direction as _direction,
+    safe_pct as _safe_pct,
+)
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "weekly_data.json"
 OUTPUT_FILENAME = "weekly_kpi.json"
-
-
-KPI_DISPLAY_NAMES = {
-    "runtime_rate": "运行率",
-    "downtime_count": "停机次数",
-    "alarm_count": "告警数量",
-    "output": "产量",
-    "energy_consumption": "能耗",
-    "corrosion_rate": "腐蚀速率",
-    "thickness_loss": "壁厚减薄量",
-    "vibration_level": "振动水平",
-    "bearing_temp": "轴承温度",
-    "flow_rate": "流量",
-    "outlet_pressure": "出口压力",
-    "valve_temp": "阀温",
-    "vibration_velocity_rms": "振动速度有效值",
-    "vibration_acceleration_peak": "振动加速度峰值",
-    "kurtosis_index": "峭度指标",
-}
-
-KPI_BETTER_WHEN_HIGHER = {"runtime_rate", "output", "flow_rate", "outlet_pressure"}
 
 WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -56,22 +46,6 @@ FOCUS_LIMIT = 5
 
 def _output_dir() -> Path:
     return Path(os.environ.get("WEEKLY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
-
-
-def _safe_pct(numerator: float, denominator: float | None) -> float | None:
-    if denominator is None or denominator == 0:
-        return None
-    return round(numerator / denominator, 4)
-
-
-def _direction(delta: float | None, better_when_higher: bool) -> str:
-    if delta is None:
-        return "flat"
-    if abs(delta) < 1e-9:
-        return "flat"
-    if better_when_higher:
-        return "up" if delta > 0 else "down"
-    return "down" if delta > 0 else "up"
 
 
 def _build_kpi_summary(

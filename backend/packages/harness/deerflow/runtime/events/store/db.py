@@ -44,9 +44,9 @@ class DbRunEventStore(RunEventStore):
                 logger.debug("Failed to deserialize content as JSON for event seq=%s", d.get("seq"))
         return d
 
-    def _truncate_trace(self, category: str, content: str | dict, metadata: dict | None) -> tuple[str | dict, dict]:
+    def _truncate_trace(self, category: str, content: str | dict | list, metadata: dict | None) -> tuple[str | dict | list, dict]:
         if category == "trace":
-            text = json.dumps(content, default=str, ensure_ascii=False) if isinstance(content, dict) else content
+            text = json.dumps(content, default=str, ensure_ascii=False) if not isinstance(content, str) else content
             encoded = text.encode("utf-8")
             if len(encoded) > self._max_trace_content:
                 # Truncate by bytes, then decode back (may cut a multi-byte char, so use errors="ignore")
@@ -82,7 +82,7 @@ class DbRunEventStore(RunEventStore):
         the initial ``human_message`` event (once per run).
         """
         content, metadata = self._truncate_trace(category, content, metadata)
-        if isinstance(content, dict):
+        if not isinstance(content, str):
             db_content = json.dumps(content, default=str, ensure_ascii=False)
             metadata = {**(metadata or {}), "content_is_dict": True}
         else:
@@ -128,7 +128,7 @@ class DbRunEventStore(RunEventStore):
                     category = e.get("category", "trace")
                     metadata = e.get("metadata")
                     content, metadata = self._truncate_trace(category, content, metadata)
-                    if isinstance(content, dict):
+                    if not isinstance(content, str):
                         db_content = json.dumps(content, default=str, ensure_ascii=False)
                         metadata = {**(metadata or {}), "content_is_dict": True}
                     else:

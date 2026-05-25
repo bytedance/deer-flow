@@ -75,6 +75,8 @@ class RunRepository(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        failure_category=None,
+        failed_layer=None,
         created_at=None,
         follow_up_to_run_id=None,
     ):
@@ -90,6 +92,8 @@ class RunRepository(RunStore):
             metadata_json=self._safe_json(metadata) or {},
             kwargs_json=self._safe_json(kwargs) or {},
             error=error,
+            failure_category=failure_category,
+            failed_layer=failed_layer,
             follow_up_to_run_id=follow_up_to_run_id,
             created_at=datetime.fromisoformat(created_at) if created_at else now,
             updated_at=now,
@@ -129,10 +133,14 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, failure_category=None, failed_layer=None):
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
+        if failure_category is not None:
+            values["failure_category"] = failure_category
+        if failed_layer is not None:
+            values["failed_layer"] = failed_layer
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
             await session.commit()

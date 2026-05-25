@@ -218,24 +218,37 @@ class LocalContainerBackend(SandboxBackend):
         On macOS, prefer Apple Container if available, otherwise fall back to Docker.
         On other platforms, use Docker.
 
-        Returns:
-            "container" for Apple Container, "docker" for Docker.
+        Returns the resolved executable path or name (e.g. "docker", "container",
+        or a full path like "C:\\...\\docker.exe").
         """
         import platform
+        import shutil
 
         if platform.system() == "Darwin":
             try:
-                result = subprocess.run(
+                subprocess.run(
                     ["container", "--version"],
                     capture_output=True,
                     text=True,
                     check=True,
                     timeout=5,
                 )
-                logger.info(f"Detected Apple Container: {result.stdout.strip()}")
+                logger.info("Detected Apple Container")
                 return "container"
             except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 logger.info("Apple Container not available, falling back to Docker")
+
+        docker = shutil.which("docker")
+        if docker is not None:
+            return docker
+
+        # Windows: Docker Desktop may be installed but not in PATH (e.g. the
+        # user hasn't logged out/in since installing). Check the standard location.
+        if platform.system() == "Windows":
+            standard = r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+            if os.path.isfile(standard):
+                logger.info("Docker resolved via standard install path: %s", standard)
+                return standard
 
         return "docker"
 
