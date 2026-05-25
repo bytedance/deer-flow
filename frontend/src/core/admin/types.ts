@@ -44,6 +44,8 @@ export interface TenantUser {
 export interface UsageRecord {
   timestamp: string;
   tenant_id: string;
+  user_id?: string | null;
+  user_name?: string | null;
   thread_id: string | null;
   model_name: string;
   input_tokens: number;
@@ -92,6 +94,8 @@ export interface AuditLogEntry {
   timestamp: string;
   tenant_id: string;
   thread_id: string | null;
+  actor_user_id?: string | null;
+  actor_username?: string | null;
   direction: string;
   role: string;
   original_text: string;

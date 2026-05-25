@@ -41,6 +41,7 @@ export default function AdminUsagePage() {
     () => [
       { accessorKey: "timestamp", header: t.admin.timestamp, cell: (info: { getValue: () => string }) => info.getValue().slice(0, 19) },
       { accessorKey: "tenant_id", header: t.admin.tenant },
+      { accessorKey: "user_id", header: t.admin.user, cell: (info: { row: { original: UsageRecord } }) => info.row.original.user_name || info.row.original.user_id || "-" },
       { accessorKey: "model_name", header: t.admin.model },
       { accessorKey: "input_tokens", header: t.admin.input, cell: (info: { getValue: () => number }) => info.getValue().toLocaleString() },
       { accessorKey: "output_tokens", header: t.admin.output, cell: (info: { getValue: () => number }) => info.getValue().toLocaleString() },

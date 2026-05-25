@@ -582,6 +582,8 @@ export interface Translations {
     records: string;
     timestamp: string;
     tenant: string;
+    user: string;
+    actor: string;
     model: string;
     input: string;
     output: string;

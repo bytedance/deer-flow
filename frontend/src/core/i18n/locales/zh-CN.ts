@@ -649,6 +649,8 @@ export const zhCN: Translations = {
     records: "记录",
     timestamp: "时间",
     tenant: "租户",
+    user: "用户",
+    actor: "操作人",
     model: "模型",
     input: "输入",
     output: "输出",

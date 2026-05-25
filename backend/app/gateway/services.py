@@ -33,7 +33,7 @@ from deerflow.runtime import (
 )
 from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import get_current_tenant_id
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, get_effective_username
 from deerflow.cost.storage import UsageStorage
 from deerflow.cost.budget import BudgetChecker
 from deerflow.config.cost_config import get_cost_config
@@ -408,6 +408,13 @@ async def start_run(
     runtime_context = config.setdefault("context", {})
     runtime_context["tenant_id"] = get_current_tenant_id()
     runtime_context["user_id"] = get_effective_user_id()
+    runtime_context["user_name"] = get_effective_username()
+    # Also inject into configurable so worker.py can read user_id without
+    # reaching into the context dict (context is for LangGraph runtime, configurable
+    # is for RunnableConfig consumers).
+    if "configurable" in config:
+        config["configurable"]["user_id"] = get_effective_user_id()
+        config["configurable"]["user_name"] = get_effective_username()
     access_token = _resolve_request_access_token(request)
     if access_token:
         runtime_context["access_token"] = access_token

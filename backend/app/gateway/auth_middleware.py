@@ -45,6 +45,8 @@ class _DictUser:
 
     def __init__(self, user_dict: dict) -> None:
         self.id = user_dict.get("id", user_dict.get("username", "default"))
+        self.username = user_dict.get("username")
+        self.email = user_dict.get("email")
 
 
 # Paths that never require authentication.

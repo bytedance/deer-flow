@@ -410,7 +410,8 @@ async def run_agent(
                         cost_usd = calculator.calculate(model_name, input_tokens, output_tokens)
 
                         tenant_id = get_current_tenant_id()
-                        user_id = config.get("configurable", {}).get("user_id")
+                        user_id = config.get("configurable", {}).get("user_id") or config.get("context", {}).get("user_id")
+                        user_name = config.get("configurable", {}).get("user_name") or config.get("context", {}).get("user_name")
 
                         storage = UsageStorage()
                         storage.add_record(UsageRecord(
@@ -423,6 +424,7 @@ async def run_agent(
                             total_tokens=total_tokens,
                             cost_usd=cost_usd,
                             user_id=user_id,
+                            user_name=user_name,
                         ))
             except Exception:
                 logger.debug("Failed to record usage for run %s (non-fatal)", run_id, exc_info=True)
@@ -440,7 +442,7 @@ async def run_agent(
                         agent_completion = journal.get_completion_data()
                         _duration = int((__import__("time").monotonic() - _run_start_mono) * 1000)
                         _tenant = get_current_tenant_id() or "default"
-                        _user = config.get("configurable", {}).get("user_id") or "default"
+                        _user = config.get("configurable", {}).get("user_id") or config.get("context", {}).get("user_id") or "default"
 
                         repo = AgentUsageRepository(sf)
                         await repo.record(

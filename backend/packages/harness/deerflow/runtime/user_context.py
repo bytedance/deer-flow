@@ -109,6 +109,30 @@ def get_effective_user_id() -> str:
     return str(user.id)
 
 
+def get_effective_username() -> str:
+    """Return a human-readable display name for the current user.
+
+    Checks InsBase ``userName`` first, then ``username`` attribute, then the
+    local part of ``email``, then falls back to ``id``.
+    Returns ``"default"`` when no user context is set.
+    """
+    user = _current_user.get()
+    if user is None:
+        return DEFAULT_USER_ID
+    # InsBase auth provides user_name via ins_base_user_data
+    ins_data = getattr(user, "ins_base_user_data", None)
+    if ins_data:
+        name = ins_data.get("userName", "")
+        if name:
+            return str(name)
+    name = getattr(user, "username", None)
+    if not name:
+        email = getattr(user, "email", None)
+        if email:
+            name = str(email).split("@")[0]
+    return str(name) if name else str(user.id)
+
+
 # ---------------------------------------------------------------------------
 # Sentinel-based user_id resolution
 # ---------------------------------------------------------------------------

@@ -130,6 +130,7 @@ export default function AdminLogsPage() {
                 <tr className="border-b text-left text-muted-foreground">
                   <th className="py-2 pr-4">{t.admin.timestamp}</th>
                   <th className="py-2 pr-4">{t.admin.tenant}</th>
+                  <th className="py-2 pr-4">{t.admin.actor}</th>
                   <th className="py-2 pr-4">{t.admin.direction}</th>
                   <th className="py-2 pr-4">{t.admin.model}</th>
                   <th className="py-2 pr-4">Status</th>
@@ -139,7 +140,7 @@ export default function AdminLogsPage() {
               <tbody>
                 {entries.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                    <td colSpan={7} className="py-8 text-center text-muted-foreground">
                       {t.admin.noLogRecords}
                     </td>
                   </tr>
@@ -148,6 +149,7 @@ export default function AdminLogsPage() {
                   <tr key={i} className="border-b last:border-0">
                     <td className="py-2 pr-4 whitespace-nowrap">{e.timestamp.slice(0, 19)}</td>
                     <td className="py-2 pr-4">{e.tenant_id}</td>
+                    <td className="py-2 pr-4">{e.actor_username || e.actor_user_id || "-"}</td>
                     <td className="py-2 pr-4">
                       <span className={e.direction === "input" ? "text-blue-500" : "text-green-500"}>
                         {e.direction === "input" ? t.admin.input_dir : t.admin.output_dir}

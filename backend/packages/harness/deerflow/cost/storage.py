@@ -28,6 +28,7 @@ class UsageRecord:
     total_tokens: int
     cost_usd: float
     user_id: str | None = None
+    user_name: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +36,7 @@ class UsageRecord:
             "tenant_id": self.tenant_id,
             "thread_id": self.thread_id,
             "user_id": self.user_id,
+            "user_name": self.user_name,
             "model_name": self.model_name,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -49,6 +51,7 @@ class UsageRecord:
             tenant_id=d["tenant_id"],
             thread_id=d.get("thread_id"),
             user_id=d.get("user_id"),
+            user_name=d.get("user_name"),
             model_name=d["model_name"],
             input_tokens=d["input_tokens"],
             output_tokens=d["output_tokens"],

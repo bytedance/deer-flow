@@ -26,6 +26,7 @@ class AuditLogEntry:
     role: str  # "user" or "assistant"
     original_text: str
     actor_user_id: str | None = None
+    actor_username: str | None = None
     sanitized_text: str | None = None
     allowed: bool = True
     flagged_categories: list[str] = field(default_factory=list)
@@ -38,6 +39,7 @@ class AuditLogEntry:
             "tenant_id": self.tenant_id,
             "thread_id": self.thread_id,
             "actor_user_id": self.actor_user_id,
+            "actor_username": self.actor_username,
             "direction": self.direction,
             "role": self.role,
             "original_text": self.original_text,
@@ -55,6 +57,7 @@ class AuditLogEntry:
             tenant_id=d.get("tenant_id", ""),
             thread_id=d.get("thread_id"),
             actor_user_id=d.get("actor_user_id"),
+            actor_username=d.get("actor_username"),
             direction=d.get("direction", ""),
             role=d.get("role", ""),
             original_text=d.get("original_text", ""),

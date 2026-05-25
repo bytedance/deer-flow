@@ -686,6 +686,8 @@ export const enUS: Translations = {
     records: "Records",
     timestamp: "Timestamp",
     tenant: "Tenant",
+    user: "User",
+    actor: "Actor",
     model: "Model",
     input: "Input",
     output: "Output",

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
 from deerflow.content_safety.provider import ContentSafetyProvider, ContentSafetyRequest
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, get_effective_username
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,18 @@ def _get_tenant_from_runtime(runtime: Runtime | None) -> str:
     from deerflow.config.tenant import get_current_tenant_id
 
     return get_current_tenant_id()
+
+
+def _get_user_info_from_runtime(runtime: Runtime | None) -> tuple[str | None, str | None]:
+    """Extract user_id and username from runtime context, falling back to ContextVar."""
+    if runtime is not None:
+        ctx = getattr(runtime, "context", None) or {}
+        if isinstance(ctx, dict):
+            uid = ctx.get("user_id")
+            uname = ctx.get("user_name")
+            if uid:
+                return uid, uname
+    return get_effective_user_id(), get_effective_username()
 
 
 class OutputGuardMiddleware(AgentMiddleware[AgentState]):
@@ -55,7 +67,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
                 return msg
         return None
 
-    def _evaluate(self, text: str, thread_id: str | None, tenant_id: str = "default", *, actor_user_id: str | None = None) -> dict | None:
+    def _evaluate(self, text: str, thread_id: str | None, tenant_id: str = "default", *, actor_user_id: str | None = None, actor_username: str | None = None) -> dict | None:
         request = ContentSafetyRequest(text=text, role="assistant", thread_id=thread_id)
         try:
             decision = self.provider.evaluate(request)
@@ -63,7 +75,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Output guard provider error")
             return None
 
-        self._log_audit(text, decision, thread_id, "output", "assistant", tenant_id=tenant_id, actor_user_id=actor_user_id)
+        self._log_audit(text, decision, thread_id, "output", "assistant", tenant_id=tenant_id, actor_user_id=actor_user_id, actor_username=actor_username)
 
         if not decision.allowed and self.block_on_harmful:
             logger.warning("Output guard blocked AI response: %s", decision.reasons)
@@ -75,7 +87,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
 
         return None
 
-    def _log_audit(self, text: str, decision, thread_id: str | None, direction: str, role: str, *, tenant_id: str = "default", actor_user_id: str | None = None) -> None:
+    def _log_audit(self, text: str, decision, thread_id: str | None, direction: str, role: str, *, tenant_id: str = "default", actor_user_id: str | None = None, actor_username: str | None = None) -> None:
         if self.audit_storage is None:
             return
         try:
@@ -86,6 +98,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
                 tenant_id=tenant_id,
                 thread_id=thread_id,
                 actor_user_id=actor_user_id,
+                actor_username=actor_username,
                 direction=direction,
                 role=role,
                 original_text=text,
@@ -113,8 +126,8 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
         if not text.strip():
             return None
         tenant_id = _get_tenant_from_runtime(runtime)
-        user_id = get_effective_user_id()
-        return self._evaluate(text, None, tenant_id, actor_user_id=user_id)
+        user_id, username = _get_user_info_from_runtime(runtime)
+        return self._evaluate(text, None, tenant_id, actor_user_id=user_id, actor_username=username)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -131,7 +144,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
             return None
 
         tenant_id = _get_tenant_from_runtime(runtime)
-        user_id = get_effective_user_id()
+        user_id, username = _get_user_info_from_runtime(runtime)
 
         request = ContentSafetyRequest(text=text, role="assistant")
         try:
@@ -140,7 +153,7 @@ class OutputGuardMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Output guard provider error (async)")
             return None
 
-        self._log_audit(text, decision, None, "output", "assistant", tenant_id=tenant_id, actor_user_id=user_id)
+        self._log_audit(text, decision, None, "output", "assistant", tenant_id=tenant_id, actor_user_id=user_id, actor_username=username)
 
         if not decision.allowed and self.block_on_harmful:
             logger.warning("Output guard blocked AI response: %s", decision.reasons)
