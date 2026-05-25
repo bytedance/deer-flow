@@ -32,10 +32,7 @@ need to:
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-from typing import Any
+from _report_common import load_sibling_module_required as _load_script
 
 from _data_providers import (
     DEMO_FALLBACK,
@@ -47,34 +44,6 @@ from _data_providers import (
     call_http_endpoint,
     register_provider,
 )
-
-# ---------------------------------------------------------------------------
-# Lazy module loader — avoid circular imports when query scripts import this
-# module on startup. We need to call helpers in the demo-data path of each
-# query script without re-running its main(). The pattern: import the
-# script module and call its top-level demo helpers directly.
-# ---------------------------------------------------------------------------
-
-
-def _load_script(name: str) -> Any:
-    """Load a sibling script module by file path, bypassing import-side-effects."""
-    module = sys.modules.get(name)
-    if module is not None:
-        return module
-    path = Path(__file__).parent / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to load local script module: {name}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if sys.modules.get(name) is module:
-            del sys.modules[name]
-        raise
-    return module
-
 
 # ============================================================================
 # trend / query_trend.py

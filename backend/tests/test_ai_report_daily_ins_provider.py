@@ -362,7 +362,7 @@ def test_daily_kpi_preserves_provenance_from_query_payload(monkeypatch, tmp_path
     assert "data_source_banner" not in result
 
 
-def test_daily_kpi_missing_data_source_raises_key_error():
+def test_daily_kpi_missing_data_source_defaults_to_empty_string():
     daily_kpi = load_script("daily_kpi")
 
     payload = {
@@ -375,5 +375,5 @@ def test_daily_kpi_missing_data_source_raises_key_error():
         "data_notes": [],
     }
 
-    with pytest.raises(KeyError):
-        daily_kpi.compute(payload)
+    result = daily_kpi.compute(payload)
+    assert result["data_source"] == ""

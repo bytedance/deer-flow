@@ -1,5 +1,6 @@
 """Thread-safe network utilities."""
 
+import os
 import socket
 import threading
 from contextlib import contextmanager
@@ -48,8 +49,15 @@ class PortAllocator:
         # mirrors exactly what Docker does.  Docker binds to 0.0.0.0:PORT;
         # checking only 127.0.0.1 can falsely report a port as available even
         # when Docker already occupies it on the wildcard address.
+        #
+        # On Windows SO_REUSEADDR is enabled by default, which lets a second
+        # bind() succeed on an already-bound port.  SO_EXCLUSIVEADDRUSE forces
+        # a true exclusive check so we don't return a port that Docker will
+        # reject with "port is already allocated".
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
+                if os.name == "nt":
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 s.bind(("0.0.0.0", port))
                 return True
             except OSError:
