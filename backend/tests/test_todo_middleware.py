@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.graph import StateGraph
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.todo_middleware import (
@@ -17,6 +18,7 @@ from deerflow.agents.middlewares.todo_middleware import (
     _reminder_in_messages,
     _todos_in_messages,
 )
+from deerflow.agents.thread_state import ThreadState
 
 
 def _ai_with_write_todos():
@@ -510,6 +512,20 @@ class TestWrapModelCall:
 
 
 class TestTodoMiddlewareAgentGraphIntegration:
+    def test_todo_state_schema_is_compatible_with_thread_state_in_either_order(self):
+        graph = StateGraph(TodoMiddleware.state_schema)
+        graph._add_schema(ThreadState)
+
+        reverse_graph = StateGraph(ThreadState)
+        reverse_graph._add_schema(TodoMiddleware.state_schema)
+
+    def test_create_agent_with_thread_state_and_todo_middleware_does_not_conflict(self):
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+
+        graph = create_agent(model=model, tools=[], middleware=[TodoMiddleware()], state_schema=ThreadState)
+
+        assert graph is not None
+
     def test_completion_reminder_is_transient_in_real_agent_graph(self):
         mw = TodoMiddleware()
         model = _CapturingFakeMessagesListChatModel(

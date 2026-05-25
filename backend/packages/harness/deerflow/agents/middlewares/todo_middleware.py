@@ -17,13 +17,29 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Awaitable, Callable
-from typing import Any, override
+from typing import Annotated, Any, override
 
+from langchain.agents import AgentState
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.todo import PlanningState, Todo
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
+from langchain.agents.middleware.types import (
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+    OmitFromInput,
+    hook_config,
+)
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
+
+from deerflow.agents.thread_state import merge_todos
+
+
+class TodoMiddlewareState(AgentState):
+    # LangGraph treats the final Annotated metadata item as the reducer, so
+    # merge_todos must stay last. The value type intentionally matches
+    # ThreadState.todos while OmitFromInput preserves LangChain's input omission.
+    todos: Annotated[list | None, OmitFromInput, merge_todos]
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -112,6 +128,8 @@ class TodoMiddleware(TodoListMiddleware):
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
     """
+
+    state_schema = TodoMiddlewareState
 
     @override
     def before_model(

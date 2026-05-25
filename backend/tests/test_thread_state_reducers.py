@@ -7,6 +7,9 @@ overwrites the previously accumulated value.
 
 from typing import get_type_hints
 
+from langchain.agents.middleware.types import OmitFromInput
+
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.thread_state import (
     ThreadState,
     merge_artifacts,
@@ -90,6 +93,20 @@ class TestThreadStateAnnotations:
         todos_hint = hints["todos"]
         assert hasattr(todos_hint, "__metadata__"), "ThreadState.todos must be Annotated with a reducer"
         assert merge_todos in todos_hint.__metadata__, "ThreadState.todos must be wired to merge_todos reducer (see #3123)"
+
+    def test_todo_middleware_todos_field_uses_same_reducer(self):
+        """TodoMiddleware.todos must be compatible with ThreadState.todos.
+
+        LangChain merges middleware state schemas with the base ThreadState. If
+        TodoMiddleware registers todos as a plain last-value channel while
+        ThreadState registers todos with merge_todos, graph construction can
+        fail with "Channel 'todos' already exists with a different type".
+        """
+        hints = get_type_hints(TodoMiddleware.state_schema, include_extras=True)
+        todos_hint = hints["todos"]
+        assert hasattr(todos_hint, "__metadata__"), "TodoMiddleware.todos must be Annotated"
+        assert OmitFromInput in todos_hint.__metadata__, "TodoMiddleware.todos must stay omitted from input schema"
+        assert todos_hint.__metadata__[-1] is merge_todos, "merge_todos must be the final metadata item so LangGraph treats it as the reducer"
 
     def test_artifacts_field_is_wired_to_merge_artifacts(self):
         """Sanity check that existing reducer wiring is preserved."""
