@@ -200,6 +200,7 @@ python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
   --week-start "{validated.week_start}" \
+  --type "{validated.equipment_type}" \
   --equipment "{validated.equipment_ids}" \
   --equipment-names "{validated.equipment_labels}" \
   --kpis "{validated.kpis}" \

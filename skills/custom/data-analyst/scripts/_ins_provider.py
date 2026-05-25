@@ -96,6 +96,44 @@ _INS_FACTORY_ID: str | None = os.environ.get("INS_FACTORY_ID") or None
 #                    selection by Chinese name (used when positionType
 #                    ranges overlap multiple physical signals)
 #
+# ---------------------------------------------------------------------------
+# Machine drop event type → (label, severity_level) mapping.
+# 8K (rotating_machinery) supports all 18 types.
+# 9K (reciprocating_machinery) supports types 1,2,3,14,15 only.
+# ---------------------------------------------------------------------------
+_EVENT_TYPE_MAP: dict[int, tuple[str, str]] = {
+    1: ("主报警", "high"),
+    2: ("预报警", "warning"),
+    3: ("启停机", "info"),
+    4: ("黑匣子", "info"),
+    5: ("正反进动", "info"),
+    6: ("通频值/过程量偏差", "warning"),
+    7: ("1X偏差", "warning"),
+    8: ("2X偏差", "warning"),
+    9: ("0.5X偏差", "warning"),
+    10: ("可选偏差", "warning"),
+    11: ("残余量偏差", "warning"),
+    12: ("振动波动", "warning"),
+    13: ("诊断事件", "info"),
+    14: ("预警", "warning"),
+    15: ("偏差报警", "high"),
+    16: ("诊断事件-D", "info"),
+    17: ("诊断事件-C", "info"),
+    18: ("诊断事件-B", "info"),
+}
+
+_EVENT_TYPES_8K: tuple[int, ...] = tuple(range(1, 19))
+_EVENT_TYPES_9K: tuple[int, ...] = (1, 2, 3, 14, 15)
+
+_EVENT_TYPES_BY_EQ_TYPE: dict[str, tuple[int, ...]] = {
+    "rotating_machinery": _EVENT_TYPES_8K,
+    "reciprocating_machinery": _EVENT_TYPES_9K,
+}
+
+_MACHINE_DROPS_PATH_BY_SERIES: dict[str, str] = {
+    "8k": "ins-os-view/sg8kData/getMachineDrops",
+    "9k": "ins-os-view/sg9kData/getMachineDrops",
+}
 
 _RM_POSITION_TYPES = tuple(range(81, 84))
 _RC_POSITION_TYPES = tuple(range(91, 100))
@@ -719,6 +757,11 @@ async def _async_fetch_payload(
             )
             per_equipment_kpis[eid] = kpis
             per_equipment_speed_rows[eid] = speed_rows
+
+        # Fetch machine drop events for rotating / reciprocating machinery.
+        alarms = await _fetch_equipment_events(
+            client, equipment_ids, start_ms, end_ms, eq_type=eq_type
+        )
     finally:
         await client.close()
 
@@ -749,7 +792,7 @@ async def _async_fetch_payload(
         "kpis": aggregated_kpis,
         "kpi_units": kpi_units,
         "hourly_runtime_rate": hourly,
-        "alarms": [],  # Real alarm log is out of scope for this adapter.
+        "alarms": alarms,
     }
     if include_per_equipment:
         per_eq: dict[str, dict[str, Any]] = {}
@@ -833,12 +876,17 @@ async def _async_fetch_daily_series_payload(
                 else:
                     aggregated_kpis[kpi_key] = round(sum(values) / len(values), 4)
 
+            # Per-day event scoping for weekly report trend data.
+            day_alarms = await _fetch_equipment_events(
+                client, equipment_ids, start_ms, end_ms, eq_type=eq_type
+            )
+
             daily_entries.append(
                 {
                     "date": date_str,
                     "kpis": aggregated_kpis,
                     "kpi_units": _kpi_units_for(kpi_keys),
-                    "alarms": [],
+                    "alarms": day_alarms,
                 }
             )
 
@@ -878,6 +926,106 @@ def _kpi_units_for(kpi_keys: list[str]) -> dict[str, str]:
     except Exception:
         pass
     return {k: "" for k in kpi_keys}
+
+
+# ---------------------------------------------------------------------------
+# Machine drop events — fetch from 8K / 9K getMachineDrops endpoint
+# ---------------------------------------------------------------------------
+
+
+def _event_series_for_eq_type(eq_type: str) -> str | None:
+    if eq_type == "rotating_machinery":
+        return "8k"
+    if eq_type == "reciprocating_machinery":
+        return "9k"
+    return None
+
+
+def _format_machine_drop_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    types: list[int] = entry.get("types") or []
+    if not types:
+        return None
+    primary_type = types[0]
+    label, level = _EVENT_TYPE_MAP.get(primary_type, (f"未知事件({primary_type})", "info"))
+
+    datatime = entry.get("datatime")
+    if isinstance(datatime, (int, float)):
+        try:
+            time_str = datetime.fromtimestamp(datatime / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, OverflowError, ValueError):
+            time_str = str(datatime)
+    else:
+        time_str = str(datatime or "")
+
+    pos_name = str(entry.get("posName") or entry.get("posId") or "")
+    pos_id = str(entry.get("posId") or "")
+
+    return {
+        "time": time_str,
+        "equipment": pos_name,
+        "level": level,
+        "message": f"[{label}] {pos_name}",
+        "pos_id": pos_id,
+        "event_type": primary_type,
+        "event_label": label,
+    }
+
+
+async def _fetch_machine_drops(
+    client: Any,
+    equipment_id: str,
+    start_ms: str,
+    end_ms: str,
+    eq_type: str,
+) -> list[dict[str, Any]]:
+    series = _event_series_for_eq_type(eq_type)
+    if series is None:
+        return []
+
+    event_types = list(_EVENT_TYPES_BY_EQ_TYPE.get(eq_type, ()))
+    if not event_types:
+        return []
+
+    raw_events = await client.get_machine_drops(
+        equipment_id,
+        start_ms,
+        end_ms,
+        event_types,
+        endpoint_series=series,
+        factory_id=_INS_FACTORY_ID,
+    )
+    if not raw_events:
+        return []
+
+    alarms: list[dict[str, Any]] = []
+    for entry in raw_events:
+        formatted = _format_machine_drop_entry(entry)
+        if formatted is not None:
+            alarms.append(formatted)
+    return alarms
+
+
+async def _fetch_equipment_events(
+    client: Any,
+    equipment_ids: list[str],
+    start_ms: str,
+    end_ms: str,
+    eq_type: str,
+) -> list[dict[str, Any]]:
+    series = _event_series_for_eq_type(eq_type)
+    if series is None:
+        return []
+
+    all_alarms: list[dict[str, Any]] = []
+    for eid in equipment_ids:
+        try:
+            alarms = await _fetch_machine_drops(client, eid, start_ms, end_ms, eq_type)
+            all_alarms.extend(alarms)
+        except Exception:
+            # Graceful degradation: a single equipment's events failing
+            # should not block the entire report.
+            continue
+    return all_alarms
 
 
 # ---------------------------------------------------------------------------

@@ -205,7 +205,7 @@ scripts:
   query_monthly:
     entry: scripts/query_monthly.py
     kind: [data_step]
-    description: "查询月度运行数据（KPI + 维修 + 缺陷 + 能耗，含环比/同比）"
+    description: "查询月度运行数据（KPI + 维修 + 缺陷，含环比/同比）"
     # alias map: DSL templates may use the short names ``mom``/``yoy`` for
     # ``compare``. The platform's Script Registry loader MUST translate them to
     # the canonical long names below before invoking the script — the script

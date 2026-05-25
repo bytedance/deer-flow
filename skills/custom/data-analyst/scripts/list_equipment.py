@@ -65,15 +65,13 @@ _SUB_TYPE_NAMES: dict[int, str] = {
 
 EQUIPMENT_TYPE_KPIS: dict[str, list[str]] = {
     "all": [
-        "runtime_rate", "downtime_count", "alarm_count", "energy_consumption",
+        "runtime_rate", "downtime_count", "alarm_count",
     ],
     "static_equipment": [
         "runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss",
-        "energy_consumption",
     ],
     "rotating_machinery": [
         "runtime_rate", "vibration_level", "bearing_temp", "downtime_count",
-        "energy_consumption",
     ],
     "pump": [
         "vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp",
@@ -89,7 +87,6 @@ KPI_DEFINITIONS: dict[str, dict[str, str]] = {
     "runtime_rate": {"name": "运行率", "unit": "%"},
     "downtime_count": {"name": "停机次数", "unit": "次"},
     "alarm_count": {"name": "告警数量", "unit": "条"},
-    "energy_consumption": {"name": "能耗", "unit": "kWh"},
     "output": {"name": "产量", "unit": "件"},
     "corrosion_rate": {"name": "腐蚀速率", "unit": "mm/a"},
     "thickness_loss": {"name": "壁厚减薄量", "unit": "mm"},

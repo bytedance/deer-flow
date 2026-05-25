@@ -92,6 +92,8 @@ class FakeClient:
         self._trend_table = trend_table
         self._parse_raw_rows = parse_raw_rows
         self.trend_calls: list[dict[str, Any]] = []
+        self.machine_drops_calls: list[dict[str, Any]] = []
+        self._machine_drops: dict[str, Any] = {}
         self.closed = False
 
     async def get_slim_components(self, equipment_id: str) -> list[dict[str, Any]]:
@@ -117,6 +119,25 @@ class FakeClient:
         if not self._parse_raw_rows:
             return result
         return load_features_ins().parse_trend_response(result, kwargs.get("endpoint_series", "8k"))
+
+    def set_machine_drops(self, events: dict[str, Any]) -> None:
+        self._machine_drops = events
+
+    async def get_machine_drops(self, machine_id, start_ms, end_ms, event_types, endpoint_series="8k", factory_id=None):
+        self.machine_drops_calls.append(
+            {
+                "machine_id": machine_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "event_types": list(event_types),
+                "endpoint_series": endpoint_series,
+                "factory_id": factory_id,
+            }
+        )
+        result = self._machine_drops.get(machine_id, [])
+        if isinstance(result, Exception):
+            raise result
+        return list(result)
 
     async def close(self) -> None:
         self.closed = True
