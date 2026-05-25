@@ -16,15 +16,19 @@ export function CopyButton({
 }) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(async () => {
-    const didCopy = await writeTextToClipboard(clipboardData);
-    if (!didCopy) {
-      toast.error(t.clipboard.failedToCopyToClipboard);
-      return;
-    }
+  const handleCopy = useCallback(() => {
+    void (async () => {
+      const didCopy = await writeTextToClipboard(clipboardData);
+      if (!didCopy) {
+        toast.error(t.clipboard.failedToCopyToClipboard);
+        return;
+      }
 
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    })().catch(() => {
+      toast.error(t.clipboard.failedToCopyToClipboard);
+    });
   }, [clipboardData, t.clipboard.failedToCopyToClipboard]);
   return (
     <Tooltip content={t.clipboard.copyToClipboard}>
