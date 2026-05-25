@@ -106,6 +106,84 @@ class TestAgentConfig:
 
 
 # ===========================================================================
+# 2a. resolve_agent_dir
+# ===========================================================================
+
+
+class TestResolveAgentDir:
+    """``resolve_agent_dir`` must not treat a memory-only per-user directory as
+    a valid agent dir. The memory writer creates ``users/{uid}/agents/{name}/``
+    with just ``memory.json`` after the first chat; without a ``config.yaml``
+    guard, the next request resolves to that directory and the subsequent
+    ``load_agent_config`` call raises ``FileNotFoundError``, which surfaces as
+    the agent disappearing from the assistant menu.
+    """
+
+    def test_skips_user_dir_with_memory_only(self, tmp_path):
+        """Per-user dir without config.yaml must fall through to legacy path."""
+        # Per-user dir from memory writer: only memory.json present.
+        user_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "my-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        # Legacy shared template that should win.
+        _write_agent(tmp_path, "my-agent", {"name": "my-agent"})
+        legacy_dir = tmp_path / "agents" / "my-agent"
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import resolve_agent_dir
+
+            resolved = resolve_agent_dir("my-agent")
+
+        assert resolved == legacy_dir
+
+    def test_prefers_user_dir_when_config_yaml_exists(self, tmp_path):
+        """Per-user dir with a valid config.yaml must win over legacy."""
+        user_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "my-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "config.yaml").write_text("name: my-agent\n", encoding="utf-8")
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        _write_agent(tmp_path, "my-agent", {"name": "my-agent"})
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import resolve_agent_dir
+
+            resolved = resolve_agent_dir("my-agent")
+
+        assert resolved == user_dir
+
+    def test_returns_user_path_when_neither_exists(self, tmp_path):
+        """If nothing exists, return the per-user write target."""
+        expected = tmp_path / "users" / "test-user-autouse" / "agents" / "fresh-agent"
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import resolve_agent_dir
+
+            resolved = resolve_agent_dir("fresh-agent")
+
+        assert resolved == expected
+
+    def test_load_agent_config_falls_back_when_user_has_memory_only(self, tmp_path):
+        """End-to-end: load_agent_config succeeds via legacy fallback when the
+        per-user dir is memory-only.
+        """
+        user_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "shared-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        _write_agent(tmp_path, "shared-agent", {"name": "shared-agent", "description": "Legacy"})
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("shared-agent")
+
+        assert cfg.name == "shared-agent"
+        assert cfg.description == "Legacy"
+
+
+# ===========================================================================
 # 3. load_agent_config
 # ===========================================================================
 
