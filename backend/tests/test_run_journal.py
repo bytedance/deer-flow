@@ -714,6 +714,110 @@ class TestExternalUsageRecords:
         assert j._subagent_tokens == 0
 
 
+class TestProgressSnapshots:
+    @pytest.mark.anyio
+    async def test_on_llm_end_reports_progress_snapshot(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+        )
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("Answer", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        assert snapshots
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["message_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_throttled_progress_flush_emits_trailing_snapshot(self):
+        snapshots: list[dict] = []
+        trailing_seen = asyncio.Event()
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+            if snapshot["total_tokens"] == 45:
+                trailing_seen.set()
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0.01,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.wait_for(trailing_seen.wait(), timeout=1.0)
+        await j.flush()
+
+        assert len(snapshots) >= 2
+        assert snapshots[-1]["total_tokens"] == 45
+        assert snapshots[-1]["llm_call_count"] == 2
+        assert snapshots[-1]["last_ai_message"] == "Second"
+
+    @pytest.mark.anyio
+    async def test_flush_cancels_delayed_progress_without_final_progress_write(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=10.0,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.sleep(0)
+        assert snapshots[-1]["total_tokens"] == 15
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        await asyncio.wait_for(j.flush(), timeout=0.2)
+
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "First"
+
+
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
 
