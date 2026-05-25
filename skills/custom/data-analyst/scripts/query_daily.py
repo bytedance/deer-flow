@@ -65,6 +65,22 @@ KPI_UNITS = {
     "kurtosis_index": "—",
 }
 
+# Default KPI keys per equipment type — mirrors list_equipment.EQUIPMENT_TYPE_KPIS.
+# When the user leaves --kpis at its argparse default and eq_type is detected as
+# a specific type (e.g. pump), we substitute the type-appropriate KPIs so that
+# 2K pumps get vibration KPIs instead of 8K/9K defaults like runtime_rate.
+_EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
+    "all": ["runtime_rate", "downtime_count", "alarm_count"],
+    "static_equipment": ["runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss"],
+    "rotating_machinery": ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count"],
+    "pump": ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index"],
+    "reciprocating_machinery": ["runtime_rate", "vibration_level", "valve_temp", "downtime_count", "alarm_count"],
+}
+
+# The argparse default for --kpis. We compare against this to decide whether
+# the caller left KPIs untouched (and therefore should get type-specific KPIs).
+_ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
+
 
 def _output_dir() -> Path:
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
@@ -367,6 +383,12 @@ def main() -> int:
             equipment_meta = {e["id"]: e for e in equipment_records}
             include_per_equipment = len(equipment_ids) > 20
             is_scope_mode = True
+            # When --type is all, derive eq_type from resolved equipment so
+            # per-type KPI mappings (e.g. pump → 2K) apply in scope mode too.
+            if eq_type == "all" and equipment_records:
+                org_types = {e.get("org_type") for e in equipment_records if e.get("org_type")}
+                if len(org_types) == 1:
+                    eq_type = org_types.pop()
         else:
             equipment_ids = _dedupe_preserve_order(_parse_csv(args.equipment))
             equipment_error = _validate_equipment_ids(equipment_ids)
@@ -389,6 +411,12 @@ def main() -> int:
                     eq_type = detected
 
         kpi_keys = _dedupe_preserve_order(_parse_csv(args.kpis) or ["runtime_rate", "downtime_count", "alarm_count"])
+        # When --kpis is left at its argparse default and eq_type is a specific
+        # type, substitute type-appropriate KPIs.  This is load-bearing for pumps:
+        # the defaults (runtime_rate / downtime_count / alarm_count) only match
+        # 8K/9K position types, so 2K pump data returns empty without this swap.
+        if kpi_keys == _ARGPARSE_DEFAULT_KPIS and eq_type != "all" and eq_type in _EQUIPMENT_TYPE_DEFAULT_KPIS:
+            kpi_keys = list(_EQUIPMENT_TYPE_DEFAULT_KPIS[eq_type])
         kpi_error = _validate_kpi_keys(kpi_keys)
         if kpi_error:
             return _error(kpi_error)

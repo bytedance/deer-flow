@@ -754,7 +754,11 @@ def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             ):
                 for child in inner:
-                    flattened.append(child)
+                    enriched = dict(child)
+                    gpid = item.get("gpid")
+                    if gpid:
+                        enriched["component_id"] = str(gpid)
+                    flattened.append(enriched)
             elif isinstance(inner, list) and not inner:
                 # Empty value array → no data samples for this 2k/6k point.
                 pass

@@ -324,3 +324,154 @@ def test_main_emits_error_json_when_fetch_raises(query_daily, monkeypatch, capsy
     assert "RuntimeError" in payload["error"]
     assert "ins unreachable" in payload["error"]
     assert not (tmp_path / "daily_data.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# KPI auto-substitution — when --kpis is left at its argparse default and the
+# equipment type is detected as a specific type (e.g. pump), the script must
+# swap 8K/9K defaults for type-appropriate KPIs so pumps get 2K vibration KPIs
+# instead of runtime_rate / downtime_count / alarm_count that return no data.
+# ---------------------------------------------------------------------------
+
+
+def test_kpi_substitution_for_pump_equipment_mode(query_daily, monkeypatch, capsys, tmp_path):
+    """Default KPIs must be swapped to pump-specific KPIs when auto-detection
+    identifies the equipment as pump type."""
+    calls: list[dict] = []
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        calls.append({"kpi_keys": list(kpi_keys), "eq_type": eq_type})
+        return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+    # Simulate auto-detection: _detect_equipment_type returns "pump"
+    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "pump")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "PP-001",
+            # No --kpis → argparse default "runtime_rate,downtime_count,alarm_count"
+            "--compare", "none",
+        ],
+    )
+    rc = query_daily.main()
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "error" not in out
+    assert len(calls) == 1
+    # Default KPIs must have been replaced with pump-specific ones
+    assert calls[0]["kpi_keys"] == ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index"]
+    assert calls[0]["eq_type"] == "pump"
+
+
+def test_kpi_substitution_not_applied_when_custom_kpis_provided(query_daily, monkeypatch, capsys):
+    """When the caller explicitly passes --kpis, the substitution must NOT fire
+    even if the equipment type is pump — the caller asked for specific KPIs."""
+    calls: list[dict] = []
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        calls.append({"kpi_keys": list(kpi_keys), "eq_type": eq_type})
+        return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "pump")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "PP-001",
+            "--kpis", "runtime_rate,alarm_count",
+            "--compare", "none",
+        ],
+    )
+    rc = query_daily.main()
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "error" not in out
+    # Custom KPIs must be preserved — no substitution
+    assert calls[0]["kpi_keys"] == ["runtime_rate", "alarm_count"]
+
+
+def test_kpi_substitution_not_applied_for_all_type(query_daily, monkeypatch, capsys):
+    """When eq_type stays 'all', the substitution must NOT fire."""
+    calls: list[dict] = []
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        calls.append({"kpi_keys": list(kpi_keys), "eq_type": eq_type})
+        return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+    # Auto-detection returns "all" (mixed types or undetermined)
+    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "all")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "E001,E002",
+            "--compare", "none",
+        ],
+    )
+    rc = query_daily.main()
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "error" not in out
+    # Default KPIs preserved for "all" type
+    assert calls[0]["kpi_keys"] == ["runtime_rate", "downtime_count", "alarm_count"]
+
+
+def test_kpi_substitution_for_rotating_machinery(query_daily, monkeypatch, capsys):
+    """Rotating machinery must also get its type-specific KPIs substituted."""
+    calls: list[dict] = []
+
+    def fake_fetch(date_str, equipment_ids, kpi_keys, eq_type="all",
+                   include_per_equipment=False, equipment_meta=None):
+        calls.append({"kpi_keys": list(kpi_keys), "eq_type": eq_type})
+        return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
+
+    monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
+    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "rotating_machinery")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "query_daily.py",
+            "--date", "2026-05-13",
+            "--equipment", "RM-001",
+            "--compare", "none",
+        ],
+    )
+    rc = query_daily.main()
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "error" not in out
+    assert calls[0]["kpi_keys"] == ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count"]
+
+
+def test_constants_match_list_equipment(query_daily):
+    """The per-type KPI lists in query_daily must match list_equipment's
+    EQUIPMENT_TYPE_KPIS (minus energy_consumption which is intentionally
+    excluded from the KPI_FEATURE_MAP)."""
+    import importlib.util
+    le_path = SCRIPT_PATH.parent / "list_equipment.py"
+    spec = importlib.util.spec_from_file_location("list_equipment", le_path)
+    le = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(le)
+
+    for eq_type in ["rotating_machinery", "pump", "reciprocating_machinery", "static_equipment"]:
+        le_kpis = [k for k in le.EQUIPMENT_TYPE_KPIS[eq_type] if k != "energy_consumption"]
+        qd_kpis = query_daily._EQUIPMENT_TYPE_DEFAULT_KPIS[eq_type]
+        assert qd_kpis == le_kpis, f"KPI mismatch for {eq_type}: query_daily={qd_kpis} vs list_equipment={le_kpis}"
