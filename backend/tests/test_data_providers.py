@@ -114,6 +114,16 @@ def test_env_var_routes_to_http(providers, monkeypatch):
     assert "Http" in type(p).__name__
 
 
+def test_env_var_ins_on_non_ins_source_falls_back_to_demo(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=ins on trend/fault_context/etc. must fall back to demo."""
+    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "ins")
+    for source in ("trend", "fault_context", "failure_data", "closure_items", "inspection"):
+        p = providers.get_provider(source)
+        assert "Demo" in type(p).__name__, (
+            f"get_provider({source!r}) returned {type(p).__name__}, expected Demo*Provider"
+        )
+
+
 def test_unknown_mode_raises_key_error(providers, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "nonexistent")
     with pytest.raises(KeyError):

@@ -278,14 +278,17 @@ def _resolve_mode(source: str, mode: str | None) -> str:
 
     Equipment report sources (``daily`` / ``weekly`` / ``monthly``) are
     pinned to the InS backend — they ignore ``DEER_FLOW_DATA_PROVIDER`` and
-    always resolve to ``ins``. All other sources fall back to the env var
-    (default ``demo``).
+    always resolve to ``ins``. The reverse is also enforced: non-INS sources
+    never resolve to ``ins`` (fall back to ``demo`` when the env var says
+    ``ins``, since those sources don't have an InS provider).
     """
     if mode is not None:
         return mode.lower()
     if source in INS_ONLY_SOURCES:
         return "ins"
     env_mode = (os.environ.get("DEER_FLOW_DATA_PROVIDER") or "").lower()
+    if env_mode == "ins":
+        return "demo"
     return env_mode or "demo"
 
 
