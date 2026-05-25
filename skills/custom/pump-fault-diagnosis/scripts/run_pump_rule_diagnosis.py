@@ -78,8 +78,6 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             machine_id=args.machine_id,
             component_id=args.component_id,
             diagnosis_time=args.diagnosis_time,
-            start_time=args.start_time,
-            end_time=args.end_time,
             component_name=args.component_name,
             base_freq=args.base_freq,
         )

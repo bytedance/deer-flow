@@ -16,6 +16,22 @@ Authoritative runtime entrypoints:
 - `scripts/run_pump_rule_diagnosis.py`
 - `scripts/build_pump_report_payload.py`
 
+**IMPORTANT: CLI argument rules**
+
+When invoking `run_pump_rule_diagnosis.py`, you MUST:
+- Pass `--diagnosis-time` with the user-selected diagnosis hour (e.g. `"2026-05-24T08:00:00"`)
+- **Do NOT pass `--start-time` or `--end-time`**. The runtime automatically computes a 24-hour window ending at `diagnosis_time`. Passing explicit start/end overrides this logic with a narrow 1-hour window, resulting in empty trend data.
+
+Example correct invocation:
+```
+python /mnt/skills/custom/pump-fault-diagnosis/scripts/run_pump_rule_diagnosis.py \
+  --machine-id "241212010001718" \
+  --component-id "703030976116162560" \
+  --component-name "风机" \
+  --diagnosis-time "2026-05-24T08:00:00" \
+  --output /mnt/user-data/outputs/pump_rule_result.json
+```
+
 Runtime package:
 
 - `/opt/features-tool/pump_rule` in sandbox
@@ -32,7 +48,9 @@ The managed runtime does not evaluate start-stop state and never skips vibration
 
 ## Workflow
 
-1. Confirm the target pump device, selected sub-device, and diagnosis hour.
+**Device type policy**: Do NOT check or restrict by device type (e.g. type=50 for fans, type=4 for pumps). If the selected sub-device has vibration measurement points, execute the diagnosis flow regardless of device classification.
+
+1. Confirm the target device, selected sub-device, and diagnosis hour.
 2. Determine target context from `/ins-os-manage/organize/getComponentByMachineIds?operateType=1&machineIds={machineId}` by expanding the selected `componentId`; vibration points are `unitType=3` rows whose `type` is `23`, `24`, `26`, or `27`. Use `getPointConfigs` only as a fallback when the component tree cannot provide points.
 3. Use the plant inspection toolchain first to locate the pump, inspect component hierarchy, and identify related points:
    - shaft vibration X/Y at drive end and non-drive end (or housing vibration on small pumps)

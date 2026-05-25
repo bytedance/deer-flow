@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import platform
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .context import build_target_context_from_component_tree, build_target_context_from_point_configs
-from .health import check_temperature_health, check_vibration_health
+from .health import calc_trend_k, check_temperature_health, check_vibration_health
 from .models import PumpDiagnosisResult
 from .provider import InsPumpDataProvider, JsonFixturePumpDataProvider, PumpDataProvider
 from .rules import check_malfunctions
@@ -119,7 +119,15 @@ async def run_diagnosis(
     spectrum_ratio_map, sampled_waveforms, spectrum_warnings = _build_spectrum_ratio_map(vibration_points, wave_by_point, resolved_base_freq)
     warnings.extend(spectrum_warnings)
     malfunction_findings = check_malfunctions(spectrum_ratio_map) if spectrum_ratio_map else []
-    evidence = _build_evidence(health_findings, malfunction_findings, spectrum_ratio_map, machine_id)
+    point_names = {}
+    point_thresholds_map = {}
+    for point in vibration_points + temperature_points:
+        point_names[point.point_id] = point.name
+        point_thresholds_map[point.point_id] = point.thresholds
+    evidence = _build_evidence(
+        health_findings, malfunction_findings, spectrum_ratio_map,
+        component_name or machine_id, point_names, point_thresholds_map,
+    )
 
     target_info = context.model_dump()
     target_info["diagnosis_time"] = diagnosis_time
@@ -142,12 +150,10 @@ async def run_diagnosis(
 def _resolve_window(diagnosis_time: str, start_time: str | None, end_time: str | None) -> tuple[str, str]:
     if start_time and end_time:
         return start_time, end_time
-    if "T" in diagnosis_time:
-        prefix = diagnosis_time[:13]
-        return f"{prefix}:00:00", f"{prefix}:59:59"
-    if len(diagnosis_time) == 10:
-        return f"{diagnosis_time}T00:00:00", f"{diagnosis_time}T00:59:59"
-    return diagnosis_time, diagnosis_time
+    fmt = "%Y-%m-%dT%H:%M:%S" if "T" in diagnosis_time else "%Y-%m-%d"
+    end_dt = datetime.strptime(diagnosis_time[:19], fmt)
+    start_dt = end_dt - timedelta(hours=24)
+    return start_dt.strftime(fmt), end_dt.strftime(fmt)
 
 
 def _build_health_findings(
@@ -156,12 +162,16 @@ def _build_health_findings(
     trend_by_point: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    vibration_k = 1.0
     for point in vibration_points:
         values = [_normalize_trend_value(item) for item in trend_by_point.get(point.point_id, [])]
         findings.extend(check_vibration_health(point.point_id, point.name, values, point.thresholds))
+        c_val = point.thresholds.get("rms_c") or point.thresholds.get("C") or point.thresholds.get("c") or point.thresholds.get("cValue")
+        if c_val is not None:
+            vibration_k = calc_trend_k(float(c_val))
     for point in temperature_points:
         values = [_normalize_trend_value(item) for item in trend_by_point.get(point.point_id, [])]
-        findings.extend(check_temperature_health(point.point_id, point.name, values, point.thresholds))
+        findings.extend(check_temperature_health(point.point_id, point.name, values, point.thresholds, vibration_k=vibration_k))
     return findings
 
 
@@ -221,52 +231,83 @@ def _latest_rms_from_wave(wave: list[float]) -> float:
     return float((sum(value * value for value in wave) / len(wave)) ** 0.5)
 
 
+_CATEGORY_ZH = {"health": "健康", "rule": "规则", "spectrum": "频谱"}
+
+_FEATURE_ZH = {
+    "1X energy ratio": "1倍频能量占比",
+    "2X energy ratio": "2倍频能量占比",
+    "0.5X energy ratio": "0.5倍频能量占比",
+    "unbalance": "不平衡",
+    "bearing_damage": "轴承损伤",
+    "misalignment": "不对中",
+    "cavitation": "汽蚀",
+    "resonance": "共振",
+}
+
+
 def _build_evidence(
     health_findings: list[dict[str, Any]],
     malfunction_findings: list[dict[str, Any]],
     spectrum_ratio_map: dict[str, list[dict[str, Any]]],
-    machine_id: str,
+    equipment_name: str,
+    point_names: dict[str, str],
+    point_thresholds: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for finding in health_findings:
+        pid = finding.get("point_id") or ""
         rows.append(
             {
-                "category": "health",
-                "equipment_id": machine_id,
-                "point": finding.get("point_name") or finding.get("point_id"),
+                "category": _CATEGORY_ZH["health"],
+                "equipment": equipment_name,
+                "point": point_names.get(pid) or finding.get("point_name") or pid,
                 "feature": finding.get("description") or finding.get("status"),
                 "value": finding.get("value"),
-                "threshold": finding.get("threshold"),
-                "verdict": "exceed",
+                "verdict": "报警",
             }
         )
     for finding in malfunction_findings:
+        ids = finding.get("point_ids") or []
+        names = [point_names.get(str(pid), str(pid)) for pid in ids]
+        raw_name = finding.get("name") or finding.get("type") or ""
         rows.append(
             {
-                "category": "rule",
-                "equipment_id": machine_id,
-                "point": ",".join(str(item) for item in (finding.get("point_ids") or [])),
-                "feature": finding.get("name") or finding.get("type"),
+                "category": _CATEGORY_ZH["rule"],
+                "equipment": equipment_name,
+                "point": ",".join(names),
+                "feature": _FEATURE_ZH.get(raw_name, raw_name),
                 "value": round(float(finding.get("probability") or 0.0), 4),
-                "threshold": ">=0.5",
-                "verdict": "exceed",
+                "verdict": "报警",
             }
         )
     for point_id, spectra in spectrum_ratio_map.items():
+        thresholds = point_thresholds.get(point_id, {})
+        c_threshold = (
+            thresholds.get("rms_c")
+            or thresholds.get("C")
+            or thresholds.get("c")
+            or thresholds.get("cValue")
+            or thresholds.get("vRmsCValue")
+        )
         for spectrum in spectra[:2]:
             one = (spectrum.get("harmonic_ratio") or {}).get("1")
-            if one is not None:
-                rows.append(
-                    {
-                        "category": "spectrum",
-                        "equipment_id": machine_id,
-                        "point": point_id,
-                        "feature": "1X energy ratio",
-                        "value": round(float(one), 4),
-                        "threshold": 0.5,
-                        "verdict": "exceed" if float(one) >= 0.5 else "normal",
-                    }
-                )
+            if one is None:
+                continue
+            rms = spectrum.get("rms")
+            if rms is not None and c_threshold is not None and float(rms) > float(c_threshold):
+                verdict = "报警"
+            else:
+                verdict = "正常"
+            rows.append(
+                {
+                    "category": _CATEGORY_ZH["spectrum"],
+                    "equipment": equipment_name,
+                    "point": point_names.get(point_id, point_id),
+                    "feature": _FEATURE_ZH["1X energy ratio"],
+                    "value": round(float(one), 4),
+                    "verdict": verdict,
+                }
+            )
     return rows
 
 

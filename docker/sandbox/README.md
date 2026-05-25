@@ -16,7 +16,7 @@ From the repository root:
 ```bash
 docker build \
   -f docker/sandbox/Dockerfile \
-  -t deer-flow-sandbox-features-tool:latest \
+  -t deer-flow-sandbox:latest \
   docker/sandbox
 ```
 
@@ -26,7 +26,7 @@ If you need a custom Python package mirror:
 docker build \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
   -f docker/sandbox/Dockerfile \
-  -t deer-flow-sandbox-features-tool:latest \
+  -t deer-flow-sandbox:latest \
   docker/sandbox
 ```
 
@@ -36,7 +36,7 @@ docker build \
 
 ```yaml
 sandbox:
-  image: deer-flow-sandbox-features-tool:latest
+  image: deer-flow-sandbox:latest
   environment:
     FEATURES_TOOL_ROOT: /opt/features-tool
 ```

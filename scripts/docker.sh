@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
 DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
-CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox-features-tool:latest"
+CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox:latest"
 
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"

@@ -3,3 +3,5 @@ httpx
 cryptography
 protobuf
 pydantic
+scipy
+PyEMD

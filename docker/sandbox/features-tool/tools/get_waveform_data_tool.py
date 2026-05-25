@@ -16,9 +16,9 @@ INS_SETTINGS = load_ins_settings()
 ins_client = InsApiClient(INS_SETTINGS)
 
 
-async def _get_waveform_data_impl(component_id: str, time: str) -> dict[str, object]:
+async def _get_waveform_data_impl(component_id: str, time: str, endpoint_series: str = "8k") -> dict[str, object]:
     time_ms = datetime_input_to_ms(time)
-    data = await ins_client.get_waveform_data(component_id, time_ms)
+    data = await ins_client.get_waveform_data(component_id, time_ms, endpoint_series=endpoint_series)
     return {
         "component_id": component_id,
         "time_ms": time_ms,
