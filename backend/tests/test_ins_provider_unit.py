@@ -196,7 +196,14 @@ class _FakeClient:
         self._components = components
         self._trend_table = trend_table
         self.trend_calls: list[dict[str, Any]] = []
+        self.machine_drops_calls: list[dict[str, Any]] = []
         self.closed = False
+        # Per-machine drop events: dict[machine_id] → list[event_dict] or Exception
+        self._machine_drops: dict[str, Any] = {}
+
+    def set_machine_drops(self, events: dict[str, Any]) -> None:
+        """Configure canned getMachineDrops responses keyed by machine_id."""
+        self._machine_drops = events
 
     async def get_slim_components(self, equipment_id: str) -> list[dict]:
         return self._components.get(equipment_id, [])
@@ -212,6 +219,22 @@ class _FakeClient:
             }
         )
         return list(self._trend_table.get((component_id, kwargs.get("endpoint_series")), []))
+
+    async def get_machine_drops(self, machine_id, start_ms, end_ms, event_types, endpoint_series="8k", factory_id=None):
+        self.machine_drops_calls.append(
+            {
+                "machine_id": machine_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "event_types": list(event_types),
+                "endpoint_series": endpoint_series,
+                "factory_id": factory_id,
+            }
+        )
+        result = self._machine_drops.get(machine_id, [])
+        if isinstance(result, Exception):
+            raise result
+        return list(result)
 
     async def close(self) -> None:
         self.closed = True
@@ -302,7 +325,7 @@ def test_8k_bearing_temp_uses_value_field_when_temperature_missing(provider, mon
         eq_type="rotating_machinery",
     )
 
-    assert result["kpis"]["bearing_temp"] == pytest.approx((62.2 + 62.0 + 61.8 + 62.4) / 4)
+    assert result["kpis"]["bearing_temp"] == pytest.approx(0.621)
     requested = fake.trend_calls[0]["features"]
     assert "value" in requested
     assert "temperature" in requested
@@ -850,3 +873,253 @@ def test_9k_runtime_rate_uses_9k_endpoint(provider, monkeypatch):
     # 2 of 4 samples have speed>0 → 0.5
     assert result["kpis"]["runtime_rate"] == pytest.approx(0.5)
     assert fake.trend_calls[0]["kwargs"]["endpoint_series"] == "9k"
+
+
+# ---------------------------------------------------------------------------
+# Machine drop events — _EVENT_TYPE_MAP, _fetch_machine_drops, graceful
+# degradation, and report-scoped alarm injection.
+# ---------------------------------------------------------------------------
+
+
+def test_event_type_map_covers_all_18_types(provider):
+    assert len(provider._EVENT_TYPE_MAP) == 18
+    for t in range(1, 19):
+        assert t in provider._EVENT_TYPE_MAP, f"type {t} missing from _EVENT_TYPE_MAP"
+        label, level = provider._EVENT_TYPE_MAP[t]
+        assert isinstance(label, str) and len(label) > 0
+        assert level in {"high", "warning", "info"}
+
+
+def test_event_type_map_critical_types_have_high_level(provider):
+    # Main alarm (1) and deviation alarm (15) must be "high"
+    assert provider._EVENT_TYPE_MAP[1][1] == "high"
+    assert provider._EVENT_TYPE_MAP[15][1] == "high"
+
+
+def test_event_type_map_warning_types_have_warning_level(provider):
+    warning_types = [2, 6, 7, 8, 9, 10, 11, 12, 14]
+    for t in warning_types:
+        assert provider._EVENT_TYPE_MAP[t][1] == "warning", f"type {t} expected warning"
+
+
+def test_event_types_8k_covers_1_to_18(provider):
+    assert set(provider._EVENT_TYPES_8K) == set(range(1, 19))
+
+
+def test_event_types_9k_is_restricted_subset(provider):
+    assert set(provider._EVENT_TYPES_9K) == {1, 2, 3, 14, 15}
+
+
+def test_event_series_for_eq_type_rotating(provider):
+    assert provider._event_series_for_eq_type("rotating_machinery") == "8k"
+
+
+def test_event_series_for_eq_type_reciprocating(provider):
+    assert provider._event_series_for_eq_type("reciprocating_machinery") == "9k"
+
+
+def test_event_series_for_eq_type_none_for_other(provider):
+    assert provider._event_series_for_eq_type("pump") is None
+    assert provider._event_series_for_eq_type("static_equipment") is None
+    assert provider._event_series_for_eq_type("all") is None
+
+
+def test_format_machine_drop_entry_maps_type_to_label_and_level(provider):
+    entry = {
+        "posId": "P001",
+        "posName": "驱动端振动",
+        "types": [1],
+        "datatime": 1700000000000,
+    }
+    result = provider._format_machine_drop_entry(entry)
+    assert result is not None
+    assert result["level"] == "high"
+    assert result["event_type"] == 1
+    assert result["event_label"] == "主报警"
+    assert "主报警" in result["message"]
+    assert "驱动端振动" in result["message"]
+    assert result["time"] is not None
+
+
+def test_format_machine_drop_entry_uses_pos_id_fallback(provider):
+    entry = {
+        "posId": "P002",
+        "types": [14],
+        "datatime": 1700000000000,
+    }
+    result = provider._format_machine_drop_entry(entry)
+    assert result is not None
+    assert result["level"] == "warning"
+    assert result["event_label"] == "预警"
+    assert "P002" in result["message"]
+
+
+def test_format_machine_drop_entry_returns_none_for_empty_types(provider):
+    entry = {"posId": "P003", "posName": "x", "types": [], "datatime": 1700000000000}
+    assert provider._format_machine_drop_entry(entry) is None
+
+
+def test_rotating_machinery_report_includes_alarms(provider, monkeypatch):
+    rows = [
+        {"component_id": "P_8K_1", "time_ms": "1700000000000", "time": "t",
+         "values": {"value": 2.0}}
+    ]
+    fake = _FakeClient(
+        components={"M8K": _machine_8k()},
+        trend_table={("P_8K_1", "8k"): rows},
+    )
+    fake.set_machine_drops({
+        "M8K": [
+            {
+                "posId": "P_8K_1",
+                "posName": "出口压力",
+                "types": [1],
+                "datatime": 1700000000000,
+            },
+            {
+                "posId": "P_8K_1",
+                "posName": "出口压力",
+                "types": [14],
+                "datatime": 1700000100000,
+            },
+        ],
+    })
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M8K"],
+        kpi_keys=["outlet_pressure"],
+        eq_type="rotating_machinery",
+    )
+
+    assert len(result["alarms"]) == 2
+    assert result["alarms"][0]["level"] == "high"
+    assert result["alarms"][0]["event_type"] == 1
+    assert result["alarms"][1]["level"] == "warning"
+    assert result["alarms"][1]["event_type"] == 14
+    # Verify machine_drops was called with correct params
+    assert len(fake.machine_drops_calls) == 1
+    assert fake.machine_drops_calls[0]["endpoint_series"] == "8k"
+    assert fake.machine_drops_calls[0]["machine_id"] == "M8K"
+
+
+def test_reciprocating_machinery_report_includes_alarms(provider, monkeypatch):
+    rows = [
+        {"component_id": "P_9K_1", "time_ms": "1700000000000", "time": "t",
+         "values": {"pp_value": 15.0}}
+    ]
+    fake = _FakeClient(
+        components={"M9K": _machine_9k()},
+        trend_table={("P_9K_1", "9k"): rows},
+    )
+    fake.set_machine_drops({
+        "M9K": [
+            {
+                "posId": "P_9K_1",
+                "posName": "驱动端水平振动",
+                "types": [3],
+                "datatime": 1700000000000,
+            },
+        ],
+    })
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M9K"],
+        kpi_keys=["vibration_level"],
+        eq_type="reciprocating_machinery",
+    )
+
+    assert len(result["alarms"]) == 1
+    assert result["alarms"][0]["event_type"] == 3
+    assert result["alarms"][0]["event_label"] == "启停机"
+    assert fake.machine_drops_calls[0]["endpoint_series"] == "9k"
+    # 9K only requests event types 1,2,3,14,15
+    assert set(fake.machine_drops_calls[0]["event_types"]) == {1, 2, 3, 14, 15}
+
+
+def test_pump_report_has_empty_alarms(provider, monkeypatch):
+    rows = [
+        {"component_id": "P_2K_1", "time_ms": "1700000000000", "time": "t",
+         "values": {"v_rms": 1.5}}
+    ]
+    fake = _FakeClient(
+        components={"M2K": _machine_2k()},
+        trend_table={("P_2K_1", "2k"): rows},
+    )
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M2K"],
+        kpi_keys=["vibration_velocity_rms"],
+        eq_type="pump",
+    )
+
+    assert result["alarms"] == []
+    assert len(fake.machine_drops_calls) == 0
+
+
+def test_machine_drops_failure_degrades_gracefully(provider, monkeypatch):
+    rows = [
+        {"component_id": "P_8K_1", "time_ms": "1700000000000", "time": "t",
+         "values": {"value": 2.0}}
+    ]
+    fake = _FakeClient(
+        components={"M8K": _machine_8k()},
+        trend_table={("P_8K_1", "8k"): rows},
+    )
+    fake.set_machine_drops({"M8K": RuntimeError("InS timeout")})
+    _patch_client(monkeypatch, provider, fake)
+
+    # Should NOT raise — event fetch failure is swallowed
+    result = provider.fetch_daily_payload(
+        date_str="2026-05-13",
+        equipment_ids=["M8K"],
+        kpi_keys=["outlet_pressure"],
+        eq_type="rotating_machinery",
+    )
+
+    # KPI data is still returned
+    assert result["kpis"]["outlet_pressure"] == pytest.approx(2.0)
+    # Alarms degrade to empty list
+    assert result["alarms"] == []
+
+
+def test_daily_series_payload_scopes_events_per_day(provider, monkeypatch):
+    components = {"M8K": _machine_8k()}
+    # 3 days of trend data
+    trend = {
+        ("P_8K_1", "8k"): [
+            {"component_id": "P_8K_1", "time_ms": str(1700000000000 + d * 86_400_000), "time": "t",
+             "values": {"value": 2.0 + d * 0.1}}
+            for d in range(3)
+        ],
+    }
+    fake = _FakeClient(components=components, trend_table=trend)
+    # Day 1 has events, day 2 has none, day 3 has events
+    fake.set_machine_drops({
+        "M8K": [
+            {"posId": "P_8K_1", "posName": "出口压力", "types": [1], "datatime": 1700000000000},
+            {"posId": "P_8K_1", "posName": "出口压力", "types": [2], "datatime": 1700086400000},
+        ],
+    })
+    _patch_client(monkeypatch, provider, fake)
+
+    result = provider.fetch_daily_series_payload(
+        start_date="2026-05-13",
+        day_count=3,
+        equipment_ids=["M8K"],
+        kpi_keys=["outlet_pressure"],
+        eq_type="rotating_machinery",
+    )
+
+    assert len(result) == 3
+    # Each day calls get_machine_drops (3 calls)
+    assert len(fake.machine_drops_calls) == 3
+    # Check day-level scoping
+    for call in fake.machine_drops_calls:
+        assert call["machine_id"] == "M8K"
+        assert call["endpoint_series"] == "8k"

@@ -224,6 +224,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
    ```bash
    python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
      --report-month "{validated.report_month}" \
+     --type "{validated.equipment_type}" \
      --equipment "{validated.equipment_ids}" \
      --equipment-names "{validated.equipment_labels}" \
      --kpis "{validated.kpi_keys}" \

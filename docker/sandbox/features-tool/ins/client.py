@@ -49,6 +49,10 @@ _ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
     "8k": "ins-os-view/sg8kData/getTrendDataHis",
     "9k": "ins-os-view/sg9kData/getTrendDataHis",
 }
+_MACHINE_DROPS_PATH: dict[str, str] = {
+    "8k": "ins-os-view/sg8kData/getMachineDrops",
+    "9k": "ins-os-view/sg9kData/getMachineDrops",
+}
 # ---------------------------------------------------------------------------
 # Retry policy for transient network errors during HTTP calls.
 # ConnectTimeout / ConnectError / ReadTimeout / RemoteProtocolError are
@@ -413,6 +417,37 @@ class InsApiClient:
 
         rows = _extract_trend_rows(body)
         return parse_trend_response(rows, series)
+
+    async def get_machine_drops(
+        self,
+        machine_id: str,
+        start_ms: str,
+        end_ms: str,
+        event_types: list[int],
+        endpoint_series: str = "8k",
+        factory_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch machine drop events (alarms, start/stop, warnings, etc.).
+
+        ``endpoint_series`` must be ``"8k"`` (rotating machinery) or ``"9k"``
+        (reciprocating machinery).
+        """
+        series = endpoint_series.lower()
+        path = _MACHINE_DROPS_PATH.get(series)
+        if path is None:
+            raise ValueError(f"Unsupported endpoint_series for machine drops: {endpoint_series!r}")
+
+        params: dict[str, Any] = {
+            "macId": machine_id,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "type": [str(t) for t in event_types],
+        }
+        if factory_id is not None:
+            params["factoryId"] = factory_id
+
+        body = await self._get_json(path, params)
+        return body.get("data") or []
 
     async def get_waveform_data(self, component_id: str, time_ms: str) -> dict[str, Any]:
         items = await self._fetch_wave_items(component_id, time_ms)

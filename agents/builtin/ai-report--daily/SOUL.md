@@ -221,6 +221,7 @@ python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
   --date "{validated.report_date}" \
+  --type "{validated.equipment_type}" \
   --equipment "{validated.equipment_ids}" \
   --equipment-names "{validated.equipment_labels}" \
   --kpis "{validated.kpis}" \
