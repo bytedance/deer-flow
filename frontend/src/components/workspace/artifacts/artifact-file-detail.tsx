@@ -110,6 +110,13 @@ export function ArtifactFileDetail({
     isSupportPreview,
     toolResult,
   });
+  const selectableArtifacts = useMemo(() => {
+    const artifactPaths = artifacts ?? [];
+    if (isWriteFile || artifactPaths.includes(filepath)) {
+      return artifactPaths;
+    }
+    return [filepath, ...artifactPaths];
+  }, [artifacts, filepath, isWriteFile]);
   const { content, url } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
@@ -167,7 +174,7 @@ export function ArtifactFileDetail({
                 </SelectTrigger>
                 <SelectContent className="select-none">
                   <SelectGroup>
-                    {(artifacts ?? []).map((filepath) => (
+                    {selectableArtifacts.map((filepath) => (
                       <SelectItem key={filepath} value={filepath}>
                         {getFileName(filepath)}
                       </SelectItem>

@@ -9,6 +9,7 @@ const IN_PROGRESS_THREAD_ID = "00000000-0000-0000-0000-000000003119";
 const COMPLETE_THREAD_ID = "00000000-0000-0000-0000-000000003120";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
+const PRESENT_FILES_THREAD_ID = "00000000-0000-0000-0000-000000003192";
 
 function writeFileMessages({
   path = ARTIFACT_PATH,
@@ -54,6 +55,30 @@ function writeFileMessages({
   }
 
   return messages;
+}
+
+function presentFileMessages(path = "/mnt/user-data/outputs/report.html") {
+  return [
+    {
+      type: "human",
+      id: "msg-human-present-file",
+      content: [{ type: "text", text: "Create a report artifact" }],
+    },
+    {
+      type: "ai",
+      id: "msg-ai-present-file",
+      content: "I created the report.",
+      tool_calls: [
+        {
+          id: "present-file-artifact",
+          name: "present_files",
+          args: {
+            filepaths: [path],
+          },
+        },
+      ],
+    },
+  ];
 }
 
 test.describe("Artifact preview stability", () => {
@@ -169,6 +194,43 @@ test.describe("Artifact preview stability", () => {
     await expect(artifactsPanel.getByText('"status": "draft"')).toBeVisible();
     await expect(
       artifactsPanel.getByText('"中文字段": "测试内容"'),
+    ).toBeVisible();
+  });
+
+  test("shows the selected filename for presented files outside the thread artifact list", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: PRESENT_FILES_THREAD_ID,
+          title: "Presented artifact without thread list entry",
+          messages: presentFileMessages(),
+          artifacts: [],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${PRESENT_FILES_THREAD_ID}/artifacts/mnt/user-data/outputs/report.html`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<!doctype html><html><body><h1>Presented report</h1></body></html>",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${PRESENT_FILES_THREAD_ID}`);
+
+    await expect(page.getByText("report.html")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("report.html").click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("report.html")).toBeVisible();
+    await expect(
+      artifactsPanel.locator('iframe[title="Artifact preview"]'),
     ).toBeVisible();
   });
 });
