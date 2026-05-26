@@ -159,6 +159,40 @@ def test_feishu_receive_single_file_releases_sandbox_after_sync(tmp_path, monkey
     _run(go())
 
 
+def test_feishu_receive_single_file_skips_release_for_local_sandbox(tmp_path, monkeypatch):
+    async def go():
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = _FakeGetMessageResourceRequest
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"hello uploads")
+        response.file_name = "note.txt"
+
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        paths = SimpleNamespace(
+            ensure_thread_dirs=MagicMock(),
+            sandbox_uploads_dir=MagicMock(return_value=tmp_path),
+        )
+        provider = MagicMock()
+        provider.acquire.return_value = "local"
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-local")
+
+        assert result == "/mnt/user-data/uploads/note.txt"
+        assert (tmp_path / "note.txt").read_bytes() == b"hello uploads"
+        provider.get.assert_not_called()
+        provider.release.assert_not_called()
+
+    _run(go())
+
+
 def test_feishu_receive_single_file_releases_sandbox_when_sync_fails(tmp_path, monkeypatch):
     async def go():
         bus = MessageBus()

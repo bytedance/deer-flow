@@ -236,11 +236,7 @@ async def upload_files(
         if sandbox is None:
             _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
-    try:
-        auto_convert_documents = _auto_convert_documents_enabled(config)
-    except Exception:
-        _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
-        raise
+    auto_convert_documents = _auto_convert_documents_enabled(config)
 
     for file in files:
         if not file.filename:

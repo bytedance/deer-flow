@@ -393,7 +393,7 @@ class FeishuChannel(Channel):
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"
         finally:
-            if sandbox_provider is not None and sandbox_id is not None:
+            if sandbox_provider is not None and sandbox_id is not None and sandbox_id != "local":
                 try:
                     sandbox_provider.release(sandbox_id)
                 except Exception:
