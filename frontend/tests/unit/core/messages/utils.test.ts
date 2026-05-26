@@ -1,13 +1,25 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import {
+  extractContentFromMessage,
+  extractReasoningContentFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
   getStreamingMessageLookup,
+  hasContent,
+  hasReasoning,
   isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
+
+function aiMessage(content: string): Message {
+  return {
+    id: "ai-1",
+    type: "ai",
+    content,
+  } as Message;
+}
 
 test("aggregates token usage messages once per assistant turn", () => {
   const messages = [
@@ -65,6 +77,100 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+describe("inline <think> tag splitting", () => {
+  test("strips a fully closed <think> block from AI content", () => {
+    const message = aiMessage("<think>internal reasoning</think>final answer");
+    expect(extractContentFromMessage(message)).toBe("final answer");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "internal reasoning",
+    );
+  });
+
+  test("strips multiple closed <think> blocks and joins their reasoning", () => {
+    const message = aiMessage(
+      "<think>step one</think>between<think>step two</think>after",
+    );
+    expect(extractContentFromMessage(message)).toBe("betweenafter");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "step one\n\nstep two",
+    );
+  });
+
+  test("during streaming, an unclosed <think> tag does not leak its tail into content", () => {
+    // Simulates accumulated content mid-stream, before </think> arrives.
+    const message = aiMessage(
+      "<think>I need to analyze the user's question step by",
+    );
+    expect(extractContentFromMessage(message)).toBe("");
+    expect(extractContentFromMessage(message)).not.toContain("<think>");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "I need to analyze the user's question step by",
+    );
+  });
+
+  test("preamble before an unclosed <think> stays in content", () => {
+    const message = aiMessage(
+      "Here is part of the answer.<think>but wait, let me reconsider",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Here is part of the answer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "but wait, let me reconsider",
+    );
+  });
+
+  test("closed <think> followed by a trailing unclosed <think> merges both into reasoning", () => {
+    const message = aiMessage(
+      "<think>first step</think>partial answer<think>second step still streaming",
+    );
+    expect(extractContentFromMessage(message)).toBe("partial answer");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "first step\n\nsecond step still streaming",
+    );
+  });
+
+  test("hasReasoning recognises an unclosed <think> tag mid-stream", () => {
+    expect(hasReasoning(aiMessage("<think>thinking in progress"))).toBe(true);
+  });
+
+  test("hasContent excludes an unclosed <think> tail when no preamble exists", () => {
+    expect(hasContent(aiMessage("<think>thinking in progress"))).toBe(false);
+  });
+
+  test("hasContent stays true when preamble precedes an unclosed <think>", () => {
+    expect(hasContent(aiMessage("preamble<think>still thinking"))).toBe(true);
+  });
+
+  test("a lone <think> open tag with no body yields no reasoning and no content", () => {
+    const message = aiMessage("<think>");
+    expect(extractContentFromMessage(message)).toBe("");
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a literal <think> inside markdown inline code is not treated as reasoning", () => {
+    const message = aiMessage(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>` markers to delimit reasoning sections.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a backtick-prefixed <think> mid-stream is not split into reasoning", () => {
+    // Simulates the moment the model has emitted the opening backtick and
+    // `<think>` for a literal documentation reference, before the closing
+    // backtick arrives. The pre-fix behaviour would have permanently
+    // truncated the content here.
+    const message = aiMessage("Documentation: `<think>");
+    expect(extractContentFromMessage(message)).toBe("Documentation: `<think>");
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+  });
 });
 
 test("hides internal todo reminder messages from message groups", () => {
