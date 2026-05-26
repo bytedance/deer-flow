@@ -22,7 +22,7 @@ _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
 def _setup_auth(tmp_path):
     """Fresh SQLite engine + auth config per test."""
     from app.gateway import deps
-    from app.gateway.routers.auth import _SETUP_STATUS_COOLDOWN
+    from app.gateway.routers.auth import _SETUP_STATUS_CACHE, _SETUP_STATUS_INFLIGHT
     from deerflow.persistence.engine import close_engine, init_engine
 
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
@@ -30,13 +30,15 @@ def _setup_auth(tmp_path):
     asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
     deps._cached_local_provider = None
     deps._cached_repo = None
-    _SETUP_STATUS_COOLDOWN.clear()
+    _SETUP_STATUS_CACHE.clear()
+    _SETUP_STATUS_INFLIGHT.clear()
     try:
         yield
     finally:
         deps._cached_local_provider = None
         deps._cached_repo = None
-        _SETUP_STATUS_COOLDOWN.clear()
+        _SETUP_STATUS_CACHE.clear()
+        _SETUP_STATUS_INFLIGHT.clear()
         asyncio.run(close_engine())
 
 
@@ -168,15 +170,76 @@ def test_setup_status_false_when_only_regular_user_exists(client):
     assert resp.json()["needs_setup"] is True
 
 
-def test_setup_status_rate_limited_on_second_call(client):
-    """Second /setup-status call within the cooldown window returns 429 with Retry-After."""
-    # First call succeeds.
+def test_setup_status_returns_cached_result_on_rapid_calls(client):
+    """Rapid /setup-status calls return the cached result (200) instead of 429."""
+    client.post("/api/v1/auth/initialize", json=_init_payload())
+
+    # First call succeeds and computes the result.
     resp1 = client.get("/api/v1/auth/setup-status")
     assert resp1.status_code == 200
 
-    # Immediate second call is rate-limited.
+    # Immediate second call returns cached result, not 429.
     resp2 = client.get("/api/v1/auth/setup-status")
-    assert resp2.status_code == 429
-    assert "Retry-After" in resp2.headers
-    retry_after = int(resp2.headers["Retry-After"])
-    assert 1 <= retry_after <= 60
+    assert resp2.status_code == 200
+    assert resp2.json() == resp1.json()
+    assert resp2.json()["needs_setup"] is False
+
+
+def test_setup_status_does_not_return_stale_true_after_initialize(client):
+    """A pre-initialize setup-status response should not stay cached as True."""
+    before = client.get("/api/v1/auth/setup-status")
+    assert before.status_code == 200
+    assert before.json()["needs_setup"] is True
+
+    init = client.post("/api/v1/auth/initialize", json=_init_payload())
+    assert init.status_code == 201
+
+    after = client.get("/api/v1/auth/setup-status")
+    assert after.status_code == 200
+    assert after.json()["needs_setup"] is False
+
+
+@pytest.mark.asyncio
+async def test_setup_status_single_flight_per_ip(monkeypatch):
+    """Concurrent requests from same IP share one in-flight DB query."""
+    from starlette.requests import Request
+
+    from app.gateway.routers.auth import (
+        _SETUP_STATUS_CACHE,
+        _SETUP_STATUS_INFLIGHT,
+        setup_status,
+    )
+
+    class _Provider:
+        def __init__(self):
+            self.calls = 0
+
+        async def count_admin_users(self):
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return 0
+
+    provider = _Provider()
+    monkeypatch.setattr("app.gateway.routers.auth.get_local_provider", lambda: provider)
+    _SETUP_STATUS_CACHE.clear()
+    _SETUP_STATUS_INFLIGHT.clear()
+
+    def _request() -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/v1/auth/setup-status",
+                "headers": [],
+                "client": ("127.0.0.1", 12345),
+            }
+        )
+
+    results = await asyncio.gather(
+        setup_status(_request()),
+        setup_status(_request()),
+        setup_status(_request()),
+    )
+
+    assert all(result["needs_setup"] is True for result in results)
+    assert provider.calls == 1

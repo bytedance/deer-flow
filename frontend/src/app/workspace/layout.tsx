@@ -43,12 +43,14 @@ export default async function WorkspaceLayout({
             >
               Retry
             </Link>
-            <Link
-              href="/api/v1/auth/logout"
-              className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm"
-            >
-              Logout &amp; Reset
-            </Link>
+            <form action="/api/v1/auth/logout" method="post">
+              <button
+                type="submit"
+                className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm"
+              >
+                Logout &amp; Reset
+              </button>
+            </form>
           </div>
         </div>
       );
