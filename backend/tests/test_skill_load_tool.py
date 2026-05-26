@@ -37,12 +37,19 @@ def _skill(tmp_path: Path, name: str = "demo-skill") -> Skill:
     )
 
 
+def _storage(skills: list[Skill]) -> SimpleNamespace:
+    def get_skill(name: str, *, enabled_only: bool = False):
+        return next((skill for skill in skills if skill.name == name), None)
+
+    return SimpleNamespace(get_skill=get_skill)
+
+
 def test_skill_load_loads_enabled_skill_main_file(monkeypatch, tmp_path):
     skill = _skill(tmp_path)
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]),
+        lambda: _storage([skill]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill")
@@ -55,7 +62,7 @@ def test_skill_load_loads_referenced_file_inside_skill(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]),
+        lambda: _storage([skill]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill", file_path="references/notes.md")
@@ -68,7 +75,7 @@ def test_skill_load_rejects_path_traversal(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]),
+        lambda: _storage([skill]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill", file_path="../secret.txt")
@@ -80,7 +87,7 @@ def test_skill_load_reports_missing_or_disabled_skill(monkeypatch):
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        lambda: _storage([]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill")
@@ -93,12 +100,44 @@ def test_skill_load_rejects_skill_outside_runtime_allowlist(monkeypatch, tmp_pat
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]),
+        lambda: _storage([skill]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(available_skills=["other-skill"]), skill_name="demo-skill")
 
     assert result == "Error: Skill is not available to this agent: demo-skill"
+
+
+def test_skill_load_treats_string_available_skills_as_one_name(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: _storage([skill]),
+    )
+
+    result = skill_load_tool.func(
+        runtime=_runtime(available_skills="demo-skill"),
+        skill_name="demo-skill",
+    )
+
+    assert "# Demo Skill" in result
+
+
+def test_skill_load_returns_generic_error_for_unexpected_failures(monkeypatch):
+    class BrokenStorage:
+        def get_skill(self, name: str, *, enabled_only: bool = False):
+            raise RuntimeError("/private/path")
+
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: BrokenStorage(),
+    )
+
+    result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill")
+
+    assert result == "Error: Failed to load skill."
 
 
 def test_skill_load_threads_runtime_app_config_to_storage(monkeypatch, tmp_path):
@@ -108,7 +147,7 @@ def test_skill_load_threads_runtime_app_config_to_storage(monkeypatch, tmp_path)
 
     def fake_get_or_new_skill_storage(*, app_config=None):
         captured["app_config"] = app_config
-        return SimpleNamespace(load_skills=lambda *, enabled_only: [skill])
+        return _storage([skill])
 
     monkeypatch.setattr(skill_load_module, "get_or_new_skill_storage", fake_get_or_new_skill_storage)
 
@@ -125,7 +164,7 @@ def test_skill_load_truncates_large_output(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skill_load_module,
         "get_or_new_skill_storage",
-        lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]),
+        lambda *, app_config=None: _storage([skill]),
     )
 
     result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")

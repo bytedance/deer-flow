@@ -245,6 +245,14 @@ class SkillStorage(ABC):
         skills.sort(key=lambda s: s.name)
         return skills
 
+    def get_skill(self, name: str, *, enabled_only: bool = False) -> Skill | None:
+        """Return one skill by normalized name, or ``None`` when absent."""
+        normalized_name = self.validate_skill_name(name)
+        return next(
+            (skill for skill in self.load_skills(enabled_only=enabled_only) if skill.name == normalized_name),
+            None,
+        )
+
     def ensure_custom_skill_is_editable(self, name: str) -> None:
         """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
         if self.custom_skill_exists(name):

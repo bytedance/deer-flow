@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from deerflow.tools.types import Runtime
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_skill_file(skill: Skill, file_path: str) -> Path:
@@ -49,18 +52,28 @@ def _get_runtime_app_config(runtime: Runtime) -> "AppConfig | None":
     return None
 
 
+def _coerce_available_skills(value: object) -> set[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return {SkillStorage.validate_skill_name(value)}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return {SkillStorage.validate_skill_name(item) for item in value if isinstance(item, str)}
+    return set()
+
+
 def _get_runtime_available_skills(runtime: Runtime) -> set[str] | None:
     context = getattr(runtime, "context", None)
     if isinstance(context, dict) and "available_skills" in context:
         value = context["available_skills"]
-        return set(value) if value is not None else None
+        return _coerce_available_skills(value)
 
     config = getattr(runtime, "config", None)
     if isinstance(config, dict):
         metadata = config.get("metadata", {})
         if isinstance(metadata, dict) and "available_skills" in metadata:
             value = metadata["available_skills"]
-            return set(value) if value is not None else None
+            return _coerce_available_skills(value)
     return None
 
 
@@ -101,8 +114,7 @@ def skill_load_tool(
 
         app_config = _get_runtime_app_config(runtime)
         storage = get_or_new_skill_storage(app_config=app_config) if app_config is not None else get_or_new_skill_storage()
-        skills = storage.load_skills(enabled_only=True)
-        skill = next((candidate for candidate in skills if candidate.name == normalized_name), None)
+        skill = storage.get_skill(normalized_name, enabled_only=True)
         if skill is None:
             return f"Error: Skill not found or disabled: {normalized_name}"
 
@@ -115,5 +127,6 @@ def skill_load_tool(
         return f"Error: {e}"
     except UnicodeDecodeError:
         return f"Error: Skill file is not valid UTF-8: {skill_name}/{file_path}"
-    except Exception as e:
-        return f"Error: Failed to load skill: {e}"
+    except Exception:
+        logger.exception("Failed to load skill %s/%s", skill_name, file_path)
+        return "Error: Failed to load skill."

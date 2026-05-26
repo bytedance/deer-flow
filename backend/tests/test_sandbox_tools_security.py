@@ -500,7 +500,7 @@ def test_is_skills_path_recognises_default_prefix() -> None:
 
 
 def test_validate_local_tool_path_allows_skills_read_only() -> None:
-    """Local read-only path validation still permits dedicated skill tooling."""
+    """Local read-only path validation still permits skills mount reads."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         # Should not raise
         validate_local_tool_path(
