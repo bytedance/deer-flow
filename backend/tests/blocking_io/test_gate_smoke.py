@@ -14,10 +14,12 @@ worse than no gate at all).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 from blockbuster import BlockingError
+from support.detectors.blocking_io_runtime import detect_blocking_io_strict
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,6 +31,16 @@ async def test_gate_catches_unoffloaded_blocking_io_in_deerflow_module(tmp_path:
 
     with pytest.raises(BlockingError):
         ensure_sqlite_parent_dir(str(db_file))
+
+
+async def test_gate_restores_blockbuster_patches_after_exceptions() -> None:
+    original_stat = os.stat
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with detect_blocking_io_strict():
+            raise RuntimeError("boom")
+
+    assert os.stat is original_stat
 
 
 @pytest.mark.allow_blocking_io

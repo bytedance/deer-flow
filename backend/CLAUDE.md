@@ -110,7 +110,7 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
 - Two regression anchors live there: `test_skills_load.py` (locks the
   `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
   for #1917) and `test_sqlite_lifespan.py` (locks the offload around
-  `ensure_sqlite_parent_dir`, fix for #1912).
+  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912).
 - `test_gate_smoke.py` is a meta-test asserting the gate actually catches
   unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
   opt-out works.
