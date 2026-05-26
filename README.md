@@ -546,6 +546,15 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 
 If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to your deployment URL.
 
+**Trace correlation fields.** Every agent run is annotated with Langfuse's reserved trace attributes so the Sessions and Users pages light up automatically:
+
+- `session_id` = LangGraph `thread_id` — groups every trace of the same conversation
+- `user_id` = effective user from `get_effective_user_id()` (falls back to `default` in no-auth mode)
+- `trace_name` = assistant id (defaults to `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
+
+These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
+
 #### Using Both Providers
 
 If both LangSmith and Langfuse are enabled, DeerFlow attaches both tracing callbacks and reports the same model activity to both systems.

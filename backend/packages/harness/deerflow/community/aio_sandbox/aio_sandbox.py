@@ -1,4 +1,5 @@
 import base64
+import errno
 import logging
 import shlex
 import threading
@@ -6,10 +7,13 @@ import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
+
+_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -101,6 +105,49 @@ class AioSandbox(Sandbox):
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+
+    def download_file(self, path: str) -> bytes:
+        """Download file bytes from the sandbox.
+
+        Raises:
+            PermissionError: If the path contains '..' traversal segments or is
+                outside ``VIRTUAL_PATH_PREFIX``.
+            OSError: If the file cannot be retrieved from the sandbox.
+        """
+        # Reject path traversal before sending to the container API.
+        # LocalSandbox gets this implicitly via _resolve_path;
+        # here the path is forwarded verbatim so we must check explicitly.
+        normalised = path.replace("\\", "/")
+        for segment in normalised.split("/"):
+            if segment == "..":
+                logger.error(f"Refused download due to path traversal: {path}")
+                raise PermissionError(f"Access denied: path traversal detected in '{path}'")
+
+        stripped_path = normalised.lstrip("/")
+        allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+        if stripped_path != allowed_prefix and not stripped_path.startswith(f"{allowed_prefix}/"):
+            logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
+            raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
+
+        with self._lock:
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in self._client.file.download_file(path=path):
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_SIZE:
+                        raise OSError(
+                            errno.EFBIG,
+                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                            path,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+            except OSError:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to download file in sandbox: {e}")
+                raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         """List the contents of a directory in the sandbox.
