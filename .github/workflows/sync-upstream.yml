@@ -40,7 +40,10 @@ jobs:
             exit 0
           fi
           echo "📦 Found $UPSTREAM_COMMITS new commit(s) from upstream, merging..."
-          git merge upstream/main --no-edit --allow-unrelated-histories
-
+          if ! git merge upstream/main --no-edit; then
+            echo "❌ Merge conflict detected!"
+            git merge --abort
+            exit 1
+          fi
       - name: Push changes
         run: git push origin main
