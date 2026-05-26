@@ -102,7 +102,9 @@ and `scripts/` with AST. By default it reports only blocking IO candidates that
 are inside async code, reachable from async code in the same file, or reachable
 from sync-only `AgentMiddleware` before/after hooks that LangGraph can execute
 on the async graph path. It prints a concise summary and writes complete JSON
-findings to `.deer-flow/blocking-io-findings.json`. JSON findings include
+findings to `.deer-flow/blocking-io-findings.json` at the repository root
+(both `make detect-blocking-io` from the repo root and `cd backend && make
+detect-blocking-io` resolve to the same repo-root path). JSON findings include
 `priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
 `code` for model-assisted or manual review. `priority` is a deterministic
 review ordering from operation type, not proof of a bug. Bare-name same-file
