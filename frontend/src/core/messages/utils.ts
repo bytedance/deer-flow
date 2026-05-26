@@ -26,6 +26,13 @@ export type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
+const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
+  "summary",
+  "loop_warning",
+  "todo_reminder",
+  "todo_completion_reminder",
+]);
+
 export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
@@ -50,10 +57,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 
   for (const message of messages) {
     if (isHiddenFromUIMessage(message)) {
-      continue;
-    }
-
-    if (message.name === "todo_reminder") {
       continue;
     }
 
@@ -167,6 +170,86 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   return usageMessagesByGroupIndex;
 }
 
+type MessageMetadataLookup = (
+  message: Message,
+  index: number,
+) => { streamMetadata?: Record<string, unknown> } | undefined;
+
+export type StreamingMessageLookup = {
+  ids: ReadonlySet<string>;
+  messages: ReadonlySet<Message>;
+};
+
+export function getStreamingMessageLookup(
+  messages: Message[],
+  isStreaming: boolean,
+  getMessagesMetadata?: MessageMetadataLookup,
+): StreamingMessageLookup {
+  const streamingMessageIds = new Set<string>();
+  const streamingMessages = new Set<Message>();
+
+  if (!isStreaming) {
+    return {
+      ids: streamingMessageIds,
+      messages: streamingMessages,
+    };
+  }
+
+  messages.forEach((message, index) => {
+    if (!getMessagesMetadata?.(message, index)?.streamMetadata) {
+      return;
+    }
+
+    if (typeof message.id === "string" && message.id.length > 0) {
+      streamingMessageIds.add(message.id);
+    }
+    streamingMessages.add(message);
+  });
+
+  return {
+    ids: streamingMessageIds,
+    messages: streamingMessages,
+  };
+}
+
+export function isAssistantMessageGroupStreaming(
+  groupMessages: Message[],
+  streamingMessages: StreamingMessageLookup,
+) {
+  return groupMessages.some((message) => {
+    if (message.type !== "ai") {
+      return false;
+    }
+
+    return (
+      (typeof message.id === "string" &&
+        message.id.length > 0 &&
+        streamingMessages.ids.has(message.id)) ||
+      streamingMessages.messages.has(message)
+    );
+  });
+}
+
+export function getAssistantTurnCopyData(
+  messages: Message[],
+  { isStreaming = false }: { isStreaming?: boolean } = {},
+) {
+  if (isStreaming) {
+    return null;
+  }
+
+  return (
+    [...messages]
+      .reverse()
+      .filter((message) => message.type === "ai")
+      .map((message) => {
+        const content = extractContentFromMessage(message);
+        return content ?? extractReasoningContentFromMessage(message) ?? "";
+      })
+      .find((content) => content.length > 0) ?? null
+  );
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (
@@ -183,22 +266,42 @@ export function extractTextFromMessage(message: Message) {
   return "";
 }
 
+const THINK_OPEN_TAG = "<think>";
 const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
 
 function splitInlineReasoning(content: string) {
   const reasoningParts: string[] = [];
-  const cleaned = content
-    .replace(THINK_TAG_RE, (_, reasoning: string) => {
-      const normalized = reasoning.trim();
-      if (normalized) {
-        reasoningParts.push(normalized);
-      }
-      return "";
-    })
-    .trim();
+
+  // First pass: strip every fully closed `<think>...</think>` pair and
+  // collect its body as reasoning.
+  let cleaned = content.replace(THINK_TAG_RE, (_, reasoning: string) => {
+    const normalized = reasoning.trim();
+    if (normalized) {
+      reasoningParts.push(normalized);
+    }
+    return "";
+  });
+
+  // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
+  // yet means the rest of the chunk is reasoning in flight. Route it into the
+  // reasoning slot instead of letting it render as message content (the
+  // raw-HTML markdown pipeline would otherwise paint the inner text on
+  // screen until the closing tag lands).
+  //
+  // Skip when the opener sits right after a backtick — that is the model
+  // talking about `<think>` literally inside markdown inline code, not
+  // actually streaming reasoning.
+  const openTagIndex = cleaned.indexOf(THINK_OPEN_TAG);
+  if (openTagIndex !== -1 && cleaned[openTagIndex - 1] !== "`") {
+    const tail = cleaned.slice(openTagIndex + THINK_OPEN_TAG.length).trim();
+    if (tail) {
+      reasoningParts.push(tail);
+    }
+    cleaned = cleaned.slice(0, openTagIndex);
+  }
 
   return {
-    content: cleaned,
+    content: cleaned.trim(),
     reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : null,
   };
 }
@@ -248,7 +351,7 @@ export function extractReasoningContentFromMessage(message: Message) {
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
-    if (part && "thinking" in part) {
+    if (part && typeof part === "object" && "thinking" in part) {
       return part.thinking as string;
     }
   }
@@ -368,8 +471,8 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 export function isHiddenFromUIMessage(message: Message) {
   return (
     message.additional_kwargs?.hide_from_ui === true ||
-    message.name === "summary" ||
-    message.name === "loop_warning"
+    (typeof message.name === "string" &&
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
   );
 }
 
@@ -392,6 +495,50 @@ export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
     .trim();
+}
+
+/**
+ * Tag names that backend middlewares wrap around internal payloads before
+ * letting them ride along inside LangGraph message ``content``.
+ *
+ * These markers are *not* user copy — they come from:
+ *
+ * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
+ *   ``<memory>`` / ``<current_date>`` inside)
+ * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
+ *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
+ *   the same tag vocabulary.
+ *
+ * The primary export filter is {@link isHiddenFromUIMessage}. This list is
+ * the defence-in-depth strip for any message that — by middleware bug,
+ * provider quirk, or merge-conflict regression — slips through without
+ * its ``hide_from_ui`` flag set.
+ */
+export const INTERNAL_MARKER_TAGS = [
+  "uploaded_files",
+  "system-reminder",
+  "memory",
+  "current_date",
+] as const;
+
+const INTERNAL_MARKER_RE = new RegExp(
+  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
+  "g",
+);
+
+/**
+ * Strip every known backend-injected marker from message content.
+ *
+ * Intended for the chat export path where a marker leaking through is a
+ * privacy regression. UI render paths should keep using
+ * {@link stripUploadedFilesTag} — they receive ``hide_from_ui`` messages
+ * via a separate filter and the narrower function avoids stripping content
+ * a user might legitimately type into a meta-discussion (e.g. asking the
+ * model about its own ``<memory>`` system).
+ */
+export function stripInternalMarkers(content: string): string {
+  return content.replace(INTERNAL_MARKER_RE, "").trim();
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {

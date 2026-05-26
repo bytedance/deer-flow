@@ -195,7 +195,7 @@ export const zhCN: Translations = {
     nameStepApiDisabledError:
       "服务器未开启自定义智能体管理功能，请联系管理员。",
     nameStepBootstrapMessage:
-      "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
+      "新智能体的名称是 {name}。请先帮我设计它的用途、行为方式和 SOUL.md，再保存它。",
     save: "保存智能体",
     saving: "正在保存智能体...",
     saveRequested:
@@ -296,7 +296,7 @@ export const zhCN: Translations = {
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
     unavailableShort: "未返回用量",
-    note: "基于供应商返回的 usage_metadata 展示。当前总量是 best-effort 的会话参考值，可能与平台账单页不完全一致。",
+    note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，可能与平台账单页不完全一致。",
     presets: {
       off: "关闭",
       summary: "总览",

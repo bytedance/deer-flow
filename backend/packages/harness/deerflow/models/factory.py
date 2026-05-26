@@ -47,11 +47,24 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
         model_settings_from_config["stream_usage"] = True
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
         name: The name of the model to create. If None, the first model in the config will be used.
+        thinking_enabled: Enable the model's extended-thinking mode when supported.
+        app_config: Explicit application config; falls back to the cached global if omitted.
+        attach_tracing: When True (default), attach tracing callbacks (Langfuse,
+            LangSmith) directly to the model instance. Standalone callers — anything
+            that invokes the model outside a LangGraph run that already wires tracing
+            at the invocation root (``MemoryUpdater``, ad-hoc utilities, etc.) — keep
+            this default so the model-level callback still produces traces. Callers
+            that already attach tracing at the graph root (``make_lead_agent``, the
+            in-graph ``TitleMiddleware``) MUST pass ``attach_tracing=False``; otherwise
+            the same LLM call emits duplicate spans (one rooted at the graph, one at
+            the model) and ``session_id`` / ``user_id`` metadata never reach the trace
+            because the model becomes a nested observation whose ``langfuse_*`` keys
+            get stripped.
 
     Returns:
         A chat model instance.
@@ -149,9 +162,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
-    callbacks = build_tracing_callbacks()
-    if callbacks:
-        existing_callbacks = model_instance.callbacks or []
-        model_instance.callbacks = [*existing_callbacks, *callbacks]
-        logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
+    if attach_tracing:
+        callbacks = build_tracing_callbacks()
+        if callbacks:
+            existing_callbacks = model_instance.callbacks or []
+            model_instance.callbacks = [*existing_callbacks, *callbacks]
+            logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
     return model_instance

@@ -16,6 +16,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -68,9 +69,28 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
         logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
         return
 
-    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH
     chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
     os.chmod(file_path, writable_mode, **chmod_kwargs)
+
+
+def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
+    """Ensure uploaded files are readable by the sandbox process.
+
+    For Docker sandboxes (AIO), the gateway writes files as root with 0o600
+    permissions, then bind-mounts the host directory into the container. The
+    sandbox process inside the container runs as a non-root user and cannot
+    read those files without group/other read bits. This function adds
+    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content.
+    """
+    file_stat = os.lstat(file_path)
+    if stat.S_ISLNK(file_stat.st_mode):
+        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
+        return
+
+    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, readable_mode, **chmod_kwargs)
 
 
 def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
@@ -192,6 +212,10 @@ async def upload_files(
     sandbox_sync_targets = []
     skipped_files = []
     total_size = 0
+    # Track filenames within this request so duplicate form parts do not
+    # silently truncate each other. Existing uploads keep the historical
+    # overwrite behavior for a single replacement upload.
+    seen_filenames: set[str] = set()
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
@@ -208,7 +232,8 @@ async def upload_files(
             continue
 
         try:
-            safe_filename = normalize_filename(file.filename)
+            original_filename = normalize_filename(file.filename)
+            safe_filename = claim_unique_filename(original_filename, seen_filenames)
         except ValueError:
             logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
             continue
@@ -236,6 +261,8 @@ async def upload_files(
                 "virtual_path": virtual_path,
                 "artifact_url": upload_artifact_url(thread_id, safe_filename),
             }
+            if safe_filename != original_filename:
+                file_info["original_filename"] = original_filename
 
             logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
@@ -267,6 +294,16 @@ async def upload_files(
             logger.error(f"Failed to upload {file.filename}: {e}")
             _cleanup_uploaded_paths(written_paths)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+
+    # Uploaded files are created with 0o600 permissions (owner read/write only).
+    # In Docker sandbox deployments the gateway writes as root but the sandbox
+    # process runs as a non-root user (typically UID 1000).  Without group/other
+    # read bits the sandbox cannot access the files — whether the uploads
+    # directory is bind-mounted into the container or synced via
+    # sandbox.update_file.  Always add group/other read bits so every sandbox
+    # configuration can read the uploaded content.
+    for file_path in written_paths:
+        _make_file_sandbox_readable(file_path)
 
     if sync_to_sandbox:
         for file_path, virtual_path in sandbox_sync_targets:
