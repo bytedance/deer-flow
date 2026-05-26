@@ -9,6 +9,8 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
+from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.base import RunStore
 
 
 async def _make_repo(tmp_path):
@@ -25,6 +27,48 @@ async def _cleanup():
     await close_engine()
 
 
+class _CustomRunStoreWithoutProgress(RunStore):
+    async def put(self, *args, **kwargs):
+        return None
+
+    async def get(self, *args, **kwargs):
+        return None
+
+    async def list_by_thread(self, *args, **kwargs):
+        return []
+
+    async def update_status(self, *args, **kwargs):
+        return None
+
+    async def delete(self, *args, **kwargs):
+        return None
+
+    async def delete_by_thread(self, *args, **kwargs):
+        return 0
+
+    async def update_model_name(self, *args, **kwargs):
+        return None
+
+    async def update_run_completion(self, *args, **kwargs):
+        return None
+
+    async def list_pending(self, *args, **kwargs):
+        return []
+
+    async def list_inflight(self, *args, **kwargs):
+        return []
+
+    async def aggregate_tokens_by_thread(self, *args, **kwargs):
+        return {}
+
+
+@pytest.mark.anyio
+async def test_update_run_progress_defaults_to_noop_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    await store.update_run_progress("r1", total_tokens=1)
+
+
 class TestRunRepository:
     @pytest.mark.anyio
     async def test_put_and_get(self, tmp_path):
@@ -38,6 +82,19 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_put_is_idempotent_for_retried_writes(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", assistant_id="old-agent", status="pending")
+
+        await repo.put("r1", thread_id="t1", assistant_id="new-agent", status="running", error="retry")
+
+        row = await repo.get("r1")
+        assert row["assistant_id"] == "new-agent"
+        assert row["status"] == "running"
+        assert row["error"] == "retry"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_get_missing_returns_none(self, tmp_path):
         repo = await _make_repo(tmp_path)
         assert await repo.get("nope") is None
@@ -47,9 +104,17 @@ class TestRunRepository:
     async def test_update_status(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")
-        await repo.update_status("r1", "running")
+        updated = await repo.update_status("r1", "running")
         row = await repo.get("r1")
+        assert updated is True
         assert row["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_status_returns_false_for_missing_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        updated = await repo.update_status("missing", "error", error="lost")
+        assert updated is False
         await _cleanup()
 
     @pytest.mark.anyio
@@ -133,10 +198,23 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_inflight_returns_pending_and_running_before_cutoff(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("pending-old", thread_id="t1", status="pending", created_at="2026-01-01T00:00:00+00:00")
+        await repo.put("running-old", thread_id="t1", status="running", created_at="2026-01-01T00:00:01+00:00")
+        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:02+00:00")
+        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:03+00:00")
+
+        inflight = await repo.list_inflight(before="2026-01-01T00:00:02+00:00")
+
+        assert [row["run_id"] for row in inflight] == ["pending-old", "running-old"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_run_completion(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="running")
-        await repo.update_run_completion(
+        updated = await repo.update_run_completion(
             "r1",
             status="success",
             total_input_tokens=100,
@@ -151,6 +229,7 @@ class TestRunRepository:
             first_human_message="What is the meaning?",
         )
         row = await repo.get("r1")
+        assert updated is True
         assert row["status"] == "success"
         assert row["total_tokens"] == 150
         assert row["llm_call_count"] == 2
@@ -158,6 +237,13 @@ class TestRunRepository:
         assert row["message_count"] == 3
         assert row["last_ai_message"] == "The answer is 42"
         assert row["first_human_message"] == "What is the meaning?"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_completion_returns_false_for_missing_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        updated = await repo.update_run_completion("missing", status="error", total_tokens=1)
+        assert updated is False
         await _cleanup()
 
     @pytest.mark.anyio
@@ -191,6 +277,69 @@ class TestRunRepository:
         assert row["thread_id"] == "t1"
         assert row["assistant_id"] == "agent1"
         assert row["total_tokens"] == 100
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_progress_keeps_status_running(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_progress(
+            "r1",
+            total_input_tokens=40,
+            total_output_tokens=10,
+            total_tokens=50,
+            llm_call_count=1,
+            message_count=2,
+            last_ai_message="partial answer",
+        )
+        row = await repo.get("r1")
+        assert row["status"] == "running"
+        assert row["total_tokens"] == 50
+        assert row["llm_call_count"] == 1
+        assert row["message_count"] == 2
+        assert row["last_ai_message"] == "partial answer"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_progress_preserves_omitted_fields(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_progress(
+            "r1",
+            total_input_tokens=40,
+            total_output_tokens=10,
+            total_tokens=50,
+            llm_call_count=1,
+            lead_agent_tokens=30,
+            subagent_tokens=20,
+            message_count=2,
+        )
+
+        await repo.update_run_progress("r1", total_tokens=60, last_ai_message="updated")
+
+        row = await repo.get("r1")
+        assert row["total_input_tokens"] == 40
+        assert row["total_output_tokens"] == 10
+        assert row["total_tokens"] == 60
+        assert row["llm_call_count"] == 1
+        assert row["lead_agent_tokens"] == 30
+        assert row["subagent_tokens"] == 20
+        assert row["message_count"] == 2
+        assert row["last_ai_message"] == "updated"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_progress_skips_terminal_runs(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_run_completion("r1", status="success", total_tokens=100, llm_call_count=1)
+
+        await repo.update_run_progress("r1", total_tokens=200, llm_call_count=2)
+
+        row = await repo.get("r1")
+        assert row["status"] == "success"
+        assert row["total_tokens"] == 100
+        assert row["llm_call_count"] == 1
         await _cleanup()
 
     @pytest.mark.anyio
@@ -245,6 +394,28 @@ class TestRunRepository:
             "lead_agent": 120,
             "subagent": 25,
             "middleware": 5,
+        }
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_can_include_active_runs(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("success-run", thread_id="t1", status="running")
+        await repo.update_run_completion("success-run", status="success", total_tokens=100, lead_agent_tokens=100)
+        await repo.put("running-run", thread_id="t1", status="running")
+        await repo.update_run_progress("running-run", total_tokens=25, lead_agent_tokens=20, subagent_tokens=5)
+
+        without_active = await repo.aggregate_tokens_by_thread("t1")
+        with_active = await repo.aggregate_tokens_by_thread("t1", include_active=True)
+
+        assert without_active["total_tokens"] == 100
+        assert without_active["total_runs"] == 1
+        assert with_active["total_tokens"] == 125
+        assert with_active["total_runs"] == 2
+        assert with_active["by_caller"] == {
+            "lead_agent": 120,
+            "subagent": 5,
+            "middleware": 0,
         }
         await _cleanup()
 
@@ -350,3 +521,105 @@ class TestRunRepository:
         assert select_match is not None
         assert group_by_match is not None
         assert select_match.group(1) == group_by_match.group(1)
+
+    @pytest.mark.anyio
+    async def test_run_manager_hydrates_store_only_run_from_sql(self, tmp_path):
+        """RunManager should hydrate historical runs from SQL-backed store."""
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "sql-store-only",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            status="success",
+            metadata={"source": "sql"},
+            kwargs={"input": "value"},
+            model_name="model-a",
+        )
+        manager = RunManager(store=repo)
+
+        record = await manager.get("sql-store-only")
+        rows = await manager.list_by_thread("thread-1")
+
+        assert record is not None
+        assert record.run_id == "sql-store-only"
+        assert record.status == RunStatus.success
+        assert record.metadata == {"source": "sql"}
+        assert record.kwargs == {"input": "value"}
+        assert record.model_name == "model-a"
+        assert [run.run_id for run in rows] == ["sql-store-only"]
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_cancel_persists_interrupted_status_to_sql(self, tmp_path):
+        """RunManager.cancel should write interrupted status to SQL-backed store."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+        await manager.set_status(record.run_id, RunStatus.running)
+
+        cancelled = await manager.cancel(record.run_id)
+        row = await repo.get(record.run_id)
+
+        assert cancelled is True
+        assert row is not None
+        assert row["status"] == "interrupted"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name(self, tmp_path):
+        """RunRepository.update_model_name should update model_name for existing run."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", "updated-model")
+        row = await repo.get("r1")
+        assert row["model_name"] == "updated-model"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_normalizes_value(self, tmp_path):
+        """RunRepository.update_model_name should normalize and truncate model_name."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        long_name = "a" * 200
+        await repo.update_model_name("r1", long_name)
+        row = await repo.get("r1")
+        assert row["model_name"] == "a" * 128
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_model_name_to_none(self, tmp_path):
+        """RunRepository.update_model_name should allow setting model_name to None."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="initial-model")
+        await repo.update_model_name("r1", None)
+        row = await repo.get("r1")
+        assert row["model_name"] is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_persists_to_sql(self, tmp_path):
+        """RunManager.update_model_name should persist to SQL-backed store without integrity error."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "gpt-4o")
+
+        row = await repo.get(record.run_id)
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_manager_update_model_name_twice(self, tmp_path):
+        """RunManager.update_model_name should support multiple updates."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+        record = await manager.create("thread-1")
+
+        await manager.update_model_name(record.run_id, "model-1")
+        await manager.update_model_name(record.run_id, "model-2")
+
+        row = await repo.get(record.run_id)
+        assert row["model_name"] == "model-2"
+        await _cleanup()

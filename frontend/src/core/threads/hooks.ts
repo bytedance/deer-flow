@@ -136,6 +136,20 @@ function getMessagesAfterBaseline(
   });
 }
 
+export function getVisibleOptimisticMessages(
+  optimisticMessages: Message[],
+  previousHumanMessageCount: number,
+  currentHumanMessageCount: number,
+): Message[] {
+  if (
+    optimisticMessages.some((message) => message.type === "human") &&
+    currentHumanMessageCount > previousHumanMessageCount
+  ) {
+    return [];
+  }
+  return optimisticMessages;
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -628,10 +642,16 @@ export function useThreadStream({
     messagesRef.current = thread.messages;
   }
 
+  const visibleOptimisticMessages = getVisibleOptimisticMessages(
+    optimisticMessages,
+    prevHumanMsgCountRef.current,
+    humanMessageCount,
+  );
+
   const mergedMessages = mergeMessages(
     history,
     thread.messages,
-    optimisticMessages,
+    visibleOptimisticMessages,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(

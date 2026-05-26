@@ -204,6 +204,26 @@ class TestSymlinkEscapes:
 
         assert exc_info.value.errno == errno.EACCES
 
+    def test_download_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.bin").write_bytes(b"\x00secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/user-data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.download_file("/mnt/user-data/escape/secret.bin")
+
+        assert exc_info.value.errno == errno.EACCES
+
     def test_write_file_blocks_symlink_escape_from_mount(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
@@ -332,6 +352,74 @@ class TestSymlinkEscapes:
 
         assert exc_info.value.errno == errno.EROFS
         assert existing.read_bytes() == b"original"
+
+
+class TestDownloadFileMappings:
+    """download_file must use _resolve_path_with_mapping so path resolution, symlink
+    containment, and read-only awareness are consistent with read_file."""
+
+    def test_resolves_container_path_via_mapping(self, tmp_path):
+        """download_file should resolve container paths through path mappings."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "asset.bin").write_bytes(b"\x01\x02\x03")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir))],
+        )
+
+        result = sandbox.download_file("/mnt/user-data/asset.bin")
+
+        assert result == b"\x01\x02\x03"
+
+    def test_raises_oserror_with_original_path_when_missing(self, tmp_path):
+        """OSError filename should show the container path, not the resolved host path."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir))],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.download_file("/mnt/user-data/missing.bin")
+
+        assert exc_info.value.filename == "/mnt/user-data/missing.bin"
+
+    def test_rejects_path_outside_virtual_prefix_and_logs_error(self, tmp_path, caplog):
+        """download_file must reject paths outside /mnt/user-data and log the reason."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "model.bin").write_bytes(b"weights")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir), read_only=True)],
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(PermissionError) as exc_info:
+                sandbox.download_file("/mnt/skills/model.bin")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert "outside allowed directory" in caplog.text
+
+    def test_readable_from_read_only_mount(self, tmp_path):
+        """Read-only mounts must not block download_file — read-only only restricts writes."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "model.bin").write_bytes(b"weights")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(skills_dir), read_only=True)],
+        )
+
+        result = sandbox.download_file("/mnt/user-data/model.bin")
+
+        assert result == b"weights"
 
 
 class TestMultipleMounts:

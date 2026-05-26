@@ -1,7 +1,10 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
-import { mergeMessages } from "@/core/threads/hooks";
+import {
+  getVisibleOptimisticMessages,
+  mergeMessages,
+} from "@/core/threads/hooks";
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {
@@ -61,4 +64,94 @@ test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   } as Message;
 
   expect(mergeMessages([oldTool], [liveTool], [])).toEqual([liveTool]);
+});
+
+test("getVisibleOptimisticMessages hides optimistic user input after server human arrives", () => {
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], 0, 1)).toEqual([]);
+});
+
+test("mergeMessages shows server human instead of optimistic duplicate after first response", () => {
+  const serverHuman = {
+    id: "server-human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const visibleOptimistic = getVisibleOptimisticMessages(
+    [optimisticHuman],
+    0,
+    1,
+  );
+
+  expect(mergeMessages([], [serverHuman], visibleOptimistic)).toEqual([
+    serverHuman,
+  ]);
+});
+
+test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "hello",
+  } as Message;
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], 0, 0)).toEqual([
+    optimisticHuman,
+  ]);
+});
+
+test("getVisibleOptimisticMessages keeps non-human optimistic status messages", () => {
+  const optimisticAi = {
+    id: "opt-ai-1",
+    type: "ai",
+    content: "Uploading files...",
+  } as Message;
+
+  expect(getVisibleOptimisticMessages([optimisticAi], 0, 1)).toEqual([
+    optimisticAi,
+  ]);
+});
+
+test("getVisibleOptimisticMessages hides the upload optimistic pair after server human arrives", () => {
+  const optimisticHuman = {
+    id: "opt-human-1",
+    type: "human",
+    content: "upload this",
+  } as Message;
+  const optimisticUploadingAi = {
+    id: "opt-ai-uploading",
+    type: "ai",
+    content: "Uploading files...",
+  } as Message;
+
+  expect(
+    getVisibleOptimisticMessages(
+      [optimisticHuman, optimisticUploadingAi],
+      0,
+      1,
+    ),
+  ).toEqual([]);
+});
+
+test("getVisibleOptimisticMessages hides optimistic user input after later server turns", () => {
+  const optimisticHuman = {
+    id: "opt-human-2",
+    type: "human",
+    content: "follow up",
+  } as Message;
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], 3, 4)).toEqual([]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
+    optimisticHuman,
+  ]);
 });

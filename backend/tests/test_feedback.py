@@ -296,8 +296,18 @@ class TestFollowUpAssociation:
         from deerflow.runtime.runs.store.memory import MemoryRunStore
 
         store = MemoryRunStore()
-        await store.put("r1", thread_id="t1", status="success")
-        await store.put("r2", thread_id="t1", status="error")
+        await store.put(
+            "r1",
+            thread_id="t1",
+            status="success",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        await store.put(
+            "r2",
+            thread_id="t1",
+            status="error",
+            created_at="2026-01-01T00:00:01+00:00",
+        )
 
         # Auto-detect: list_by_thread returns newest first
         recent = await store.list_by_thread("t1", limit=1)
@@ -308,7 +318,12 @@ class TestFollowUpAssociation:
         assert follow_up is None
 
         # Now add a successful run
-        await store.put("r3", thread_id="t1", status="success")
+        await store.put(
+            "r3",
+            thread_id="t1",
+            status="success",
+            created_at="2026-01-01T00:00:02+00:00",
+        )
         recent = await store.list_by_thread("t1", limit=1)
         follow_up = None
         if recent and recent[0].get("status") == "success":
