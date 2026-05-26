@@ -5,7 +5,7 @@ persistence layer (runs, threads metadata, users, etc.). The user
 configures one backend; the system handles physical separation details.
 
 SQLite mode: checkpointer and app share a single .db file
-({sqlite_dir}/deerflow.db) with WAL journal mode enabled on every
+({sqlite_dir}/{db_name}.db) with WAL journal mode enabled on every
 connection. WAL allows concurrent readers and a single writer without
 blocking, making a unified file safe for both workloads.  Writers
 that contend for the lock wait via the default 5-second sqlite3
@@ -17,16 +17,20 @@ connection pools with different lifecycles.
 Memory mode: checkpointer uses MemorySaver, app uses in-memory stores.
 No database is initialized.
 
-Sensitive values (postgres_url) should use $VAR syntax in config.yaml
-to reference environment variables from .env:
+Switching backends:
+    Simply change the `backend` field. Both SQLite and Postgres configs
+    can be kept side-by-side; only the active backend is used.
 
+    # SQLite (local development)
+    database:
+      backend: sqlite
+      db_name: ehm_ai
+      sqlite_dir: .deer-flow/data
+
+    # PostgreSQL (production)
     database:
       backend: postgres
-      postgres_url: $DATABASE_URL
-
-The $VAR resolution is handled by AppConfig.resolve_env_variables()
-before this config is instantiated -- DatabaseConfig itself does not
-need to do any environment variable processing.
+      postgres_url: postgresql://user:pass@host:5432/ehm_ai
 """
 
 from __future__ import annotations
@@ -42,16 +46,23 @@ class DatabaseConfig(BaseModel):
         default="memory",
         description=("Storage backend for both checkpointer and application data. 'memory' for development (no persistence across restarts), 'sqlite' for single-node deployment, 'postgres' for production multi-node deployment."),
     )
+    db_name: str = Field(
+        default="ehm_ai",
+        description=(
+            "Database name, shared by both SQLite file ({db_name}.db) and PostgreSQL database. "
+            "Switch backends by changing `backend`; db_name stays the same."
+        ),
+    )
     sqlite_dir: str = Field(
         default=".deer-flow/data",
-        description=("Directory for the SQLite database file. Both checkpointer and application data share {sqlite_dir}/deerflow.db."),
+        description=("Directory for the SQLite database file. Both checkpointer and application data share {sqlite_dir}/{db_name}.db."),
     )
     postgres_url: str = Field(
         default="",
         description=(
             "PostgreSQL connection URL, shared by checkpointer and app. "
             "Use $DATABASE_URL in config.yaml to reference .env. "
-            "Example: postgresql://user:pass@host:5432/deerflow "
+            "Example: postgresql://user:pass@host:5432/ehm_ai "
             "(the +asyncpg driver suffix is added automatically where needed)."
         ),
     )
@@ -76,7 +87,7 @@ class DatabaseConfig(BaseModel):
     @property
     def sqlite_path(self) -> str:
         """Unified SQLite file path shared by checkpointer and app."""
-        return os.path.join(self._resolved_sqlite_dir, "deerflow.db")
+        return os.path.join(self._resolved_sqlite_dir, f"{self.db_name}.db")
 
     # Backward-compatible aliases
     @property

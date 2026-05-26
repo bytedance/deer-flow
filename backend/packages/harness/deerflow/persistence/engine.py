@@ -76,7 +76,7 @@ async def _run_alembic_upgrade(url: str, backend: str) -> None:
     here = Path(__file__).resolve().parent / "migrations"
     cfg = Config(str(here / "alembic.ini"))
     cfg.set_main_option("script_location", str(here))
-    sync_url = url.replace("+aiosqlite", "").replace("+asyncpg", "")
+    sync_url = url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
     cfg.set_main_option("sqlalchemy.url", sync_url)
 
     script = ScriptDirectory.from_config(cfg)

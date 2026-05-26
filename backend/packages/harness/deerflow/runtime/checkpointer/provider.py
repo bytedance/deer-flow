@@ -180,13 +180,14 @@ def checkpointer_context() -> Iterator[Checkpointer]:
 
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
+    from deerflow.config.checkpointer_config import get_checkpointer_config
 
-    config = get_app_config()
-    if config.checkpointer is None:
+    config = get_checkpointer_config()
+    if config is None:
         from langgraph.checkpoint.memory import InMemorySaver
 
         yield InMemorySaver()
         return
 
-    with _sync_checkpointer_cm(config.checkpointer) as saver:
+    with _sync_checkpointer_cm(config) as saver:
         yield saver
