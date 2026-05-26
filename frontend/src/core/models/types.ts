@@ -2,7 +2,7 @@ export interface Model {
   id: string;
   name: string;
   model: string;
-  display_name: string;
+  display_name: string | null;
   description?: string | null;
   base_url?: string | null;
   context_length?: number | null;

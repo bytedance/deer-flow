@@ -55,17 +55,23 @@ export async function updateModel({
   name: string;
   payload: ModelUpsertPayload;
 }): Promise<Model> {
-  const response = await fetch(`${getBackendBaseURL()}/api/models/${name}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/models/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
   return parseJsonResponse<Model>(response);
 }
 
 export async function deleteModel(name: string): Promise<void> {
-  const response = await fetch(`${getBackendBaseURL()}/api/models/${name}`, {
-    method: "DELETE",
-  });
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/models/${encodeURIComponent(name)}`,
+    {
+      method: "DELETE",
+    },
+  );
   await parseJsonResponse(response);
 }

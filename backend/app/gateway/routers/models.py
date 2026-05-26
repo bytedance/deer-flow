@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import logging
 import re
@@ -247,7 +248,7 @@ def _request_to_config(request: ModelUpsertRequest, existing: dict[str, Any] | N
 
 
 async def _fetch_models(base_url: str, api_key: str | None) -> tuple[str, dict[str, Any]]:
-    _validate_detection_base_url(base_url)
+    await _validate_detection_base_url(base_url)
     normalized_base = base_url.rstrip("/")
     candidates = [f"{normalized_base}/models"]
     if not normalized_base.endswith("/v1"):
@@ -266,10 +267,12 @@ async def _fetch_models(base_url: str, api_key: str | None) -> tuple[str, dict[s
             except Exception as exc:
                 last_error = exc
                 logger.debug("Model detection failed for %s: %s", endpoint, exc)
-    raise HTTPException(status_code=502, detail=f"Failed to detect models: {last_error}")
+    exc_info = (type(last_error), last_error, last_error.__traceback__) if last_error else None
+    logger.warning("Model detection failed for all candidate endpoints under %s", normalized_base, exc_info=exc_info)
+    raise HTTPException(status_code=502, detail="Failed to detect models from provider")
 
 
-def _validate_detection_base_url(base_url: str) -> None:
+async def _validate_detection_base_url(base_url: str) -> None:
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise HTTPException(status_code=422, detail="base_url must be an http(s) URL")
@@ -278,7 +281,7 @@ def _validate_detection_base_url(base_url: str) -> None:
 
     host = parsed.hostname
     try:
-        addresses = socket.getaddrinfo(host, None)
+        addresses = await asyncio.get_running_loop().getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise HTTPException(status_code=422, detail=f"Unable to resolve base_url host: {host}") from exc
 

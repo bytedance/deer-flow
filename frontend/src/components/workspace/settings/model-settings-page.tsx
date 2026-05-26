@@ -100,7 +100,7 @@ function formFromModel(model: Model): ModelForm {
     ...emptyForm,
     name: model.name,
     model: model.model,
-    displayName: model.display_name,
+    displayName: model.display_name ?? "",
     description: model.description ?? "",
     baseUrl: model.base_url ?? "",
     contextLength: model.context_length?.toString() ?? "",
@@ -272,7 +272,7 @@ export function ModelSettingsPage() {
                 return (
                   <Item key={model.id} variant="outline">
                     <ItemContent>
-                      <ItemTitle>{model.display_name}</ItemTitle>
+                      <ItemTitle>{model.display_name ?? model.name}</ItemTitle>
                       <ItemDescription>
                         {model.id}
                         {model.context_length
@@ -504,7 +504,7 @@ export function ModelSettingsPage() {
                   <ItemContent>
                     <ItemTitle>
                       <div className="flex flex-wrap items-center gap-2">
-                        <span>{model.display_name}</span>
+                        <span>{model.display_name ?? model.name}</span>
                         {model.supports_thinking && (
                           <Badge>{copy.thinking}</Badge>
                         )}
@@ -534,6 +534,7 @@ export function ModelSettingsPage() {
                       size="icon-sm"
                       onClick={() => handleDelete(model)}
                       disabled={isStatic || deleteMutation.isPending}
+                      aria-label={t.common.delete}
                       title={t.common.delete}
                     >
                       <Trash2Icon className="size-4" />
