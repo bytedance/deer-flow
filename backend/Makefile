@@ -2,13 +2,16 @@ install:
 	uv sync
 
 dev:
-	PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
 gateway:
-	PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
 
 test:
-	PYTHONPATH=. uv run pytest tests/ -v
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/ -v
+
+test-blocking-io:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
 
 lint:
 	uvx ruff check .

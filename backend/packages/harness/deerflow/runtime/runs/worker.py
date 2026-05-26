@@ -19,6 +19,7 @@ import asyncio
 import copy
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
@@ -150,8 +153,6 @@ async def run_agent(
 
     journal = None
 
-    journal = None
-
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
         logger.info(
@@ -174,6 +175,7 @@ async def run_agent(
                 thread_id=thread_id,
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
         # 1. Mark running
@@ -216,6 +218,12 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        # Expose the run-scoped journal under a sentinel key so middleware can
+        # write audit events (e.g. SafetyFinishReasonMiddleware recording
+        # suppressed tool calls). Double-underscore prefix marks it as a
+        # runtime-internal channel; user code must not depend on the key name.
+        if journal is not None:
+            runtime_ctx["__run_journal"] = journal
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -224,6 +232,19 @@ async def run_agent(
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
+
+        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
+        # can lift session_id / user_id / trace_name / tags onto the root trace.
+        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
+        # in sync; caller-provided metadata wins via setdefault inside the helper.
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=record.assistant_id,
+            model_name=record.model_name,
+            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.

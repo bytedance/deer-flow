@@ -88,17 +88,37 @@ make stop       # Stop all services
 
 **Backend directory** (for backend development only):
 ```bash
-make install    # Install backend dependencies
-make dev        # Run Gateway API with reload (port 8001)
-make gateway    # Run Gateway API only (port 8001)
-make test       # Run all backend tests
-make lint       # Lint with ruff
-make format     # Format code with ruff
+make install            # Install backend dependencies
+make dev                # Run Gateway API with reload (port 8001)
+make gateway            # Run Gateway API only (port 8001)
+make test               # Run all backend tests
+make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
+make lint               # Lint with ruff
+make format             # Format code with ruff
 ```
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+Blocking-IO runtime gate (`tests/blocking_io/`):
+- Wraps every item under `tests/blocking_io/` with a strict Blockbuster
+  context scoped to `app.*` and `deerflow.*` (see
+  `tests/support/detectors/blocking_io_runtime.py`). Any sync blocking IO
+  call whose stack passes through DeerFlow business code while running on
+  the asyncio event loop raises `BlockingError` and fails the test.
+- Two regression anchors live there: `test_skills_load.py` (locks the
+  `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
+  for #1917) and `test_sqlite_lifespan.py` (locks the offload around
+  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912).
+- `test_gate_smoke.py` is a meta-test asserting the gate actually catches
+  unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
+  opt-out works.
+- Coverage boundary: the gate only sees code that test execution actually
+  touches. Static AST coverage is a separate concern (out of scope for
+  this PR).
+- CI: runs on every PR via `.github/workflows/backend-blocking-io-tests.yml`,
+  hard-fail.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
@@ -183,6 +203,18 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path changes or the file's mtime increases. This keeps Gateway and LangGraph reads aligned with `config.yaml` edits without requiring a manual process restart.
+
+**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work (logging level, channels, `langgraph_runtime` engines) and passes it explicitly to `langgraph_runtime(app, startup_config)`. Infrastructure fields are **restart-required**:
+
+| Field | Why a restart is required |
+|---|---|
+| `database.*` | `init_engine_from_config()` runs once during `langgraph_runtime()` startup; the SQLAlchemy engine holds the connection pool. |
+| `checkpointer.*` (including SQLite WAL/journal settings) | `make_checkpointer()` binds the persistent checkpointer once at startup. |
+| `run_events.*` | `make_run_event_store()` selects memory- vs. SQL-backed implementation at startup. |
+| `stream_bridge.*` | `make_stream_bridge()` constructs the bridge object once. |
+| `sandbox.use` | `get_sandbox_provider()` caches the provider singleton (`_default_sandbox_provider`); a new class path takes effect only on next process start. |
+| `log_level` | `apply_logging_level()` is called only in `app.py` startup; it mutates the root logger's level, and `get_app_config()` returning a fresh `AppConfig` does not retrigger it. |
+| `channels.*` IM platform credentials | `start_channel_service()` is invoked once during startup; live channels are not rebuilt on config change. |
 
 Configuration priority:
 1. Explicit `config_path` argument
@@ -396,6 +428,24 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 
 - `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)
 - `resolve_class(path, base_class)` - Import and validate class against base class
+
+### Tracing System (`packages/harness/deerflow/tracing/`)
+
+LangSmith and Langfuse are both supported. The wiring lives in two layers:
+
+- `factory.py::build_tracing_callbacks()` — returns the LangChain `CallbackHandler` list for the providers currently enabled via env vars (`LANGSMITH_TRACING`, `LANGFUSE_TRACING`, etc.). The handlers are attached at the **graph invocation root** for in-graph runs (`make_lead_agent` and `DeerFlowClient.stream` both append them to `config["callbacks"]` before invoking the graph) so a single run produces one trace with all node / LLM / tool calls as child spans. Standalone callers — anything that invokes a model outside such a graph (e.g. `MemoryUpdater`) — keep `create_chat_model`'s default `attach_tracing=True`, which falls back to model-level callback attachment.
+- `metadata.py::build_langfuse_trace_metadata()` — builds the Langfuse-reserved trace attributes for `RunnableConfig.metadata`. The Langfuse v4 `langchain.CallbackHandler` lifts these onto the root trace (see its `_parse_langfuse_trace_attributes`), but only when it sees `on_chain_start(parent_run_id=None)` — which is why the callbacks have to live at the graph root, not the model.
+
+**Trace-attribute injection points**: both `runtime/runs/worker.py::run_agent` (gateway path) and `client.py::DeerFlowClient.stream` (embedded path) merge the metadata into `config["metadata"]` right before constructing the graph. Caller-supplied keys win via `setdefault`, so an external `session_id` override is preserved. Field mapping:
+
+| Langfuse field         | Source                                       |
+|-----------------------|----------------------------------------------|
+| `langfuse_session_id` | LangGraph `thread_id`                         |
+| `langfuse_user_id`    | `get_effective_user_id()` (`default` in no-auth) |
+| `langfuse_trace_name` | `RunRecord.assistant_id` / client `agent_name` (defaults to `lead-agent`) |
+| `langfuse_tags`       | `env:<DEER_FLOW_ENV>` + `model:<model_name>`  |
+
+Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only deployments are unaffected. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment. Tests live in `tests/test_tracing_factory.py`, `tests/test_tracing_metadata.py`, `tests/test_worker_langfuse_metadata.py`, and `tests/test_client_langfuse_metadata.py`.
 
 ### Config Schema
 

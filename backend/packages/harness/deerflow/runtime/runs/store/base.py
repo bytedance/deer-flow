@@ -59,7 +59,12 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
-    ) -> None:
+    ) -> bool | None:
+        """Update a run status.
+
+        Returns ``False`` when the store can prove no row was updated. Older or
+        lightweight stores may return ``None`` when they cannot report rowcount.
+        """
         pass
 
     @abc.abstractmethod
@@ -92,15 +97,42 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
-    ) -> None:
+    ) -> bool | None:
+        """Persist final completion fields.
+
+        Returns ``False`` when the store can prove no row was updated.
+        """
         pass
+
+    async def update_run_progress(
+        self,
+        run_id: str,
+        *,
+        total_input_tokens: int | None = None,
+        total_output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        llm_call_count: int | None = None,
+        lead_agent_tokens: int | None = None,
+        subagent_tokens: int | None = None,
+        middleware_tokens: int | None = None,
+        message_count: int | None = None,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+    ) -> None:
+        """Persist a best-effort running snapshot without changing run status."""
+        return None
 
     @abc.abstractmethod
     async def list_pending(self, *, before: str | None = None) -> list[dict[str, Any]]:
         pass
 
     @abc.abstractmethod
-    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
+    async def list_inflight(self, *, before: str | None = None) -> list[dict[str, Any]]:
+        """Return persisted runs that are still ``pending`` or ``running``."""
+        pass
+
+    @abc.abstractmethod
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.
 
         Returns a dict with keys: total_tokens, total_input_tokens,
