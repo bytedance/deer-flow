@@ -1,6 +1,7 @@
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
+from langchain.agents.middleware.todo import PlanningState, Todo
 
 
 class SandboxState(TypedDict):
@@ -58,11 +59,23 @@ def merge_todos(existing: list | None, new: list | None) -> list | None:
     return new
 
 
+class DeerFlowPlanningState(PlanningState):
+    """Plan-mode state schema with a todos reducer that preserves existing items.
+
+    ``TodoListMiddleware`` registers ``PlanningState.todos`` as ``LastValue``.
+    DeerFlow overrides it with ``merge_todos`` so partial graph updates that omit
+    todos do not wipe streamed values (see issue #3123). This type must be used as
+    ``TodoMiddleware.state_schema`` instead of re-declaring ``todos`` on
+    ``ThreadState``, which conflicts at graph build time.
+    """
+
+    todos: Annotated[NotRequired[list[Todo]], merge_todos]
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
-    todos: Annotated[list | None, merge_todos]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}

@@ -22,6 +22,8 @@ from typing import Any, override
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.todo import PlanningState, Todo
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
+
+from deerflow.agents.thread_state import DeerFlowPlanningState
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
@@ -112,6 +114,8 @@ class TodoMiddleware(TodoListMiddleware):
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
     """
+
+    state_schema = DeerFlowPlanningState  # type: ignore[assignment]
 
     @override
     def before_model(

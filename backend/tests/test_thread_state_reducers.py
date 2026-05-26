@@ -8,6 +8,7 @@ overwrites the previously accumulated value.
 from typing import get_type_hints
 
 from deerflow.agents.thread_state import (
+    DeerFlowPlanningState,
     ThreadState,
     merge_artifacts,
     merge_todos,
@@ -80,16 +81,21 @@ class TestThreadStateAnnotations:
     """
 
     def test_todos_field_is_wired_to_merge_todos(self):
-        """ThreadState.todos must use merge_todos.
+        """DeerFlowPlanningState.todos must use merge_todos (not on ThreadState).
 
-        Without this Annotated binding, LangGraph falls back to last-value-wins
-        behavior, and partial state updates that omit todos will silently clear
-        previously streamed values.
+        Declaring todos on ThreadState conflicts with TodoListMiddleware's
+        PlanningState at graph build time. The reducer lives on the middleware
+        state schema instead.
         """
-        hints = get_type_hints(ThreadState, include_extras=True)
+        hints = get_type_hints(DeerFlowPlanningState, include_extras=True)
         todos_hint = hints["todos"]
-        assert hasattr(todos_hint, "__metadata__"), "ThreadState.todos must be Annotated with a reducer"
-        assert merge_todos in todos_hint.__metadata__, "ThreadState.todos must be wired to merge_todos reducer (see #3123)"
+        assert hasattr(todos_hint, "__metadata__"), "DeerFlowPlanningState.todos must be Annotated with a reducer"
+        assert merge_todos in todos_hint.__metadata__, "DeerFlowPlanningState.todos must use merge_todos (see #3123)"
+
+    def test_thread_state_does_not_declare_todos(self):
+        """ThreadState must not register a todos channel (plan middleware owns it)."""
+        hints = get_type_hints(ThreadState, include_extras=True)
+        assert "todos" not in hints
 
     def test_artifacts_field_is_wired_to_merge_artifacts(self):
         """Sanity check that existing reducer wiring is preserved."""
