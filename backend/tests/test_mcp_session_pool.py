@@ -472,11 +472,15 @@ async def test_http_transport_tools_not_pooled():
         tools = await get_mcp_tools()
 
     pool = get_session_pool()
-    # Only the stdio (playwright) tool should have a pool entry; HTTP should not.
-    pool_keys = list(pool._entries.keys())
-    assert ("playwright", "default") not in pool_keys  # Not called yet, no entry
+    # Tool discovery is lazy: no pooled sessions are created until a wrapped tool is invoked.
+    assert list(pool._entries.keys()) == []
+
     # Verify the HTTP tool was NOT wrapped with the pool (it's the original tool).
     http_tools = [t for t in tools if t.name == "myserver_search"]
     assert len(http_tools) == 1
-    # The HTTP tool's coroutine should be the original, not the pool wrapper.
     assert http_tools[0].coroutine is http_tool.coroutine
+
+    # Verify the stdio tool WAS wrapped with the pool.
+    stdio_tools = [t for t in tools if t.name == "playwright_navigate"]
+    assert len(stdio_tools) == 1
+    assert stdio_tools[0].coroutine is not stdio_tool.coroutine
