@@ -16,3 +16,6 @@ lint:
 
 format:
 	uvx ruff check . --fix && uvx ruff format .
+
+mcp-server:
+	PYTHONPATH=. uv run python -m deerflow.mcp.server

@@ -336,6 +336,14 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+DeerFlow can also be **hosted as an MCP server** itself, allowing external AI agents (Claude Code, OpenCode, Cursor, etc.) to invoke DeerFlow's research and reasoning as tools:
+
+```bash
+cd backend && make mcp-server
+```
+
+See the [MCP Server Hosting Guide](backend/docs/MCP_SERVER_HOSTING.md) for integration examples.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
