@@ -633,11 +633,7 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_wrapped_json_responses_parse(self):
         """Memory update should tolerate provider wrappers around valid JSON."""
-        valid_json = (
-            '{"user": {}, "history": {}, '
-            '"newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], '
-            '"factsToRemove": []}'
-        )
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], "factsToRemove": []}'
         response_variants = [
             f"<think>Analyze the conversation first.</think>\n{valid_json}",
             f"<think>Analyze the conversation first.\n{valid_json}",
@@ -662,11 +658,7 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_schema_guard_ignores_invalid_update_fields(self):
         """Parsed JSON with bad field types should not break the memory update."""
-        response = (
-            '{"user": "bad", "history": [], '
-            '"newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], '
-            '"factsToRemove": "bad"}'
-        )
+        response = '{"user": "bad", "history": [], "newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], "factsToRemove": "bad"}'
 
         result, mock_storage = self._run_update_with_response(response)
 
