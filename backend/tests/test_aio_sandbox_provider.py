@@ -51,6 +51,7 @@ def _make_provider(tmp_path):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
         provider._config = {}
         provider._sandboxes = {}
+        provider._lease_counts = {}
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
     return provider
@@ -139,6 +140,45 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+def test_reused_active_sandbox_requires_matching_releases(monkeypatch):
+    """A temporary acquire must not release another caller's active sandbox lease."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(None)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lease_counts = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=aio_mod.SandboxInfo(sandbox_id="sandbox-lease", sandbox_url="http://sandbox")),
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda _thread_id: [])
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+
+    first_id = provider.acquire("thread-lease")
+    second_id = provider.acquire("thread-lease")
+
+    assert first_id == second_id
+    assert provider._lease_counts[first_id] == 2
+
+    provider.release(first_id)
+
+    assert first_id in provider._sandboxes
+    assert first_id not in provider._warm_pool
+    assert provider._lease_counts[first_id] == 1
+
+    provider.release(first_id)
+
+    assert first_id not in provider._sandboxes
+    assert first_id in provider._warm_pool
+    assert first_id not in provider._lease_counts
 
 
 @pytest.mark.anyio

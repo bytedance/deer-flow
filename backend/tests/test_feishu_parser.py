@@ -1,5 +1,7 @@
 import asyncio
 import json
+from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,6 +17,24 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+class _FakeGetMessageResourceRequest:
+    @classmethod
+    def builder(cls):
+        return cls()
+
+    def message_id(self, _message_id):
+        return self
+
+    def file_key(self, _file_key):
+        return self
+
+    def type(self, _type):
+        return self
+
+    def build(self):
+        return object()
 
 
 def test_feishu_on_message_plain_text():
@@ -99,6 +119,77 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
         result = await channel.receive_file(msg, "thread_1")
 
         assert result.text == "before /mnt/user-data/uploads/a.png middle /mnt/user-data/uploads/b.pdf after"
+
+    _run(go())
+
+
+def test_feishu_receive_single_file_releases_sandbox_after_sync(tmp_path, monkeypatch):
+    async def go():
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = _FakeGetMessageResourceRequest
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"hello uploads")
+        response.file_name = "note.txt"
+
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        paths = SimpleNamespace(
+            ensure_thread_dirs=MagicMock(),
+            sandbox_uploads_dir=MagicMock(return_value=tmp_path),
+        )
+        sandbox = MagicMock()
+        provider = MagicMock()
+        provider.acquire.return_value = "aio-1"
+        provider.get.return_value = sandbox
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a")
+
+        assert result == "/mnt/user-data/uploads/note.txt"
+        assert (tmp_path / "note.txt").read_bytes() == b"hello uploads"
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/note.txt", b"hello uploads")
+        provider.release.assert_called_once_with("aio-1")
+
+    _run(go())
+
+
+def test_feishu_receive_single_file_releases_sandbox_when_sync_fails(tmp_path, monkeypatch):
+    async def go():
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = _FakeGetMessageResourceRequest
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"hello uploads")
+        response.file_name = "note.txt"
+
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        paths = SimpleNamespace(
+            ensure_thread_dirs=MagicMock(),
+            sandbox_uploads_dir=MagicMock(return_value=tmp_path),
+        )
+        sandbox = MagicMock()
+        sandbox.update_file.side_effect = RuntimeError("sync failed")
+        provider = MagicMock()
+        provider.acquire.return_value = "aio-1"
+        provider.get.return_value = sandbox
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a")
+
+        assert result == "Failed to obtain the [file]"
+        provider.release.assert_called_once_with("aio-1")
 
     _run(go())
 

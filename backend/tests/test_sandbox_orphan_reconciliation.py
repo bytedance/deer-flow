@@ -347,6 +347,7 @@ def _make_provider_for_reconciliation():
     provider._thread_sandboxes = {}
     provider._thread_locks = {}
     provider._last_activity = {}
+    provider._lease_counts = {}
     provider._warm_pool = {}
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()

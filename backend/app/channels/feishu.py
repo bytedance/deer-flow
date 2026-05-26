@@ -378,6 +378,8 @@ class FeishuChannel(Channel):
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
+        sandbox_provider = None
+        sandbox_id = None
         try:
             sandbox_provider = get_sandbox_provider()
             sandbox_id = sandbox_provider.acquire(thread_id)
@@ -390,6 +392,12 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"
+        finally:
+            if sandbox_provider is not None and sandbox_id is not None:
+                try:
+                    sandbox_provider.release(sandbox_id)
+                except Exception:
+                    logger.warning("[Feishu] failed to release sandbox %s after file sync", sandbox_id, exc_info=True)
 
         logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
         return virtual_path
