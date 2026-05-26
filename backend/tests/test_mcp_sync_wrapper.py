@@ -12,9 +12,10 @@ from deerflow.tools.sync import make_sync_tool_wrapper
 
 
 class MockCallToolResult:
-    content = []
-    isError = False
-    structuredContent = None
+    def __init__(self):
+        self.content = []
+        self.isError = False
+        self.structuredContent = None
 
 
 class MockArgs(BaseModel):

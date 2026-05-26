@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_prefixed_tool_server(tool_name: str, server_names: Iterable[str]) -> str | None:
-    for server_name in sorted(server_names, key=len, reverse=True):
+    for server_name in server_names:
         if tool_name.startswith(f"{server_name}_"):
             return server_name
     return None
@@ -263,8 +263,14 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Wrap each tool with persistent-session logic.
         wrapped_tools: list[BaseTool] = []
-        tool_servers = [_get_prefixed_tool_server(tool.name, servers_config) for tool in tools]
-        exposed_name_candidates = [_strip_mcp_tool_prefix(tool.name, tool_server) if tool_server is not None else tool.name for tool, tool_server in zip(tools, tool_servers, strict=True)]
+        server_names_by_prefix_length = tuple(sorted(servers_config, key=len, reverse=True))
+        tool_servers = [_get_prefixed_tool_server(tool.name, server_names_by_prefix_length) for tool in tools]
+        exposed_name_candidates: list[str] = []
+        for tool, tool_server in zip(tools, tool_servers, strict=True):
+            if tool_server is None:
+                exposed_name_candidates.append(tool.name)
+            else:
+                exposed_name_candidates.append(_strip_mcp_tool_prefix(tool.name, tool_server))
         exposed_name_counts = Counter(exposed_name_candidates)
 
         for tool, tool_server, exposed_name_candidate in zip(tools, tool_servers, exposed_name_candidates, strict=True):
