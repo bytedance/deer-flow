@@ -96,6 +96,108 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
 
 @pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_assistant_id():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert captured["factory_run_name"] == "lead_agent"
+    assert captured["astream_run_name"] == "lead_agent"
+
+
+@pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_context_agent_name():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"context": {"agent_name": "finalis"}},
+    )
+
+    assert captured["factory_run_name"] == "finalis"
+    assert captured["astream_run_name"] == "finalis"
+
+
+@pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_configurable_agent_name():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"configurable": {"agent_name": "finalis"}},
+    )
+
+    assert captured["factory_run_name"] == "finalis"
+    assert captured["astream_run_name"] == "finalis"
+
+
+@pytest.mark.anyio
 async def test_rollback_restores_snapshot_without_deleting_thread():
     checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
 
