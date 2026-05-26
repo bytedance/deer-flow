@@ -1,5 +1,5 @@
-<!-- Required for issue/PR auto-link. Use Fixes / Closes / Resolves so the
-     linked issue closes on merge. Delete this line if the PR doesn't close any issue. -->
+<!-- Reference a related issue with #123. Use Fixes / Closes / Resolves to
+     auto-close it on merge. Delete this line if the PR doesn't reference an issue. -->
 Fixes #
 
 ## Why
@@ -51,14 +51,11 @@ Fixes #
        - Did it go red on `main` and green on this branch? (yes / no)
        - If a red test wasn't cheap to write, explain why and what you did instead. -->
 
--
-
 
 ## Validation
 
 <!-- What you actually ran. Run at least the checks for the area you changed:
-       Backend:           cd backend  && make lint && make test
-       Frontend:          cd frontend && pnpm lint && pnpm typecheck && make test
+       Backend:   cd backend  && make lint && make test
+       Frontend:  cd frontend && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test
        Frontend E2E (if you touched frontend/): cd frontend && make test-e2e -->
 
--
