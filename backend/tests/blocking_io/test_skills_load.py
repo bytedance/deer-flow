@@ -1,10 +1,9 @@
 """Regression test: skill loading must remain releasable to a worker thread.
 
-Anchors the production offload from `subagents/executor.py:_load_skills`
-(lines around 354-356) where both `get_or_new_skill_storage` and the sync
-`storage.load_skills(...)` method are dispatched via `asyncio.to_thread`.
-That fix addressed #1917, where `os.walk` inside `load_skills` blocked the
-LangGraph async event loop.
+Anchors the production offload from `subagents/executor.py:_load_skills`,
+where both `get_or_new_skill_storage` and the sync `storage.load_skills(...)`
+method are dispatched via `asyncio.to_thread`. That fix addressed #1917,
+where `os.walk` inside `load_skills` blocked the LangGraph async event loop.
 
 This test invokes the production `_load_skills()` call path under the strict
 Blockbuster context against a real `LocalSkillStorage` instance pointed at
