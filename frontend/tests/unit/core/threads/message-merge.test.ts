@@ -2,6 +2,8 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  buildRunMessagesUrl,
+  getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
   getVisibleOptimisticMessages,
   mergeMessages,
@@ -186,4 +188,35 @@ test("getOldestRunMessageSeq returns the cursor for the next older run page", ()
 
 test("getOldestRunMessageSeq ignores rows without seq", () => {
   expect(getOldestRunMessageSeq([runMessage()])).toBeNull();
+});
+
+test("getNextRunMessagesBeforeSeq keeps runs pending when has_more lacks seq", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: true }),
+  ).toBeUndefined();
+});
+
+test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: false }),
+  ).toBeNull();
+});
+
+test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
+  expect(
+    buildRunMessagesUrl(
+      "https://api.example.test/",
+      "thread/with space",
+      "run?one",
+      18,
+    ),
+  ).toBe(
+    "https://api.example.test/api/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
+  );
+});
+
+test("buildRunMessagesUrl omits before_seq when loading the latest page", () => {
+  expect(
+    buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
+  ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
 });

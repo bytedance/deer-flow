@@ -114,6 +114,31 @@ export function getOldestRunMessageSeq(messages: RunMessage[]) {
   return oldestSeq;
 }
 
+export function getNextRunMessagesBeforeSeq(
+  result: RunMessagesPageResponse,
+): number | null | undefined {
+  if (!runMessagesPageHasMore(result)) {
+    return null;
+  }
+  return getOldestRunMessageSeq(result.data) ?? undefined;
+}
+
+export function buildRunMessagesUrl(
+  baseUrl: string,
+  threadId: string,
+  runId: string,
+  beforeSeq?: number,
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const url = new URL(
+    `${normalizedBaseUrl}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`,
+  );
+  if (beforeSeq !== undefined) {
+    url.searchParams.set("before_seq", String(beforeSeq));
+  }
+  return url.toString();
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -750,12 +775,12 @@ export function useThreadHistory(threadId: string) {
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
         const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
-        const searchParams = new URLSearchParams();
-        if (beforeSeq !== undefined) {
-          searchParams.set("before_seq", String(beforeSeq));
-        }
-        const query = searchParams.toString();
-        const url = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages${query ? `?${query}` : ""}`;
+        const url = buildRunMessagesUrl(
+          getBackendBaseURL(),
+          requestThreadId,
+          run.run_id,
+          beforeSeq,
+        );
         const result: RunMessagesPageResponse = await fetch(url, {
           method: "GET",
           headers: {
@@ -771,13 +796,16 @@ export function useThreadHistory(threadId: string) {
         if (threadIdRef.current !== requestThreadId) {
           return;
         }
-        const pageHasMore = runMessagesPageHasMore(result);
-        const oldestSeq = getOldestRunMessageSeq(result.data);
+        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
-        if (pageHasMore && oldestSeq !== null) {
-          runBeforeSeqRef.current.set(run.run_id, oldestSeq);
+        if (typeof nextBeforeSeq === "number") {
+          runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
+        } else if (nextBeforeSeq === undefined) {
+          console.warn(
+            `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
+          );
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
           loadedRunIdsRef.current.add(run.run_id);
