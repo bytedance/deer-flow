@@ -90,7 +90,7 @@ describe("WorkspaceHeader", () => {
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain("DF");
+    expect(html).toContain(">E<");
     expect(html).toContain("New chat");
   });
 });

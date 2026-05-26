@@ -402,7 +402,57 @@ class ClosureService:
             actor_id=actor_id,
             payload=result.event_payload,
         )
+
+        # Hook: extract KB candidate on verify_close
+        if action_enum.value == "verify_close":
+            await self._maybe_extract_kb_candidate(tenant_id, ticket_id)
+
         return self._to_response(updated)
+
+    async def _maybe_extract_kb_candidate(
+        self, tenant_id: str, ticket_id: str
+    ) -> None:
+        """Extract KB candidate from closed ticket events.
+
+        Called after verify_close transition. Extracts verification_summary
+        and evidence from event payloads, creates a pending_review candidate.
+        """
+        try:
+            from deerflow.insights.kb_candidate_store import KBCandidateStore
+            from deerflow.insights.knowledge_extractor import ClosureKnowledgeExtractor
+
+            # Query events for this ticket
+            events = await self._repo.list_events(
+                tenant_id=tenant_id, ticket_id=ticket_id
+            )
+
+            # Extract candidate
+            extractor = ClosureKnowledgeExtractor()
+            candidate = await extractor.extract(
+                ticket_id=ticket_id,
+                tenant_id=tenant_id,
+                events=events,
+            )
+
+            if candidate is None:
+                return
+
+            # Save to store
+            store = KBCandidateStore()
+            store.save(candidate)
+
+            logger.info(
+                "Created KB candidate from closed ticket %s",
+                ticket_id,
+            )
+        except Exception as e:
+            # Non-critical: log but don't fail the transition
+            logger.warning(
+                "Failed to extract KB candidate from ticket %s: %s",
+                ticket_id,
+                e,
+                exc_info=True,
+            )
 
     # --------------------------------------------------------- aggregates
 

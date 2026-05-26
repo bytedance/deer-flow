@@ -17,6 +17,10 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
     mode: undefined,
     reasoning_effort: undefined,
   },
+  onboarding: {
+    industrialCompleted: false,
+    industrialOperations: [],
+  },
 };
 
 export const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
@@ -49,9 +53,13 @@ export interface LocalSettings {
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
     knowledge_base_selection?: KnowledgeBaseSelection;
   };
+  onboarding: {
+    industrialCompleted: boolean;
+    industrialOperations: string[];
+  };
 }
 
-function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
+export function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
   return {
     ...DEFAULT_LOCAL_SETTINGS,
     context: {
@@ -65,6 +73,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     notification: {
       ...DEFAULT_LOCAL_SETTINGS.notification,
       ...settings?.notification,
+    },
+    onboarding: {
+      ...DEFAULT_LOCAL_SETTINGS.onboarding,
+      ...settings?.onboarding,
     },
   };
 }

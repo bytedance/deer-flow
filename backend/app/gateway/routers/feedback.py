@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +18,21 @@ from deerflow.config.tenant import get_current_tenant_id
 from deerflow.feedback.storage import FeedbackEntry, FeedbackStorage
 
 logger = logging.getLogger(__name__)
+
+
+async def _maybe_check_cluster(request: Request, tenant_id: str) -> None:
+    """Lightweight cluster check hook — runs async, never blocks response."""
+    try:
+        from app.gateway.deps import get_insights_aggregator
+
+        aggregator = get_insights_aggregator(request)
+        if aggregator is None:
+            return
+        alerts = await aggregator.detect_clusters(tenant_id, threshold=5, window_minutes=60)
+        if alerts:
+            logger.info("Cluster alert triggered for tenant %s: %d alerts", tenant_id, len(alerts))
+    except Exception as e:
+        logger.debug("Cluster check skipped (insights not initialized): %s", e)
 
 # ---------------------------------------------------------------------------
 # Simple feedback (legacy / non-run-scoped)
@@ -131,13 +147,19 @@ async def upsert_feedback(
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
 
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.upsert(
+    result = await feedback_repo.upsert(
         run_id=run_id,
         thread_id=thread_id,
         rating=body.rating,
         user_id=user_id,
         comment=body.comment,
     )
+
+    if body.rating == -1:
+        tenant_id = get_current_tenant_id()
+        asyncio.create_task(_maybe_check_cluster(request, tenant_id))
+
+    return result
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback")
@@ -182,7 +204,7 @@ async def create_feedback(
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
 
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.create(
+    result = await feedback_repo.create(
         run_id=run_id,
         thread_id=thread_id,
         rating=body.rating,
@@ -190,6 +212,12 @@ async def create_feedback(
         message_id=body.message_id,
         comment=body.comment,
     )
+
+    if body.rating == -1:
+        tenant_id = get_current_tenant_id()
+        asyncio.create_task(_maybe_check_cluster(request, tenant_id))
+
+    return result
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback", response_model=list[FeedbackResponse])

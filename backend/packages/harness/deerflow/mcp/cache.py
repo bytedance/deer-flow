@@ -103,21 +103,13 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     if not _cache_initialized:
         logger.info("MCP tools not initialized, performing lazy initialization...")
         try:
-            # Try to initialize in the current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is already running (e.g., in LangGraph Studio),
-                # we need to create a new loop in a thread
-                import concurrent.futures
+            asyncio.get_running_loop()
+            import concurrent.futures
 
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, initialize_mcp_tools())
-                    future.result()
-            else:
-                # If no loop is running, we can use the current loop
-                loop.run_until_complete(initialize_mcp_tools())
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, initialize_mcp_tools())
+                future.result()
         except RuntimeError:
-            # No event loop exists, create one
             try:
                 asyncio.run(initialize_mcp_tools())
             except Exception:
@@ -166,13 +158,10 @@ def get_tenant_mcp_tools(tenant_mcp_configs: dict[str, dict]) -> list[BaseTool]:
         import concurrent.futures
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, get_mcp_tools_from_configs(tenant_mcp_configs))
-                    return future.result()
-            else:
-                return loop.run_until_complete(get_mcp_tools_from_configs(tenant_mcp_configs))
+            asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, get_mcp_tools_from_configs(tenant_mcp_configs))
+                return future.result()
         except RuntimeError:
             return asyncio.run(get_mcp_tools_from_configs(tenant_mcp_configs))
     except ImportError:

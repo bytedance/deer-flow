@@ -21,6 +21,9 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.http_connector_config import HttpConnectorConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
+from deerflow.config.session_memory_config import SessionMemoryConfig, load_session_memory_config_from_dict
+from deerflow.config.domain_memory_config import DomainMemoryConfig, load_domain_memory_config_from_dict
+from deerflow.config.memory_api_config import MemoryApiConfig, load_memory_api_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.nacos_config import NacosConfig, load_nacos_config_from_dict
 from deerflow.config.rag_config import RagConfig, load_rag_config_from_dict
@@ -41,6 +44,11 @@ from deerflow.config.runtime_paths import existing_project_file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigValidationError(Exception):
+    """Raised when configuration validation fails in production mode."""
+    pass
 
 
 CONFIG_FILE_DATABASE_DEFAULTS = {
@@ -103,6 +111,9 @@ class AppConfig(BaseModel):
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    session_memory: SessionMemoryConfig = Field(default_factory=SessionMemoryConfig, description="Session memory subsystem configuration (thread-scoped)")
+    domain_memory: DomainMemoryConfig = Field(default_factory=DomainMemoryConfig, description="Domain memory subsystem configuration (entity-scoped)")
+    memory_api: MemoryApiConfig = Field(default_factory=MemoryApiConfig, description="Memory API and UI configuration")
     rag: RagConfig = Field(default_factory=RagConfig, description="RAG (embedding + vector store) subsystem configuration")
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
@@ -173,6 +184,7 @@ class AppConfig(BaseModel):
 
         config_data = cls.resolve_env_variables(config_data)
         cls._apply_database_defaults(config_data)
+        cls._validate_postgres_consistency(config_data)
 
         # Load circuit_breaker config if present
         if "circuit_breaker" in config_data:
@@ -198,7 +210,10 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_singleton_configs(cls, config: Self, acp_agents: dict[str, ACPAgentConfig]) -> None:
-        from deerflow.config.checkpointer_config import get_checkpointer_config
+        from deerflow.config.checkpointer_config import (
+            CheckpointerConfig,
+            get_checkpointer_config,
+        )
 
         previous_checkpointer_config = get_checkpointer_config()
 
@@ -206,6 +221,9 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_session_memory_config_from_dict(config.session_memory.model_dump())
+        load_domain_memory_config_from_dict(config.domain_memory.model_dump())
+        load_memory_api_config_from_dict(config.memory_api.model_dump())
         load_rag_config_from_dict(config.rag.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
@@ -215,15 +233,37 @@ class AppConfig(BaseModel):
         load_audio_input_config_from_dict(config.audio_input.model_dump())
         load_content_safety_config_from_dict(config.content_safety.model_dump())
         load_rate_limit_config_from_dict(config.rate_limit.model_dump())
-        load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
+
+        # Derive checkpointer config from database section if no standalone config.
+        # This eliminates the need for a separate `checkpointer:` block in config.yaml.
+        effective_checkpointer: CheckpointerConfig | None
+        if config.checkpointer is not None:
+            effective_checkpointer = config.checkpointer
+        else:
+            db = config.database
+            if db.backend == "sqlite":
+                effective_checkpointer = CheckpointerConfig(
+                    type="sqlite",
+                    connection_string=db.checkpointer_sqlite_path,
+                )
+            elif db.backend == "postgres":
+                effective_checkpointer = CheckpointerConfig(
+                    type="postgres",
+                    connection_string=db.postgres_url,
+                )
+            else:
+                effective_checkpointer = None
+
+        load_checkpointer_config_from_dict(
+            effective_checkpointer.model_dump() if effective_checkpointer is not None else None
+        )
+
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
         load_nacos_config_from_dict(config.nacos.model_dump() if config.nacos is not None else None)
         load_rpc_config_from_dict(config.rpc.model_dump() if config.rpc is not None else None)
 
-        if previous_checkpointer_config != config.checkpointer:
-            # These runtime singletons derive their backend from checkpointer config.
-            # Keep imports local to avoid cycles: both providers import get_app_config.
+        if previous_checkpointer_config != effective_checkpointer:
             from deerflow.runtime.checkpointer import reset_checkpointer
             from deerflow.runtime.store import reset_store
 
@@ -232,7 +272,11 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
-        """Apply config.yaml defaults for persistence when the section is absent."""
+        """Apply config.yaml defaults for persistence when the section is absent.
+
+        When ``database.backend=postgres``, auto-default subsystem backends
+        to PostgreSQL-compatible values if not explicitly configured.
+        """
         database_config = config_data.get("database")
         if database_config is None:
             database_config = {}
@@ -241,6 +285,129 @@ class AppConfig(BaseModel):
             return
         for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
             database_config.setdefault(key, value)
+
+        if database_config.get("backend") != "postgres":
+            return
+
+        # Auto-default subsystem backends when database.backend=postgres
+        auto_defaults: list[tuple[str, str, str]] = []
+        skipped: list[tuple[str, str, str]] = []
+
+        # run_events.backend (stored as extra field on AppConfig)
+        run_events_config = config_data.get("run_events")
+        if run_events_config is None:
+            run_events_config = {}
+            config_data["run_events"] = run_events_config
+        if isinstance(run_events_config, dict):
+            if "backend" not in run_events_config:
+                run_events_config["backend"] = "db"
+                auto_defaults.append(("run_events.backend", "db", "database.backend=postgres"))
+            else:
+                skipped.append(("run_events.backend", run_events_config["backend"], "explicitly configured"))
+
+        # memory.storage_class
+        memory_config = config_data.get("memory")
+        if memory_config is None:
+            memory_config = {}
+            config_data["memory"] = memory_config
+        if isinstance(memory_config, dict):
+            if "storage_class" not in memory_config:
+                memory_config["storage_class"] = "deerflow.agents.memory.storage.StoreMemoryStorage"
+                auto_defaults.append(("memory.storage_class", "StoreMemoryStorage", "database.backend=postgres"))
+            else:
+                skipped.append(("memory.storage_class", memory_config["storage_class"], "explicitly configured"))
+
+        # rag.vector_store_backend
+        rag_config = config_data.get("rag")
+        if rag_config is None:
+            rag_config = {}
+            config_data["rag"] = rag_config
+        if isinstance(rag_config, dict):
+            if "vector_store_backend" not in rag_config:
+                rag_config["vector_store_backend"] = "pgvector"
+                auto_defaults.append(("rag.vector_store_backend", "pgvector", "database.backend=postgres"))
+            else:
+                skipped.append(("rag.vector_store_backend", rag_config["vector_store_backend"], "explicitly configured"))
+
+        # cost.storage_backend
+        cost_config = config_data.get("cost")
+        if cost_config is None:
+            cost_config = {}
+            config_data["cost"] = cost_config
+        if isinstance(cost_config, dict):
+            if "storage_backend" not in cost_config:
+                cost_config["storage_backend"] = "postgres"
+                auto_defaults.append(("cost.storage_backend", "postgres", "database.backend=postgres"))
+            else:
+                skipped.append(("cost.storage_backend", cost_config["storage_backend"], "explicitly configured"))
+
+        for field, value, reason in auto_defaults:
+            logger.info("Auto-defaulted %s=%s from %s", field, value, reason)
+        for field, value, reason in skipped:
+            logger.info("%s=%s (%s, auto-default skipped)", field, value, reason)
+
+    @classmethod
+    def _validate_postgres_consistency(cls, config_data: dict[str, Any]) -> None:
+        """Validate that subsystem backends are consistent with database.backend=postgres.
+
+        In production mode (DEER_FLOW_ENV=production): raise ConfigValidationError on split backends.
+        In development mode (default): log WARNING on split backends.
+        """
+        database_config = config_data.get("database")
+        if not isinstance(database_config, dict):
+            return
+        if database_config.get("backend") != "postgres":
+            return
+
+        conflicts: list[tuple[str, str, str]] = []
+
+        # Check run_events.backend
+        run_events = config_data.get("run_events")
+        if isinstance(run_events, dict):
+            backend = run_events.get("backend")
+            if backend and backend != "db":
+                conflicts.append(("run_events.backend", backend, "Set run_events.backend=db or remove to auto-default"))
+
+        # Check memory.storage_class
+        memory = config_data.get("memory")
+        if isinstance(memory, dict):
+            storage_class = memory.get("storage_class", "")
+            if storage_class and "FileMemoryStorage" in storage_class:
+                conflicts.append(("memory.storage_class", storage_class, "Set memory.storage_class to StoreMemoryStorage or remove to auto-default"))
+
+        # Check rag.vector_store_backend
+        rag = config_data.get("rag")
+        if isinstance(rag, dict):
+            backend = rag.get("vector_store_backend")
+            if backend and backend != "pgvector":
+                conflicts.append(("rag.vector_store_backend", backend, "Set rag.vector_store_backend=pgvector or remove to auto-default"))
+
+        # Check cost.storage_backend
+        cost = config_data.get("cost")
+        if isinstance(cost, dict):
+            backend = cost.get("storage_backend")
+            if backend and backend != "postgres":
+                conflicts.append(("cost.storage_backend", backend, "Set cost.storage_backend=postgres or remove to auto-default"))
+
+        if not conflicts:
+            return
+
+        env = os.getenv("DEER_FLOW_ENV", "development")
+        conflict_details = "; ".join(f"{field}={value} → {fix}" for field, value, fix in conflicts)
+
+        if env == "production":
+            raise ConfigValidationError(
+                f"Split backend configuration detected in production mode. "
+                f"database.backend=postgres requires all subsystem backends to use PostgreSQL-compatible values. "
+                f"Conflicts: {conflict_details}. "
+                f"See docs/POSTGRESQL_MIGRATION.md#configuration for details."
+            )
+        else:
+            logger.warning(
+                "Split backend configuration detected: database.backend=postgres but subsystems use non-PostgreSQL backends. "
+                "Conflicts: %s. This is acceptable in development mode but will fail in production (DEER_FLOW_ENV=production).",
+                conflict_details,
+            )
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
+import { MemoryTrigger } from "@/components/workspace/memory-trigger";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import {
   ChatBox,
@@ -12,6 +13,7 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
+import { IndustrialOnboardingOverlay } from "@/components/workspace/industrial-onboarding-overlay";
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -118,6 +120,7 @@ export default function ChatPage() {
     : "off";
 
   return (
+    <>
     <ThreadContext.Provider value={{ thread, isMock }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
@@ -143,6 +146,7 @@ export default function ChatPage() {
                 }
               />
               <ExportTrigger threadId={threadId} />
+              <MemoryTrigger threadId={threadId} />
               <ChatReportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -228,5 +232,7 @@ export default function ChatPage() {
         </div>
       </ChatBox>
     </ThreadContext.Provider>
+    <IndustrialOnboardingOverlay />
+  </>
   );
 }

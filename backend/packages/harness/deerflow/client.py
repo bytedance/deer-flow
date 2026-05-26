@@ -1069,11 +1069,11 @@ class DeerFlowClient:
 
         return clear_memory_data(user_id=get_effective_user_id())
 
-    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
+    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5, source: str = "manual") -> dict:
         """Create a single fact manually."""
         from deerflow.agents.memory.updater import create_memory_fact
 
-        return create_memory_fact(content=content, category=category, confidence=confidence)
+        return create_memory_fact(content=content, category=category, confidence=confidence, source=source)
 
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""

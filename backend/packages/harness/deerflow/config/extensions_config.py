@@ -52,6 +52,7 @@ class SkillStateConfig(BaseModel):
     """Configuration for a single skill's state."""
 
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
+    tier: str | None = Field(default=None, description="Product tier: 'core-industrial' or 'foundation'. None means unset (defaults to foundation at read time).")
 
 
 class ExtensionsConfig(BaseModel):
@@ -202,6 +203,13 @@ class ExtensionsConfig(BaseModel):
             # Default to enable for public & custom skill
             return skill_category in ("public", "custom")
         return skill_config.enabled
+
+    def get_skill_tier(self, skill_name: str) -> str:
+        """Return the tier for a skill, defaulting to 'foundation' when unset."""
+        skill_config = self.skills.get(skill_name)
+        if skill_config is None or skill_config.tier is None:
+            return "foundation"
+        return skill_config.tier
 
 
 _extensions_config: ExtensionsConfig | None = None

@@ -791,7 +791,11 @@ summarization:
 # Memory Configuration
 # ============================================================================
 # Global memory mechanism
-# Stores user context and conversation history for personalized responses
+# Stores user context and conversation history for personalized responses.
+#
+# AUTO-DEFAULT: When database.backend=postgres and storage_class is not set,
+# memory uses StoreMemoryStorage (backed by LangGraph Store / PostgreSQL).
+# Migration script: scripts/migrate_memory_to_store.py (see docs/POSTGRESQL_MIGRATION.md)
 memory:
   enabled: true
   storage_path: memory.json # Path relative to backend directory
@@ -803,11 +807,112 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Session Memory Configuration (Thread-Scoped Memory)
+# ============================================================================
+# Thread-scoped memory that persists facts and context for the lifetime of a
+# conversation thread, surviving message summarization to maintain continuity.
+# Session memory is complementary to User Memory (long-term, cross-thread).
+#
+# Requirements: StoreMemoryStorage backend (PostgreSQL / LangGraph Store).
+# Users with FileMemoryStorage will not have session memory available.
+#
+# Namespace: ("memory_session", tenant_id, user_id, thread_id)
+#
+session_memory:
+  enabled: false # Set to true to enable session memory
+  model_name: null # Model for LLM-based fact extraction (null = default)
+  debounce_seconds: 30 # Wait time before processing queued updates
+  max_facts: 100 # Maximum facts per thread
+  fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+  injection_enabled: true # Whether to inject session memory into system prompt
+  max_injection_tokens: 2000 # Maximum tokens for session memory injection
+
+# ============================================================================
+# Domain Memory Configuration (Entity-Scoped Knowledge)
+# ============================================================================
+# Domain memory captures entity-specific facts (equipment, processes, systems)
+# that persist across threads and conversations. Uses vector-based semantic search
+# with optional decay policies for fact aging.
+#
+# Use cases:
+# - Industrial: Track equipment specs, maintenance history, process parameters
+# - Healthcare: Patient conditions, treatment protocols, medication history
+# - Engineering: Component specifications, design decisions, test results
+#
+# Domain facts are scoped to (tenant_id, domain, entity_id) enabling cross-thread
+# retrieval. For example, facts about "Pump A" discussed in thread 1 are available
+# in thread 2.
+#
+# Decay policies:
+# - never: Facts never expire (default)
+# - linear: Relevance decreases linearly over time
+# - exponential: Relevance decreases exponentially (half-life based)
+#
+domain_memory:
+  enabled: false # Set to true to enable domain memory
+  model_name: null # Model for LLM-based fact extraction (null = default)
+  debounce_seconds: 30 # Wait time before processing queued updates
+  fact_confidence_threshold: 0.8 # Minimum confidence for storing facts
+  injection_enabled: true # Whether to inject domain memory into system prompt
+  max_injection_tokens: 1000 # Maximum tokens for domain memory injection
+  min_retrieval_score: 0.7 # Minimum similarity score for retrieval
+  # Per-domain decay configuration
+  # domains:
+  #   equipment:
+  #     policy: never # Equipment specs don't decay
+  #     half_life_days: 365
+  #   process:
+  #     policy: linear # Process parameters decay over time
+  #     half_life_days: 90
+  #   incident:
+  #     policy: exponential # Incidents become less relevant over time
+  #     half_life_days: 30
+
+# ============================================================================
+# Memory API Configuration
+# ============================================================================
+# Controls the memory management API endpoints and UI features.
+# Includes audit logging retention and content length limits.
+#
+# Frontend: set NEXT_PUBLIC_MEMORY_UI_ENABLED=false in .env to hide
+# the Memory UI (thread toolbar button + settings page tabs).
+#
+memory_api:
+  enabled: true # Whether memory API endpoints are available
+  max_content_length: 1000 # Maximum character length for memory fact content
+  audit_log_retention_days: 90 # Days to keep audit log entries
+
+# ============================================================================
+# Insights Configuration (Feedback Loop)
+# ============================================================================
+# Closes the feedback loop: collects feedback and closure data, generates
+# improvement suggestions, and feeds verified improvements into agent memory.
+#
+# Components:
+# - Feedback Analytics: Aggregates feedback patterns by agent, detects clusters
+# - Closure Knowledge Pipeline: Extracts KB candidates from verified closures
+# - Improvement Engine: Generates ranked suggestions from analytics
+# - Memory Integration: Feeds applied improvements into agent memory
+#
+# Soft prerequisite: migrate-current-system-to-postgresql improves JOIN
+# performance but SQLite mode works for MVP.
+insights:
+  enabled: true                              # Enable insights system
+  aggregation_interval_hours: 6              # Batch aggregation interval (hours)
+  cluster_threshold: 5                       # Negative feedback cluster threshold (count per hour)
+  low_confidence_threshold: 0.3              # Suppress suggestions below this confidence
+  # improvement_model_name: null             # Model for LLM-based suggestion generation (null = default)
+
+# ============================================================================
 # RAG Configuration (Embedding + Vector Store)
 # ============================================================================
 # Retrieval-Augmented Generation pipeline for semantic document search.
 # When enabled, documents can be ingested into a vector store and retrieved
 # via the search_knowledge_base tool or auto-injected via middleware.
+#
+# AUTO-DEFAULT: When database.backend=postgres and vector_store_backend is not
+# set, it defaults to 'pgvector'. Explicitly set to 'chroma' to override.
+# Migration script: scripts/reindex_rag_to_pgvector.py (see docs/POSTGRESQL_MIGRATION.md)
 #
 # Dependencies:
 #   chroma backend:  uv add chromadb
@@ -878,6 +983,19 @@ skill_evolution:
 # backend: sqlite  -- Single-node deployment, files in sqlite_dir
 # backend: postgres -- Production multi-node deployment
 #
+# AUTO-DEFAULT: When backend=postgres, the following subsystems automatically
+# switch to PostgreSQL-backed storage unless explicitly overridden:
+#   - run_events.backend        → db       (ORM-based run event storage)
+#   - memory.storage_class      → Store    (LangGraph Store-backed memory)
+#   - rag.vector_store_backend  → pgvector (PostgreSQL vector store)
+#   - cost.storage_backend      → postgres (PostgreSQL cost storage)
+#
+# Split config validation: in production mode (DEER_FLOW_ENV=production),
+# mixing postgres with non-postgres subsystems raises ConfigValidationError.
+# In development mode, a WARNING is logged instead.
+#
+# See docs/POSTGRESQL_MIGRATION.md for migration scripts and runbook.
+#
 # If this section is omitted or empty in config.yaml, DeerFlow uses:
 #   backend: sqlite
 #   sqlite_dir: .deer-flow/data
@@ -913,6 +1031,9 @@ database:
 # backend: memory  -- No persistence, data lost on restart (default)
 # backend: db      -- SQL database via ORM, full query capability (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+#
+# AUTO-DEFAULT: When database.backend=postgres and this field is not set,
+# backend defaults to 'db'. Explicitly set to 'memory' or 'jsonl' to override.
 #
 # run_events:
 #   backend: memory
@@ -1167,10 +1288,14 @@ rate_limit:
 # Token usage tracking, cost calculation, and budget enforcement.
 # When enabled, every LLM call's token usage is recorded and cost is calculated
 # based on per-model pricing. Budget limits can block or warn when exceeded.
+#
+# AUTO-DEFAULT: When database.backend=postgres and storage_backend is not set,
+# storage_backend defaults to 'postgres' (PgUsageStorage).
+# Valid values: "json" (file-based), "postgres" (PostgreSQL-backed).
 
 # cost:
 #   enabled: false
-#   storage_backend: json          # "json" (file-based)
+#   storage_backend: json          # "json" (file-based) or "postgres" (PostgreSQL)
 #
 #   model_pricing:
 #     - model: gpt-4

@@ -123,6 +123,69 @@ Sidebar entry points live in [src/components/workspace/workspace-nav-chat-list.t
 
 **Artifacts**: report exports (`report.md`, optional `report.pdf`) are downloaded through the existing `/api/threads/{thread_id}/artifacts/...` route. Markdown is always available; PDF may be absent when the backend's `weasyprint` is unavailable — the UI should hide the PDF button gracefully when `artifact_paths.pdf` is null.
 
+### Template Marketplace & Visual Editor
+
+The platform includes a visual template editor, marketplace for discovering/installing templates, and blueprint system for quick template creation.
+
+**Additional Routes** (App Router, all under `/workspace`):
+
+| Path                                           | Purpose                                                                                   |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `report-templates/editor/[id]/`                | Visual template editor with drag-and-drop form steps, data steps, sections                |
+| `report-templates/new/`                        | Blueprint catalog — choose pre-configured templates to create from                        |
+| `template-marketplace/`                        | Marketplace listing — search, filter, browse available templates                          |
+| `template-marketplace/[id]/`                   | Marketplace detail — view description, reviews, install template                          |
+
+**Marketplace Components** (under [src/components/workspace/marketplace/](src/components/workspace/marketplace/)):
+
+- `marketplace-page.tsx` — grid layout with search, category filter, sort controls
+- `marketplace-detail-page.tsx` — detail view with tabs (description, reviews), install panel
+
+**Editor Components** (under [src/components/workspace/report-templates/editor/](src/components/workspace/report-templates/editor/)):
+
+- `template-editor-page.tsx` — main editor layout (palette, canvas, property panel, YAML toggle)
+- `editor-palette.tsx` — drag-and-drop source for form fields, sections, data pipeline components
+- `form-steps-panel.tsx` — sortable form step list with @dnd-kit, automatic `next` chain update
+- `sections-panel.tsx` — sortable sections with inline editing
+- `data-steps-panel.tsx` — data steps and transforms editors
+- `editor-property-panel.tsx` — template metadata editing
+- `yaml-editor.tsx` — textarea-based YAML editor with line numbers
+- `validation-panel.tsx` — auto-validates on DSL change with 1s debounce
+- `editor-actions-dialog.tsx` — publish to marketplace and export dialogs
+
+**Blueprint Components** (under [src/components/workspace/blueprints/](src/components/workspace/blueprints/)):
+
+- `blueprint-catalog-page.tsx` — grid of blueprint cards with category icons, create dialog
+
+**State + API**:
+
+- [src/core/marketplace/](src/core/marketplace/) — marketplace listings, reviews, install operations (TanStack Query hooks)
+- [src/core/blueprints/](src/core/blueprints/) — blueprint catalog and template creation from blueprints
+- [src/core/report-templates/use-template-dsl.ts](src/core/report-templates/use-template-dsl.ts) — DSL state management hook with YAML bidirectional sync, uses js-yaml for serialization
+
+**Key Patterns**:
+
+- **DSL compatibility**: Editor output must be 100% compatible with DSL v1 schema. The `useTemplateDSL` hook maintains in-memory DSL object as single source of truth.
+- **Drag-and-drop**: Implemented with @dnd-kit/core + @dnd-kit/sortable. Form step reorder automatically updates the `next` chain.
+- **YAML bidirectional editing**: js-yaml handles serialization (DSL→YAML) and deserialization (YAML→DSL).
+- **Real-time validation**: Debounced 1s calls to `POST /api/report-templates/{id}/validate`.
+- **Marketplace operations**: TanStack Query mutations with proper cache invalidation.
+- **Package format**: `.template` ZIP archive containing template.yaml, metadata.json, blueprint.json, README.md.
+- **Marketplace source tracking**: Templates installed from marketplace include `marketplace_source` field with listing_id, display_name, source_version. UI shows badge with link to marketplace listing and "Update available" indicator when upstream has newer version.
+
+**Backend API Endpoints**:
+
+- `GET /api/template-blueprints/` — list available blueprints
+- `GET /api/template-blueprints/{id}` — get blueprint definition
+- `POST /api/template-blueprints/{id}/create-template` — create template from blueprint
+- `GET /api/template-marketplace/` — paginated listing with search/filter/sort
+- `GET /api/template-marketplace/{id}` — detail with reviews
+- `POST /api/template-marketplace/{id}/reviews` — submit rating and review
+- `POST /api/template-marketplace/{id}/install` — install template to private/tenant space
+- `POST /api/report-templates/{id}/publish-to-marketplace` — create marketplace listing
+- `GET /api/report-templates/{id}/export` — download .template package
+- `POST /api/report-templates/import` — upload and import .template package
+
 ## Design System
 
 The daily report feature follows the visual and interaction design spec at

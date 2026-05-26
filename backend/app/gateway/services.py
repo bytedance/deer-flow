@@ -34,7 +34,7 @@ from deerflow.runtime import (
 from deerflow.config.auth_config import get_auth_config
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id, get_effective_username
-from deerflow.cost.storage import UsageStorage
+from deerflow.cost.storage import UsageStorage, get_usage_storage
 from deerflow.cost.budget import BudgetChecker
 from deerflow.config.cost_config import get_cost_config
 
@@ -303,7 +303,7 @@ async def start_run(
             tenant_config = await tenant_store.get(tenant_id)
 
             if tenant_config is not None:
-                storage = UsageStorage()
+                storage = get_usage_storage()
                 daily_cost = storage.get_today_total()
                 monthly_cost = storage.get_current_month_total()
 

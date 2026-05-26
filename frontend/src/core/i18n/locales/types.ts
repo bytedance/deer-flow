@@ -628,4 +628,111 @@ export interface Translations {
     tenantNotFoundTitle: string;
     tenantNotFoundDesc: string;
   };
+
+  // Template Marketplace
+  marketplace: {
+    title: string;
+    subtitle: string;
+    searchPlaceholder: string;
+    allCategories: string;
+    sortByNewest: string;
+    sortByRating: string;
+    sortByInstalls: string;
+    noTemplates: string;
+    loading: string;
+    install: string;
+    installTo: string;
+    installPrivate: string;
+    installTenant: string;
+    installNamePlaceholder: string;
+    installSuccess: string;
+    installFailed: string;
+    reviews: string;
+    writeReview: string;
+    rating: string;
+    comment: string;
+    commentPlaceholder: string;
+    submitReview: string;
+    reviewSuccess: string;
+    reviewFailed: string;
+    noReviews: string;
+    beFirst: string;
+    description: string;
+    tags: string;
+    published: string;
+    version: string;
+    visibility: string;
+  };
+
+  // Template Editor
+  editor: {
+    title: string;
+    unsavedChanges: string;
+    allSaved: string;
+    save: string;
+    saving: string;
+    publish: string;
+    publishing: string;
+    export: string;
+    marketplace: string;
+    preview: string;
+    yaml: string;
+    formSteps: string;
+    dataSteps: string;
+    sections: string;
+    properties: string;
+    validation: string;
+    validating: string;
+    validationSuccess: string;
+    validationFailed: string;
+    saveSuccess: string;
+    saveFailed: string;
+    publishSuccess: string;
+    publishFailed: string;
+    publishToMarketplace: string;
+    publishSuccessMsg: string;
+    publishFailedMsg: string;
+    exportSuccess: string;
+    exportFailed: string;
+    createFromBlueprint: string;
+    chooseBlueprint: string;
+    noBlueprints: string;
+    loadingBlueprints: string;
+    templateCreated: string;
+    createFailed: string;
+    marketplaceSource: string;
+    updateAvailable: string;
+  };
+
+  // Onboarding
+  onboarding: {
+    welcome: {
+      title: string;
+      description: string;
+    };
+    selectDevice: {
+      title: string;
+      description: string;
+      sampleDevices: { id: string; name: string; type: string }[];
+    };
+    quickAnalysis: {
+      title: string;
+      description: string;
+      runAnalysis: string;
+      analyzing: string;
+    };
+    viewReport: {
+      title: string;
+      description: string;
+      viewReport: string;
+    };
+    finish: {
+      title: string;
+      description: string;
+      startUsing: string;
+    };
+    skip: string;
+    next: string;
+    back: string;
+  };
 }

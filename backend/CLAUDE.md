@@ -548,6 +548,46 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
 - `max_injection_tokens` - Token limit for prompt injection (2000)
 
+### Insights System (`packages/harness/deerflow/insights/`)
+
+Closes the feedback loop: collects feedback and closure data, generates improvement suggestions, and feeds verified improvements into agent memory.
+
+**Components**:
+- `analytics.py` - `FeedbackAggregator` aggregates feedback patterns by agent via dual JOIN (ThreadMetaRow for tenant isolation, AgentUsageRow for optional agent correlation)
+- `knowledge_extractor.py` - `ClosureKnowledgeExtractor` extracts KB candidates from verified closure tickets (query `ClosureTicketEventRow` for `submit_verification`/`verify_close` events)
+- `kb_candidate_store.py` - `KBCandidateStore` persists KB candidates as JSON files with tenant isolation at `{DEER_FLOW_HOME}/insights/{tenant_id}/kb_candidates/`
+- `improvement.py` - `ImprovementEngine` generates ranked `ImprovementSuggestion` objects with confidence scoring and deduplication
+- `memory_integration.py` - `FeedbackMemoryIntegration` creates memory facts with `source="feedback_loop"` when suggestions are applied
+- `scheduler.py` - `InsightsScheduler` runs batch aggregation on configurable interval (default: 6 hours)
+- `cache.py` - `JsonFileInsightsCache` stores aggregation results with tenant isolation
+
+**Data Flow**:
+1. **Feedback Analytics**: `FeedbackAggregator` JOINs `FeedbackRow` with `ThreadMetaRow` (tenant isolation) and `AgentUsageRow` (agent correlation, nullable), computes positive/negative ratios, detects negative clusters
+2. **Closure Knowledge**: `ClosureKnowledgeExtractor` hooks into `ClosureService.transition()` on `verify_close`, extracts `verification_summary` and `evidence` from event payloads
+3. **Improvement Generation**: `ImprovementEngine` analyzes feedback trends and closure patterns, generates suggestions with confidence scores
+4. **Memory Integration**: When admin applies a suggestion via dashboard, `FeedbackMemoryIntegration` creates a memory fact with `source="feedback_loop"`, `category="improvement"`, `confidence=0.9`
+
+**Admin Dashboard API** (`app/gateway/routers/insights.py`):
+- `GET /api/insights/feedback-trends` - Aggregated feedback metrics per agent
+- `GET /api/insights/closure-metrics` - Closure ticket SLA compliance and resolution rates
+- `GET /api/insights/improvements` - Ranked improvement suggestions
+- `POST /api/insights/improvements/{id}/apply` - Apply a suggestion (triggers memory integration)
+- `POST /api/insights/improvements/{id}/dismiss` - Dismiss a suggestion with reason
+- `GET /api/insights/closure-knowledge` - List KB candidates (pending_review/approved/dismissed)
+- `POST /api/insights/closure-knowledge/{ticket_id}/promote` - Approve and index a KB candidate
+- `POST /api/insights/closure-knowledge/{ticket_id}/dismiss` - Dismiss a KB candidate
+
+**Permissions**: All endpoints require `insights:read` (GET) or `insights:write` (POST). Registered in `app/gateway/authz.py` with default grants to superadmin and tenant_admin roles.
+
+**Configuration** (`config.yaml` → `insights`):
+- `enabled` - Master switch (default: true)
+- `aggregation_interval_hours` - Batch aggregation interval (default: 6)
+- `cluster_threshold` - Negative feedback cluster threshold per hour (default: 5)
+- `low_confidence_threshold` - Suppress suggestions below this confidence (default: 0.3)
+- `improvement_model_name` - Model for LLM-based suggestion generation (null = default)
+
+**Soft Prerequisite**: `migrate-current-system-to-postgresql` improves JOIN performance but SQLite mode works for MVP.
+
 ### Reflection System (`packages/harness/deerflow/reflection/`)
 
 - `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)

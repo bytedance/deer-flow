@@ -74,8 +74,14 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         # depend on it (checkpointer, store, repositories, auth providers).
         await init_engine_from_config(config.database)
 
+        import asyncio
+        logger.info("Event loop policy: %s, loop type: %s", type(asyncio.get_event_loop_policy()).__name__, type(asyncio.get_event_loop()).__name__)
+
+        logger.info("Creating stream_bridge...")
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
+        logger.info("Creating checkpointer...")
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        logger.info("Creating store...")
         app.state.store = await stack.enter_async_context(make_store(config))
 
         # Wire the Store into memory storage so memory data shares the same
@@ -219,6 +225,50 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             app.state.closure_service = None
 
+        # Insights system: cache, aggregator, improvement engine, scheduler
+        if sf is not None:
+            from deerflow.insights.analytics import FeedbackAggregator
+            from deerflow.insights.cache import JsonFileInsightsCache
+            from deerflow.insights.improvement import ImprovementEngine
+            from deerflow.insights.scheduler import InsightsScheduler
+
+            insights_cache = JsonFileInsightsCache()
+            app.state.insights_cache = insights_cache
+
+            # Insights config from app config
+            insights_cfg = getattr(config, "insights", None)
+            low_conf_threshold = 0.3
+            aggregation_hours = 6
+            cluster_threshold = 5
+            if insights_cfg is not None and isinstance(insights_cfg, dict):
+                low_conf_threshold = insights_cfg.get("low_confidence_threshold", 0.3)
+                aggregation_hours = insights_cfg.get("aggregation_interval_hours", 6)
+                cluster_threshold = insights_cfg.get("cluster_threshold", 5)
+            elif hasattr(insights_cfg, "low_confidence_threshold"):
+                low_conf_threshold = getattr(insights_cfg, "low_confidence_threshold", 0.3)
+                aggregation_hours = getattr(insights_cfg, "aggregation_interval_hours", 6)
+                cluster_threshold = getattr(insights_cfg, "cluster_threshold", 5)
+
+            aggregator = FeedbackAggregator(sf, insights_cache)
+            app.state.insights_aggregator = aggregator
+
+            app.state.improvement_engine = ImprovementEngine(low_confidence_threshold=low_conf_threshold)
+
+            scheduler = InsightsScheduler(aggregator, interval_hours=aggregation_hours)
+            app.state.insights_scheduler = scheduler
+            if insights_cfg is None or (
+                isinstance(insights_cfg, dict) and insights_cfg.get("enabled", True)
+            ) or (
+                hasattr(insights_cfg, "enabled") and getattr(insights_cfg, "enabled", True)
+            ):
+                await scheduler.start()
+                stack.push_async_callback(scheduler.stop)
+        else:
+            app.state.insights_cache = None
+            app.state.insights_aggregator = None
+            app.state.improvement_engine = None
+            app.state.insights_scheduler = None
+
         # RunManager with store backing for persistence
         from deerflow.runtime import RunManager as _RunManager
 
@@ -313,6 +363,21 @@ def get_tenant_store(request: Request):
     if val is None:
         raise HTTPException(status_code=503, detail="Tenant store not available")
     return val
+
+
+def get_insights_cache(request: Request):
+    """Return the insights cache (may be None if DB not available)."""
+    return getattr(request.app.state, "insights_cache", None)
+
+
+def get_insights_aggregator(request: Request):
+    """Return the feedback aggregator (may be None if DB not available)."""
+    return getattr(request.app.state, "insights_aggregator", None)
+
+
+def get_improvement_engine(request: Request):
+    """Return the improvement engine (may be None if not configured)."""
+    return getattr(request.app.state, "improvement_engine", None)
 
 
 def get_run_context(request: Request) -> RunContext:
@@ -526,3 +591,22 @@ async def get_current_user(request: Request) -> str | None:
     """
     user = await get_optional_user_from_request(request)
     return str(user.id) if user else None
+
+
+async def get_db_session(request: Request):
+    """FastAPI dependency that yields an async database session.
+
+    Usage::
+
+        @router.get("/items")
+        async def list_items(db: AsyncSession = Depends(get_db_session)):
+            ...
+    """
+    from deerflow.persistence.engine import get_session_factory
+
+    sf = get_session_factory()
+    if sf is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with sf() as session:
+        yield session

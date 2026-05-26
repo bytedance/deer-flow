@@ -3,8 +3,17 @@ log_level: info
 token_usage:
   enabled: true
 database:
-  backend: sqlite
+  # 切换后端：只需改 backend 字段，db_name 保持不变
+  # - sqlite: 本地开发，数据存在 {sqlite_dir}/{db_name}.db
+  # - postgres: 生产部署，数据存在 postgres_url 指向的数据库
+  backend: postgres
+  db_name: ehm_ai
+
+  # SQLite 配置（backend: sqlite 时生效）
   sqlite_dir: .deer-flow/data
+
+  # PostgreSQL 配置（backend: postgres 时生效）
+  postgres_url: $POSTGRES_URL
 auth:
   enabled: true
   rsa_public_key: $RSA_PUBLIC
@@ -178,9 +187,6 @@ agents_api:
 skill_evolution:
   enabled: false
   moderation_model_name: null
-checkpointer:
-  type: sqlite
-  connection_string: checkpoints.db
 cost:
   enabled: true
   storage_backend: json

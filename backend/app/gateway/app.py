@@ -1,8 +1,12 @@
 import asyncio
 import logging
 import os
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +25,7 @@ from app.gateway.routers import (
     audio,
     auth_router,
     auth,
+    blueprints,
     capabilities,
     channels,
     closure_tickets,
@@ -29,8 +34,10 @@ from app.gateway.routers import (
     genui,
     genui_telemetry,
     ins_base_auth,
+    insights,
     knowledge_bases,
     machine,
+    marketplace,
     mcp,
     memory,
     models,
@@ -565,6 +572,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
+            {
+                "name": "insights",
+                "description": "Feedback analytics dashboard, improvement suggestions, and KB candidates",
+            },
         ],
     )
 
@@ -687,6 +698,8 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     app.include_router(report_templates.router)
     app.include_router(report_runs.router)
     app.include_router(report_template_telemetry.router)
+    app.include_router(blueprints.router)
+    app.include_router(marketplace.router)
 
     # Tenant MCP Servers CRUD API
     app.include_router(tenant_mcp_servers.router)
@@ -712,6 +725,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Unified capability configuration view (ISSUE-10)
     app.include_router(capabilities.router)
+
+    # Insights dashboard API (feedback loop)
+    app.include_router(insights.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

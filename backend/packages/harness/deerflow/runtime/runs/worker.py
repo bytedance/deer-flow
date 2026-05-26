@@ -398,7 +398,7 @@ async def run_agent(
                     from deerflow.config.cost_config import get_cost_config
                     from deerflow.config.tenant import get_current_tenant_id
                     from deerflow.cost.calculator import CostCalculator
-                    from deerflow.cost.storage import UsageRecord, UsageStorage
+                    from deerflow.cost.storage import UsageRecord, get_usage_storage
 
                     cost_cfg = get_cost_config()
                     if cost_cfg.enabled:
@@ -413,7 +413,7 @@ async def run_agent(
                         user_id = config.get("configurable", {}).get("user_id") or config.get("context", {}).get("user_id")
                         user_name = config.get("configurable", {}).get("user_name") or config.get("context", {}).get("user_name")
 
-                        storage = UsageStorage()
+                        storage = get_usage_storage()
                         storage.add_record(UsageRecord(
                             timestamp=datetime.now(timezone.utc).isoformat(),
                             tenant_id=tenant_id,

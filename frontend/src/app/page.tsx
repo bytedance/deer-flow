@@ -14,9 +14,9 @@ export default function LandingPage() {
             EHM AI 工作台
           </h1>
           <p className="text-muted-foreground max-w-2xl text-lg md:text-xl">
-            面向石油石化行业的设备健康管理 AI 工作台。
+            工业设备智能诊断与监测平台。
             <br />
-            智能监测、故障诊断、运行报告，全部在对话中完成。
+            面向石油石化行业，以 AI 驱动实时监测、故障诊断与运行报告。
           </p>
           <Link href="/workspace">
             <Button size="lg" className="mt-4">

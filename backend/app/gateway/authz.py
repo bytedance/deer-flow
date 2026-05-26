@@ -25,6 +25,9 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- marketplace:read   - Browse template marketplace
+- marketplace:write  - Install templates, submit reviews
+- marketplace:publish - Publish templates to marketplace
 """
 
 from __future__ import annotations
@@ -64,6 +67,15 @@ class Permissions:
     CLOSURE_READ = "closure:read"
     CLOSURE_WRITE = "closure:write"
     CLOSURE_VERIFY = "closure:verify"
+
+    # Insights (feedback analytics and improvement)
+    INSIGHTS_READ = "insights:read"
+    INSIGHTS_WRITE = "insights:write"
+
+    # Marketplace (template discovery, install, publish)
+    MARKETPLACE_READ = "marketplace:read"
+    MARKETPLACE_WRITE = "marketplace:write"
+    MARKETPLACE_PUBLISH = "marketplace:publish"
 
 
 class AuthContext:
@@ -132,6 +144,11 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.CLOSURE_READ,
     Permissions.CLOSURE_WRITE,
     Permissions.CLOSURE_VERIFY,
+    Permissions.INSIGHTS_READ,
+    Permissions.INSIGHTS_WRITE,
+    Permissions.MARKETPLACE_READ,
+    Permissions.MARKETPLACE_WRITE,
+    Permissions.MARKETPLACE_PUBLISH,
 ]
 
 
