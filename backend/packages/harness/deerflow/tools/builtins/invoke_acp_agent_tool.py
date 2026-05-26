@@ -1,6 +1,5 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
-import json
 import logging
 import os
 import shutil
@@ -13,7 +12,6 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 _THOUGHT_PREVIEW_CHARS = 200
-_TOOL_IO_PREVIEW_CHARS = 2000
 _PROMPT_PREVIEW_CHARS = 200
 _RESULT_PREVIEW_CHARS = 1000
 
@@ -22,14 +20,6 @@ def _truncate_preview(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
-
-
-def _format_tool_io(value: object) -> str:
-    try:
-        text = json.dumps(value, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        text = repr(value)
-    return _truncate_preview(text, _TOOL_IO_PREVIEW_CHARS)
 
 
 class _InvokeACPAgentInput(BaseModel):
@@ -212,54 +202,31 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 try:
                     from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart, ToolCallUpdate
 
-                    content = getattr(update, "content", None)
-                    if isinstance(content, TextContentBlock):
+                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
                         if isinstance(update, AgentMessageChunk):
-                            self._chunks.append(content.text)
+                            self._chunks.append(update.content.text)
                         elif isinstance(update, AgentThoughtChunk):
                             logger.debug(
                                 "ACP agent thought [session=%s]: %s",
                                 session_id,
-                                _truncate_preview(content.text, _THOUGHT_PREVIEW_CHARS),
+                                _truncate_preview(update.content.text, _THOUGHT_PREVIEW_CHARS),
                             )
                     elif isinstance(update, ToolCallStart):
                         logger.debug(
-                            "ACP agent tool start [session=%s, title=%s, id=%s, kind=%s]",
+                            "ACP agent tool start [session=%s, id=%s, title=%s, kind=%s]",
                             session_id,
-                            update.title,
                             update.tool_call_id,
+                            update.title,
                             update.kind,
                         )
                     elif isinstance(update, ToolCallUpdate):
-                        title = getattr(update, "title", None)
-                        raw_input = getattr(update, "raw_input", None)
-                        raw_output = getattr(update, "raw_output", None)
-                        if raw_input is not None:
-                            logger.debug(
-                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s] params:\n%s",
-                                session_id,
-                                title,
-                                update.tool_call_id,
-                                update.status,
-                                _format_tool_io(raw_input),
-                            )
-                        if raw_output is not None:
-                            logger.debug(
-                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s] result:\n%s",
-                                session_id,
-                                title,
-                                update.tool_call_id,
-                                update.status,
-                                _format_tool_io(raw_output),
-                            )
-                        if raw_input is None and raw_output is None:
-                            logger.debug(
-                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s]",
-                                session_id,
-                                title,
-                                update.tool_call_id,
-                                update.status,
-                            )
+                        logger.debug(
+                            "ACP agent tool update [session=%s, id=%s, title=%s, status=%s]",
+                            session_id,
+                            update.tool_call_id,
+                            getattr(update, "title", None),
+                            update.status,
+                        )
                 except Exception:
                     logger.warning("ACP session_update failed [session=%s]", session_id, exc_info=True)
 
