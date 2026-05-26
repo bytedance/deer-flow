@@ -339,11 +339,11 @@ class TestAsyncCheckpointer:
         mock_saver_cls = MagicMock(return_value=mock_saver)
 
         mock_pool_instance = AsyncMock()
-        mock_pool_instance.check_connection = AsyncMock()
+        mock_pool_instance.__aenter__.return_value = mock_pool_instance
+        mock_pool_instance.__aexit__.return_value = False
 
         mock_pool_cls = MagicMock(return_value=mock_pool_instance)
         mock_pool_cls.check_connection = AsyncMock()
-
         mock_dict_row = MagicMock()
 
         mock_pg_module = MagicMock()
