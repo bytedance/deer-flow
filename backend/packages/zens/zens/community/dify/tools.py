@@ -1,6 +1,8 @@
 """Dify chat tool for DeerFlow agent."""
 
 import logging
+import threading
+from collections import OrderedDict
 from typing import Annotated
 
 from langchain.tools import tool
@@ -13,8 +15,29 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
+_MAX_CONVERSATION_CACHE = 1000
+
 # Per-(user_id, thread_id) → Dify conversation_id
-_conversation_ids: dict[str, str] = {}
+_conversation_ids: OrderedDict[str, str] = OrderedDict()
+_lock = threading.Lock()
+
+
+def _cache_conversation(cache_key: str, conversation_id: str) -> None:
+    """Store conversation_id in bounded LRU cache (thread-safe)."""
+    with _lock:
+        _conversation_ids[cache_key] = conversation_id
+        _conversation_ids.move_to_end(cache_key)
+        if len(_conversation_ids) > _MAX_CONVERSATION_CACHE:
+            _conversation_ids.popitem(last=False)
+
+
+def _get_cached_conversation(cache_key: str) -> str:
+    """Retrieve conversation_id from cache, or empty string if not found (thread-safe)."""
+    with _lock:
+        if cache_key in _conversation_ids:
+            _conversation_ids.move_to_end(cache_key)
+            return _conversation_ids[cache_key]
+        return ""
 
 
 def _get_dify_client() -> DifyClient:
@@ -60,7 +83,7 @@ def dify_chat_tool(
     thread_id = _get_thread_id(config)
     cache_key = f"{user_id}:{thread_id}"
 
-    conversation_id = _conversation_ids.get(cache_key, "")
+    conversation_id = _get_cached_conversation(cache_key)
     user = f"deerflow_{user_id}"
 
     client = _get_dify_client()
@@ -74,6 +97,6 @@ def dify_chat_tool(
 
     # Cache conversation_id for next call in same thread
     if response.conversation_id:
-        _conversation_ids[cache_key] = response.conversation_id
+        _cache_conversation(cache_key, response.conversation_id)
 
     return response.answer
