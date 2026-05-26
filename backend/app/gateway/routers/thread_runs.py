@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
@@ -31,18 +32,6 @@ router = APIRouter(prefix="/api/threads", tags=["runs"])
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
-
-
-def trim_run_message_page(rows: list[dict], *, limit: int, after_seq: int | None) -> tuple[list[dict], bool]:
-    """Trim a limit+1 run message page without dropping the visible boundary row."""
-    has_more = len(rows) > limit
-    if not has_more:
-        return rows, False
-
-    if after_seq is not None:
-        return rows[:limit], True
-
-    return rows[-limit:], True
 
 
 class RunCreateRequest(BaseModel):

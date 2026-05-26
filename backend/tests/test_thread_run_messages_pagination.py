@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from _router_auth_helpers import make_authed_test_app
+from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
@@ -96,11 +97,11 @@ def test_default_page_keeps_newest_messages_when_extra_row_returned():
     rows = [_make_message(i) for i in range(16, 67)]
     app = _make_app(event_store=_make_event_store(rows))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-2/runs/run-2/messages")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["has_more"] is True
-    assert [m["seq"] for m in body["data"]] == list(range(17, 67))
+        assert_run_message_page(
+            client,
+            "/api/threads/thread-2/runs/run-2/messages",
+            expected_seq=list(range(17, 67)),
+        )
 
 
 def test_before_seq_page_keeps_newest_side_when_extra_row_returned():
@@ -108,11 +109,11 @@ def test_before_seq_page_keeps_newest_side_when_extra_row_returned():
     rows = [_make_message(i) for i in range(1, 18)]
     app = _make_app(event_store=_make_event_store(rows))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-2/runs/run-2/messages?before_seq=18&limit=16")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["has_more"] is True
-    assert [m["seq"] for m in body["data"]] == list(range(2, 18))
+        assert_run_message_page(
+            client,
+            "/api/threads/thread-2/runs/run-2/messages?before_seq=18&limit=16",
+            expected_seq=list(range(2, 18)),
+        )
 
 
 def test_after_seq_page_keeps_oldest_side_when_extra_row_returned():
@@ -120,11 +121,11 @@ def test_after_seq_page_keeps_oldest_side_when_extra_row_returned():
     rows = [_make_message(i) for i in range(11, 62)]
     app = _make_app(event_store=_make_event_store(rows))
     with TestClient(app) as client:
-        response = client.get("/api/threads/thread-2/runs/run-2/messages?after_seq=10")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["has_more"] is True
-    assert [m["seq"] for m in body["data"]] == list(range(11, 61))
+        assert_run_message_page(
+            client,
+            "/api/threads/thread-2/runs/run-2/messages?after_seq=10",
+            expected_seq=list(range(11, 61)),
+        )
 
 
 def test_after_seq_forwarded_to_event_store():
