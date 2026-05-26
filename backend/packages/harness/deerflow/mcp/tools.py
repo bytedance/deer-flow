@@ -1,4 +1,4 @@
-"""Load MCP tools using langchain-mcp-adapters with persistent sessions."""
+"""Load MCP tools using langchain-mcp-adapters with stdio session pooling."""
 
 from __future__ import annotations
 
@@ -173,8 +173,10 @@ def _make_session_pool_tool(
 async def get_mcp_tools() -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
-    Tools are wrapped with persistent-session logic so that consecutive
-    calls within the same thread reuse the same MCP session.
+    Tools using stdio transport are wrapped with persistent-session logic so
+    consecutive calls within the same thread reuse the same MCP session.
+    HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
+    cleanup errors.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
