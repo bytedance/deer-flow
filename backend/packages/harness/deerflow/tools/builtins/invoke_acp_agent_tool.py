@@ -1,5 +1,6 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
+import json
 import logging
 import os
 import shutil
@@ -10,6 +11,25 @@ from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+_THOUGHT_PREVIEW_CHARS = 200
+_TOOL_IO_PREVIEW_CHARS = 2000
+_PROMPT_PREVIEW_CHARS = 200
+_RESULT_PREVIEW_CHARS = 1000
+
+
+def _truncate_preview(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _format_tool_io(value: object) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return _truncate_preview(text, _TOOL_IO_PREVIEW_CHARS)
 
 
 class _InvokeACPAgentInput(BaseModel):
@@ -164,7 +184,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
     async def _invoke(agent: str, prompt: str, config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:
         logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
-        logger.debug("Invoking ACP agent %s with prompt: %.200s%s", agent, prompt, "..." if len(prompt) > 200 else "")
+        logger.debug("Invoking ACP agent %s with prompt: %s", agent, _truncate_preview(prompt, _PROMPT_PREVIEW_CHARS))
         if agent not in _agents:
             available = ", ".join(_agents.keys())
             return f"Error: Unknown agent '{agent}'. Available: {available}"
@@ -190,15 +210,56 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
                 try:
-                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart
+                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart, ToolCallUpdate
 
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
+                    content = getattr(update, "content", None)
+                    if isinstance(content, TextContentBlock):
                         if isinstance(update, AgentMessageChunk):
-                            self._chunks.append(update.content.text)
+                            self._chunks.append(content.text)
                         elif isinstance(update, AgentThoughtChunk):
-                            logger.debug("ACP agent thought [session=%s]: %s", session_id, update.content.text)
+                            logger.debug(
+                                "ACP agent thought [session=%s]: %s",
+                                session_id,
+                                _truncate_preview(content.text, _THOUGHT_PREVIEW_CHARS),
+                            )
                     elif isinstance(update, ToolCallStart):
-                        logger.debug("ACP agent tool call [session=%s, id=%s, kind=%s]: %s", session_id, update.tool_call_id, update.kind, update.title)
+                        logger.debug(
+                            "ACP agent tool start [session=%s, title=%s, id=%s, kind=%s]",
+                            session_id,
+                            update.title,
+                            update.tool_call_id,
+                            update.kind,
+                        )
+                    elif isinstance(update, ToolCallUpdate):
+                        title = getattr(update, "title", None)
+                        raw_input = getattr(update, "raw_input", None)
+                        raw_output = getattr(update, "raw_output", None)
+                        if raw_input is not None:
+                            logger.debug(
+                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s] params:\n%s",
+                                session_id,
+                                title,
+                                update.tool_call_id,
+                                update.status,
+                                _format_tool_io(raw_input),
+                            )
+                        if raw_output is not None:
+                            logger.debug(
+                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s] result:\n%s",
+                                session_id,
+                                title,
+                                update.tool_call_id,
+                                update.status,
+                                _format_tool_io(raw_output),
+                            )
+                        if raw_input is None and raw_output is None:
+                            logger.debug(
+                                "ACP agent tool update [session=%s, title=%s, id=%s, status=%s]",
+                                session_id,
+                                title,
+                                update.tool_call_id,
+                                update.status,
+                            )
                 except Exception:
                     logger.warning("ACP session_update failed [session=%s]", session_id, exc_info=True)
 
@@ -247,7 +308,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     prompt=[text_block(prompt)],
                 )
             result = client.collected_text
-            logger.info("ACP agent '%s' returned %s", agent, result[:1000])
+            logger.info("ACP agent '%s' returned %s", agent, _truncate_preview(result, _RESULT_PREVIEW_CHARS))
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
             return result or "(no response)"
         except Exception as e:

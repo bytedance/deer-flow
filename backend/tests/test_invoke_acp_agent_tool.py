@@ -11,6 +11,7 @@ from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_acp_mcp_servers,
     _build_mcp_servers,
     _build_permission_response,
+    _format_tool_io,
     _get_work_dir,
     build_invoke_acp_agent_tool,
 )
@@ -175,7 +176,7 @@ def test_get_work_dir_falls_back_to_global_for_invalid_thread_id(monkeypatch, tm
 
 @pytest.mark.anyio
 async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
-    """ACP agent uses {base_dir}/acp-workspace/ when no thread_id is available (no config)."""
+    """ACP agent uses the global workspace and returns only AgentMessageChunk text."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -218,6 +219,16 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         async def prompt(self, **kwargs):
             captured["prompt"] = kwargs
             client = captured["client"]
+            thought_chunk = sys.modules["acp.schema"].AgentThoughtChunk()
+            thought_chunk.content = text_content_block("internal thought")
+            await client.session_update("session-1", thought_chunk)
+
+            await client.session_update("session-1", sys.modules["acp.schema"].ToolCallStart())
+
+            user_chunk = sys.modules["acp.schema"].UserMessageChunk()
+            user_chunk.content = text_content_block("user prompt echo")
+            await client.session_update("session-1", user_chunk)
+
             agent_chunk = sys.modules["acp.schema"].AgentMessageChunk()
             agent_chunk.content = text_content_block("ACP result")
             await client.session_update("session-1", agent_chunk)
@@ -257,7 +268,9 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
             Implementation=lambda **kwargs: kwargs,
             AgentMessageChunk=type("AgentMessageChunk", (), {}),
             AgentThoughtChunk=type("AgentThoughtChunk", (), {}),
-            ToolCallStart=type("ToolCallStart", (), {}),
+            ToolCallStart=type("ToolCallStart", (), {"tool_call_id": "tc-1", "title": "read file", "kind": "read"}),
+            ToolCallUpdate=type("ToolCallUpdate", (), {}),
+            UserMessageChunk=type("UserMessageChunk", (), {}),
             TextContentBlock=type(
                 "TextContentBlock",
                 (),
@@ -817,9 +830,45 @@ def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch
     assert "invoke_acp_agent" in [tool.name for tool in tools]
 
 
+# ---------------------------------------------------------------------------
+# _format_tool_io unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_tool_io_serializes_dict():
+    result = _format_tool_io({"key": "val"})
+    assert '"key"' in result
+    assert '"val"' in result
+
+
+def test_format_tool_io_truncates_long_output():
+    long_obj = {"data": "x" * 3000}
+    result = _format_tool_io(long_obj)
+    assert result.endswith("...")
+    assert len(result) <= 2003  # 2000 chars + "..."
+
+
+def test_format_tool_io_falls_back_to_repr_on_json_error():
+    class Unserializable:
+        pass
+
+    result = _format_tool_io(Unserializable())
+    assert "Unserializable" in result
+
+
+def test_format_tool_io_does_not_append_ellipsis_when_not_truncated():
+    result = _format_tool_io({"key": "val"})
+    assert not result.endswith("...")
+
+
+# ---------------------------------------------------------------------------
+# ToolCallUpdate integration test
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.anyio
-async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tmp_path):
-    """Only AgentMessageChunk content is appended; AgentThoughtChunk and UserMessageChunk are filtered out."""
+async def test_session_update_logs_tool_call_update_raw_io(monkeypatch, tmp_path, caplog):
+    """ToolCallUpdate with raw_input/raw_output is logged at DEBUG level."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -831,18 +880,18 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
     TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
     AgentMessageChunk = type("AgentMessageChunk", (), {})
     AgentThoughtChunk = type("AgentThoughtChunk", (), {})
-    ToolCallStart = type("ToolCallStart", (), {"tool_call_id": "tc-1", "title": "read file", "kind": "read"})
-    UserMessageChunk = type("UserMessageChunk", (), {})
+    ToolCallStart = type("ToolCallStart", (), {"tool_call_id": "tc-1", "title": "search", "kind": "read"})
+    ToolCallUpdate = type(
+        "ToolCallUpdate",
+        (),
+        {"tool_call_id": "tc-1", "title": "search", "status": "completed", "raw_input": {"query": "foo"}, "raw_output": {"result": "bar"}},
+    )
 
     captured: dict[str, object] = {}
 
     class DummyClient:
         def __init__(self) -> None:
             self._chunks: list[str] = []
-
-        @property
-        def collected_text(self) -> str:
-            return "".join(self._chunks)
 
         async def session_update(self, session_id, update, **kwargs):
             pass
@@ -855,20 +904,14 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
             pass
 
         async def new_session(self, **kwargs):
-            return SimpleNamespace(session_id="s1")
+            return SimpleNamespace(session_id="s2")
 
         async def prompt(self, **kwargs):
             client = captured["client"]
-            thought = AgentThoughtChunk()
-            thought.content = TextContentBlock("internal thought")
-            await client.session_update("s1", thought)
-            await client.session_update("s1", ToolCallStart())
-            user_echo = UserMessageChunk()
-            user_echo.content = TextContentBlock("user prompt echo")
-            await client.session_update("s1", user_echo)
+            await client.session_update("s2", ToolCallUpdate())
             agent_msg = AgentMessageChunk()
-            agent_msg.content = TextContentBlock("actual response")
-            await client.session_update("s1", agent_msg)
+            agent_msg.content = TextContentBlock("done")
+            await client.session_update("s2", agent_msg)
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, env=None, cwd):
@@ -905,7 +948,7 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
             AgentMessageChunk=AgentMessageChunk,
             AgentThoughtChunk=AgentThoughtChunk,
             ToolCallStart=ToolCallStart,
-            UserMessageChunk=UserMessageChunk,
+            ToolCallUpdate=ToolCallUpdate,
             TextContentBlock=TextContentBlock,
         ),
     )
@@ -913,9 +956,514 @@ async def test_session_update_collects_only_agent_message_chunks(monkeypatch, tm
     tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
 
     try:
-        result = await tool.coroutine(agent="codex", prompt="Do something")
+        with caplog.at_level("DEBUG"):
+            result = await tool.coroutine(agent="codex", prompt="Search for foo")
     finally:
         sys.modules.pop("acp", None)
         sys.modules.pop("acp.schema", None)
 
-    assert result == "actual response"
+    assert result == "done"
+    messages = [r.message for r in caplog.records]
+    assert any("tool update" in m and "params" in m and "search" in m and "tc-1" in m for m in messages)
+    assert any("tool update" in m and "result" in m and "search" in m and "tc-1" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Thought logging integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_session_update_logs_thought_chunks_immediately(monkeypatch, tmp_path, caplog):
+    """AgentThoughtChunk text is logged as soon as the chunk arrives."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
+    AgentMessageChunk = type("AgentMessageChunk", (), {})
+    AgentThoughtChunk = type("AgentThoughtChunk", (), {})
+    ToolCallStart = type("ToolCallStart", (), {"tool_call_id": "tc-2", "title": "bash", "kind": "exec"})
+    ToolCallUpdate = type("ToolCallUpdate", (), {})
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s3")
+
+        async def prompt(self, **kwargs):
+            client = captured["client"]
+            thought = AgentThoughtChunk()
+            thought.content = TextContentBlock("thinking hard")
+            await client.session_update("s3", thought)
+            captured["thought_logged_immediately"] = any("thinking hard" in record.message for record in caplog.records)
+            await client.session_update("s3", ToolCallStart())
+            msg = AgentMessageChunk()
+            msg.content = TextContentBlock("result")
+            await client.session_update("s3", msg)
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["client"] = client
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=AgentMessageChunk,
+            AgentThoughtChunk=AgentThoughtChunk,
+            ToolCallStart=ToolCallStart,
+            ToolCallUpdate=ToolCallUpdate,
+            TextContentBlock=TextContentBlock,
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        with caplog.at_level("DEBUG"):
+            result = await tool.coroutine(agent="codex", prompt="Do it")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert result == "result"
+    assert captured["thought_logged_immediately"] is True
+    assert any("thinking hard" in r.message for r in caplog.records)
+    tool_call_messages = [r.message for r in caplog.records if "ACP agent tool start" in r.message]
+    assert tool_call_messages
+    assert tool_call_messages[0].index("bash") < tool_call_messages[0].index("tc-2")
+
+
+@pytest.mark.anyio
+async def test_session_update_logs_truncated_thought_with_ellipsis(monkeypatch, tmp_path, caplog):
+    """Long thought chunks include an ellipsis when truncated for logging."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
+    AgentMessageChunk = type("AgentMessageChunk", (), {})
+    AgentThoughtChunk = type("AgentThoughtChunk", (), {})
+    ToolCallStart = type("ToolCallStart", (), {})
+    ToolCallUpdate = type("ToolCallUpdate", (), {})
+
+    captured: dict[str, object] = {}
+    long_thought = "x" * 250
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s3b")
+
+        async def prompt(self, **kwargs):
+            client = captured["client"]
+            thought = AgentThoughtChunk()
+            thought.content = TextContentBlock(long_thought)
+            await client.session_update("s3b", thought)
+            msg = AgentMessageChunk()
+            msg.content = TextContentBlock("result")
+            await client.session_update("s3b", msg)
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["client"] = client
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=AgentMessageChunk,
+            AgentThoughtChunk=AgentThoughtChunk,
+            ToolCallStart=ToolCallStart,
+            ToolCallUpdate=ToolCallUpdate,
+            TextContentBlock=TextContentBlock,
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        with caplog.at_level("DEBUG"):
+            result = await tool.coroutine(agent="codex", prompt="Do it")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert result == "result"
+    thought_messages = [r.message for r in caplog.records if "ACP agent thought" in r.message]
+    assert thought_messages
+    assert thought_messages[0].endswith("...")
+
+
+@pytest.mark.anyio
+async def test_session_update_logs_tool_call_update_status_only(monkeypatch, tmp_path, caplog):
+    """ToolCallUpdate with neither raw_input nor raw_output logs the status line."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
+    AgentMessageChunk = type("AgentMessageChunk", (), {})
+    AgentThoughtChunk = type("AgentThoughtChunk", (), {})
+    ToolCallStart = type("ToolCallStart", (), {})
+    ToolCallUpdate = type(
+        "ToolCallUpdate",
+        (),
+        {"tool_call_id": "tc-3", "status": "in_progress", "title": "bash"},
+    )
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s4")
+
+        async def prompt(self, **kwargs):
+            client = captured["client"]
+            await client.session_update("s4", ToolCallUpdate())
+            msg = AgentMessageChunk()
+            msg.content = TextContentBlock("done")
+            await client.session_update("s4", msg)
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["client"] = client
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=AgentMessageChunk,
+            AgentThoughtChunk=AgentThoughtChunk,
+            ToolCallStart=ToolCallStart,
+            ToolCallUpdate=ToolCallUpdate,
+            TextContentBlock=TextContentBlock,
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        with caplog.at_level("DEBUG"):
+            result = await tool.coroutine(agent="codex", prompt="Run bash")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert result == "done"
+    assert any("tool update" in r.message and "status" in r.message and "tc-3" in r.message and "in_progress" in r.message for r in caplog.records)
+    tool_status_messages = [r.message for r in caplog.records if "ACP agent tool update" in r.message and "status" in r.message]
+    assert tool_status_messages
+    assert tool_status_messages[0].index("bash") < tool_status_messages[0].index("tc-3")
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_logs_thought_on_prompt_failure(monkeypatch, tmp_path, caplog):
+    """Thought text is still logged when prompt execution later fails."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
+    AgentThoughtChunk = type("AgentThoughtChunk", (), {})
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s5")
+
+        async def prompt(self, **kwargs):
+            client = captured["client"]
+            thought = AgentThoughtChunk()
+            thought.content = TextContentBlock("partial failure thought")
+            await client.session_update("s5", thought)
+            raise RuntimeError("prompt failed")
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["client"] = client
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=type("AgentMessageChunk", (), {}),
+            AgentThoughtChunk=AgentThoughtChunk,
+            ToolCallStart=type("ToolCallStart", (), {}),
+            ToolCallUpdate=type("ToolCallUpdate", (), {}),
+            TextContentBlock=TextContentBlock,
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        with caplog.at_level("DEBUG"):
+            result = await tool.coroutine(agent="codex", prompt="Fail")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert result == "Error invoking ACP agent 'codex': prompt failed"
+    assert any("partial failure thought" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_logs_truncated_result_with_ellipsis(monkeypatch, tmp_path, caplog):
+    """Long final responses include an ellipsis in the info preview log."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    TextContentBlock = type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)})
+    AgentMessageChunk = type("AgentMessageChunk", (), {})
+    long_result = "r" * 1200
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="s6")
+
+        async def prompt(self, **kwargs):
+            client = captured["client"]
+            msg = AgentMessageChunk()
+            msg.content = TextContentBlock(long_result)
+            await client.session_update("s6", msg)
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, env=None, cwd):
+            captured["client"] = client
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=AgentMessageChunk,
+            AgentThoughtChunk=type("AgentThoughtChunk", (), {}),
+            ToolCallStart=type("ToolCallStart", (), {}),
+            ToolCallUpdate=type("ToolCallUpdate", (), {}),
+            TextContentBlock=TextContentBlock,
+        ),
+    )
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        with caplog.at_level("INFO"):
+            result = await tool.coroutine(agent="codex", prompt="Do it")
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert result == long_result
+    return_messages = [r.message for r in caplog.records if "ACP agent 'codex' returned " in r.message]
+    assert return_messages
+    assert any(message.endswith("...") for message in return_messages if "characters" not in message)
