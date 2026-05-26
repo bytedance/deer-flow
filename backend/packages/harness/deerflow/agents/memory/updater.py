@@ -227,6 +227,45 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+
+
+def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce parsed memory update data into the shape consumed by _apply_updates."""
+    user = update_data.get("user")
+    history = update_data.get("history")
+    new_facts = update_data.get("newFacts")
+    facts_to_remove = update_data.get("factsToRemove")
+
+    return {
+        "user": user if isinstance(user, dict) else {},
+        "history": history if isinstance(history, dict) else {},
+        "newFacts": [fact for fact in new_facts if isinstance(fact, dict)] if isinstance(new_facts, list) else [],
+        "factsToRemove": [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else [],
+    }
+
+
+def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
+    """Parse the first valid memory-update JSON object from an LLM response.
+
+    Some providers may wrap JSON in thinking traces, prose, or markdown fences
+    even when prompted to return JSON only. This parser accepts safely
+    extractable JSON objects but does not repair truncated or malformed JSON.
+    """
+    response_text = _extract_text(response_content).strip()
+    decoder = json.JSONDecoder()
+
+    for match in re.finditer(r"\{", response_text):
+        try:
+            parsed, _end = decoder.raw_decode(response_text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and _MEMORY_UPDATE_TOP_LEVEL_KEYS.intersection(parsed):
+            return _normalize_memory_update_data(parsed)
+
+    raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
+
+
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -353,13 +392,7 @@ class MemoryUpdater:
         user_id: str | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
-        response_text = _extract_text(response_content).strip()
-
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-        update_data = json.loads(response_text)
+        update_data = _parse_memory_update_response(response_content)
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
