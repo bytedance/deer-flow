@@ -1,3 +1,5 @@
+"use client";
+
 import {
   Children,
   Fragment,
@@ -76,10 +78,12 @@ const BLOCK_STREAMDOWN_VALUES = new Set([
   "unordered-list",
 ]);
 
+function isNonEmptyChild(child: ReactNode): boolean {
+  return typeof child !== "string" || child.trim() !== "";
+}
+
 function isOnlyImage(children: ReactNode) {
-  const nonEmptyChildren = Children.toArray(children).filter(
-    (child) => child !== "",
-  );
+  const nonEmptyChildren = Children.toArray(children).filter(isNonEmptyChild);
   const [onlyChild] = nonEmptyChildren;
 
   return (
@@ -141,6 +145,15 @@ function withKey(node: ReactNode, key: string) {
   return node.key == null ? cloneElement(node, { key }) : node;
 }
 
+function getReusableParagraphProps({
+  id: _id,
+  "aria-describedby": _ariaDescribedBy,
+  "aria-labelledby": _ariaLabelledBy,
+  ...props
+}: HTMLAttributes<HTMLParagraphElement>) {
+  return props;
+}
+
 export function SafeParagraph({
   children,
   node: _node,
@@ -150,7 +163,7 @@ export function SafeParagraph({
     return <>{children}</>;
   }
 
-  const childArray = Children.toArray(children).filter((child) => child !== "");
+  const childArray = Children.toArray(children).filter(isNonEmptyChild);
 
   if (!childArray.some(isBlockElement)) {
     return <p {...props}>{children}</p>;
@@ -164,11 +177,7 @@ export function SafeParagraph({
       return;
     }
 
-    chunks.push(
-      <p key={`inline-${chunks.length}`} {...props}>
-        {inlineBuffer}
-      </p>,
-    );
+    chunks.push(<p key={`inline-${chunks.length}`}>{inlineBuffer}</p>);
     inlineBuffer = [];
   };
 
@@ -184,7 +193,18 @@ export function SafeParagraph({
 
   flushInlineBuffer();
 
-  return <>{chunks}</>;
+  const paragraphProps = getReusableParagraphProps(props);
+
+  return (
+    <>
+      {chunks.map((chunk) =>
+        isValidElement<HTMLAttributes<HTMLParagraphElement>>(chunk) &&
+        chunk.type === "p"
+          ? cloneElement(chunk, paragraphProps)
+          : chunk,
+      )}
+    </>
+  );
 }
 
 export function withSafeParagraph(

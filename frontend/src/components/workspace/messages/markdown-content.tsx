@@ -1,7 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
-import { type AnchorHTMLAttributes } from "react";
+import { useMemo, type AnchorHTMLAttributes } from "react";
 
 import {
   MessageResponse,
