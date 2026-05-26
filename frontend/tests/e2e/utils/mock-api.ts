@@ -98,6 +98,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({ thread_id: MOCK_THREAD_ID }),
       });
     }
+    if (route.request().method() === "DELETE") {
+      const pathname = new URL(route.request().url()).pathname;
+      const threadId = decodeURIComponent(pathname.split("/").pop() ?? "");
+      const index = threads.findIndex((t) => t.thread_id === threadId);
+      if (index >= 0) {
+        threads.splice(index, 1);
+      }
+      return route.fulfill({ status: 204 });
+    }
     return route.fallback();
   });
 
