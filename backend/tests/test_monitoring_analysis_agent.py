@@ -158,6 +158,7 @@ def test_soul_has_enum_validation(soul_text):
     assert "anomaly" in soul_text
     assert "kpi_dashboard" in soul_text
     assert "correlation" in soul_text
+    assert "spectrum" in soul_text
 
 
 def test_soul_has_error_handling_section(soul_text):
@@ -236,3 +237,49 @@ def test_export_report_has_monitoring_in_load_payload():
     """load_payload must resolve monitoring input filename."""
     text = EXPORT_REPORT_PATH.read_text(encoding="utf-8")
     assert 'report_type == "monitoring"' in text
+
+
+# ---------------------------------------------------------------------------
+# Spectrum analysis pipeline (add-spectrum-analysis-to-monitoring)
+# ---------------------------------------------------------------------------
+
+def test_soul_has_spectrum_pipeline_section(soul_text):
+    """Spectrum pipeline section must exist with skill references."""
+    assert "图谱分析流水线" in soul_text
+    assert "ins-get-waveform-data" in soul_text
+    assert "ins-extract-spectral-waveform-features" in soul_text
+
+
+def test_soul_has_spectrum_timestep_callback(soul_text):
+    """SOUL.md must define monitor-spectrum-timestep callback."""
+    assert "monitor-spectrum-timestep" in soul_text
+
+
+def test_soul_has_spectrum_echart_rendering(soul_text):
+    """Spectrum pipeline must include ECharts waveform line chart + spectrum bar chart."""
+    assert "wave_x" in soul_text
+    assert "spec_x" in soul_text
+    assert "markLine" in soul_text
+
+
+def test_soul_has_orbit_optional(soul_text):
+    """Optional orbit analysis flow must be present."""
+    assert "轴心轨迹" in soul_text
+    assert "ins-get-orbit-data" in soul_text
+
+
+def test_soul_has_anomaly_spectrum_entry(soul_text):
+    """Anomaly pipeline must include spectrum drill-down suggestion."""
+    assert "深入分析" in soul_text
+    assert "图谱分析" in soul_text
+
+
+def test_soul_has_8k_validation(soul_text):
+    """SOUL.md must enforce type=83 check and 8k-only limitation."""
+    assert "type=83" in soul_text
+    assert "8k" in soul_text.lower()
+
+
+def test_config_has_spectrum_starter(config_text):
+    """Config must include spectrum starter."""
+    assert "波形频谱" in config_text

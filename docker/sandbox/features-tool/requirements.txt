@@ -3,3 +3,9 @@ httpx
 cryptography
 protobuf
 pydantic
+# Pro tier dependencies
+scikit-learn
+statsmodels
+ruptures
+# Ultra tier dependencies
+onnxruntime

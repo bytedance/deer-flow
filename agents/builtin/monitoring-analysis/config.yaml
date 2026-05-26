@@ -6,6 +6,8 @@ order: 3
 model: null
 tool_groups:
   - bash
+  - monitoring:pro
+  - monitoring:ultra
 exclude_tools: []
 skills:
   - data-analyst
@@ -17,6 +19,8 @@ tags:
   - anomaly
   - kpi
   - correlation
+  - spectrum
+  - waveform
 starters:
   - label: "分析设备运行趋势"
     prompt: "分析设备运行趋势"
@@ -30,5 +34,34 @@ starters:
   - label: "多参数关联分析"
     prompt: "分析多参数关联关系"
     auto_start: false
+  - label: "波形频谱分析"
+    prompt: "分析设备波形频谱特征"
+    auto_start: false
+  # Pro 能力等级 starters（monitoring:pro 工具组启用时可用）
+  - label: "Pro 多维度趋势分析"
+    prompt: "对所选设备进行多维度趋势分析，包含多模型对比和变点检测"
+    auto_start: false
+    tool_groups: [monitoring:pro]
+  - label: "Pro 智能异常检测"
+    prompt: "使用 Isolation Forest 和 DBSCAN 聚类进行智能异常检测"
+    auto_start: false
+    tool_groups: [monitoring:pro]
+  - label: "Pro 健康评分与关联"
+    prompt: "评估设备健康评分并进行多参数关联分析（Spearman/Kendall/偏相关）"
+    auto_start: false
+    tool_groups: [monitoring:pro]
+  # Ultra 能力等级 starters（monitoring:ultra 工具组启用时可用）
+  - label: "Ultra 全景驾驶舱"
+    prompt: "生成全景驾驶舱视图：风险矩阵 + 健康仪表 + 异常表 + 趋势图"
+    auto_start: false
+    tool_groups: [monitoring:ultra]
+  - label: "Ultra 预测性健康评估"
+    prompt: "使用 LSTM 和 Autoencoder 进行预测性健康评估和根因分析"
+    auto_start: false
+    tool_groups: [monitoring:ultra]
+  - label: "Ultra 因果关联分析"
+    prompt: "使用 Granger 因果检验和传递熵分析参数间因果关联"
+    auto_start: false
+    tool_groups: [monitoring:ultra]
 advanced:
   subagent_enabled: false

@@ -1,0 +1,20 @@
+# ONNX Model Placeholders
+#
+# Each .onnx file below is a pre-trained model for CPU inference via onnxruntime.
+# Models are loaded by _model_loader.py and used by Ultra-tier scripts.
+# When a model file is missing, the Ultra script falls back to the Pro method
+# and sets model_fallback: true in output.
+#
+# ┌──────────────────────────┬─────────────────────────────────┬──────────────────────────────┐
+# │ Model                    │ Architecture                    │ Input / Output               │
+# ├──────────────────────────┼─────────────────────────────────┼──────────────────────────────┤
+# │ trend_forecaster.onnx    │ LSTM (2 layers, hidden=64)      │ (1, 30, 1) → (14,)           │
+# │ anomaly_autoencoder.onnx │ Autoencoder (3-layer MLP)       │ (n_metrics,) → (n_metrics,)  │
+# │ health_predictor.onnx    │ MLP Regressor (hidden=[32, 16]) │ (n_kpis,) → (1,)              │
+# │ spectrum_classifier.onnx │ 1D-CNN (3 conv + 2 fc)          │ (1024,) → (n_classes,)        │
+# └──────────────────────────┴─────────────────────────────────┴──────────────────────────────┘
+#
+# Training data: public bearing/broken-rotor datasets + InS historical data
+# Framework: PyTorch → ONNX export (opset_version=15)
+# Inference: onnxruntime CPU, single-threaded
+# Expected latency: <5s per inference on 2-core CPU
