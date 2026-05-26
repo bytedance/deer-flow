@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { Store } from "lucide-react";
 
 import {
   useArchiveReportTemplate,
@@ -13,6 +14,7 @@ import {
   useUpdateReportTemplate,
   useValidateReportTemplate,
 } from "@/core/report-templates";
+import { useMarketplaceListing } from "@/core/marketplace/hooks";
 
 interface Props {
   templateId: string;
@@ -22,6 +24,12 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
   const { detail, isLoading, error } = useReportTemplate(templateId);
   const { versions } = useReportTemplateVersions(templateId);
   const template = detail?.template ?? null;
+
+  const marketplaceSource = template?.marketplace_source;
+  const { listing: upstreamListing } = useMarketplaceListing(
+    marketplaceSource?.listing_id ?? "",
+    { enabled: !!marketplaceSource },
+  );
 
   const [selectedVersion, setSelectedVersion] = useState<number>(0);
   const { snapshot } = useReportTemplateVersion(
@@ -148,6 +156,24 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             <span className="capitalize">{template.visibility}</span> · v
             {template.current_version} · {template.status}
           </div>
+          {marketplaceSource && (
+            <div className="mt-1.5 flex items-center gap-2">
+              <Link
+                href={`/workspace/template-marketplace/${marketplaceSource.listing_id}`}
+                className="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-500/20"
+              >
+                <Store className="h-3 w-3" />
+                Installed from marketplace
+              </Link>
+              {upstreamListing &&
+                upstreamListing.template_version >
+                  marketplaceSource.source_version && (
+                  <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600">
+                    Update available (v{upstreamListing.template_version})
+                  </span>
+                )}
+            </div>
+          )}
         </div>
         <div className="flex gap-2">
           <button

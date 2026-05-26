@@ -1,8 +1,10 @@
 "use client";
 
+import { PlusIcon, StoreIcon } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
+import { Button } from "@/components/ui/button";
 import { useReportTemplates } from "@/core/report-templates";
 import type { Visibility } from "@/core/report-templates/types";
 import { cn } from "@/lib/utils";
@@ -29,15 +31,23 @@ export function ReportTemplatesPage() {
         <div>
           <h1 className="text-2xl font-semibold">报告模板</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            管理自定义报告模板、版本和发布状态。新建模板请通过{" "}
-            <Link
-              className="underline underline-offset-2 hover:text-foreground"
-              href="/workspace/agents/ai-report--custom/chats/new"
-            >
-              自定义模板智能体
-            </Link>
-            。
+            管理自定义报告模板、版本和发布状态。
           </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/workspace/template-marketplace"
+            className="text-muted-foreground hover:text-foreground text-sm transition-colors"
+          >
+            <StoreIcon className="mr-1 inline size-4" />
+            模板市场
+          </Link>
+          <Button asChild>
+            <Link href="/workspace/report-templates/new">
+              <PlusIcon className="mr-1 size-4" />
+              创建模板
+            </Link>
+          </Button>
         </div>
       </header>
 
@@ -73,7 +83,7 @@ export function ReportTemplatesPage() {
       {!isLoading && !error && templates.length === 0 && (
         <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
           {scope === "private"
-            ? `你还没有自定义模板。在自定义模板智能体里说"创建模板"开始。`
+            ? "你还没有自定义模板。点击右上角「创建模板」开始。"
             : "暂无模板。"}
         </div>
       )}

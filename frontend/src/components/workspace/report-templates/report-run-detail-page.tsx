@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo } from "react";
+import { Store } from "lucide-react";
 
 import { GenUIRenderer } from "@/components/genui/GenUIRenderer";
 import type { DataFileEntry, ReportRun } from "@/core/report-templates";
@@ -11,7 +12,7 @@ import {
   decodeCrossPageContext,
   logCrossPageNavigation,
 } from "@/core/models/navigation";
-import { useReportRun, useReportRunPayload } from "@/core/report-templates";
+import { useReportRun, useReportRunPayload, useReportTemplate } from "@/core/report-templates";
 import { pathOfThread } from "@/core/threads/utils";
 
 import { SourceBreadcrumb } from "../source-breadcrumb";
@@ -108,6 +109,10 @@ export function ReportRunDetailPage({ runId }: Props) {
   const { run, isLoading, error } = useReportRun(runId);
   const { payload } = useReportRunPayload(runId);
   const searchParams = useSearchParams();
+  const { detail: templateDetail } = useReportTemplate(run?.template_id ?? "", {
+    enabled: !!run?.template_id,
+  });
+  const marketplaceSource = templateDetail?.template?.marketplace_source;
   const payloadBlocks = useMemo(
     () => buildPayloadBlocks(runId, payload),
     [payload, runId],
@@ -240,6 +245,15 @@ export function ReportRunDetailPage({ runId }: Props) {
           >
             Template {run.template_id}
           </Link>
+          {marketplaceSource && (
+            <Link
+              href={`/workspace/template-marketplace/${marketplaceSource.listing_id}`}
+              className="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-500/20"
+            >
+              <Store className="h-3 w-3" />
+              Marketplace
+            </Link>
+          )}
           {run.template_version != null && (
             <>
               <span className="text-muted-foreground/50">→</span>

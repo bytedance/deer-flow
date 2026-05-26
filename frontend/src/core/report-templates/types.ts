@@ -14,6 +14,12 @@ export interface IndexEntry {
   updated_at: string;
 }
 
+export interface MarketplaceSource {
+  listing_id: string;
+  display_name: string;
+  source_version: number;
+}
+
 export interface ReportTemplate {
   id: string;
   name: string;
@@ -29,6 +35,7 @@ export interface ReportTemplate {
   created_at: string;
   updated_at: string;
   etag: string;
+  marketplace_source?: MarketplaceSource;
 }
 
 export interface ReportTemplateVersion {

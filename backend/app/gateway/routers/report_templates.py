@@ -25,11 +25,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.persistence.agent.auth import is_tenant_admin
+from deerflow.report_templates.package_io import (
+    export_template_package,
+    import_template_package,
+)
 from deerflow.report_templates.permissions import Principal, check_permission
 from deerflow.report_templates.repository import (
     BuiltinNotWritableError,
@@ -368,3 +373,119 @@ async def delete_template(
     except EtagMismatchError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"deleted": True}
+
+
+@router.get("/{template_id}/export", summary="Export template as .template package")
+async def export_template(
+    template_id: str,
+    request: Request,
+    version: int | None = Query(None, description="Version to export (default: latest)"),
+):
+    """Export a template version as a downloadable .template ZIP archive."""
+    principal = _principal_from_request(request)
+    scope, record = _resolve_template(template_id, principal)
+    _enforce("view", principal, record)
+
+    repo = get_repository()
+
+    if version is None:
+        if record.current_version == 0:
+            raise HTTPException(status_code=400, detail="template has no published versions")
+        version = record.current_version
+
+    try:
+        version_record = repo.get_version(scope, template_id, version)
+    except VersionNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        result = export_template_package(
+            template=record,
+            version=version_record,
+            exported_by=principal.user_id,
+        )
+    except Exception as e:
+        logger.exception("export failed")
+        raise HTTPException(status_code=500, detail=f"export failed: {e}")
+
+    return Response(
+        content=result.data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{result.filename}"'},
+    )
+
+
+@router.post("/import", status_code=201, summary="Import template from .template package")
+async def import_template(
+    request: Request,
+    file: UploadFile = File(...),
+    visibility: str = Query("private", description="Visibility for imported template"),
+):
+    """Import a template from a .template ZIP archive."""
+    principal = _principal_from_request(request)
+
+    if visibility == "tenant" and not (
+        principal.is_tenant_admin or principal.is_superadmin
+    ):
+        raise HTTPException(status_code=403, detail="tenant templates require tenant_admin")
+    if visibility == "builtin" and not principal.is_superadmin:
+        raise HTTPException(status_code=403, detail="builtin templates require superadmin")
+
+    try:
+        data = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"failed to read file: {e}")
+
+    try:
+        result = import_template_package(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"invalid package: {e}")
+
+    report = validate_dsl(result.dsl, registry=get_registry())
+    if not report.valid:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_DSL",
+                "errors": [e.to_dict() for e in report.errors],
+                "warnings": [w.to_dict() for w in report.warnings],
+            },
+        )
+
+    repo = get_repository()
+    scope = _scope_from_visibility(visibility, principal)
+
+    try:
+        created = repo.create_template(
+            scope=scope,
+            name=result.metadata.template_id,
+            display_name=result.metadata.display_name,
+            owner_user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            description=result.metadata.description,
+            tags=result.metadata.tags,
+        )
+    except RepositoryError as e:
+        raise HTTPException(status_code=400, detail=f"create failed: {e}")
+
+    try:
+        updated = repo.save_draft(
+            scope=scope,
+            template_id=created.id,
+            dsl=result.dsl,
+            dsl_yaml=result.dsl_yaml,
+            display_name=result.metadata.display_name,
+            description=result.metadata.description,
+            tags=result.metadata.tags,
+            expected_etag=created.etag,
+        )
+    except EtagMismatchError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except RepositoryError as e:
+        raise HTTPException(status_code=400, detail=f"save failed: {e}")
+
+    return {
+        "template": updated.model_dump(),
+        "imported_version": result.metadata.template_version,
+        "blueprint_origin": result.blueprint_origin.model_dump() if result.blueprint_origin else None,
+    }

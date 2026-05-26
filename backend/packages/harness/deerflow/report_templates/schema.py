@@ -74,6 +74,8 @@ class FieldValidation(BaseModel):
     pattern: str | None = None
     min: float | None = None
     max: float | None = None
+    min_length: int | None = Field(default=None, ge=0)
+    max_length: int | None = Field(default=None, ge=0)
     min_items: int | None = Field(default=None, ge=0)
     max_items: int | None = Field(default=None, ge=0)
 
