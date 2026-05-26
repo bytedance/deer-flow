@@ -88,12 +88,12 @@ class TestQuotaEnforcement:
 
         with patch("app.gateway.services.get_cost_config", return_value=cost_config_enabled), \
              patch("app.gateway.services.get_current_tenant_id", return_value="test-tenant"), \
-             patch("app.gateway.services.UsageStorage") as mock_storage_class:
+             patch("app.gateway.services.get_usage_storage") as mock_get_storage:
 
             mock_storage = MagicMock()
             mock_storage.get_today_total.return_value = 15.0  # Exceeded
             mock_storage.get_current_month_total.return_value = 50.0  # Within limit
-            mock_storage_class.return_value = mock_storage
+            mock_get_storage.return_value = mock_storage
 
             with pytest.raises(HTTPException) as exc_info:
                 await start_run(mock_body, "test-thread", mock_request)
@@ -113,12 +113,12 @@ class TestQuotaEnforcement:
 
         with patch("app.gateway.services.get_cost_config", return_value=cost_config_enabled), \
              patch("app.gateway.services.get_current_tenant_id", return_value="test-tenant"), \
-             patch("app.gateway.services.UsageStorage") as mock_storage_class:
+             patch("app.gateway.services.get_usage_storage") as mock_get_storage:
 
             mock_storage = MagicMock()
             mock_storage.get_today_total.return_value = 5.0  # Within daily limit
             mock_storage.get_current_month_total.return_value = 150.0  # Exceeded
-            mock_storage_class.return_value = mock_storage
+            mock_get_storage.return_value = mock_storage
 
             with pytest.raises(HTTPException) as exc_info:
                 await start_run(mock_body, "test-thread", mock_request)
@@ -142,14 +142,14 @@ class TestQuotaEnforcement:
         with patch("app.gateway.services.get_cost_config", return_value=cost_config_enabled), \
              patch("app.gateway.services.get_current_tenant_id", return_value="test-tenant"), \
              patch("app.gateway.services.get_effective_user_id", return_value="test-user"), \
-             patch("app.gateway.services.UsageStorage") as mock_storage_class, \
+             patch("app.gateway.services.get_usage_storage") as mock_get_storage, \
              patch("app.gateway.services.resolve_agent_factory"), \
              patch("app.gateway.services.asyncio.create_task"):
 
             mock_storage = MagicMock()
             mock_storage.get_today_total.return_value = 5.0  # Within daily limit
             mock_storage.get_current_month_total.return_value = 50.0  # Within monthly limit
-            mock_storage_class.return_value = mock_storage
+            mock_get_storage.return_value = mock_storage
 
             # Should not raise an exception
             result = await start_run(mock_body, "test-thread", mock_request)
@@ -197,14 +197,14 @@ class TestQuotaEnforcement:
         with patch("app.gateway.services.get_cost_config", return_value=cost_config_warn), \
              patch("app.gateway.services.get_current_tenant_id", return_value="test-tenant"), \
              patch("app.gateway.services.get_effective_user_id", return_value="test-user"), \
-             patch("app.gateway.services.UsageStorage") as mock_storage_class, \
+             patch("app.gateway.services.get_usage_storage") as mock_get_storage, \
              patch("app.gateway.services.resolve_agent_factory"), \
              patch("app.gateway.services.asyncio.create_task"):
 
             mock_storage = MagicMock()
             mock_storage.get_today_total.return_value = 15.0  # Exceeded
             mock_storage.get_current_month_total.return_value = 50.0
-            mock_storage_class.return_value = mock_storage
+            mock_get_storage.return_value = mock_storage
 
             # Should not raise an exception because action is 'warn'
             result = await start_run(mock_body, "test-thread", mock_request)

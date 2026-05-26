@@ -9,10 +9,33 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deerflow.config.paths import get_paths
 
+if TYPE_CHECKING:
+    from deerflow.cost.pg_storage import PgUsageStorage
+
 logger = logging.getLogger(__name__)
+
+
+def get_usage_storage() -> UsageStorage | PgUsageStorage:
+    """Return the appropriate storage backend based on cost configuration.
+
+    Returns ``PgUsageStorage`` when ``cost.storage_backend=postgres``,
+    otherwise returns the default JSON-file ``UsageStorage``.
+    """
+    from deerflow.config.cost_config import get_cost_config
+
+    cost_cfg = get_cost_config()
+    if cost_cfg.storage_backend == "postgres":
+        from deerflow.config.app_config import get_app_config
+        from deerflow.cost.pg_storage import PgUsageStorage
+
+        app_cfg = get_app_config()
+        dsn = app_cfg.database.postgres_url
+        return PgUsageStorage(dsn=dsn)
+    return UsageStorage()
 
 
 @dataclass

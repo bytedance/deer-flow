@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -29,7 +31,10 @@ class CostConfig(BaseModel):
     enabled: bool = Field(default=False, description="Enable cost tracking and budget control")
     model_pricing: list[ModelPricing] = Field(default_factory=list, description="Per-model pricing configuration")
     budget: BudgetConfigModel = Field(default_factory=BudgetConfigModel, description="Budget limits configuration")
-    storage_backend: str = Field(default="json", description="Storage backend: json")
+    storage_backend: Literal["json", "postgres"] = Field(
+        default="json",
+        description="Storage backend for cost data: 'json' writes to token_usage.json, 'postgres' writes to RunRow and AgentUsageRow tables",
+    )
 
 
 _cost_config: CostConfig | None = None

@@ -216,3 +216,13 @@ class PgUsageStorage:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         records = self.query(start_date=f"{month}-01")
         return sum(r.total_tokens for r in records)
+
+    def query_all_tenants(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        model_name: str | None = None,
+    ) -> list[UsageRecord]:
+        """Query usage across all tenants. In postgres mode all data is in one table."""
+        return self.query(start_date=start_date, end_date=end_date, model_name=model_name)

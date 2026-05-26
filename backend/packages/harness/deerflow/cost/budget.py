@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from deerflow.config.cost_config import BudgetConfigModel
-from deerflow.cost.storage import UsageStorage
+from deerflow.cost.storage import UsageStorage, get_usage_storage
 
 logger = logging.getLogger(__name__)
 

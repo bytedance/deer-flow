@@ -10,7 +10,7 @@ from deerflow.config.cost_config import BudgetConfigModel, get_cost_config
 from deerflow.cost.budget import BudgetChecker, BudgetStatus
 from deerflow.cost.calculator import CostCalculator
 from deerflow.cost.notifications import BudgetNotifier
-from deerflow.cost.storage import UsageRecord, UsageStorage
+from deerflow.cost.storage import UsageRecord, UsageStorage, get_usage_storage
 
 router = APIRouter(prefix="/api/cost", tags=["cost"])
 
@@ -52,7 +52,7 @@ class UpdateBudgetRequest(BaseModel):
 
 
 def _get_storage() -> UsageStorage:
-    return UsageStorage()
+    return get_usage_storage()
 
 
 def _get_checker() -> BudgetChecker:
