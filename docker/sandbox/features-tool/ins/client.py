@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
@@ -48,6 +48,12 @@ _ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
     "6k": "ins-os-view/sg6kData/getTrendDataHis",
     "8k": "ins-os-view/sg8kData/getTrendDataHis",
     "9k": "ins-os-view/sg9kData/getTrendDataHis",
+}
+_WAVE_ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
+    "2k": "ins-os-view/data/getWaveDataHis",
+    "6k": "ins-os-view/sg6kData/getWaveDataHis",
+    "8k": "ins-os-view/sg8kData/getWaveDataHis",
+    "9k": "ins-os-view/sg9kData/getWaveDataHis",
 }
 _MACHINE_DROPS_PATH: dict[str, str] = {
     "8k": "ins-os-view/sg8kData/getMachineDrops",
@@ -418,6 +424,8 @@ class InsApiClient:
         rows = _extract_trend_rows(body)
         return parse_trend_response(rows, series)
 
+    async def get_waveform_data(self, component_id: str, time_ms: str, endpoint_series: str = "8k") -> dict[str, Any]:
+        items = await self._fetch_wave_items(component_id, time_ms, endpoint_series)
     async def get_machine_drops(
         self,
         machine_id: str,
@@ -537,11 +545,64 @@ class InsApiClient:
         points_raw, _, _ = get_orbit_points(wx[:take], wy[:take])
         return points_raw.tolist() if hasattr(points_raw, "tolist") else points_raw
 
-    async def _fetch_wave_items(self, gpids: str, time_ms: str) -> list[dict[str, Any]]:
-        body = await self._get_json(
-            "ins-os-view/sg8kData/getWaveDataHis",
-            {"gpids": gpids, "timepoint": time_ms},
-        )
+    async def get_value_with_wave(
+        self, point_ids: list[str], start_ms: str, end_ms: str
+    ) -> list[dict[str, Any]]:
+        """Call /data/getValueWithWave — returns trend records with embedded wave timestamps.
+
+        Each returned item has gpid + values (list of {datatime, v_rms, ...}).
+        """
+        gpids = ",".join(point_ids)
+        params: dict[str, str] = {
+            "gpids": gpids,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "typeList": "v_rms",
+        }
+        body = await self._get_json("ins-os-view/data/getValueWithWave", params)
+        data = body.get("data")
+        if isinstance(data, list):
+            return data
+        return []
+
+    async def get_wave_mp(
+        self, gpid: str, time_ms: str
+    ) -> list[dict[str, Any]]:
+        """Call /data/getMPWaveDataHisList — returns decoded wave items for one point+time."""
+        params: dict[str, str] = {"gpid": gpid, "time": time_ms}
+        body = await self._get_json("ins-os-view/data/getMPWaveDataHisList", params)
+        data = body.get("data")
+        items: list[Any] = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = [data]
+        decoded: list[dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, str):
+                clean = "".join(ch for ch in item if not ch.isspace())
+                try:
+                    decoded.append(parse_wave_str(clean))
+                except Exception:
+                    continue
+            elif isinstance(item, dict):
+                wave_str = item.get("waveStr") or item.get("wave_str") or item.get("wave")
+                if isinstance(wave_str, str):
+                    clean = "".join(ch for ch in wave_str if not ch.isspace())
+                    try:
+                        decoded.append(parse_wave_str(clean))
+                    except Exception:
+                        continue
+        return decoded
+
+    async def _fetch_wave_items(self, gpids: str, time_ms: str, endpoint_series: str = "8k") -> list[dict[str, Any]]:
+        series = (endpoint_series or "8k").lower()
+        wave_path = _WAVE_ENDPOINT_PATH_BY_SERIES.get(series, _WAVE_ENDPOINT_PATH_BY_SERIES["8k"])
+        if series == "2k":
+            params: dict[str, str] = {"gpid": gpids, "time": time_ms}
+        else:
+            params = {"gpids": gpids, "timepoint": time_ms}
+        body = await self._get_json(wave_path, params)
         data = body.get("data")
         if isinstance(data, list):
             items = data
@@ -562,12 +623,16 @@ class InsApiClient:
         return decoded_items
 
 
+_CST = timezone(timedelta(hours=8))
+
+
 def datetime_input_to_ms(value: str) -> str:
     if value.isdigit():
         return value
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return str(int(datetime.strptime(value, fmt).timestamp() * 1000))
+            dt = datetime.strptime(value, fmt).replace(tzinfo=_CST)
+            return str(int(dt.timestamp() * 1000))
         except ValueError:
             pass
     return value

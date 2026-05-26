@@ -86,30 +86,73 @@ class InsPumpDataProvider(PumpDataProvider):
         return {point_id: list(grouped.get(point_id) or []) for point_id in point_ids}
 
     async def get_waveforms(self, point_ids: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
-        from tools.get_waveform_data_tool import close_clients, _get_waveform_data_impl
+        from ins.client import InsApiClient, datetime_input_to_ms
+        from ins.config import load_ins_settings
 
-        self._clients.append(close_clients)
-        # Reference implementation samples recent wave-capable values. The current
-        # shared tool requires an exact time, so use the diagnosis end timestamp as
-        # a deterministic first sample and let the runtime report partial failures.
-        result: dict[str, list[dict[str, Any]]] = {}
-        for point_id in point_ids:
-            try:
-                payload = await _get_waveform_data_impl(point_id, end)
-            except Exception as exc:  # noqa: BLE001
-                result[point_id] = [{"error": str(exc), "time": end}]
+        client = InsApiClient(load_ins_settings())
+        self._clients.append(client.close)
+
+        start_ms = datetime_input_to_ms(start)
+        end_ms = datetime_input_to_ms(end)
+
+        # Step 1: get trend records with wave-capable timestamps (same as verification get_value_with_wave)
+        data_list = await client.get_value_with_wave(point_ids, start_ms, end_ms)
+
+        waves: dict[str, list[dict[str, Any]]] = {}
+        for data in data_list:
+            point_id = str(data.get("gpid") or "")
+            values = data.get("values") or []
+            if not point_id or not values:
                 continue
-            data = payload.get("data") or {}
-            result[point_id] = [
-                {
-                    "fs": data.get("sample_rate") or data.get("freq") or payload.get("sample_rate"),
-                    "wave": data.get("wave_y") or [],
-                    "v_rms": None,
-                    "time": payload.get("time_ms") or end,
-                    "raw": payload,
-                }
-            ]
-        return result
+
+            # Step 2: pick up to 5 most recent records (same as verification MalFunctionCheck.get_wave_list)
+            wave_length = min(5, len(values))
+            sorted_data = sorted(values, key=lambda x: str(x.get("datatime") or ""), reverse=True)[:wave_length]
+
+            point_waves: list[dict[str, Any]] = []
+            for value in sorted_data:
+                datatime = str(value.get("datatime") or "")
+                if not datatime:
+                    continue
+                try:
+                    wave_items = await client.get_wave_mp(point_id, datatime)
+                except Exception as exc:  # noqa: BLE001
+                    point_waves.append({"error": str(exc), "time": datatime})
+                    continue
+                if not wave_items:
+                    point_waves.append({"error": "波形解析为空", "time": datatime})
+                    continue
+                decoded = wave_items[0]
+                fs = float(decoded.get("freq") or 0.0)
+                # Extract wave: use extract_time_domain_wave (handles SHIFT/SPECTRUM/COMPLEX)
+                # then fallback to raw waveDataSpeed/waveDataAcc (2k pump data)
+                try:
+                    from ins.spectrum_to_wave import extract_time_domain_wave
+                    wave_arr = extract_time_domain_wave(decoded)
+                    wave = [float(v) for v in wave_arr] if wave_arr is not None else []
+                except Exception:
+                    wave = []
+                if not wave:
+                    wave_raw = decoded.get("waveDataSpeed") or decoded.get("waveDataAcc") or {}
+                    raw = wave_raw.get("wave") if isinstance(wave_raw, dict) else []
+                    wave = [float(v) for v in raw] if raw else []
+                point_waves.append(
+                    {
+                        "fs": fs,
+                        "wave": wave,
+                        "v_rms": value.get("v_rms"),
+                        "time": datatime,
+                    }
+                )
+            if point_waves:
+                waves[point_id] = point_waves
+
+        # Fill missing points with error entries
+        for point_id in point_ids:
+            if point_id not in waves:
+                waves[point_id] = [{"error": "该时间窗口内无波形数据", "time": end}]
+
+        return waves
 
     async def close(self) -> None:
         seen: set[Any] = set()

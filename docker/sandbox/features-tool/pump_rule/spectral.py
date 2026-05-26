@@ -166,6 +166,61 @@ def get_bpf_ratio(wave: list[float], fs: float, base_freq: float, config_info: d
 
 
 def infer_base_frequency(waves_by_point: dict[str, list[dict[str, Any]]]) -> float | None:
+    standards = np.array([12.5, 25.0, 50.0])
+    emd_bases = np.array([])
+    max_freqs = np.array([])
+    max_values = np.array([])
+
+    for waves in waves_by_point.values():
+        sorted_waves = sorted(waves, key=lambda x: safe_float(x.get("v_rms")) or 0.0, reverse=True)
+        num_to_remove = int(len(sorted_waves) * 0.1)
+        filtered_waves = sorted_waves[num_to_remove:] if num_to_remove > 0 else sorted_waves
+        length = min(len(filtered_waves), 3)
+        for item in filtered_waves[:length]:
+            wave = item.get("wave") or []
+            fs = safe_float(item.get("fs") or item.get("sample_rate")) or 0.0
+            if not wave or fs <= 0:
+                continue
+            emd_base = _ceemdan_base_frequency(np.asarray(wave, dtype=float), fs)
+            if emd_base is not None:
+                emd_bases = np.append(emd_bases, emd_base)
+            max_freq, max_value = _get_max_freq_amplitude(wave, fs)
+            if max_freq is not None:
+                max_freqs = np.append(max_freqs, max_freq)
+                max_values = np.append(max_values, max_value)
+
+    cleaned_data = emd_bases[emd_bases > 10]
+    if len(cleaned_data) == 0:
+        return _infer_base_frequency_fft_fallback(waves_by_point)
+    cleaned_data = _remove_outliers_iqr(cleaned_data)
+    if len(cleaned_data) == 0:
+        return _infer_base_frequency_fft_fallback(waves_by_point)
+
+    min_distance = float("inf")
+    best_match = None
+    for standard_speed in standards:
+        distance = float(np.linalg.norm(cleaned_data - standard_speed))
+        if distance < min_distance:
+            min_distance = distance
+            best_match = float(standard_speed)
+
+    if len(max_values) == 0 or best_match is None:
+        return best_match
+
+    max_value_arg = int(np.argmax(max_values))
+    max_freq = float(max_freqs[max_value_arg])
+
+    differences = np.abs(max_freqs - best_match)
+    closest_index = int(np.argmin(differences))
+    closest_value = float(max_freqs[closest_index])
+    if abs(closest_value - best_match) < 5:
+        return closest_value
+
+    z = _find_z(max_freq, best_match)
+    return best_match + z
+
+
+def _infer_base_frequency_fft_fallback(waves_by_point: dict[str, list[dict[str, Any]]]) -> float | None:
     candidates: list[float] = []
     max_freqs: list[tuple[float, float]] = []
     standards = (12.5, 25.0, 50.0)
@@ -193,3 +248,89 @@ def infer_base_frequency(waves_by_point: dict[str, list[dict[str, Any]]]) -> flo
     freq, _ = max(max_freqs, key=lambda item: item[1])
     nearest = min(standards, key=lambda std: abs(freq - std))
     return nearest
+
+
+def _butter_lowpass_filter(signal: np.ndarray, cutoff: float, fs: float, order: int = 4) -> np.ndarray:
+    try:
+        from scipy.signal import butter, filtfilt
+    except ImportError:
+        return signal
+    nyquist = 0.5 * fs
+    if cutoff >= nyquist:
+        return signal
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype="low", analog=False)
+    return filtfilt(b, a, signal)
+
+
+def _ceemdan_dominant_frequency(imf: np.ndarray, fs: float) -> float:
+    try:
+        from scipy.signal import find_peaks
+    except ImportError:
+        return 0.0
+    peaks, _ = find_peaks(imf)
+    peak_intervals = np.diff(peaks) / fs
+    if len(peak_intervals) == 0:
+        return 0.0
+    return 1.0 / float(np.mean(peak_intervals))
+
+
+def _ceemdan_base_frequency(signal: np.ndarray, fs: float) -> float | None:
+    try:
+        from PyEMD import CEEMDAN
+    except ImportError:
+        amplitude, frequencies = calc_fft(signal.tolist(), fs)
+        if amplitude.size == 0:
+            return None
+        valid = np.where((frequencies > 5.0) & (frequencies < 200.0))[0]
+        if valid.size == 0:
+            return None
+        idx = int(valid[np.argmax(amplitude[valid])])
+        return float(frequencies[idx])
+
+    filtered_signal = _butter_lowpass_filter(signal, cutoff=120.0, fs=fs, order=4)
+    ceemdan = CEEMDAN(trials=30, noise_width=0.2)
+    ceemdan.noise_seed(42)
+    try:
+        imfs = ceemdan(filtered_signal)
+    except Exception:
+        return None
+
+    frequencies = [_ceemdan_dominant_frequency(imf, fs) for imf in imfs]
+    amplitudes = [float(np.mean(np.abs(imf))) for imf in imfs]
+
+    threshold_frequency = 70.0
+    valid_imfs = [(freq, amp) for freq, amp in zip(frequencies, amplitudes) if 0 < freq < threshold_frequency]
+    if not valid_imfs:
+        return None
+    max_amplitude_imf = max(valid_imfs, key=lambda x: (x[1], -x[0]))
+    return max_amplitude_imf[0]
+
+
+def _get_max_freq_amplitude(signal: list[float] | np.ndarray, fs: float) -> tuple[float | None, float | None]:
+    amplitude, frequencies = calc_fft(signal, fs)
+    if amplitude.size == 0:
+        return None, None
+    filtered_indices = frequencies < 200.0
+    if not np.any(filtered_indices):
+        return None, None
+    filtered_frequencies = frequencies[filtered_indices]
+    filtered_amplitude = amplitude[filtered_indices]
+    max_index = int(np.argmax(filtered_amplitude))
+    return float(filtered_frequencies[max_index]), float(filtered_amplitude[max_index])
+
+
+def _remove_outliers_iqr(data: np.ndarray) -> np.ndarray:
+    if len(data) == 0:
+        return data
+    q1 = float(np.percentile(data, 25))
+    q3 = float(np.percentile(data, 75))
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    return data[(data >= lower_bound) & (data <= upper_bound)]
+
+
+def _find_z(x: float, y: float) -> float:
+    res = np.array([(x / i) - y for i in range(1, 20)])
+    return float(res[np.argmin(np.abs(res))])

@@ -9,3 +9,5 @@ statsmodels
 ruptures
 # Ultra tier dependencies
 onnxruntime
+scipy
+PyEMD
