@@ -7,7 +7,23 @@ order: 3
 model: null
 tool_groups:
   - bash
+  - monitoring:pro
+  - monitoring:ultra
+skills:
+  - data-analyst
 mcp_servers: null
 tags:
   - report
   - diagnosis
+starters:
+  - label: "生成诊断报告"
+    prompt: "生成设备故障诊断分析报告"
+    auto_start: true
+  - label: "深度诊断分析（Ultra）"
+    prompt: "使用因果推断和 LSTM 预测进行深度故障诊断"
+    auto_start: false
+    tool_groups: [monitoring:ultra]
+  - label: "多设备诊断聚合"
+    prompt: "对多个设备进行故障诊断并生成聚合报告"
+    auto_start: false
+    tool_groups: [monitoring:pro]

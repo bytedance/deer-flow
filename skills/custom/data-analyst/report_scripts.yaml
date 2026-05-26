@@ -322,6 +322,17 @@ scripts:
         max: 90
         default: 7
         description: "预测窗口（天）"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 1000
+        description: "设备 ID 列表（用于关联告警/事件上下文）"
+      include_alarms:
+        type: flag
+        description: "是否在输出中包含时间窗口内的告警记录"
+      include_events:
+        type: flag
+        description: "是否在输出中包含时间窗口内的事件记录（维保/操作/巡检等）"
     output_files:
       - id: trend_data
         path: "{run_output_dir}/data/trend_data.json"
@@ -565,4 +576,380 @@ scripts:
         path: "{run_output_dir}/data/inspection_attachments.json"
         description: "照片/备注汇总"
     timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  # ── Pro Tier Scripts (monitoring:pro tool group) ──
+
+  data_quality:
+    entry: scripts/data_quality.py
+    kind: [transform]
+    description: "数据质量评估：缺失值检测、±5σ 异常点标记、完整率计算（Pro）；三维质量评分、线性插值（Ultra）"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      tier:
+        type: enum
+        values: [pro, ultra]
+        default: pro
+        description: "能力等级"
+    output_files:
+      - id: data_quality
+        path: "{run_output_dir}/data/data_quality.json"
+        description: "数据质量评估结果"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  pro_trend:
+    entry: scripts/pro_trend.py
+    kind: [transform]
+    description: "Pro 趋势分析：多模型回归（线性/多项式/指数）、R²_adj 选优、STL 分解、PELT 变点检测、预测置信区间"
+    dependencies: [scikit-learn, statsmodels, ruptures]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      forecast_horizon:
+        type: integer
+        min: 1
+        max: 90
+        default: 14
+    output_files:
+      - id: pro_trend_analysis
+        path: "{run_output_dir}/data/pro_trend_analysis.json"
+        description: "Pro 趋势分析结果（findings/evidence/models/stl/pelt/forecast）"
+    timeout_seconds: 120
+    max_output_bytes: 20971520
+
+  pro_anomaly:
+    entry: scripts/pro_anomaly.py
+    kind: [transform]
+    description: "Pro 异常检测：Isolation Forest、DBSCAN 聚类、自适应滚动阈值"
+    dependencies: [scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: pro_anomaly_result
+        path: "{run_output_dir}/data/pro_anomaly_result.json"
+        description: "Pro 异常检测结果（anomalies/clusters/rolling_thresholds）"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  pro_kpi:
+    entry: scripts/pro_kpi.py
+    kind: [transform]
+    description: "Pro KPI 健康评估：健康评分趋势、同类设备百分位对比、加权综合评分"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径"
+    output_files:
+      - id: pro_kpi_result
+        path: "{run_output_dir}/data/pro_kpi_result.json"
+        description: "Pro KPI 健康评估结果"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  pro_correlation:
+    entry: scripts/pro_correlation.py
+    kind: [transform]
+    description: "Pro 关联分析：Spearman/Kendall 系数、时滞互相关(lag -7~+7)、偏相关"
+    dependencies: [scipy, scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: pro_correlation_result
+        path: "{run_output_dir}/data/pro_correlation_result.json"
+        description: "Pro 关联分析结果"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  pro_spectrum:
+    entry: scripts/pro_spectrum.py
+    kind: [transform]
+    description: "Pro 图谱分析：Hilbert 包络谱、倒谱、轴承故障频率匹配、边带检测"
+    dependencies: [scipy]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "waveform_data.json 路径"
+      features:
+        type: file_path
+        required: true
+        description: "spectrum_features.json 路径"
+      equipment_type:
+        type: string
+        max_length: 100
+        description: "设备类型"
+    output_files:
+      - id: pro_spectrum_result
+        path: "{run_output_dir}/data/pro_spectrum_result.json"
+        description: "Pro 图谱分析结果"
+    timeout_seconds: 120
+    max_output_bytes: 31457280
+
+  # ── Ultra Tier Scripts (monitoring:ultra tool group) ──
+
+  ultra_trend:
+    entry: scripts/ultra_trend.py
+    kind: [transform]
+    description: "Ultra 趋势分析：ONNX LSTM 预测、80%/95% 置信区间、协变组检测、自适应阈值推荐"
+    dependencies: [scikit-learn, statsmodels, ruptures]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      forecast_horizon:
+        type: integer
+        min: 1
+        max: 90
+        default: 14
+    output_files:
+      - id: ultra_trend_result
+        path: "{run_output_dir}/data/ultra_trend_result.json"
+        description: "Ultra 趋势分析结果（含 co_trending_groups/adaptive_thresholds）"
+    timeout_seconds: 180
+    max_output_bytes: 31457280
+
+  ultra_anomaly:
+    entry: scripts/ultra_anomaly.py
+    kind: [transform]
+    description: "Ultra 异常检测：Autoencoder 评分、多传感器交叉验证、故障签名根因排序"
+    dependencies: [scikit-learn]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: ultra_anomaly_result
+        path: "{run_output_dir}/data/ultra_anomaly_result.json"
+        description: "Ultra 异常检测结果（含 root_cause_ranking/cross_validation）"
+    timeout_seconds: 180
+    max_output_bytes: 31457280
+
+  ultra_kpi:
+    entry: scripts/ultra_kpi.py
+    kind: [transform]
+    description: "Ultra KPI 健康评估：预测性健康评分、风险排序、风险矩阵数据"
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径"
+    output_files:
+      - id: ultra_kpi_result
+        path: "{run_output_dir}/data/ultra_kpi_result.json"
+        description: "Ultra KPI 健康评估结果（含 risk_ranking/risk_matrix）"
+    timeout_seconds: 90
+    max_output_bytes: 10485760
+
+  ultra_correlation:
+    entry: scripts/ultra_correlation.py
+    kind: [transform]
+    description: "Ultra 关联分析：Granger 因果检验(lag 1-7)、传递熵、Graphical Lasso 因果图"
+    dependencies: [scipy, scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: ultra_correlation_result
+        path: "{run_output_dir}/data/ultra_correlation_result.json"
+        description: "Ultra 关联分析结果（含 granger_causality/transfer_entropy/graphical_lasso）"
+    timeout_seconds: 120
+    max_output_bytes: 20971520
+
+  ultra_spectrum:
+    entry: scripts/ultra_spectrum.py
+    kind: [transform]
+    description: "Ultra 图谱分析：CNN 分类、CNN+规则综合裁决、故障演化追踪"
+    dependencies: [scipy]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "waveform_data.json 路径"
+      features:
+        type: file_path
+        required: true
+        description: "spectrum_features.json 路径"
+      equipment_type:
+        type: string
+        max_length: 100
+        description: "设备类型"
+    output_files:
+      - id: ultra_spectrum_result
+        path: "{run_output_dir}/data/ultra_spectrum_result.json"
+        description: "Ultra 图谱分析结果（含 cnn_classification/fault_evolution）"
+    timeout_seconds: 180
+    max_output_bytes: 52428800
+
+  # ── Trend Report Transform (AI Report integration) ──
+
+  trend_report_transform:
+    entry: scripts/trend_report_transform.py
+    kind: [transform]
+    description: "多设备趋势分析结果聚合：逐设备摘要、横向对比、环比/同比、劣化预警、预测、维护建议"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "趋势分析结果 JSON 路径（trend_analysis / pro_trend_analysis / ultra_trend_result）"
+      trend_data:
+        type: file_path
+        description: "trend_data.json 路径（可选，用于对比模式）"
+      compare_data:
+        type: file_path
+        description: "对比周期 trend_data.json 路径（可选，用于环比/同比）"
+      capability_tier:
+        type: enum
+        values: [basic, pro, ultra]
+        default: pro
+        description: "能力等级"
+      equipment_ids:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 50
+        required: true
+        description: "设备 ID 列表（逗号分隔）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 50
+        description: "设备名称列表（与 --equipment-ids 一一对应）"
+      compare_mode:
+        type: enum
+        values: [none, wow, yoy]
+        default: none
+        description: "对比模式（none=不对比, wow=环比, yoy=同比）"
+    output_files:
+      - id: trend_report_features
+        path: "{run_output_dir}/trend_report_features.json"
+        description: "趋势报告渲染 payload（per_device/cross_device_summary/degradation_alerts/forecasts/recommendations）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  # ── Diagnosis Report Transform (AI Report integration) ──
+
+  query_diagnosis:
+    entry: scripts/query_diagnosis.py
+    kind: [data_step]
+    description: "查询诊断上下文数据（运行数据、告警、工单、维护记录）"
+    args_schema:
+      equipment_id:
+        type: string
+        required: true
+        max_length: 64
+        pattern: "^[A-Za-z0-9_-]+$"
+        description: "设备 ID"
+      fault_time:
+        type: string
+        required: true
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+        description: "故障时间 ISO8601"
+      lookback_hours:
+        type: integer
+        min: 1
+        max: 720
+        default: 24
+        description: "回溯时间窗口（小时）"
+      kind:
+        type: enum
+        values: [rotating, pump, reciprocating, generic]
+        default: generic
+        description: "设备族类型"
+    output_files:
+      - id: fault_context
+        path: "{run_output_dir}/data/fault_context.json"
+        description: "诊断上下文数据"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  diagnosis_features:
+    entry: scripts/diagnosis_features.py
+    kind: [transform]
+    description: "生成诊断特征（证据链、规则匹配、候选根因）"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "fault_context.json 路径"
+      rules_skill:
+        type: enum
+        values: [vibration-fault-diagnosis, pump-fault-diagnosis, reciprocating-fault-diagnosis]
+        default: vibration-fault-diagnosis
+        description: "规则集名称"
+    output_files:
+      - id: diagnosis_features
+        path: "{run_output_dir}/data/diagnosis_features.json"
+        description: "诊断特征（evidence_chain/rule_matches/candidate_root_causes）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  diagnosis_analysis:
+    entry: scripts/diagnosis_analysis.py
+    kind: [transform]
+    description: "诊断分析（多假设对比、因果推断）"
+    dependencies: [scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "diagnosis_features.json 路径"
+    output_files:
+      - id: diagnosis_analysis
+        path: "{run_output_dir}/data/diagnosis_analysis.json"
+        description: "诊断分析结果（hypotheses/causal_inference）"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  diagnosis_report_transform:
+    entry: scripts/diagnosis_report_transform.py
+    kind: [transform]
+    description: "多设备诊断结果聚合：逐设备摘要、跨设备关联、影响评估、根因排序、维护建议"
+    args_schema:
+      inputs:
+        type: csv
+        items: {pattern: "^.+\\.json$", max_length: 500}
+        max_items: 50
+        required: true
+        description: "诊断结果 JSON 路径列表（逗号分隔）"
+      equipment_ids:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 50
+        required: true
+        description: "设备 ID 列表（与 inputs 一一对应）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 50
+        description: "设备名称列表（与 inputs 一一对应）"
+      capability_tier:
+        type: enum
+        values: [basic, pro, ultra]
+        default: basic
+        description: "能力等级"
+    output_files:
+      - id: diagnosis_report_features
+        path: "{run_output_dir}/diagnosis_report_features.json"
+        description: "诊断报告渲染 payload（per_device/cross_device_correlation/impact_assessment/root_cause_ranking/recommendations）"
+    timeout_seconds: 60
     max_output_bytes: 10485760

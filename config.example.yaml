@@ -361,6 +361,8 @@ tool_groups:
   - name: file:write
   - name: bash
   - name: rag
+  - name: monitoring:pro
+  - name: monitoring:ultra
 
 # ============================================================================
 # Tools Configuration

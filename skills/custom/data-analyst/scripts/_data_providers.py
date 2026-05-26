@@ -69,6 +69,9 @@ class TrendDataProvider(Protocol):
         date_range: tuple[str, str],  # (start_iso, end_iso)
         aggregation: str,  # "hourly" | "daily" | "weekly"
         forecast_horizon: int,
+        equipment_ids: list[str] | None = None,
+        include_alarms: bool = False,
+        include_events: bool = False,
     ) -> ProviderResult: ...
 
 

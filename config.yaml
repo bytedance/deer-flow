@@ -122,7 +122,7 @@ uploads:
   auto_convert_documents: false
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  image: deer-flow-sandbox:latest
+  image: deer-flow-sandbox-features-tool:latest
   environment:
     INS_USERNAME: $INS_USERNAME
     INS_PASSWORD: $INS_PASSWORD
@@ -266,7 +266,7 @@ audio_input:
   provider:
     use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
     config:
-      model: whisper-1
+      model: Qwen3-ASR-1.7B
       api_key: $OPENAI_API_KEY
       base_url: https://aiapi.shenguyun.com/v1
 http_connectors:

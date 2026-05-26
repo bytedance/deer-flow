@@ -211,8 +211,15 @@ def render_diagnosis_markdown(payload: dict, thread_id: str | None = None) -> st
     ``render_weekly_markdown`` (used to embed artifact links). The current
     diagnosis renderer does not embed inline assets, so the parameter is
     reserved for future spectrum / orbit SVG injection.
+
+    Supports both single-device and multi-device aggregated report formats.
     """
     _ = thread_id  # reserved
+
+    # Detect format: aggregated (has per_device) vs single device
+    if "per_device" in payload:
+        return _render_aggregated_markdown(payload)
+
     parts: list[str] = ["# 故障诊断报告", ""]
     parts.append(_section_warnings(payload))
     parts.append(_section_machine_and_task(payload))
@@ -223,6 +230,254 @@ def render_diagnosis_markdown(payload: dict, thread_id: str | None = None) -> st
     parts.append(_section_recommendations(payload))
     parts.append(_section_historical_cases(payload))
     return "\n".join(p for p in parts if p)
+
+
+# --- Aggregated report renderers (multi-device) ---
+
+
+def _render_aggregated_markdown(payload: dict) -> str:
+    """Render multi-device aggregated diagnosis report."""
+    parts: list[str] = ["# 多设备故障诊断报告", ""]
+
+    # Report metadata
+    parts.append(_section_report_meta(payload))
+
+    # Per-device summaries
+    parts.append(_section_per_device_summaries(payload))
+
+    # Cross-device correlation (Pro/Ultra)
+    parts.append(_section_cross_device_correlation(payload))
+
+    # Impact assessment
+    parts.append(_section_impact_assessment(payload))
+
+    # Root cause ranking
+    parts.append(_section_root_cause_ranking(payload))
+
+    # Recommendations
+    parts.append(_section_aggregated_recommendations(payload))
+
+    # Data quality warnings
+    parts.append(_section_data_quality(payload))
+
+    return "\n".join(p for p in parts if p)
+
+
+def _section_report_meta(payload: dict) -> str:
+    """Render report metadata section."""
+    meta = payload.get("report_meta", {}) or {}
+    capability_tier = meta.get("capability_tier") or payload.get("capability_tier", "basic")
+    model_fallback = payload.get("model_fallback", False)
+    schedule_label = payload.get("schedule_label", "")
+
+    lines = ["## 报告信息", ""]
+    lines.append(f"- **能力等级**：{capability_tier.upper()}")
+    lines.append(f"- **设备类型**：{meta.get('kind', '—')}")
+    lines.append(f"- **规则集**：{meta.get('rules_skill', '—')}")
+    lines.append(f"- **数据来源**：{meta.get('data_source', '—')}")
+    lines.append(f"- **生成时间**：{meta.get('generated_at', '—')}")
+    lines.append(f"- **设备数量**：{meta.get('total_devices', 0)}")
+
+    if model_fallback:
+        lines.append("")
+        lines.append("> ⚠️ **模型回退**：Ultra 模型不可用，已自动回退到 Pro 等级")
+
+    if schedule_label:
+        lines.append(f"- **调度标签**：{schedule_label}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _section_per_device_summaries(payload: dict) -> str:
+    """Render per-device summary sections."""
+    per_device = payload.get("per_device", []) or []
+    if not per_device:
+        return "## 设备诊断摘要\n\n_无设备数据_\n"
+
+    lines = ["## 设备诊断摘要", ""]
+
+    for device in per_device:
+        eq_name = device.get("equipment_name", device.get("equipment_id", "未知设备"))
+        eq_id = device.get("equipment_id", "")
+
+        lines.append(f"### {eq_name} ({eq_id})")
+        lines.append("")
+
+        # Key findings
+        key_findings = device.get("key_findings", []) or []
+        if key_findings:
+            lines.append("**异常发现**：")
+            for finding in key_findings:
+                severity = finding.get("severity", "medium")
+                severity_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                lines.append(
+                    f"- {severity_icon} {finding.get('point', '—')} · {finding.get('feature', '—')}："
+                    f"{_format_value(finding.get('value'))} / {_format_value(finding.get('threshold'))}"
+                    f"（{_verdict_label(finding.get('verdict', '—'))}）"
+                )
+            lines.append("")
+
+        # Root causes
+        root_causes = device.get("root_causes", []) or []
+        if root_causes:
+            lines.append("**根因分析**：")
+            for rc in root_causes[:3]:  # Top 3
+                confidence = _confidence_label(rc.get("confidence", "low"))
+                lines.append(
+                    f"- {rc.get('root_cause_label', '—')}（{confidence}置信度，"
+                    f"可能性：{rc.get('likelihood', '—')}，严重度：{rc.get('severity', '—')}）"
+                )
+            lines.append("")
+
+        # Recommendations
+        recommendations = device.get("recommendations", []) or []
+        if recommendations:
+            lines.append("**维护建议**：")
+            for rec in recommendations[:3]:  # Top 3
+                priority = rec.get("priority", "routine")
+                priority_label = {"urgent": "紧急", "important": "重要", "routine": "常规"}.get(priority, "常规")
+                lines.append(f"- [{priority_label}] {rec.get('action', '—')}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _section_cross_device_correlation(payload: dict) -> str:
+    """Render cross-device correlation section (Pro/Ultra)."""
+    correlation = payload.get("cross_device_correlation", {}) or {}
+    correlated_root_causes = correlation.get("correlated_root_causes", []) or []
+
+    if not correlated_root_causes:
+        return ""
+
+    lines = ["## 跨设备根因关联", ""]
+
+    for rc in correlated_root_causes:
+        strength = rc.get("correlation_strength", "low")
+        strength_label = {"high": "强关联", "medium": "中等关联", "low": "弱关联"}.get(strength, "弱关联")
+        strength_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(strength, "⚪")
+
+        affected_devices = rc.get("affected_devices", []) or []
+        device_names = [d.get("equipment_name", d.get("equipment_id", "")) for d in affected_devices]
+
+        lines.append(f"### {strength_icon} {rc.get('root_cause_label', '—')}")
+        lines.append("")
+        lines.append(f"- **关联强度**：{strength_label}")
+        lines.append(f"- **影响设备**：{', '.join(device_names)}")
+        lines.append(f"- **最大严重度**：{rc.get('max_severity', '—')}")
+        lines.append(f"- **最大可能性**：{rc.get('max_likelihood', '—')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _section_impact_assessment(payload: dict) -> str:
+    """Render impact assessment section."""
+    impact = payload.get("impact_assessment", {}) or {}
+    if not impact:
+        return ""
+
+    lines = ["## 影响评估", ""]
+    lines.append(f"- **受影响设备数**：{impact.get('affected_equipment_count', 0)}")
+
+    severity_dist = impact.get("severity_distribution", {}) or {}
+    if severity_dist:
+        lines.append("- **严重度分布**：")
+        lines.append(f"  - 严重：{severity_dist.get('critical', 0)}")
+        lines.append(f"  - 高：{severity_dist.get('high', 0)}")
+        lines.append(f"  - 中：{severity_dist.get('medium', 0)}")
+        lines.append(f"  - 低：{severity_dist.get('low', 0)}")
+
+    downtime = impact.get("estimated_downtime_hours")
+    if downtime is not None:
+        lines.append(f"- **预估停机时间**：{downtime} 小时")
+
+    business_impact = impact.get("business_impact", "")
+    if business_impact:
+        lines.append(f"- **业务影响**：{business_impact}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _section_root_cause_ranking(payload: dict) -> str:
+    """Render root cause ranking table."""
+    ranking = payload.get("root_cause_ranking", []) or []
+    if not ranking:
+        return "## 根因排序\n\n_无根因数据_\n"
+
+    lines = ["## 根因排序", ""]
+    lines.append("| 排名 | 设备 | 根因 | 可能性 | 严重度 | 置信度 | 主要根因 |")
+    lines.append("|------|------|------|--------|--------|--------|----------|")
+
+    for rc in ranking:
+        is_primary = rc.get("is_primary", False)
+        primary_mark = "⭐" if is_primary else ""
+
+        lines.append(
+            f"| {rc.get('rank', '—')} "
+            f"| {rc.get('equipment_name', '—')} "
+            f"| {rc.get('root_cause_label', '—')} "
+            f"| {rc.get('likelihood', '—')} "
+            f"| {rc.get('severity', '—')} "
+            f"| {_confidence_label(rc.get('confidence', 'low'))} "
+            f"| {primary_mark} |"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def _section_aggregated_recommendations(payload: dict) -> str:
+    """Render aggregated recommendations section."""
+    recommendations = payload.get("recommendations", []) or []
+    if not recommendations:
+        return "## 维护建议\n\n_暂无建议_\n"
+
+    lines = ["## 维护建议", ""]
+
+    # Group by priority
+    urgent = [r for r in recommendations if r.get("priority") == "urgent"]
+    important = [r for r in recommendations if r.get("priority") == "important"]
+    routine = [r for r in recommendations if r.get("priority") == "routine"]
+
+    if urgent:
+        lines.append("### 🔴 紧急")
+        for rec in urgent:
+            lines.append(f"- **{rec.get('equipment_name', '—')}**：{rec.get('action', '—')}")
+            if rec.get("rationale"):
+                lines.append(f"  - 理由：{rec.get('rationale')}")
+        lines.append("")
+
+    if important:
+        lines.append("### 🟡 重要")
+        for rec in important:
+            lines.append(f"- **{rec.get('equipment_name', '—')}**：{rec.get('action', '—')}")
+            if rec.get("rationale"):
+                lines.append(f"  - 理由：{rec.get('rationale')}")
+        lines.append("")
+
+    if routine:
+        lines.append("### 🟢 常规")
+        for rec in routine:
+            lines.append(f"- **{rec.get('equipment_name', '—')}**：{rec.get('action', '—')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _section_data_quality(payload: dict) -> str:
+    """Render data quality warnings section."""
+    data_quality = payload.get("data_quality", []) or []
+    if not data_quality:
+        return ""
+
+    lines = ["## 数据质量警告", ""]
+    for warning in data_quality:
+        lines.append(f"- {warning}")
+
+    return "\n".join(lines) + "\n"
 
 
 def render_diagnosis_html(payload: dict) -> str:

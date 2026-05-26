@@ -52,7 +52,13 @@ from _data_providers import (
 
 class DemoTrendProvider:
     """Re-uses ``query_trend._build_series`` + ``_enumerate_steps`` to produce
-    the deterministic sine demo data the existing tests rely on."""
+    the deterministic sine demo data the existing tests rely on.
+
+    When ``include_alarms`` / ``include_events`` is True and ``equipment_ids``
+    is provided, generates deterministic synthetic alarms / events scattered
+    across the date range so the downstream trend_analysis transform can
+    correlate metric movements with contextual events.
+    """
 
     def fetch(
         self,
@@ -61,25 +67,98 @@ class DemoTrendProvider:
         date_range: tuple[str, str],
         aggregation: str,
         forecast_horizon: int,
+        equipment_ids: list[str] | None = None,
+        include_alarms: bool = False,
+        include_events: bool = False,
     ) -> ProviderResult:
         qt = _load_script("query_trend")
-        from datetime import date as _date
+        from datetime import date as _date, datetime, timedelta
 
         start = _date.fromisoformat(date_range[0])
         end = _date.fromisoformat(date_range[1])
         timestamps = qt._enumerate_steps(start, end, aggregation)
         time_series = [qt._build_series(m, timestamps) for m in metric_keys]
-        return ProviderResult(
-            data={
-                "time_series": time_series,
-                "timestamps_meta": {
-                    "first": timestamps[0] if timestamps else None,
-                    "last": timestamps[-1] if timestamps else None,
-                    "count_per_series": len(timestamps),
-                },
+
+        data: dict = {
+            "time_series": time_series,
+            "timestamps_meta": {
+                "first": timestamps[0] if timestamps else None,
+                "last": timestamps[-1] if timestamps else None,
+                "count_per_series": len(timestamps),
             },
-            data_source=DEMO_FALLBACK,
-        )
+        }
+
+        equipment_ids = equipment_ids or []
+        if include_alarms:
+            data["alarms"] = self._demo_alarms(start, end, equipment_ids)
+        if include_events:
+            data["events"] = self._demo_events(start, end, equipment_ids)
+
+        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
+
+    @staticmethod
+    def _demo_alarms(start, end, equipment_ids: list[str]) -> list[dict]:
+        """Deterministic alarms: 1 per 7 days per equipment, phase-shifted."""
+        from datetime import datetime, timedelta
+
+        alarms: list[dict] = []
+        days = (end - start).days + 1
+        levels = ["info", "warning", "critical"]
+        messages = [
+            "振动值超过阈值",
+            "温度偏高",
+            "运行率低于目标",
+            "压力波动异常",
+            "定期巡检正常",
+        ]
+        for idx, eq_id in enumerate(equipment_ids or ["demo-equipment"]):
+            phase = (idx * 3) % 7
+            day_offset = phase
+            while day_offset < days:
+                alarm_date = start + timedelta(days=day_offset)
+                msg_idx = (idx + day_offset) % len(messages)
+                lvl_idx = (idx + day_offset // 3) % len(levels)
+                alarms.append({
+                    "time": datetime.combine(alarm_date, datetime.min.time().replace(hour=8 + (day_offset % 12))).isoformat(timespec="seconds"),
+                    "equipment": eq_id,
+                    "level": levels[lvl_idx],
+                    "message": messages[msg_idx],
+                })
+                day_offset += 7
+        alarms.sort(key=lambda a: a["time"])
+        return alarms
+
+    @staticmethod
+    def _demo_events(start, end, equipment_ids: list[str]) -> list[dict]:
+        """Deterministic events: 1 per 14 days per equipment."""
+        from datetime import datetime, timedelta
+
+        events: list[dict] = []
+        days = (end - start).days + 1
+        types = ["maintenance", "operation", "inspection", "calibration"]
+        descriptions = [
+            "定期保养完成",
+            "更换润滑油",
+            "巡检记录",
+            "传感器校准",
+            "设备启停操作",
+        ]
+        for idx, eq_id in enumerate(equipment_ids or ["demo-equipment"]):
+            phase = (idx * 5) % 14
+            day_offset = phase
+            while day_offset < days:
+                event_date = start + timedelta(days=day_offset)
+                type_idx = (idx + day_offset) % len(types)
+                desc_idx = (idx + day_offset // 2) % len(descriptions)
+                events.append({
+                    "time": datetime.combine(event_date, datetime.min.time().replace(hour=9)).isoformat(timespec="seconds"),
+                    "equipment": eq_id,
+                    "type": types[type_idx],
+                    "description": descriptions[desc_idx],
+                })
+                day_offset += 14
+        events.sort(key=lambda e: e["time"])
+        return events
 
 
 class HttpTrendProvider:
@@ -91,7 +170,10 @@ class HttpTrendProvider:
           "metric_keys": ["runtime_rate", ...],
           "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
           "aggregation": "daily",
-          "forecast_horizon": 7
+          "forecast_horizon": 7,
+          "equipment_ids": ["P-001", ...],
+          "include_alarms": true,
+          "include_events": true
         }
 
     Expected response body (must match the shape DemoTrendProvider produces)::
@@ -108,7 +190,9 @@ class HttpTrendProvider:
               "better_when_higher": true
             },
             ...
-          ]
+          ],
+          "alarms":    [{time, equipment, level, message}, ...],  // when include_alarms
+          "events":    [{time, equipment, type, description}, ...] // when include_events
         }
     """
 
@@ -119,6 +203,9 @@ class HttpTrendProvider:
         date_range: tuple[str, str],
         aggregation: str,
         forecast_horizon: int,
+        equipment_ids: list[str] | None = None,
+        include_alarms: bool = False,
+        include_events: bool = False,
     ) -> ProviderResult:
         endpoint = HttpEndpoint.from_env("DEERFLOW_TREND")
         if endpoint is None:
@@ -128,10 +215,17 @@ class HttpTrendProvider:
             "date_range": {"start": date_range[0], "end": date_range[1]},
             "aggregation": aggregation,
             "forecast_horizon": forecast_horizon,
+            "equipment_ids": equipment_ids or [],
+            "include_alarms": include_alarms,
+            "include_events": include_events,
         }
         data = call_http_endpoint(endpoint, body)
         if "time_series" not in data:
             raise HttpProviderError("response missing required field: time_series")
+        if include_alarms and "alarms" not in data:
+            data["alarms"] = []
+        if include_events and "events" not in data:
+            data["events"] = []
         return ProviderResult(data=data, data_source=HTTP_SUCCESS)
 
 

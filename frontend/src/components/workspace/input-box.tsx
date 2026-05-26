@@ -229,7 +229,7 @@ function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
 ): InputMode {
-  if (!supportsThinking && mode !== "flash") {
+  if (!supportsThinking && mode === "thinking") {
     return "flash";
   }
   if (mode) {
