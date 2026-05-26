@@ -153,6 +153,37 @@ class TestBuildPodVolumes:
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.containers[0].volume_mounts) == 2
 
+    def test_pod_includes_configured_sandbox_env(self, provisioner_module):
+        """Provisioner should pass optional sandbox memory-saving toggles to Pods."""
+        provisioner_module.SANDBOX_DISABLE_JUPYTER = " TRUE "
+        provisioner_module.SANDBOX_DISABLE_CODE_SERVER = "true"
+
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
+
+        env = {item.name: item.value for item in pod.spec.containers[0].env}
+        assert env == {
+            "DISABLE_JUPYTER": "true",
+            "DISABLE_CODE_SERVER": "true",
+        }
+
+    def test_pod_omits_disabled_sandbox_env(self, provisioner_module):
+        """False values should preserve the sandbox image defaults."""
+        provisioner_module.SANDBOX_DISABLE_JUPYTER = "false"
+        provisioner_module.SANDBOX_DISABLE_CODE_SERVER = ""
+
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
+
+        assert pod.spec.containers[0].env == []
+
+    def test_pod_omits_non_true_sandbox_env_values(self, provisioner_module):
+        """Only explicit true should opt in to sandbox service disable flags."""
+        provisioner_module.SANDBOX_DISABLE_JUPYTER = "1"
+        provisioner_module.SANDBOX_DISABLE_CODE_SERVER = "yes"
+
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
+
+        assert pod.spec.containers[0].env == []
+
     def test_pod_pvc_mode_uses_user_scoped_subpath(self, provisioner_module):
         """Pod should use a user-scoped subPath for PVC user-data."""
         provisioner_module.SKILLS_PVC_NAME = "skills-pvc"

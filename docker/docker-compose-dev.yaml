@@ -29,6 +29,8 @@ services:
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      - SANDBOX_DISABLE_JUPYTER=${SANDBOX_DISABLE_JUPYTER:-false}
+      - SANDBOX_DISABLE_CODE_SERVER=${SANDBOX_DISABLE_CODE_SERVER:-false}
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:

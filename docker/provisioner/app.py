@@ -62,6 +62,8 @@ SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+SANDBOX_DISABLE_JUPYTER = os.environ.get("SANDBOX_DISABLE_JUPYTER", "false")
+SANDBOX_DISABLE_CODE_SERVER = os.environ.get("SANDBOX_DISABLE_CODE_SERVER", "false")
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
@@ -298,6 +300,28 @@ def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list
     ]
 
 
+def _env_is_true(value: str) -> bool:
+    return value.strip().lower() == "true"
+
+
+def _build_sandbox_env() -> list[k8s_client.V1EnvVar]:
+    """Build optional environment overrides for the sandbox image."""
+    env: list[k8s_client.V1EnvVar] = []
+    if _env_is_true(SANDBOX_DISABLE_JUPYTER):
+        env.append(
+            k8s_client.V1EnvVar(
+                name="DISABLE_JUPYTER", value="true"
+            )
+        )
+    if _env_is_true(SANDBOX_DISABLE_CODE_SERVER):
+        env.append(
+            k8s_client.V1EnvVar(
+                name="DISABLE_CODE_SERVER", value="true"
+            )
+        )
+    return env
+
+
 def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     return k8s_client.V1Pod(
@@ -317,6 +341,7 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                     name="sandbox",
                     image=SANDBOX_IMAGE,
                     image_pull_policy="IfNotPresent",
+                    env=_build_sandbox_env(),
                     ports=[
                         k8s_client.V1ContainerPort(
                             name="http",

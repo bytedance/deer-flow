@@ -127,6 +127,8 @@ services:
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      - SANDBOX_DISABLE_JUPYTER=${SANDBOX_DISABLE_JUPYTER:-false}
+      - SANDBOX_DISABLE_CODE_SERVER=${SANDBOX_DISABLE_CODE_SERVER:-false}
       - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - KUBECONFIG_PATH=/root/.kube/config
