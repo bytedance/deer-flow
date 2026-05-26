@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
@@ -55,6 +56,7 @@ _ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 # Falls back to absolute 200-char check when page count is unavailable.
 _MIN_CHARS_PER_PAGE = 50
 _LEGACY_DOC_CONVERSION_TIMEOUT_SECONDS = 60
+LEGACY_DOC_CONVERTER_UNAVAILABLE_MESSAGE = "Legacy .doc uploads require LibreOffice (`soffice`) or macOS `textutil` to convert them to .docx before Markdown extraction."
 
 
 def _pymupdf_output_too_sparse(text: str, file_path: Path) -> bool:
@@ -145,6 +147,23 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
     return _convert_with_markitdown(file_path)
 
 
+def _write_markdown_file(md_path: Path, text: str) -> None:
+    tmp_path = md_path.with_name(f"{md_path.name}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(md_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        md_path.unlink(missing_ok=True)
+        raise
+
+
+def _convert_legacy_doc_to_markdown(file_path: Path) -> str:
+    with tempfile.TemporaryDirectory(prefix="deerflow-doc-") as tmp_dir:
+        converted_docx = _convert_legacy_doc_to_docx(file_path, Path(tmp_dir))
+        return _convert_with_markitdown(converted_docx)
+
+
 async def convert_file_to_markdown(file_path: Path) -> Path | None:
     """Convert a supported document file to Markdown.
 
@@ -158,17 +177,13 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
     Returns:
         Path to the generated .md file, or None if conversion failed.
     """
+    md_path = file_path.with_suffix(".md")
     try:
         if file_path.suffix.lower() == ".doc":
-            with tempfile.TemporaryDirectory(prefix="deerflow-doc-") as tmp_dir:
-                converted_docx = _convert_legacy_doc_to_docx(file_path, Path(tmp_dir))
-                text = _convert_with_markitdown(converted_docx)
-
-                md_path = file_path.with_suffix(".md")
-                md_path.write_text(text, encoding="utf-8")
-
-                logger.info("Converted %s to markdown via %s", file_path.name, converted_docx.name)
-                return md_path
+            text = await asyncio.to_thread(_convert_legacy_doc_to_markdown, file_path)
+            _write_markdown_file(md_path, text)
+            logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
+            return md_path
 
         pdf_converter = _get_pdf_converter()
         file_size = file_path.stat().st_size
@@ -178,14 +193,15 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         else:
             text = _do_convert(file_path, pdf_converter)
 
-        md_path = file_path.with_suffix(".md")
-        md_path.write_text(text, encoding="utf-8")
+        _write_markdown_file(md_path, text)
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path
     except LegacyDocConversionError:
+        md_path.unlink(missing_ok=True)
         raise
     except Exception as e:
+        md_path.unlink(missing_ok=True)
         logger.error("Failed to convert %s to markdown: %s", file_path.name, e)
         return None
 
@@ -193,13 +209,13 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 def ensure_legacy_doc_conversion_supported() -> None:
     """Raise a clear error when legacy ``.doc`` conversion is unavailable."""
     if _find_legacy_doc_converter() is None:
-        raise LegacyDocConversionError("Legacy .doc uploads require LibreOffice (`soffice`) or macOS `textutil` to convert them to .docx before Markdown extraction.")
+        raise LegacyDocConversionError(LEGACY_DOC_CONVERTER_UNAVAILABLE_MESSAGE)
 
 
 def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
     converter = _find_legacy_doc_converter()
     if converter is None:
-        raise LegacyDocConversionError(f"Legacy Word file '{file_path.name}' is not supported in this environment. Install LibreOffice (`soffice`) or use macOS `textutil`.")
+        raise LegacyDocConversionError(f"{LEGACY_DOC_CONVERTER_UNAVAILABLE_MESSAGE} File: {file_path.name}")
 
     tool, executable = converter
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +266,7 @@ def _convert_legacy_doc_to_docx(file_path: Path, output_dir: Path) -> Path:
     return output_path
 
 
+@lru_cache(maxsize=1)
 def _find_legacy_doc_converter() -> tuple[str, str] | None:
     if platform.system() == "Windows":
         soffice_exe = shutil.which("soffice.exe")

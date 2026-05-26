@@ -307,6 +307,29 @@ class TestConvertFileToMarkdown:
 
         assert result is None
 
+    def test_removes_partial_markdown_on_write_error(self, tmp_path):
+        """A failed markdown write must not leave a partial .md artifact."""
+        pdf = tmp_path / "broken-write.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        md_path = pdf.with_suffix(".md")
+
+        def fail_write(path: Path, text: str) -> None:
+            md_path.write_text("partial", encoding="utf-8")
+            raise OSError("disk full")
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                return_value="# Partial",
+            ),
+            patch("deerflow.utils.file_conversion._write_markdown_file", side_effect=fail_write),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
+
+        assert result is None
+        assert not md_path.exists()
+
     def test_writes_utf8_markdown_file(self, tmp_path):
         """Generated .md file is written with UTF-8 encoding."""
         pdf = tmp_path / "report.pdf"
@@ -520,6 +543,22 @@ def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
     assert md_path.read_text(encoding="utf-8") == "converted legacy doc"
 
 
+def test_convert_file_to_markdown_offloads_legacy_doc_conversion(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        assert fn.__name__ == "_convert_legacy_doc_to_markdown"
+        return "converted in thread"
+
+    with patch("deerflow.utils.file_conversion.asyncio.to_thread", side_effect=fake_to_thread) as to_thread:
+        md_path = asyncio.run(convert_file_to_markdown(source))
+
+    to_thread.assert_called_once()
+    assert md_path == source.with_suffix(".md")
+    assert md_path.read_text(encoding="utf-8") == "converted in thread"
+
+
 def test_convert_legacy_doc_timeout_raises_conversion_error(tmp_path):
     source = tmp_path / "legacy.doc"
     source.write_bytes(b"fake-doc")
@@ -537,6 +576,7 @@ def test_convert_legacy_doc_timeout_raises_conversion_error(tmp_path):
 
 
 def test_find_legacy_doc_converter_prefers_soffice_exe_on_windows():
+    _find_legacy_doc_converter.cache_clear()
     with (
         patch("deerflow.utils.file_conversion.platform.system", return_value="Windows"),
         patch(

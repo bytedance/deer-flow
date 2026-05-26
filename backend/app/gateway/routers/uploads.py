@@ -204,13 +204,11 @@ async def upload_files(
     seen_filenames: set[str] = set()
 
     auto_convert_documents = _auto_convert_documents_enabled(config)
-    if auto_convert_documents:
-        for file in files:
-            if file.filename and file.filename.lower().endswith(".doc"):
-                try:
-                    ensure_legacy_doc_conversion_supported()
-                except LegacyDocConversionError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
+    if auto_convert_documents and any(file.filename and file.filename.lower().endswith(".doc") for file in files):
+        try:
+            ensure_legacy_doc_conversion_supported()
+        except LegacyDocConversionError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)

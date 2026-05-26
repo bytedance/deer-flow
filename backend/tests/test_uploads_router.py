@@ -172,6 +172,36 @@ def test_upload_files_accepts_legacy_doc_when_auto_conversion_disabled(tmp_path)
     convert_mock.assert_not_called()
 
 
+def test_upload_files_checks_legacy_doc_converter_once_per_request(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    async def fake_convert(file_path: Path) -> Path:
+        md_path = file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "ensure_legacy_doc_conversion_supported") as ensure_supported,
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+    ):
+        files = [
+            UploadFile(filename="first.doc", file=BytesIO(b"doc-bytes")),
+            UploadFile(filename="second.doc", file=BytesIO(b"doc-bytes")),
+        ]
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=files, config=SimpleNamespace()))
+
+    assert result.success is True
+    ensure_supported.assert_called_once()
+
+
 def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
