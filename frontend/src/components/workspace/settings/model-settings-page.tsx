@@ -221,7 +221,7 @@ export function ModelSettingsPage() {
   }
 
   async function handleDelete(model: Model) {
-    if (!window.confirm(copy.deleteConfirm(model.display_name || model.name))) {
+    if (!window.confirm(copy.deleteConfirm(model.display_name ?? model.name))) {
       return;
     }
     try {
