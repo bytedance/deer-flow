@@ -25,6 +25,7 @@ SCRIPTS_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts"
 TRANSFORM_PATH = SCRIPTS_DIR / "trend_analysis.py"
 QUERY_PATH = SCRIPTS_DIR / "query_trend.py"
 HELPERS_PATH = SCRIPTS_DIR / "_stub_helpers.py"
+SCRIPT_DIR_STR = str(SCRIPTS_DIR)
 
 
 def _load(name, path):
@@ -38,6 +39,8 @@ def _load(name, path):
 @pytest.fixture()
 def transform(tmp_path):
     _load("_stub_helpers", HELPERS_PATH)
+    if SCRIPT_DIR_STR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR_STR)
     return _load("trend_analysis", TRANSFORM_PATH)
 
 
@@ -45,6 +48,8 @@ def transform(tmp_path):
 def trend_data(tmp_path):
     """Build a realistic trend_data.json fixture via query_trend."""
     _load("_stub_helpers", HELPERS_PATH)
+    if SCRIPT_DIR_STR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR_STR)
     query = _load("query_trend", QUERY_PATH)
     timestamps = query._enumerate_steps(
         query.date.fromisoformat("2026-04-01"),

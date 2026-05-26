@@ -22,6 +22,9 @@ CLI:
         --date-range 2026-01-01..2026-05-18 \
         --aggregation daily \
         --forecast-horizon 14 \
+        --equipment P-001,P-002 \
+        --include-alarms \
+        --include-events \
         --output-dir /run/abc
 """
 
@@ -139,11 +142,28 @@ def main() -> int:
         choices=["hourly", "daily", "weekly"],
     )
     parser.add_argument("--forecast-horizon", type=int, default=7)
+    parser.add_argument(
+        "--equipment",
+        default="",
+        help="CSV of equipment IDs (enables per-equipment alarm/event context)",
+    )
+    parser.add_argument(
+        "--include-alarms",
+        action="store_true",
+        help="Include alarm records within the date range",
+    )
+    parser.add_argument(
+        "--include-events",
+        action="store_true",
+        help="Include event records within the date range",
+    )
     args = parser.parse_args()
 
     metrics = parse_csv(args.metric_keys)
     if not metrics:
         return emit_error("INVALID_METRICS", "--metric-keys must contain at least one key")
+
+    equipment_ids = parse_csv(args.equipment)
 
     try:
         start_str, end_str = args.date_range.split("..", 1)
@@ -171,6 +191,9 @@ def main() -> int:
             "date_range": (start.isoformat(), end.isoformat()),
             "aggregation": args.aggregation,
             "forecast_horizon": args.forecast_horizon,
+            "equipment_ids": equipment_ids or None,
+            "include_alarms": args.include_alarms,
+            "include_events": args.include_events,
         },
     )
     time_series = result.data.get("time_series") or []
@@ -183,6 +206,9 @@ def main() -> int:
             "aggregation": args.aggregation,
             "forecast_horizon": args.forecast_horizon,
             "requested_metric_keys": metrics,
+            "equipment_ids": equipment_ids,
+            "include_alarms": args.include_alarms,
+            "include_events": args.include_events,
             "data_source": result.data_source,
         },
         "time_series": time_series,
@@ -194,6 +220,11 @@ def main() -> int:
         },
         "_meta": {"stub": True, "generated_at": iso_now(), "provider_notes": result.notes},
     }
+
+    if args.include_alarms:
+        output["alarms"] = result.data.get("alarms") or []
+    if args.include_events:
+        output["events"] = result.data.get("events") or []
 
     write_json(Path(args.output_dir), "trend_data", output)
     return 0

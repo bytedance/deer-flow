@@ -20,6 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "query_trend.py"
 STUB_HELPERS_PATH = SCRIPT_PATH.parent / "_stub_helpers.py"
+SCRIPT_DIR = str(SCRIPT_PATH.parent)
 
 
 def _load_module():
@@ -29,10 +30,20 @@ def _load_module():
     sys.modules["_stub_helpers"] = helpers
     helpers_spec.loader.exec_module(helpers)
 
-    spec = importlib.util.spec_from_file_location("query_trend", SCRIPT_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    scripts_dir_added = False
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+        scripts_dir_added = True
+
+    try:
+        spec = importlib.util.spec_from_file_location("query_trend", SCRIPT_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        if scripts_dir_added and SCRIPT_DIR in sys.path:
+            sys.path.remove(SCRIPT_DIR)
+        raise
 
 
 @pytest.fixture()
