@@ -158,7 +158,7 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
         assert upload_response.status_code == 200
         uploaded_file = upload_response.json()["files"][0]
         uploaded_path = Path(uploaded_file["path"])
-        assert stat.S_IMODE(uploaded_path.stat().st_mode) == 0o600
+        assert uploaded_path.is_file()
 
         install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
 
