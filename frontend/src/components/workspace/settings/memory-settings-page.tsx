@@ -559,6 +559,7 @@ export function MemorySettingsPage() {
           </ItemContent>
           <ItemActions>
             <Switch
+              aria-label={contextToggleTitle}
               checked={settings.context.memory_enabled === true}
               onCheckedChange={(memory_enabled) =>
                 setSettings("context", { memory_enabled })

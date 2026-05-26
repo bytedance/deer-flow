@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -21,6 +21,7 @@ def test_runtime_memory_injection_only_skips_explicit_false():
     assert is_runtime_memory_injection_enabled(SimpleNamespace(context={})) is True
     assert is_runtime_memory_injection_enabled(SimpleNamespace(context={"memory_enabled": False})) is False
     assert is_runtime_memory_injection_enabled(SimpleNamespace(context={"memory_enabled": True})) is True
+    assert is_runtime_memory_injection_enabled(SimpleNamespace(context=MappingProxyType({"memory_enabled": False}))) is False
 
 
 def test_memory_middleware_queues_when_runtime_memory_context_is_absent(monkeypatch):
