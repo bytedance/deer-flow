@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sys
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -188,6 +189,13 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         except ImportError:
             return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
 
+        acp_schema = sys.modules.get("acp.schema")
+        agent_message_chunk_cls = getattr(acp_schema, "AgentMessageChunk", None)
+        agent_thought_chunk_cls = getattr(acp_schema, "AgentThoughtChunk", None)
+        text_content_block_cls = getattr(acp_schema, "TextContentBlock", None)
+        tool_call_start_cls = getattr(acp_schema, "ToolCallStart", None)
+        tool_call_update_cls = getattr(acp_schema, "ToolCallUpdate", None)
+
         class _CollectingClient(Client):
             """Minimal ACP Client that collects streamed text from session updates."""
 
@@ -200,18 +208,17 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
                 try:
-                    from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock, ToolCallStart, ToolCallUpdate
-
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
-                        if isinstance(update, AgentMessageChunk):
-                            self._chunks.append(update.content.text)
-                        elif isinstance(update, AgentThoughtChunk):
+                    content = getattr(update, "content", None)
+                    if text_content_block_cls is not None and isinstance(content, text_content_block_cls):
+                        if agent_message_chunk_cls is not None and isinstance(update, agent_message_chunk_cls):
+                            self._chunks.append(content.text)
+                        elif agent_thought_chunk_cls is not None and isinstance(update, agent_thought_chunk_cls):
                             logger.debug(
                                 "ACP agent thought [session=%s]: %s",
                                 session_id,
-                                _truncate_preview(update.content.text, _THOUGHT_PREVIEW_CHARS),
+                                _truncate_preview(content.text, _THOUGHT_PREVIEW_CHARS),
                             )
-                    elif isinstance(update, ToolCallStart):
+                    elif tool_call_start_cls is not None and isinstance(update, tool_call_start_cls):
                         logger.debug(
                             "ACP agent tool start [session=%s, id=%s, title=%s, kind=%s]",
                             session_id,
@@ -219,7 +226,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                             update.title,
                             update.kind,
                         )
-                    elif isinstance(update, ToolCallUpdate):
+                    elif tool_call_update_cls is not None and isinstance(update, tool_call_update_cls):
                         logger.debug(
                             "ACP agent tool update [session=%s, id=%s, title=%s, status=%s]",
                             session_id,
