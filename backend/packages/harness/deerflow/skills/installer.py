@@ -13,6 +13,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 
 logger = logging.getLogger(__name__)
@@ -131,22 +132,6 @@ def _should_scan_support_file(rel_path: Path) -> bool:
     return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
 
 
-def _make_installed_skill_path_sandbox_readable(path: Path) -> None:
-    if path.is_symlink():
-        return
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if path.is_dir():
-        path.chmod(mode | 0o555)
-    elif path.is_file():
-        path.chmod(mode | 0o444)
-
-
-def _make_installed_skill_tree_sandbox_readable(target: Path) -> None:
-    _make_installed_skill_path_sandbox_readable(target)
-    for path in target.rglob("*"):
-        _make_installed_skill_path_sandbox_readable(path)
-
-
 def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
     installed = False
     reserved = False
@@ -155,7 +140,7 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
         reserved = True
         for child in staging_target.iterdir():
             shutil.move(str(child), target / child.name)
-        _make_installed_skill_tree_sandbox_readable(target)
+        make_skill_tree_sandbox_readable(target)
         installed = True
     except FileExistsError as e:
         raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e

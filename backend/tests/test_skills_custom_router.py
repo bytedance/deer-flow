@@ -247,6 +247,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         )
         assert update_response.status_code == 200
         assert update_response.json()["description"] == "Edited skill"
+        assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
 
         history_response = client.get("/api/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
@@ -255,6 +256,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 200
         assert rollback_response.json()["description"] == "Demo skill"
+        assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
         assert refresh_calls == ["refresh", "refresh"]
 
 
