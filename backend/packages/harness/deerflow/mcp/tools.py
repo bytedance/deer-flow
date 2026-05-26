@@ -251,6 +251,9 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
+        # Only pool stdio sessions. HTTP/SSE transports use anyio TaskGroups
+        # internally which cannot be closed from a different async task, so
+        # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
         for tool in tools:
             tool_server: str | None = None
@@ -260,7 +263,11 @@ async def get_mcp_tools() -> list[BaseTool]:
                     break
 
             if tool_server is not None:
-                wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                transport = servers_config[tool_server].get("transport", "stdio")
+                if transport == "stdio":
+                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                else:
+                    wrapped_tools.append(tool)
             else:
                 wrapped_tools.append(tool)
 
