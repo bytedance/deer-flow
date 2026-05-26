@@ -63,6 +63,7 @@ import { useSkills } from "@/core/skills/hooks";
 import {
   getSkillRouteCategoryLabel,
   SKILL_ROUTE_CATEGORIES,
+  type SkillCategoryBindings,
   type SkillRouteCategory,
 } from "@/core/skills/routing";
 import type { AgentThreadContext } from "@/core/threads";
@@ -92,6 +93,20 @@ import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+function isSkillCategoryBindings(
+  value: unknown,
+): value is SkillCategoryBindings {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every(
+      (items) =>
+        Array.isArray(items) && items.every((item) => typeof item === "string"),
+    )
+  );
+}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -235,9 +250,8 @@ export function InputBox({
 
   const skillCategoryBindings = useMemo(
     () =>
-      typeof context.skill_category_bindings === "object" &&
-      context.skill_category_bindings !== null
-        ? (context.skill_category_bindings as Record<string, string[]>)
+      isSkillCategoryBindings(context.skill_category_bindings)
+        ? context.skill_category_bindings
         : {},
     [context.skill_category_bindings],
   );
@@ -654,7 +668,11 @@ export function InputBox({
                   </DropdownMenuLabel>
                   <DropdownMenuCheckboxItem
                     checked={!selectedSkillNames && !selectedSkillCategory}
-                    onCheckedChange={handleAllSkillsSelect}
+                    onCheckedChange={(checked) => {
+                      if (checked === true) {
+                        handleAllSkillsSelect();
+                      }
+                    }}
                   >
                     {t.inputBox.allSkills}
                   </DropdownMenuCheckboxItem>
@@ -671,9 +689,11 @@ export function InputBox({
                       disabled={
                         (skillCategoryBindings[category] ?? []).length === 0
                       }
-                      onCheckedChange={() =>
-                        handleSkillCategorySelect(category)
-                      }
+                      onCheckedChange={(checked) => {
+                        if (checked === true) {
+                          handleSkillCategorySelect(category);
+                        }
+                      }}
                     >
                       {getSkillRouteCategoryLabel(
                         category,

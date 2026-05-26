@@ -36,6 +36,7 @@ import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import {
   getSkillRouteCategoryLabel,
   SKILL_ROUTE_CATEGORIES,
+  type SkillCategoryBindings,
   type SkillRouteCategory,
 } from "@/core/skills/routing";
 import type { Skill } from "@/core/skills/type";
@@ -78,7 +79,8 @@ function SkillSettingsList({
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
   );
-  const categoryBindings = settings.context.skill_category_bindings ?? {};
+  const categoryBindings: SkillCategoryBindings =
+    settings.context.skill_category_bindings ?? {};
   const categoryLabels = useMemo(
     () =>
       ({
@@ -107,11 +109,17 @@ function SkillSettingsList({
       current.delete(skillName);
     }
     nextBindings[category] = Array.from(current);
+    const nextSelectedSkillNames = nextBindings[category] ?? [];
+    const clearSelectedCategory =
+      settings.context.skill_category === category &&
+      nextSelectedSkillNames.length === 0;
     const contextUpdate = {
       skill_category_bindings: nextBindings,
-      ...(settings.context.skill_category === category
-        ? { selected_skill_names: nextBindings[category] }
-        : {}),
+      ...(clearSelectedCategory
+        ? { selected_skill_names: undefined, skill_category: undefined }
+        : settings.context.skill_category === category
+          ? { selected_skill_names: nextSelectedSkillNames }
+          : {}),
     };
     setSettings("context", contextUpdate);
   };
