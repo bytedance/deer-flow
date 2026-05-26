@@ -220,8 +220,18 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     """
     from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_store, get_thread_store
 
-    # Clean local filesystem
     user_id = get_effective_user_id()
+
+    # Remove metadata before irreversible cleanup so failures do not leave
+    # clients retrying after local data has already been removed.
+    try:
+        thread_store = get_thread_store(request)
+        await thread_store.delete(thread_id)
+    except Exception:
+        logger.exception("Failed to delete thread_meta for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to delete thread metadata.")
+
+    # Clean local filesystem
     response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
@@ -250,15 +260,6 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         await run_store.delete_by_thread(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete runs for thread %s (not critical)", sanitize_log_param(thread_id))
-
-    # Remove thread_meta row (best-effort) — required for sqlite backend
-    # so the deleted thread no longer appears in /threads/search.
-    try:
-        thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
-    except Exception:
-        logger.exception("Failed to delete thread_meta for %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to delete thread metadata.")
 
     return response
 

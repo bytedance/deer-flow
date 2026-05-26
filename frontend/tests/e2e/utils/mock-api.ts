@@ -102,9 +102,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Direct backend thread delete - used by the chat delete menu.
   void page.route("**/api/threads/*", (route) => {
     if (route.request().method() === "DELETE") {
-      const threadId = decodeURIComponent(
-        route.request().url().split("/").pop() ?? "",
-      );
+      const pathname = new URL(route.request().url()).pathname;
+      const threadId = decodeURIComponent(pathname.split("/").pop() ?? "");
       const index = threads.findIndex((t) => t.thread_id === threadId);
       if (index >= 0) {
         threads.splice(index, 1);

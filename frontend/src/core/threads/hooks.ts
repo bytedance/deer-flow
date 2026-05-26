@@ -902,8 +902,12 @@ export function useDeleteThread() {
   const apiClient = getAPIClient();
   return useMutation({
     mutationFn: async ({ threadId }: { threadId: string }) => {
-      if (env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
-        await apiClient.threads.delete(threadId);
+      if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
+        try {
+          await apiClient.threads.delete(threadId);
+        } catch (error) {
+          console.warn("Failed to delete LangGraph thread state", error);
+        }
       }
 
       const response = await fetch(
