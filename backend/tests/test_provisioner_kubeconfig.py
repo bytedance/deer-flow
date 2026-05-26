@@ -71,6 +71,76 @@ def test_init_k8s_client_uses_file_kubeconfig(tmp_path, monkeypatch, provisioner
     assert result == "core-v1"
 
 
+def test_init_k8s_client_api_server_override_keeps_tls_verification_by_default(tmp_path, monkeypatch, provisioner_module):
+    """K8S_API_SERVER should not implicitly disable Kubernetes API TLS checks."""
+    kubeconfig_file = tmp_path / "config"
+    kubeconfig_file.write_text("apiVersion: v1\n")
+
+    class FakeConfiguration:
+        def __init__(self):
+            self.host = "https://from-kubeconfig.example"
+            self.verify_ssl = True
+
+        @staticmethod
+        def get_default_copy():
+            config = FakeConfiguration()
+            captured["config"] = config
+            return config
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("K8S_API_SERVER", "https://host.docker.internal:26443")
+    monkeypatch.delenv("K8S_INSECURE_SKIP_TLS_VERIFY", raising=False)
+    monkeypatch.setattr(provisioner_module.k8s_config, "load_kube_config", lambda config_file: None)
+    monkeypatch.setattr(provisioner_module.k8s_client, "Configuration", FakeConfiguration)
+    monkeypatch.setattr(provisioner_module.k8s_client, "ApiClient", lambda configuration: captured.setdefault("api_client_config", configuration))
+    monkeypatch.setattr(provisioner_module.k8s_client, "CoreV1Api", lambda api_client: captured.setdefault("api_client", api_client))
+
+    provisioner_module.KUBECONFIG_PATH = str(kubeconfig_file)
+
+    result = provisioner_module._init_k8s_client()
+
+    config = captured["config"]
+    assert config.host == "https://host.docker.internal:26443"
+    assert config.verify_ssl is True
+    assert captured["api_client_config"] is config
+    assert result is config
+
+
+def test_init_k8s_client_api_server_override_can_explicitly_skip_tls_verification(tmp_path, monkeypatch, provisioner_module):
+    """Local development can still opt into insecure API server TLS behavior."""
+    kubeconfig_file = tmp_path / "config"
+    kubeconfig_file.write_text("apiVersion: v1\n")
+
+    class FakeConfiguration:
+        def __init__(self):
+            self.host = "https://from-kubeconfig.example"
+            self.verify_ssl = True
+
+        @staticmethod
+        def get_default_copy():
+            config = FakeConfiguration()
+            captured["config"] = config
+            return config
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("K8S_API_SERVER", "https://host.docker.internal:26443")
+    monkeypatch.setenv("K8S_INSECURE_SKIP_TLS_VERIFY", "true")
+    monkeypatch.setattr(provisioner_module.k8s_config, "load_kube_config", lambda config_file: None)
+    monkeypatch.setattr(provisioner_module.k8s_client, "Configuration", FakeConfiguration)
+    monkeypatch.setattr(provisioner_module.k8s_client, "ApiClient", lambda configuration: captured.setdefault("api_client_config", configuration))
+    monkeypatch.setattr(provisioner_module.k8s_client, "CoreV1Api", lambda api_client: captured.setdefault("api_client", api_client))
+
+    provisioner_module.KUBECONFIG_PATH = str(kubeconfig_file)
+
+    result = provisioner_module._init_k8s_client()
+
+    config = captured["config"]
+    assert config.host == "https://host.docker.internal:26443"
+    assert config.verify_ssl is False
+    assert captured["api_client_config"] is config
+    assert result is config
+
+
 def test_init_k8s_client_falls_back_to_incluster_when_missing(tmp_path, monkeypatch, provisioner_module):
     """When kubeconfig file is missing, in-cluster config should be attempted."""
     missing_path = tmp_path / "missing-config"

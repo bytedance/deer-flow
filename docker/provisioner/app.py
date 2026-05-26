@@ -65,6 +65,7 @@ USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -100,6 +101,11 @@ def join_host_path(base: str, *parts: str) -> str:
 # ── K8s client setup ────────────────────────────────────────────────────
 
 core_v1: k8s_client.CoreV1Api | None = None
+
+
+def _env_flag(name: str) -> bool:
+    """Return True when an environment variable is explicitly truthy."""
+    return os.environ.get(name, "").strip().lower() in TRUE_ENV_VALUES
 
 
 def _init_k8s_client() -> k8s_client.CoreV1Api:
@@ -139,8 +145,12 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
     if k8s_api_server:
         configuration = k8s_client.Configuration.get_default_copy()
         configuration.host = k8s_api_server
-        # Self-signed certs are common for local clusters
-        configuration.verify_ssl = False
+        if _env_flag("K8S_INSECURE_SKIP_TLS_VERIFY"):
+            logger.warning(
+                "K8S_INSECURE_SKIP_TLS_VERIFY is enabled; Kubernetes API server "
+                "certificate verification is disabled."
+            )
+            configuration.verify_ssl = False
         api_client = k8s_client.ApiClient(configuration)
         return k8s_client.CoreV1Api(api_client)
 

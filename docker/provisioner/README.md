@@ -145,6 +145,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+| `K8S_INSECURE_SKIP_TLS_VERIFY` | `false` | Set to `true` only for local development clusters when the API server certificate cannot be verified |
 
 ### PVC User-Data Upgrade Note
 
@@ -172,6 +173,8 @@ provisioner:
   environment:
     - K8S_API_SERVER=https://host.docker.internal:26443  # Replace 26443 with your API port
 ```
+
+TLS server certificate verification remains enabled when `K8S_API_SERVER` is set. If a local development cluster uses a self-signed certificate that is not valid for `host.docker.internal`, explicitly set `K8S_INSECURE_SKIP_TLS_VERIFY=true`. Do not use this insecure option for production clusters.
 
 Check your kubeconfig API server:
 ```bash
@@ -293,6 +296,8 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
    ```yaml
    environment:
      - K8S_API_SERVER=https://host.docker.internal:PORT
+     # Local development only, when the API server certificate cannot be verified:
+     # - K8S_INSECURE_SKIP_TLS_VERIFY=true
    ```
 
 ### Issue: "Unprocessable Entity" when creating Pod
