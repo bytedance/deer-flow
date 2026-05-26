@@ -92,3 +92,16 @@ async def test_transcript_preserves_repeated_identical_user_messages_without_ids
     transcript = await get_thread_transcript(store, "thread-1")
 
     assert [message["content"] for message in transcript] == ["same question", "same question"]
+
+
+@pytest.mark.anyio
+async def test_transcript_replaces_earliest_matching_unidentified_message() -> None:
+    store = FakeStore()
+
+    await append_thread_transcript_messages(store, "thread-1", [HumanMessage(content="same question")])
+    await append_thread_transcript_messages(store, "thread-1", [HumanMessage(content="same question")])
+    await append_thread_transcript_messages(store, "thread-1", [HumanMessage(id="human-1", content="same question")])
+
+    transcript = await get_thread_transcript(store, "thread-1")
+
+    assert [message.get("id") for message in transcript] == ["human-1", None]

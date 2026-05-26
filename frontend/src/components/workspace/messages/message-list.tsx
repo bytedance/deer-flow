@@ -8,6 +8,7 @@ import {
   ConversationContent,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -159,11 +160,25 @@ type ThreadMessagesResponse = {
   messages?: AgentThreadState["messages"];
 };
 
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
 function messageFingerprint(message: AgentThreadState["messages"][number]) {
   const content =
     typeof message.content === "string"
       ? message.content
-      : JSON.stringify(message.content);
+      : stableStringify(message.content);
   const toolCallId =
     "tool_call_id" in message && typeof message.tool_call_id === "string"
       ? message.tool_call_id
@@ -185,11 +200,17 @@ function mergeTranscriptWithLiveMessages(
       .map((message) => message.id)
       .filter((id): id is string => typeof id === "string" && id.length > 0),
   );
-  const unidentifiedByFingerprint = new Map<string, number>();
+  const unidentifiedByFingerprint = new Map<string, number[]>();
 
   transcriptMessages.forEach((message, index) => {
     if (!message.id) {
-      unidentifiedByFingerprint.set(messageFingerprint(message), index);
+      const fingerprint = messageFingerprint(message);
+      const indices = unidentifiedByFingerprint.get(fingerprint);
+      if (indices) {
+        indices.push(index);
+      } else {
+        unidentifiedByFingerprint.set(fingerprint, [index]);
+      }
     }
   });
 
@@ -202,11 +223,14 @@ function mergeTranscriptWithLiveMessages(
     }
 
     const fingerprint = messageFingerprint(message);
-    const unidentifiedIndex = unidentifiedByFingerprint.get(fingerprint);
+    const unidentifiedIndices = unidentifiedByFingerprint.get(fingerprint);
+    const unidentifiedIndex = unidentifiedIndices?.shift();
     if (message.id && unidentifiedIndex !== undefined) {
       merged[unidentifiedIndex] = message;
       seenIds.add(message.id);
-      unidentifiedByFingerprint.delete(fingerprint);
+      if (unidentifiedIndices?.length === 0) {
+        unidentifiedByFingerprint.delete(fingerprint);
+      }
       continue;
     }
 
@@ -279,7 +303,7 @@ export function MessageList({
     const controller = new AbortController();
 
     const loadTranscript = async () => {
-      const response = await fetch(
+      const response = await fetchWithAuth(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/messages`,
         {
           signal: controller.signal,
@@ -301,7 +325,6 @@ export function MessageList({
       }
       console.error("Failed to load canonical thread transcript", error);
       setTranscriptMessages([]);
-      setTranscriptLoadedForThread(threadId);
     });
 
     return () => controller.abort();
