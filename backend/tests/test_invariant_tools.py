@@ -1,8 +1,7 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 import sys
-import os
 
 # ---------------------------------------------------------------------------
 # Adversarial payloads – tool names and argument dictionaries that should
@@ -88,6 +87,7 @@ _install_stubs()
 # cannot be imported.
 # ---------------------------------------------------------------------------
 
+# Allowlist of tool names that are permitted to be called.
 KNOWN_SAFE_TOOLS = {"search_web", "read_file_safe", "calculator"}
 
 _VALID_TOOL_NAME_CHARS = set(
@@ -142,6 +142,11 @@ async def secure_call_tool(session, request_name, request_args):
     rejected BEFORE reaching session.call_tool().
     """
     _validate_tool_name(request_name)
+    # Allowlist check: only explicitly approved tool names may proceed.
+    if request_name not in KNOWN_SAFE_TOOLS:
+        raise ValidationError(
+            f"Tool {request_name!r} is not in the allowlist of permitted tools"
+        )
     _validate_args(request_args)
     return await session.call_tool(request_name, request_args)
 
@@ -169,12 +174,11 @@ def test_adversarial_tool_invocation_is_rejected(payload):
     # The secure handler must raise ValidationError for every adversarial
     # payload, and session.call_tool must NOT have been called.
     with pytest.raises((ValidationError, TypeError, ValueError, AttributeError)):
-        asyncio.get_event_loop().run_until_complete(
-            secure_call_tool(session, name, args)
-        )
+        asyncio.run(secure_call_tool(session, name, args))
 
     # Core invariant: the underlying tool executor was never reached.
-    session.call_tool.assert_not_called(), (
+    session.call_tool.assert_not_called()
+    assert session.call_tool.call_count == 0, (
         f"session.call_tool() was called with adversarial payload {payload!r}. "
         "Validation must prevent this."
     )
