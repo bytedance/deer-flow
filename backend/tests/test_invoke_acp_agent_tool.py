@@ -181,7 +181,7 @@ def test_get_work_dir_falls_back_to_global_for_invalid_thread_id(monkeypatch, tm
 
 @pytest.mark.anyio
 async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
-    """ACP agent uses the global workspace and returns only AgentMessageChunk text."""
+    """ACP agent uses the fixed global ACP workspace when thread_id is absent."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
