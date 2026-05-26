@@ -144,7 +144,6 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str], use_flat_csv: b
     Returns a mapping of original_name -> sanitized_table_name.
     use_flat_csv: If True, prefer pre-processed flattened CSVs (L1 cache) when available.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
@@ -221,17 +220,14 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str], use_flat_csv: b
 def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
-    """Load all sheets from an Excel file into DuckDB tables."""
+    """Load all sheets from an Excel file into DuckDB tables using openpyxl."""
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     sheet_names = wb.sheetnames
-    wb.close()
 
     for sheet_name in sheet_names:
         table_name = sanitize_table_name(sheet_name)
-
-        # Handle duplicate table names
         original_table_name = table_name
         counter = 1
         while table_name in table_map.values():
@@ -239,25 +235,35 @@ def _load_excel(
             counter += 1
 
         try:
-            con.execute(
-                f"""
-                CREATE TABLE "{table_name}" AS
-                SELECT * FROM st_read(
-                    '{file_path}',
-                    layer = '{sheet_name}',
-                    open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
-                )
-            """
-            )
+            ws = wb[sheet_name]
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+
+            headers = [str(h) if h is not None else f"col_{i}" for i, h in enumerate(rows[0])]
+            data_rows = rows[1:] if len(rows) > 1 else []
+
+            columns_def = ", ".join([f'"{h}" VARCHAR' for h in headers])
+            con.execute(f'CREATE TABLE "{table_name}" ({columns_def})')
+
+            if data_rows:
+                batch_size = 1000
+                for i in range(0, len(data_rows), batch_size):
+                    batch = data_rows[i : i + batch_size]
+                    placeholders = ", ".join(["?" for _ in headers])
+                    con.executemany(
+                        f'INSERT INTO "{table_name}" VALUES ({placeholders})',
+                        batch,
+                    )
+
             table_map[sheet_name] = table_name
-            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
-                0
-            ]
-            logger.info(
-                f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows)"
-            )
+            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            logger.info(f"  ✅ 已加载工作表 '{sheet_name}' -> 表 '{table_name}' ({row_count} 行)")
+            print(f"  ✅ 已加载工作表: {sheet_name}")
         except Exception as e:
-            logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+            logger.warning(f"  ⚠️ 加载工作表 '{sheet_name}' 失败: {e}")
+
+    wb.close()
 
 
 def _load_csv(
