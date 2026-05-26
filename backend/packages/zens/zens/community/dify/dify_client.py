@@ -27,11 +27,9 @@ class DifyClient:
     def __init__(
         self,
         api_key: str,
-        app_id: str,
         base_url: str = "http://localhost:8000",
     ):
         self.api_key = api_key
-        self.app_id = app_id
         self.base_url = base_url.rstrip("/")
 
     def chat(
@@ -65,11 +63,13 @@ class DifyClient:
             try:
                 error_body = response.json()
                 message = error_body.get("message", response.text)
-            except Exception:
+            except httpx.HTTPError:
                 message = response.text or "Unknown error"
             raise DifyAPIError(response.status_code, message)
 
         data = response.json()
+        if "answer" not in data:
+            raise DifyAPIError(response.status_code, "Dify response missing 'answer' field")
         return DifyResponse(
             answer=data.get("answer", ""),
             conversation_id=data.get("conversation_id", ""),

@@ -16,7 +16,7 @@ def test_dify_api_error():
 
 
 def test_dify_client_chat_request(monkeypatch):
-    client = DifyClient(api_key="test-key", app_id="app-123", base_url="http://localhost:8000")
+    client = DifyClient(api_key="test-key", base_url="http://localhost:8000")
     recorded_request = {}
 
     class FakeResponse:
