@@ -1,12 +1,19 @@
 import type { NextRequest } from "next/server";
 
 const BACKEND_BASE_URL =
-  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "http://127.0.0.1:8001";
+  process.env.BACKEND_BASE_URL ??
+  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ??
+  "http://127.0.0.1:8001";
 
 const INVALID_PATH_SEGMENTS = new Set(["", ".", ".."]);
 
 export function hasInvalidPathSegments(pathSegments: string[]) {
-  return pathSegments.some((segment) => INVALID_PATH_SEGMENTS.has(segment));
+  return pathSegments.some(
+    (segment) =>
+      INVALID_PATH_SEGMENTS.has(segment) ||
+      segment.includes("/") ||
+      segment.includes("\\"),
+  );
 }
 
 export function resolveProxyPath(prefix: string, pathSegments: string[]) {
@@ -38,6 +45,13 @@ function stripProxyHeaders(headers: Headers) {
   }
 }
 
+function sanitizeResponseHeaders(headers: Headers) {
+  stripProxyHeaders(headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return headers;
+}
+
 export async function proxyRequest(request: NextRequest, pathname: string) {
   const headers = new Headers(request.headers);
   stripProxyHeaders(headers);
@@ -52,8 +66,8 @@ export async function proxyRequest(request: NextRequest, pathname: string) {
     },
   );
 
-  return new Response(await response.arrayBuffer(), {
+  return new Response(response.body, {
     status: response.status,
-    headers: response.headers,
+    headers: sanitizeResponseHeaders(new Headers(response.headers)),
   });
 }
