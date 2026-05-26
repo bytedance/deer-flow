@@ -326,6 +326,53 @@ class TestAsyncCheckpointer:
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/test.db")
         mock_saver.setup.assert_awaited_once()
 
+    @pytest.mark.anyio
+    async def test_postgres_uses_connection_pool(self):
+        """Async postgres checkpointer should use AsyncConnectionPool, not a single connection."""
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        mock_config = MagicMock()
+        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db")
+
+        mock_saver = AsyncMock()
+
+        mock_saver_cls = MagicMock(return_value=mock_saver)
+
+        mock_pool_instance = AsyncMock()
+        mock_pool_instance.check_connection = AsyncMock()
+
+        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
+        mock_pool_cls.check_connection = AsyncMock()
+
+        mock_dict_row = MagicMock()
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresSaver = mock_saver_cls
+
+        mock_psycopg_rows = MagicMock()
+        mock_psycopg_rows.dict_row = mock_dict_row
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg.rows": mock_psycopg_rows}),
+            patch.dict(sys.modules, {"psycopg_pool": MagicMock(AsyncConnectionPool=mock_pool_cls)}),
+        ):
+            # AsyncConnectionPool() is a callable that returns mock_pool_instance
+            # We need the constructor to be an async context manager
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        # Verify the pool was constructed with check Connection
+        mock_pool_cls.assert_called_once()
+        call_kwargs = mock_pool_cls.call_args
+        assert call_kwargs[0][0] == "postgresql://localhost/db"
+        assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+
+        # Verify saver was constructed with the pool (not via from_conn_string)
+        mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
+        mock_saver.setup.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # app_config.py integration

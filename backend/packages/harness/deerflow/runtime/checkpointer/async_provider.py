@@ -67,10 +67,22 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         except ImportError as exc:
             raise ImportError(POSTGRES_INSTALL) from exc
 
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import AsyncConnectionPool
+        except ImportError as exc:
+            raise ImportError(POSTGRES_INSTALL) from exc
+
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresSaver.from_conn_string(config.connection_string) as saver:
+        pool = AsyncConnectionPool(
+            config.connection_string,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            check=AsyncConnectionPool.check_connection,
+        )
+        async with pool:
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
@@ -111,10 +123,22 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
         except ImportError as exc:
             raise ImportError(POSTGRES_INSTALL) from exc
 
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import AsyncConnectionPool
+        except ImportError as exc:
+            raise ImportError(POSTGRES_INSTALL) from exc
+
         if not db_config.postgres_url:
             raise ValueError("database.postgres_url is required for the postgres backend")
 
-        async with AsyncPostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+        pool = AsyncConnectionPool(
+            db_config.postgres_url,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            check=AsyncConnectionPool.check_connection,
+        )
+        async with pool:
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
