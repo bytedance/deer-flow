@@ -6,10 +6,16 @@ import shutil
 
 import yaml
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AGENT_DISPLAY_NAME_MAX_LENGTH, AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import (
+    AGENT_DISPLAY_NAME_MAX_LENGTH,
+    AgentConfig,
+    list_custom_agents,
+    load_agent_config,
+    load_agent_soul,
+)
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -48,12 +54,18 @@ class AgentCreateRequest(BaseModel):
     display_name: str | None = Field(
         default=None,
         description="Optional human-friendly agent display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
     )
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return AgentConfig.normalize_display_name(value)
 
 
 class AgentUpdateRequest(BaseModel):
@@ -62,12 +74,18 @@ class AgentUpdateRequest(BaseModel):
     display_name: str | None = Field(
         default=None,
         description="Updated display name",
+        max_length=AGENT_DISPLAY_NAME_MAX_LENGTH,
     )
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        return AgentConfig.normalize_display_name(value)
 
 
 def _validate_agent_name(name: str) -> None:
@@ -89,23 +107,6 @@ def _validate_agent_name(name: str) -> None:
 def _normalize_agent_name(name: str) -> str:
     """Normalize agent name to lowercase for filesystem storage."""
     return name.lower()
-
-
-def _normalize_display_name(display_name: str | None) -> str | None:
-    """Trim display names and collapse empty values to None."""
-    if display_name is None:
-        return None
-    normalized = display_name.strip()
-    return normalized or None
-
-
-def _validate_display_name_length(display_name: str | None) -> None:
-    """Validate the normalized display name length."""
-    if display_name is not None and len(display_name) > AGENT_DISPLAY_NAME_MAX_LENGTH:
-        raise HTTPException(
-            status_code=422,
-            detail=f"display_name must be at most {AGENT_DISPLAY_NAME_MAX_LENGTH} characters after trimming",
-        )
 
 
 def _require_agents_api_enabled() -> None:
@@ -256,10 +257,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
         # Write config.yaml
         config_data: dict = {"name": normalized_name}
-        normalized_display_name = _normalize_display_name(request.display_name)
-        _validate_display_name_length(normalized_display_name)
-        if normalized_display_name is not None:
-            config_data["display_name"] = normalized_display_name
+        if request.display_name is not None:
+            config_data["display_name"] = request.display_name
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -339,12 +338,14 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             updated = agent_cfg.model_dump(exclude_none=True)
             updated["name"] = agent_cfg.name
             if "description" in fields_set:
-                updated["description"] = request.description
+                if request.description is None:
+                    updated.pop("description", None)
+                else:
+                    updated["description"] = request.description
 
             new_display_name = agent_cfg.display_name
             if "display_name" in fields_set:
-                new_display_name = _normalize_display_name(request.display_name)
-                _validate_display_name_length(new_display_name)
+                new_display_name = request.display_name
             if new_display_name is not None:
                 updated["display_name"] = new_display_name
             else:

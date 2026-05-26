@@ -8,6 +8,7 @@ export interface Agent {
   soul?: string | null;
 }
 
+// Keep this in sync with backend AGENT_DISPLAY_NAME_MAX_LENGTH.
 export const AGENT_DISPLAY_NAME_MAX_LENGTH = 100;
 
 export interface CreateAgentRequest {
