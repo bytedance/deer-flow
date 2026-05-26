@@ -1,5 +1,5 @@
 const MERMAID_FENCE_RE =
-  /(^|\n)((```+|~~~+)[ \t]*mermaid[^\n]*\n)([\s\S]*?)(\n\3[ \t]*(?=\n|$))/gi;
+  /(^|\n)((```+|~~~+)[ \t]*mermaid[^\n]*\n)([\s\S]*?)(^\3[ \t]*(?=\n|$))/gim;
 
 const LABELLED_DOTTED_ARROW_RE =
   /^(\s*)(.+?)\s+--\s+("[^"\n]+"|'[^'\n]+')\s+-\.->\s+(.+?)\s*$/;

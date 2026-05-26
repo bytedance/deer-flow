@@ -43,3 +43,19 @@ test("preserves mermaid fence metadata", () => {
     ].join("\n"),
   );
 });
+
+test("preserves empty mermaid fences", () => {
+  const markdown = ["```mermaid", "```"].join("\n");
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(markdown);
+});
+
+test("normalizes labelled dotted arrows inside tilde mermaid fences", () => {
+  const markdown = ["~~~mermaid", 'A -- "sealed memory" -.-> F', "~~~"].join(
+    "\n",
+  );
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(
+    ["~~~mermaid", 'A -. "sealed memory" .-> F', "~~~"].join("\n"),
+  );
+});

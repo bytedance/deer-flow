@@ -7,7 +7,10 @@ import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
-import { normalizeMermaidMarkdown, streamdownPlugins } from "@/core/streamdown";
+import {
+  preprocessStreamdownMarkdown,
+  streamdownPlugins,
+} from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -34,7 +37,7 @@ export function MarkdownContent({
   components: componentsFromProps,
 }: MarkdownContentProps) {
   const normalizedContent = useMemo(
-    () => normalizeMermaidMarkdown(content),
+    () => preprocessStreamdownMarkdown(content),
     [content],
   );
   const components = useMemo(() => {
