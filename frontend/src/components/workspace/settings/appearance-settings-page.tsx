@@ -112,15 +112,19 @@ export function AppearanceSettingsPage() {
                 <HoverCardTrigger asChild>
                   <button
                     type="button"
-                    className="text-muted-foreground hover:text-foreground rounded-sm transition-colors"
-                    aria-label={t.settings.appearance.collapsedThinkingStepHelp}
+                    className="text-muted-foreground hover:text-foreground focus-visible:ring-ring rounded-sm transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+                    aria-label={t.common.more}
+                    aria-describedby="collapsed-thinking-step-help"
                   >
                     <HelpCircleIcon className="size-4" />
                   </button>
                 </HoverCardTrigger>
                 <HoverCardContent className="w-80">
                   <div className="space-y-3">
-                    <p className="text-muted-foreground text-xs leading-relaxed">
+                    <p
+                      id="collapsed-thinking-step-help"
+                      className="text-muted-foreground text-xs leading-relaxed"
+                    >
                       {t.settings.appearance.collapsedThinkingStepHelp}
                     </p>
                     <CollapsedThinkingStepPreview />

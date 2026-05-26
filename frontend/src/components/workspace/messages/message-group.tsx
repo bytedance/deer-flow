@@ -43,6 +43,8 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 
+const COLLAPSED_THINKING_SUMMARY_MAX_CHARS = 180;
+
 export function MessageGroup({
   className,
   messages,
@@ -226,14 +228,16 @@ export function MessageGroup({
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
+  const shouldComputeCollapsedThinkingSummary =
+    localSettings.appearance.showCollapsedThinkingStep && !showLastThinking;
   const collapsedThinkingSummary = useMemo(
-    () => summarizeCollapsedThinkingStep(lastReasoningStep?.reasoning),
-    [lastReasoningStep?.reasoning],
+    () =>
+      shouldComputeCollapsedThinkingSummary
+        ? summarizeCollapsedThinkingStep(lastReasoningStep?.reasoning)
+        : "",
+    [lastReasoningStep?.reasoning, shouldComputeCollapsedThinkingSummary],
   );
-  const showCollapsedThinkingSummary =
-    localSettings.appearance.showCollapsedThinkingStep &&
-    !showLastThinking &&
-    collapsedThinkingSummary;
+  const collapsedThinkingSummaryToShow = collapsedThinkingSummary || undefined;
 
   return (
     <ChainOfThought
@@ -323,11 +327,7 @@ export function MessageGroup({
                     label={
                       <ThinkingStepLabel
                         label={t.common.thinking}
-                        summary={
-                          showCollapsedThinkingSummary
-                            ? collapsedThinkingSummary
-                            : undefined
-                        }
+                        summary={collapsedThinkingSummaryToShow}
                       />
                     }
                     token={shouldInlineThinkingToken({
@@ -453,7 +453,7 @@ function summarizeCollapsedThinkingStep(reasoning?: string | null): string {
     return "";
   }
 
-  return reasoning
+  const summary = reasoning
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
@@ -461,6 +461,9 @@ function summarizeCollapsedThinkingStep(reasoning?: string | null): string {
     .replace(/[#>*_\-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  return summary.length > COLLAPSED_THINKING_SUMMARY_MAX_CHARS
+    ? `${summary.slice(0, COLLAPSED_THINKING_SUMMARY_MAX_CHARS).trimEnd()}...`
+    : summary;
 }
 
 function ToolCall({
