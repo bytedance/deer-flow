@@ -39,7 +39,7 @@ class RunCreateRequest(BaseModel):
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
     metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
-    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
+    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.). May include client capabilities under context.client.")
     webhook: str | None = Field(default=None, description="Completion callback URL")
     checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")

@@ -115,6 +115,42 @@ nested subagent graphs.
 - `thinking_enabled` (boolean): Enable extended thinking for supported models
 - `is_plan_mode` (boolean): Enable TodoList middleware for task tracking
 
+**Client Context:**
+
+Clients may describe their output capabilities under top-level `context.client`.
+The gateway keeps only the prompt-relevant, non-sensitive fields (`name`,
+`capabilities`, and `preferences`) and places the sanitized value in the run
+runtime context. The agent may also receive a compact hidden
+`<client_context>` reminder so skills can choose an output shape that fits the
+calling client.
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Analyze this dataset"
+      }
+    ]
+  },
+  "context": {
+    "client": {
+      "name": "custom-analytics-frontend",
+      "capabilities": {
+        "artifacts": true,
+        "csv_download": true,
+        "charts": true
+      },
+      "preferences": {
+        "csv": "present",
+        "chart": "present"
+      }
+    }
+  }
+}
+```
+
 **Response:** Server-Sent Events (SSE) stream
 
 ```

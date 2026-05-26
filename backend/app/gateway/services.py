@@ -33,6 +33,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.runs.naming import resolve_root_run_name
 
 logger = logging.getLogger(__name__)
@@ -140,9 +141,22 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
-    see issue #2677)."""
+    see issue #2677).
+
+    Client capability context is runtime-only: it is sanitized and copied into
+    ``config['context']['client']`` but never into ``configurable``.
+    """
+    existing_runtime_context = config.get("context")
+    if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
+        existing_client_context = sanitize_client_context(existing_runtime_context.get("client"))
+        if existing_client_context is None:
+            existing_runtime_context.pop("client", None)
+        else:
+            existing_runtime_context["client"] = existing_client_context
+
     if not context:
         return
+
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -151,6 +165,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+
+    client_context = sanitize_client_context(context.get("client"))
+    if client_context is not None and isinstance(runtime_context, dict):
+        runtime_context.setdefault("client", client_context)
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
