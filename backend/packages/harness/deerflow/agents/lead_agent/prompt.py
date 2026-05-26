@@ -542,6 +542,14 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs`
+- File Editing Workflow: When revising an existing file, prefer
+  `str_replace` over `write_file` — it sends only the diff and avoids
+  re-emitting the whole file (mirrors Claude Code's Edit and Codex's
+  apply_patch). When writing long new content from scratch, split it
+  into sections: the first `write_file` call creates the file, then use
+  `write_file` with append=True to extend it section by section. This
+  keeps each tool call small and avoids mid-stream chunk-gap timeouts
+  on oversized single-shot writes. (See issue #3189.)  
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
 - Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
