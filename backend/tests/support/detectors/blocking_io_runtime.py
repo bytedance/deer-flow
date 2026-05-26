@@ -14,15 +14,26 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from blockbuster import BlockBuster, BlockingError
+from blockbuster import BlockBuster, BlockBusterFunction, BlockingError
 
 _SCANNED_MODULES: tuple[str, ...] = ("app", "deerflow")
+
+# Add DeerFlow-local rules here only when Blockbuster's default rule set misses
+# a generic blocking primitive used by production code. If a path is invisible
+# because no test exercises it, add a production-path runtime anchor instead.
+_PROJECT_BLOCKING_RULES: tuple[tuple[str, BlockBusterFunction], ...] = ()
+
+
+def _install_project_rules(bb: BlockBuster) -> None:
+    for name, rule in _PROJECT_BLOCKING_RULES:
+        bb.functions[name] = rule
 
 
 @contextmanager
 def detect_blocking_io_strict() -> Iterator[BlockBuster]:
     """Activate Blockbuster scoped to app.* and deerflow.* callers only."""
     bb = BlockBuster(scanned_modules=list(_SCANNED_MODULES))
+    _install_project_rules(bb)
     try:
         bb.activate()
         yield bb
