@@ -39,10 +39,38 @@ class AioSandbox(Sandbox):
         self._client = AioSandboxClient(base_url=base_url, timeout=600)
         self._home_dir = home_dir
         self._lock = threading.Lock()
+        self._closed = False
 
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def close(self) -> None:
+        """Best-effort close of the host-side HTTP client owned by this sandbox.
+
+        The agent_sandbox client wraps an ``httpx.Client`` (via ``SyncClientWrapper``).
+        Closing it releases pooled sockets so long-running provider lifecycles
+        do not accumulate unreclaimed host-side resources (#2872). Idempotent
+        and non-fatal: failures during teardown are logged and swallowed so
+        provider/backend cleanup can continue.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        client = getattr(self, "_client", None)
+        if client is None:
+            return
+
+        try:
+            wrapper = getattr(client, "_client_wrapper", None)
+            httpx_client = getattr(wrapper, "httpx_client", None) if wrapper is not None else None
+            if httpx_client is not None and hasattr(httpx_client, "close"):
+                httpx_client.close()
+            elif hasattr(client, "close"):
+                client.close()
+        except Exception as e:
+            logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
 
     @property
     def home_dir(self) -> str:

@@ -318,3 +318,53 @@ class TestDownloadFile:
         result = sandbox.download_file("/mnt/user-data/outputs/single.bin")
 
         assert result == b"single-chunk"
+
+
+class TestClose:
+    """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
+
+    def test_close_calls_underlying_httpx_client(self, sandbox):
+        """close() should close the wrapped httpx_client owned by the agent_sandbox client."""
+        httpx_client = MagicMock()
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+
+        sandbox.close()
+
+        httpx_client.close.assert_called_once_with()
+
+    def test_close_is_idempotent(self, sandbox):
+        """Calling close() multiple times must close the underlying client at most once."""
+        httpx_client = MagicMock()
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+
+        sandbox.close()
+        sandbox.close()
+        sandbox.close()
+
+        assert httpx_client.close.call_count == 1
+
+    def test_close_swallows_exceptions(self, sandbox, caplog):
+        """close() must be best-effort: client errors are logged but never raised."""
+        httpx_client = MagicMock()
+        httpx_client.close.side_effect = RuntimeError("teardown boom")
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+
+        with caplog.at_level("WARNING"):
+            sandbox.close()
+
+        assert "Error closing AioSandbox client" in caplog.text
+
+    def test_close_falls_back_to_client_close(self, sandbox):
+        """If no nested wrapper.httpx_client, close() should call the client's own close()."""
+        # Replace the mocked client with a stub that exposes only top-level close()
+        client = MagicMock(spec=["close"])
+        sandbox._client = client
+
+        sandbox.close()
+
+        client.close.assert_called_once_with()
+
+    def test_close_when_no_close_attr_does_not_raise(self, sandbox):
+        """A client without any close attribute must not crash close()."""
+        sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
+        sandbox.close()  # must not raise
