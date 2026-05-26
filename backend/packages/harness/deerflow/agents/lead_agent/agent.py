@@ -379,14 +379,11 @@ def _load_tenant_mcp_configs(tenant_id: str) -> dict[str, dict] | None:
             return await repo.list_by_tenant(tenant_id, include_disabled=False)
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
+            asyncio.get_running_loop()
+            import concurrent.futures
 
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    servers = executor.submit(asyncio.run, _fetch()).result()
-            else:
-                servers = loop.run_until_complete(_fetch())
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                servers = executor.submit(asyncio.run, _fetch()).result()
         except RuntimeError:
             servers = asyncio.run(_fetch())
 
@@ -447,14 +444,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         import asyncio
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
+            asyncio.get_running_loop()
+            import concurrent.futures
 
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    tc = executor.submit(asyncio.run, _check_tenant()).result()
-            else:
-                tc = loop.run_until_complete(_check_tenant())
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                tc = executor.submit(asyncio.run, _check_tenant()).result()
         except RuntimeError:
             tc = asyncio.run(_check_tenant())
 

@@ -535,6 +535,8 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
     """Get memory context for injection into system prompt.
 
+    Merges User Memory and Session Memory into a single context block.
+
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
@@ -544,7 +546,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     try:
-        from deerflow.agents.memory import format_memory_for_injection, get_memory_data
+        from deerflow.agents.memory.retrieval import compose_memory_for_prompt
         from deerflow.runtime.user_context import get_effective_user_id
 
         if app_config is None:
@@ -555,10 +557,29 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             config = app_config.memory
 
         if not config.enabled or not config.injection_enabled:
-            return ""
+            from deerflow.config.session_memory_config import get_session_memory_config
 
-        memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+            session_cfg = get_session_memory_config()
+            if not session_cfg.enabled or not session_cfg.injection_enabled:
+                return ""
+
+        thread_id = None
+        try:
+            from langgraph.config import get_config
+
+            cfg = get_config()
+            thread_id = cfg.get("configurable", {}).get("thread_id")
+        except Exception:
+            pass
+
+        user_id = get_effective_user_id()
+        memory_content = compose_memory_for_prompt(
+            thread_id=thread_id or "",
+            user_id=user_id,
+            agent_name=agent_name,
+            user_memory_tokens=config.max_injection_tokens,
+            memory_config=config,
+        )
 
         if not memory_content.strip():
             return ""

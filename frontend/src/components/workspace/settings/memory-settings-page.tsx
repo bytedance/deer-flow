@@ -22,8 +22,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { env } from "@/env";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -39,10 +41,13 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import { useMemoryEventSubscription } from "@/core/memory/use-memory-events";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
+import { DomainMemoryPanel } from "./domain-memory-panel";
+import { SessionMemoryPanel } from "./session-memory-panel";
 import { SettingsSection } from "./settings-section";
 
 type MemoryViewFilter = "all" | "facts" | "summaries";
@@ -275,7 +280,22 @@ function upperFirst(str: string) {
 
 export function MemorySettingsPage() {
   const { t } = useI18n();
+
+  if (env.NEXT_PUBLIC_MEMORY_UI_ENABLED === "false") {
+    return (
+      <SettingsSection
+        title={t.settings.memory.title}
+        description={t.settings.memory.description}
+      >
+        <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+          Memory UI is disabled.
+        </div>
+      </SettingsSection>
+    );
+  }
+
   const { memory, isLoading, error } = useMemory();
+  useMemoryEventSubscription();
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
@@ -291,6 +311,12 @@ export function MemorySettingsPage() {
   );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
+  const [visibleLayers, setVisibleLayers] = useState<string[]>([
+    "user",
+    "session",
+    "domain",
+  ]);
+  const [activeTab, setActiveTab] = useState("user");
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
@@ -537,6 +563,38 @@ export function MemorySettingsPage() {
         title={t.settings.memory.title}
         description={t.settings.memory.description}
       >
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <TabsList>
+              {visibleLayers.includes("user") && (
+                <TabsTrigger value="user">User Memory</TabsTrigger>
+              )}
+              {visibleLayers.includes("session") && (
+                <TabsTrigger value="session">Session Memory</TabsTrigger>
+              )}
+              {visibleLayers.includes("domain") && (
+                <TabsTrigger value="domain">Domain Memory</TabsTrigger>
+              )}
+            </TabsList>
+            <ToggleGroup
+              type="multiple"
+              value={visibleLayers}
+              onValueChange={(values) => {
+                if (values.length === 0) return;
+                setVisibleLayers(values);
+                if (!values.includes(activeTab)) {
+                  setActiveTab(values[0]);
+                }
+              }}
+              variant="outline"
+            >
+              <ToggleGroupItem value="user">User</ToggleGroupItem>
+              <ToggleGroupItem value="session">Session</ToggleGroupItem>
+              <ToggleGroupItem value="domain">Domain</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+
+          <TabsContent value="user">
         {isLoading ? (
           <div className="text-muted-foreground text-sm">
             {t.common.loading}
@@ -736,6 +794,16 @@ export function MemorySettingsPage() {
             ) : null}
           </div>
         )}
+          </TabsContent>
+
+          <TabsContent value="session">
+            <SessionMemoryPanel />
+          </TabsContent>
+
+          <TabsContent value="domain">
+            <DomainMemoryPanel />
+          </TabsContent>
+        </Tabs>
       </SettingsSection>
 
       <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>

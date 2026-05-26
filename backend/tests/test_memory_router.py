@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
+from deerflow.config.memory_api_config import MemoryApiConfig, set_memory_api_config
 
 
 def _sample_memory(facts: list[dict] | None = None) -> dict:
@@ -303,3 +304,18 @@ def test_update_memory_fact_route_returns_specific_error_for_invalid_confidence(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid confidence value; must be between 0 and 1."
+
+
+def test_memory_api_returns_503_when_disabled() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    original_config = memory.get_memory_api_config()
+
+    try:
+        set_memory_api_config(MemoryApiConfig(enabled=False))
+        with TestClient(app) as client:
+            response = client.get("/api/memory/export")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Memory API is disabled"
+    finally:
+        set_memory_api_config(original_config)

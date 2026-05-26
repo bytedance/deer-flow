@@ -160,6 +160,77 @@ Rules:
 Return ONLY valid JSON."""
 
 
+# Prompt template for updating session memory (thread-scoped)
+SESSION_MEMORY_UPDATE_PROMPT = """You are a session memory management system. Your task is to analyze a conversation and update the thread's session memory.
+
+Current Session Memory State:
+<current_session_memory>
+{current_memory}
+</current_session_memory>
+
+New Conversation to Process:
+<conversation>
+{conversation}
+</conversation>
+
+Instructions:
+1. Analyze the conversation for thread-specific context and important facts
+2. Update the session_context summary if the conversation reveals new thread purpose or key decisions
+3. Extract relevant facts that are specific to this thread (not long-term user preferences)
+4. Remove facts that are contradicted by new information
+
+Before extracting facts, perform a structured reflection:
+1. Thread Purpose: What is the main goal or topic of this thread?
+2. Key Decisions: Were any important decisions made in this conversation?
+3. Error/Retry Detection: Did the agent encounter errors or get corrected?
+   If yes, record the correct approach as a high-confidence fact with category "correction".
+4. Session-Specific Context: What information would help maintain continuity if messages are summarized?
+
+{correction_hint}
+
+Session Context Guidelines:
+- sessionContext: High-level summary of thread purpose and key decisions (2-4 sentences)
+  Example: "User is debugging authentication issue in staging environment. JWT token expiration was identified as root cause. Solution involves extending token lifetime to 24 hours."
+  Update when: New major decisions are made, thread purpose shifts, or key problems are solved
+  Include: Thread goal, key findings, decisions made, current status
+
+Facts Extraction (Thread-Scoped):
+- Extract facts specific to this conversation thread
+- Include: technical details, constraints, decisions, error patterns
+- Exclude: long-term user preferences (those belong in User Memory)
+- Categories:
+  * context: Thread-specific background (project name, environment, issue ID)
+  * decision: Choices made during this thread (approach selected, tool chosen)
+  * constraint: Limitations discovered (API rate limits, data format requirements)
+  * correction: Explicit agent mistakes or user corrections in this thread
+  * progress: Milestones reached, steps completed
+- Confidence levels:
+  * 0.9-1.0: Explicitly stated facts
+  * 0.7-0.8: Strongly implied from context
+  * 0.5-0.6: Inferred patterns (use sparingly)
+
+Output Format (JSON):
+{{
+  "sessionContext": {{ "summary": "...", "shouldUpdate": true/false }},
+  "newFacts": [
+    {{ "content": "...", "category": "context|decision|constraint|correction|progress", "confidence": 0.0-1.0 }}
+  ],
+  "factsToRemove": ["fact_id_1", "fact_id_2"]
+}}
+
+Important Rules:
+- Only set shouldUpdate=true if there's meaningful new information about thread purpose
+- Session context should be concise but capture the thread's essence
+- Extract facts that would be lost if messages are summarized
+- Use category "correction" for explicit mistakes; assign confidence >= 0.95 when explicit
+- Include "sourceError" only for explicit correction facts when the prior mistake is clearly stated
+- Remove facts contradicted by new information
+- Focus on information useful for maintaining thread continuity
+- Do NOT record file upload events (session-specific and ephemeral)
+
+Return ONLY valid JSON, no explanation or markdown."""
+
+
 def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
     """Count tokens in text using tiktoken.
 

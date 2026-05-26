@@ -52,3 +52,48 @@ export interface UserMemory {
   };
   facts: MemoryFact[];
 }
+
+export interface SessionFact {
+  id: string;
+  content: string;
+  category: string;
+  confidence: number;
+  created_at: string;
+  source_error: string | null;
+}
+
+export interface SessionMemory {
+  thread_id: string;
+  facts: SessionFact[];
+  session_context: Record<string, unknown>;
+}
+
+export interface DomainFact {
+  id: string;
+  content: string;
+  domain: string;
+  entity_id: string;
+  confidence: number;
+  created_at: string;
+  similarity_score: number;
+  adjusted_score: number;
+}
+
+export interface DomainFactCreateInput {
+  content: string;
+  domain: string;
+  entity_id: string;
+  confidence: number;
+}
+
+export interface AuditEntry {
+  id: number;
+  tenant_id: string;
+  user_id: string;
+  action: string;
+  layer: string;
+  fact_id: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  created_at: string;
+}

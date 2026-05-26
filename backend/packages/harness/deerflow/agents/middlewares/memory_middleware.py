@@ -1,5 +1,6 @@
 """Middleware for memory mechanism."""
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, override
 
@@ -10,13 +11,33 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory.session_queue import get_session_memory_queue
+from deerflow.agents.memory.domain_queue import get_domain_memory_queue
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.session_memory_config import get_session_memory_config
+from deerflow.config.domain_memory_config import get_domain_memory_config
+from deerflow.config.tenant import get_current_tenant_id
+from deerflow.memory_events import get_memory_event_bus
 from deerflow.runtime.user_context import get_effective_user_id
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_sse(tenant_id: str, layer: str, thread_id: str, user_id: str | None) -> None:
+    """Fire-and-forget SSE event for memory queue activity."""
+    try:
+        loop = asyncio.get_running_loop()
+        bus = get_memory_event_bus()
+        loop.create_task(bus.publish(
+            tenant_id=tenant_id,
+            event_type="memory_updated",
+            data={"layer": layer, "action": "queued", "fact_id": "", "user_id": user_id, "thread_id": thread_id},
+        ))
+    except RuntimeError:
+        pass
 
 
 class MemoryMiddlewareState(AgentState):
@@ -106,5 +127,36 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
         )
+        tenant_id = get_current_tenant_id()
+        _emit_sse(tenant_id, "user", thread_id, user_id)
+
+        session_config = get_session_memory_config()
+        if session_config.enabled:
+            try:
+                session_queue = get_session_memory_queue()
+                session_queue.add(
+                    thread_id=thread_id,
+                    messages=filtered_messages,
+                    user_id=user_id,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                )
+                _emit_sse(tenant_id, "session", thread_id, user_id)
+            except Exception:
+                logger.exception("Failed to queue session memory update for thread %s", thread_id)
+
+        domain_config = get_domain_memory_config()
+        if domain_config.enabled:
+            try:
+                domain_queue = get_domain_memory_queue()
+                domain_queue.add(
+                    thread_id=thread_id,
+                    messages=filtered_messages,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+                _emit_sse(tenant_id, "domain", thread_id, user_id)
+            except Exception:
+                logger.exception("Failed to queue domain memory update for thread %s", thread_id)
 
         return None

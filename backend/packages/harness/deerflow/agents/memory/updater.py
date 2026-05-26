@@ -13,12 +13,17 @@ from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
+    SESSION_MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
 from deerflow.agents.memory.storage import (
     create_empty_memory,
     get_memory_storage,
     utc_now_iso_z,
+)
+from deerflow.agents.memory.session_storage import (
+    create_empty_session_memory,
+    get_session_storage,
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
@@ -100,6 +105,7 @@ def create_memory_fact(
     agent_name: str | None = None,
     *,
     user_id: str | None = None,
+    source: str = "manual",
 ) -> dict[str, Any]:
     """Create a new fact and persist the updated memory data."""
     normalized_content = content.strip()
@@ -119,7 +125,7 @@ def create_memory_fact(
             "category": normalized_category,
             "confidence": validated_confidence,
             "createdAt": now,
-            "source": "manual",
+            "source": source,
         }
     )
     updated_memory["facts"] = facts
@@ -499,6 +505,251 @@ class MemoryUpdater:
             user_id=user_id,
         )
 
+    def _prepare_session_update_prompt(
+        self,
+        messages: list[Any],
+        thread_id: str,
+        correction_detected: bool,
+        reinforcement_detected: bool,
+        user_id: str | None = None,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Load session memory and build the update prompt for a conversation."""
+        from deerflow.config.session_memory_config import get_session_memory_config
+
+        config = get_session_memory_config()
+        if not config.enabled or not messages:
+            return None
+
+        session_storage = get_session_storage()
+        if session_storage is None:
+            logger.debug("Session storage not available, skipping session memory update")
+            return None
+
+        current_memory = session_storage.load(thread_id, user_id=user_id)
+        conversation_text = format_conversation_for_update(messages)
+        if not conversation_text.strip():
+            return None
+
+        correction_hint = self._build_correction_hint(
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+        )
+        prompt = SESSION_MEMORY_UPDATE_PROMPT.format(
+            current_memory=json.dumps(current_memory, indent=2),
+            conversation=conversation_text,
+            correction_hint=correction_hint,
+        )
+        return current_memory, prompt
+
+    def _finalize_session_update(
+        self,
+        current_memory: dict[str, Any],
+        response_content: Any,
+        thread_id: str,
+        user_id: str | None = None,
+    ) -> bool:
+        """Parse the model response, apply updates, and persist session memory."""
+        response_text = _extract_text(response_content).strip()
+
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+        update_data = json.loads(response_text)
+        updated_memory = self._apply_session_updates(copy.deepcopy(current_memory), update_data, thread_id)
+        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+
+        session_storage = get_session_storage()
+        if session_storage is None:
+            logger.warning("Session storage not available, cannot save session memory")
+            return False
+
+        return session_storage.save(updated_memory, thread_id, user_id=user_id)
+
+    def _apply_session_updates(
+        self,
+        current_memory: dict[str, Any],
+        update_data: dict[str, Any],
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Apply LLM-generated updates to session memory.
+
+        Args:
+            current_memory: Current session memory data.
+            update_data: Updates from LLM.
+            thread_id: Thread ID for tracking source.
+
+        Returns:
+            Updated session memory data.
+        """
+        from deerflow.config.session_memory_config import get_session_memory_config
+
+        config = get_session_memory_config()
+        now = utc_now_iso_z()
+
+        # Update session context
+        session_context_update = update_data.get("sessionContext", {})
+        if session_context_update.get("shouldUpdate") and session_context_update.get("summary"):
+            current_memory["session_context"] = {
+                "summary": session_context_update["summary"],
+                "updatedAt": now,
+            }
+
+        # Remove facts
+        facts_to_remove = set(update_data.get("factsToRemove", []))
+        if facts_to_remove:
+            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
+
+        # Add new facts
+        existing_fact_keys = {
+            fact_key
+            for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", []))
+            if fact_key is not None
+        }
+        new_facts = update_data.get("newFacts", [])
+        for fact in new_facts:
+            confidence = fact.get("confidence", 0.5)
+            if confidence >= config.fact_confidence_threshold:
+                raw_content = fact.get("content", "")
+                if not isinstance(raw_content, str):
+                    continue
+                normalized_content = raw_content.strip()
+                fact_key = _fact_content_key(normalized_content)
+                if fact_key is not None and fact_key in existing_fact_keys:
+                    continue
+
+                fact_entry = {
+                    "id": f"fact_{uuid.uuid4().hex[:8]}",
+                    "content": normalized_content,
+                    "category": fact.get("category", "context"),
+                    "confidence": confidence,
+                    "createdAt": now,
+                    "source": thread_id,
+                }
+                source_error = fact.get("sourceError")
+                if isinstance(source_error, str):
+                    normalized_source_error = source_error.strip()
+                    if normalized_source_error:
+                        fact_entry["sourceError"] = normalized_source_error
+                current_memory["facts"].append(fact_entry)
+                if fact_key is not None:
+                    existing_fact_keys.add(fact_key)
+
+        # Enforce max facts limit
+        if len(current_memory["facts"]) > config.max_facts:
+            current_memory["facts"] = sorted(
+                current_memory["facts"],
+                key=lambda f: f.get("confidence", 0),
+                reverse=True,
+            )[: config.max_facts]
+
+        return current_memory
+
+    def _do_update_session_memory_sync(
+        self,
+        messages: list[Any],
+        thread_id: str,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+    ) -> bool:
+        """Pure-sync session memory update using ``model.invoke()``."""
+        try:
+            prepared = self._prepare_session_update_prompt(
+                messages=messages,
+                thread_id=thread_id,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+                user_id=user_id,
+            )
+            if prepared is None:
+                return False
+
+            current_memory, prompt = prepared
+            model = self._get_model()
+            response = model.invoke(prompt, config={"run_name": "session_memory_agent"})
+            return self._finalize_session_update(
+                current_memory=current_memory,
+                response_content=response.content,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse LLM response for session memory update: %s", e)
+            return False
+        except Exception as e:
+            logger.exception("Session memory update failed: %s", e)
+            return False
+
+    async def aupdate_session_memory(
+        self,
+        messages: list[Any],
+        thread_id: str,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+    ) -> bool:
+        """Update session memory asynchronously by delegating to the sync path."""
+        return await asyncio.to_thread(
+            self._do_update_session_memory_sync,
+            messages=messages,
+            thread_id=thread_id,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            user_id=user_id,
+        )
+
+    def update_session_memory(
+        self,
+        messages: list[Any],
+        thread_id: str,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+    ) -> bool:
+        """Synchronously update session memory using the sync LLM path.
+
+        When called from within a running event loop, the blocking sync call
+        is offloaded to a thread pool so the caller's loop is not blocked.
+
+        Args:
+            messages: List of conversation messages.
+            thread_id: Thread ID for session memory scope.
+            correction_detected: Whether recent turns include an explicit correction signal.
+            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            user_id: If provided, scopes memory to a specific user.
+
+        Returns:
+            True if update was successful, False otherwise.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            try:
+                future = _SYNC_MEMORY_UPDATER_EXECUTOR.submit(
+                    self._do_update_session_memory_sync,
+                    messages=messages,
+                    thread_id=thread_id,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                )
+                return future.result()
+            except Exception:
+                logger.exception("Failed to offload session memory update to executor")
+                return False
+
+        return self._do_update_session_memory_sync(
+            messages=messages,
+            thread_id=thread_id,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            user_id=user_id,
+        )
+
     def _apply_updates(
         self,
         current_memory: dict[str, Any],
@@ -609,3 +860,137 @@ def update_memory_from_conversation(
     """
     updater = MemoryUpdater()
     return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)
+
+
+def update_session_from_conversation(
+    messages: list[Any],
+    thread_id: str,
+    correction_detected: bool = False,
+    reinforcement_detected: bool = False,
+    user_id: str | None = None,
+) -> bool:
+    """Convenience function to update session memory from a conversation.
+
+    Args:
+        messages: List of conversation messages.
+        thread_id: Thread ID for session memory scope.
+        correction_detected: Whether recent turns include an explicit correction signal.
+        reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+        user_id: If provided, scopes memory to a specific user.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    updater = MemoryUpdater()
+    return updater.update_session_memory(messages, thread_id, correction_detected, reinforcement_detected, user_id=user_id)
+
+
+def extract_domain_facts(
+    messages: list[Any],
+    tenant_id: str,
+    model: Any | None = None,
+    confidence_threshold: float = 0.8,
+) -> list[dict[str, Any]]:
+    """Extract domain-specific facts from conversation using LLM.
+
+    Args:
+        messages: List of conversation messages.
+        tenant_id: Tenant ID for fact storage.
+        model: Optional LLM model to use. If None, uses default.
+        confidence_threshold: Minimum confidence for fact storage.
+
+    Returns:
+        List of extracted facts with domain, entity_id, content, and confidence.
+    """
+    from deerflow.agents.memory.domain_prompt import (
+        DOMAIN_FACT_EXTRACTION_PROMPT,
+        format_conversation_for_domain,
+    )
+    from deerflow.agents.memory.domain_storage import get_domain_storage
+
+    if not messages:
+        return []
+
+    conversation_text = format_conversation_for_domain(messages)
+    if not conversation_text.strip():
+        return []
+
+    prompt = DOMAIN_FACT_EXTRACTION_PROMPT.format(conversation=conversation_text)
+
+    try:
+        if model is None:
+            updater = MemoryUpdater()
+            model = updater._get_model()
+
+        response = model.invoke(prompt, config={"run_name": "domain_fact_extraction"})
+        response_content = response.content
+
+        if isinstance(response_content, str) and response_content.strip().startswith("```"):
+            response_content = re.sub(r"^```\w*\n?", "", response_content)
+            response_content = re.sub(r"\n?```$", "", response_content)
+
+        data = json.loads(response_content)
+        raw_facts = data.get("facts", [])
+
+        storage = get_domain_storage()
+        if storage is None:
+            logger.warning("Domain storage not available, skipping fact storage")
+            return []
+
+        stored_facts = []
+        for fact in raw_facts:
+            confidence = fact.get("confidence", 0.5)
+            if confidence < confidence_threshold:
+                continue
+
+            domain = fact.get("domain", "")
+            entity_id = fact.get("entity_id", "")
+            content = fact.get("content", "")
+
+            if not domain or not entity_id or not content:
+                continue
+
+            fact_id = storage.store_fact(
+                tenant_id=tenant_id,
+                domain=domain,
+                entity_id=entity_id,
+                content=content,
+                confidence=confidence,
+            )
+
+            if fact_id:
+                stored_facts.append({
+                    "id": fact_id,
+                    "domain": domain,
+                    "entity_id": entity_id,
+                    "content": content,
+                    "confidence": confidence,
+                })
+
+        return stored_facts
+
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse LLM response for domain fact extraction: %s", e)
+        return []
+    except Exception as e:
+        logger.exception("Domain fact extraction failed: %s", e)
+        return []
+
+
+def update_domain_from_conversation(
+    messages: list[Any],
+    tenant_id: str,
+    user_id: str | None = None,
+) -> bool:
+    """Convenience function to extract and store domain facts from a conversation.
+
+    Args:
+        messages: List of conversation messages.
+        tenant_id: Tenant ID for fact storage.
+        user_id: Optional user ID (not used for domain memory scope).
+
+    Returns:
+        True if at least one fact was stored, False otherwise.
+    """
+    facts = extract_domain_facts(messages, tenant_id)
+    return len(facts) > 0
