@@ -466,6 +466,13 @@ tools:
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
 
+  - name: dify_chat
+    group: community
+    use: zens.community.dify.tools:dify_chat_tool
+    # api_key: $DIFY_API_KEY  # Required: your Dify API key
+    # app_id: app-ZzvO2ic3KveYOeQcI4xYT8Qq  # Optional: defaults to this app
+    # base_url: http://localhost:8000  # Optional: defaults to localhost:8000
+
   # File operations tools
   - name: ls
     group: file:read
