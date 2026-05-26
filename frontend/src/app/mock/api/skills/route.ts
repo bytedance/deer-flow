@@ -8,6 +8,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "frontend-design",
@@ -16,6 +17,7 @@ export function GET() {
         license: "Complete terms in LICENSE.txt",
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "github-deep-research",
@@ -24,6 +26,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "image-generation",
@@ -32,6 +35,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "podcast-generation",
@@ -40,6 +44,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "ppt-generation",
@@ -48,6 +53,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "skill-creator",
@@ -56,6 +62,7 @@ export function GET() {
         license: "Complete terms in LICENSE.txt",
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "vercel-deploy",
@@ -64,6 +71,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "video-generation",
@@ -72,6 +80,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
       {
         name: "web-design-guidelines",
@@ -80,6 +89,7 @@ export function GET() {
         license: null,
         category: "public",
         enabled: true,
+        tier: "foundation",
       },
     ],
   });

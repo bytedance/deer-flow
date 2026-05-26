@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config
@@ -14,7 +14,7 @@ from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
-from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.skills.types import SKILL_MD_FILE, SkillCategory, SkillTier
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class SkillResponse(BaseModel):
     license: str | None = Field(None, description="License information")
     category: SkillCategory = Field(..., description="Category of the skill (public or custom)")
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
+    tier: SkillTier = Field(default=SkillTier.FOUNDATION, description="Product tier (core-industrial or foundation)")
 
 
 class SkillsListResponse(BaseModel):
@@ -74,6 +75,19 @@ class SkillRollbackRequest(BaseModel):
     history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
 
 
+class SkillTierUpdateRequest(BaseModel):
+    """Request model for updating a skill's tier."""
+
+    tier: SkillTier = Field(..., description="Product tier to assign (core-industrial or foundation)")
+
+
+class SkillBatchTierRequest(BaseModel):
+    """Request model for batch-updating skill tiers."""
+
+    skill_names: list[str] = Field(..., description="List of skill names to update")
+    tier: SkillTier = Field(..., description="Product tier to assign to all listed skills")
+
+
 def _skill_to_response(skill: Skill) -> SkillResponse:
     """Convert a Skill object to a SkillResponse."""
     return SkillResponse(
@@ -82,7 +96,22 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
         license=skill.license,
         category=skill.category,
         enabled=skill.enabled,
+        tier=skill.tier,
     )
+
+
+def _write_extensions_config(config_path: Path, extensions_config: ExtensionsConfig) -> None:
+    """Persist extensions_config to disk, preserving tier labels."""
+    config_data = {
+        "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
+        "skills": {
+            name: {k: v for k, v in {"enabled": sc.enabled, "tier": sc.tier}.items() if v is not None}
+            for name, sc in extensions_config.skills.items()
+        },
+    }
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+        f.write("\n")
 
 
 @router.get(
@@ -91,9 +120,14 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
     summary="List All Skills",
     description="Retrieve a list of all available skills from both public and custom directories.",
 )
-async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+async def list_skills(
+    tier: SkillTier | None = Query(default=None, description="Filter skills by tier (core-industrial or foundation)"),
+    config: AppConfig = Depends(get_config),
+) -> SkillsListResponse:
     try:
         skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        if tier is not None:
+            skills = [s for s in skills if s.tier == tier]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
@@ -278,6 +312,51 @@ async def rollback_custom_skill(skill_name: str, request: SkillRollbackRequest, 
         raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
 
 
+@router.put(
+    "/skills/batch-tier",
+    response_model=SkillsListResponse,
+    summary="Batch Update Skill Tiers",
+    description="Update the product tier for multiple skills at once. MUST be defined before /skills/{skill_name} to avoid route conflict.",
+)
+async def batch_update_skill_tier(request: SkillBatchTierRequest, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+    try:
+        if not request.skill_names:
+            raise HTTPException(status_code=400, detail="skill_names must not be empty")
+
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        skill_map = {s.name: s for s in skills}
+
+        not_found = [name for name in request.skill_names if name not in skill_map]
+        if not_found:
+            raise HTTPException(status_code=404, detail=f"Skills not found: {', '.join(not_found)}")
+
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None:
+            config_path = Path.cwd().parent / "extensions_config.json"
+
+        extensions_config = get_extensions_config()
+        for name in request.skill_names:
+            existing = extensions_config.skills.get(name)
+            extensions_config.skills[name] = SkillStateConfig(
+                enabled=existing.enabled if existing else True,
+                tier=request.tier.value,
+            )
+        _write_extensions_config(config_path, extensions_config)
+
+        reload_extensions_config()
+        await refresh_skills_system_prompt_cache_async()
+
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        updated = [s for s in skills if s.name in set(request.skill_names)]
+        logger.info("Batch tier update: %d skills → %s", len(updated), request.tier.value)
+        return SkillsListResponse(skills=[_skill_to_response(s) for s in updated])
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to batch update skill tiers: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to batch update skill tiers: {e!s}")
+
+
 @router.get(
     "/skills/{skill_name}",
     response_model=SkillResponse,
@@ -322,15 +401,13 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
         extensions_config = get_extensions_config()
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
+        existing = extensions_config.skills.get(skill_name)
+        extensions_config.skills[skill_name] = SkillStateConfig(
+            enabled=request.enabled,
+            tier=existing.tier if existing else None,
+        )
 
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        _write_extensions_config(config_path, extensions_config)
 
         logger.info(f"Skills configuration updated and saved to: {config_path}")
         reload_extensions_config()
@@ -350,3 +427,46 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
     except Exception as e:
         logger.error(f"Failed to update skill {skill_name}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update skill: {str(e)}")
+
+
+@router.put(
+    "/skills/{skill_name}/tier",
+    response_model=SkillResponse,
+    summary="Update Skill Tier",
+    description="Update a skill's product tier (core-industrial or foundation).",
+)
+async def update_skill_tier(skill_name: str, request: SkillTierUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
+    try:
+        skill_name = skill_name.replace("\r\n", "").replace("\n", "")
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        skill = next((s for s in skills if s.name == skill_name), None)
+        if skill is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None:
+            config_path = Path.cwd().parent / "extensions_config.json"
+
+        extensions_config = get_extensions_config()
+        existing = extensions_config.skills.get(skill_name)
+        extensions_config.skills[skill_name] = SkillStateConfig(
+            enabled=existing.enabled if existing else True,
+            tier=request.tier.value,
+        )
+        _write_extensions_config(config_path, extensions_config)
+
+        reload_extensions_config()
+        await refresh_skills_system_prompt_cache_async()
+
+        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+        updated = next((s for s in skills if s.name == skill_name), None)
+        if updated is None:
+            raise HTTPException(status_code=500, detail=f"Failed to reload skill '{skill_name}' after tier update")
+
+        logger.info("Skill '%s' tier updated to %s", skill_name, request.tier.value)
+        return _skill_to_response(updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update skill tier %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update skill tier: {e!s}")

@@ -6,6 +6,7 @@ import {
   LayoutDashboardIcon,
   LogOutIcon,
   type LucideIcon,
+  SparklesIcon,
   UsersIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -28,6 +29,7 @@ export function AdminSidebar() {
     { href: "/admin/tenants", label: t.admin.tenants, icon: UsersIcon },
     { href: "/admin/usage", label: t.admin.usage, icon: GaugeIcon },
     { href: "/admin/logs", label: t.admin.logs, icon: ClipboardListIcon },
+    { href: "/admin/skills", label: "Skills", icon: SparklesIcon },
   ];
 
   return (

@@ -37,10 +37,20 @@ interface ChartBlockProps {
   };
 }
 
-const DEFAULT_COLORS = [
-  "#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#0088fe",
-  "#00c49f", "#ffbb28", "#ff8042", "#a4de6c", "#d0ed57",
+const INDUSTRIAL_COLORS = [
+  "#10b981", // 正常 - 绿色 (normal/healthy)
+  "#f59e0b", // 预警 - 黄色 (warning/caution)
+  "#ef4444", // 报警 - 红色 (alarm/critical)
+  "#3b82f6", // 信息 - 蓝色 (info/reference)
+  "#8b5cf6", // 辅助 - 紫色 (auxiliary/secondary)
+  "#06b6d4", // 数据 - 青色 (data/trend)
+  "#ec4899", // 标记 - 粉色 (marker/highlight)
+  "#84cc16", // 补充 - 黄绿 (supplementary)
+  "#f97316", // 警告 - 橙色 (caution/elevated)
+  "#6366f1", // 中性 - 靛蓝 (neutral/baseline)
 ];
+
+const DEFAULT_COLORS = INDUSTRIAL_COLORS;
 
 export default function ChartBlock({ block }: ChartBlockProps) {
   const { props } = block;

@@ -12,7 +12,7 @@ from app.gateway.auth.models import UserResponse
 from app.gateway.deps import get_local_provider, get_tenant_store, get_thread_store
 from deerflow.config.tenant_storage import TenantConfig
 from deerflow.content_safety.log_storage import AuditLogEntry, AuditLogStorage
-from deerflow.cost.storage import UsageStorage
+from deerflow.cost.storage import UsageStorage, get_usage_storage
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -64,7 +64,8 @@ def _get_cross_tenant_records(
     end_date: str | None = None,
 ) -> list:
     """Fetch usage records across all tenants (admin view)."""
-    return UsageStorage.query_all_tenants(
+    storage = get_usage_storage()
+    return storage.query_all_tenants(
         start_date=start_date, end_date=end_date,
     )
 

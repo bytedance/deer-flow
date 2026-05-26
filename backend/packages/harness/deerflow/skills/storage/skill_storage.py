@@ -236,6 +236,13 @@ class SkillStorage(ABC):
             extensions_config = ExtensionsConfig.from_file()
             for skill in skills:
                 skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
+                from deerflow.skills.types import SkillTier
+
+                raw_tier = extensions_config.get_skill_tier(skill.name)
+                try:
+                    skill.tier = SkillTier(raw_tier)
+                except ValueError:
+                    skill.tier = SkillTier.FOUNDATION
         except Exception as e:
             logger.warning("Failed to load extensions config: %s", e)
 

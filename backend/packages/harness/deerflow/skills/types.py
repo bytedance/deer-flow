@@ -16,6 +16,17 @@ class SkillCategory(StrEnum):
     CUSTOM = "custom"
 
 
+class SkillTier(StrEnum):
+    """Product tier for a skill.
+
+    - ``CORE_INDUSTRIAL``: industrial-domain skill that differentiates the product.
+    - ``FOUNDATION``: general-purpose skill available as a basic capability pack.
+    """
+
+    CORE_INDUSTRIAL = "core-industrial"
+    FOUNDATION = "foundation"
+
+
 @dataclass
 class Skill:
     """Represents a skill with its metadata and file path"""
@@ -28,6 +39,7 @@ class Skill:
     relative_path: Path  # Relative path from category root to skill directory
     category: SkillCategory  # 'public' or 'custom'
     enabled: bool = False  # Whether this skill is enabled
+    tier: SkillTier = SkillTier.FOUNDATION  # Product tier: core-industrial or foundation
 
     @property
     def skill_path(self) -> str:

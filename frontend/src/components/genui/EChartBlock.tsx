@@ -34,7 +34,7 @@ function extractTitle(option: Record<string, unknown>): string | undefined {
 
 export default function EChartBlock({ block, threadId }: EChartBlockProps) {
   const { props } = block;
-  const { option, height = 400, theme = "default", loading = false } = props;
+  const { option, height = 400, theme = "industrial", loading = false } = props;
   const capturedRef = useRef(false);
 
   const chartTitle = extractTitle(option);
@@ -68,7 +68,7 @@ export default function EChartBlock({ block, threadId }: EChartBlockProps) {
         echarts={echarts}
         option={option}
         style={{ height: `${height}px`, width: "100%" }}
-        theme={theme === "default" ? undefined : theme}
+        theme={theme === "default" ? "industrial" : theme}
         showLoading={loading}
         notMerge={true}
         lazyUpdate={true}

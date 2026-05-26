@@ -22,6 +22,8 @@ export const env = createEnv({
     NEXT_PUBLIC_BACKEND_BASE_URL: z.string().optional(),
     NEXT_PUBLIC_LANGGRAPH_BASE_URL: z.string().optional(),
     NEXT_PUBLIC_STATIC_WEBSITE_ONLY: z.string().optional(),
+    NEXT_PUBLIC_MEMORY_UI_ENABLED: z.string().optional(),
+    NEXT_PUBLIC_INDUSTRIAL_FIRST: z.string().optional(),
   },
 
   /**
@@ -35,6 +37,10 @@ export const env = createEnv({
     NEXT_PUBLIC_LANGGRAPH_BASE_URL: process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
     NEXT_PUBLIC_STATIC_WEBSITE_ONLY:
       process.env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY,
+    NEXT_PUBLIC_MEMORY_UI_ENABLED:
+      process.env.NEXT_PUBLIC_MEMORY_UI_ENABLED,
+    NEXT_PUBLIC_INDUSTRIAL_FIRST:
+      process.env.NEXT_PUBLIC_INDUSTRIAL_FIRST,
     GITHUB_OAUTH_TOKEN: process.env.GITHUB_OAUTH_TOKEN,
   },
   /**
