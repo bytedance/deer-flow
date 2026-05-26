@@ -224,7 +224,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                             session_id,
                             update.tool_call_id,
                             update.title,
-                            update.kind,
+                            getattr(update, "kind", None),
                         )
                     elif tool_call_update_cls is not None and isinstance(update, tool_call_update_cls):
                         logger.debug(
@@ -232,7 +232,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                             session_id,
                             update.tool_call_id,
                             getattr(update, "title", None),
-                            update.status,
+                            getattr(update, "status", None),
                         )
                 except Exception:
                     logger.warning("ACP session_update failed [session=%s]", session_id, exc_info=True)
