@@ -402,3 +402,38 @@ async def sse_consumer(
         if record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
+
+
+async def wait_for_run_completion(
+    bridge: StreamBridge,
+    record: RunRecord,
+    request: Request,
+    run_mgr: RunManager,
+) -> None:
+    """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+
+    The non-streaming ``/wait`` endpoints used to ``await record.task``
+    directly with no disconnect handling.  When the client (or an
+    intermediate HTTP proxy) timed out during a long tool call such as
+    ``pip install``, the handler would swallow ``CancelledError`` and
+    serialize whatever checkpoint happened to exist — masking a half-finished
+    run as a normal completion (issue #3265).
+
+    This helper consumes the same bridge that ``sse_consumer`` does so the
+    wait path shares its disconnect semantics: each wake-up polls
+    ``request.is_disconnected()``; on a real disconnect it cancels the
+    background run when ``record.on_disconnect`` is ``cancel``.  The bridge's
+    heartbeat sentinels guarantee at least one wake-up per
+    ``heartbeat_interval`` even when the agent emits no events for a while.
+    """
+    try:
+        async for entry in bridge.subscribe(record.run_id):
+            if await request.is_disconnected():
+                break
+            if entry is END_SENTINEL:
+                return
+            # Heartbeats and regular events: keep waiting for END_SENTINEL.
+    finally:
+        if record.status in (RunStatus.pending, RunStatus.running):
+            if record.on_disconnect == DisconnectMode.cancel:
+                await run_mgr.cancel(record.run_id)

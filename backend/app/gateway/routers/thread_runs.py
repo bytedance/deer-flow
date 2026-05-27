@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
-from app.gateway.services import sse_consumer, start_run
+from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -175,13 +175,12 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
     if record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
+        await wait_for_run_completion(bridge, record, request, run_mgr)
 
     checkpointer = get_checkpointer(request)
     config = {"configurable": {"thread_id": thread_id}}
