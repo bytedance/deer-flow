@@ -227,7 +227,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -314,7 +314,7 @@ def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
             parsed, _end = decoder.raw_decode(response_text[match.start() :])
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and _MEMORY_UPDATE_TOP_LEVEL_KEYS.intersection(parsed):
+        if isinstance(parsed, dict) and _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS.issubset(parsed):
             return _normalize_memory_update_data(parsed)
 
     raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)

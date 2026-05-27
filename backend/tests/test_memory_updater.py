@@ -649,6 +649,17 @@ class TestUpdateMemoryStructuredResponse:
             saved_memory = mock_storage.save.call_args.args[0]
             assert saved_memory["facts"][0]["content"] == "User prefers concise updates"
 
+    def test_ignores_unrelated_json_before_memory_update(self):
+        """Parser should not select unrelated JSON objects before the memory update."""
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9}], "factsToRemove": []}'
+        response = f'Example object: {{"user": "alice"}}\nActual memory update:\n{valid_json}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert saved_memory["facts"][0]["content"] == "Remember the actual update"
+
     def test_invalid_json_response_is_skipped_without_saving(self):
         """Truncated JSON should remain a safe skipped update, not guessed repair."""
         result, mock_storage = self._run_update_with_response('{"user": {}, "history": {}, "newFacts": [')
