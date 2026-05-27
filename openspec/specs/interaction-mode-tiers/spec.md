@@ -1,4 +1,10 @@
-## ADDED Requirements
+# interaction-mode-tiers
+
+## Purpose
+
+Defines tiered interaction modes (Basic, Pro, Ultra) for the monitoring agent, controlling the complexity of user input from step-by-step forms to natural language conversation.
+
+## Requirements
 
 ### Requirement: Basic interaction — step-by-step forms
 At Basic tier, the user SHALL interact with the monitoring agent through a fixed form sequence: device selection → analysis scope → wait for results.
