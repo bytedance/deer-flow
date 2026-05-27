@@ -151,9 +151,6 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
-
-    # ``user_id`` must be available to runtime tools/interceptors (e.g. MCP auth
-    # header injection), but it is not a configurable model/runtime tuning knob.
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 

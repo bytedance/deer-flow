@@ -606,9 +606,6 @@ class ChannelManager:
             user_layer.get("context"),
             {
                 "thread_id": thread_id,
-                # Preserve the sender identity from the inbound channel message so
-                # downstream interceptors (e.g. MCP auth header injection) don't
-                # fall back to default user context outside web auth flows.
                 "user_id": msg.user_id,
             },
         )

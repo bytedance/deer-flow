@@ -137,8 +137,6 @@ def _make_session_pool_tool(
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
-                # Preserve interceptor-injected headers for stdio MCP calls by
-                # forwarding them through MCP call meta.
                 call_kwargs: dict[str, Any] = {}
                 if request.headers:
                     call_kwargs["meta"] = {"headers": dict(request.headers)}
