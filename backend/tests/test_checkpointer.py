@@ -372,8 +372,8 @@ class TestAsyncCheckpointer:
         # Verify saver was constructed with the pool (not via from_conn_string)
         mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
         mock_saver.setup.assert_awaited_once()
-     
-    
+
+    @pytest.mark.anyio
     async def test_database_sqlite_creates_parent_dir_via_to_thread(self):
         """Unified database SQLite setup should also move path IO off the event loop."""
         from deerflow.config.database_config import DatabaseConfig
