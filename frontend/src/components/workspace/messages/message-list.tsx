@@ -18,6 +18,7 @@ import {
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
 import { partitionStandaloneBlockIds, isSubmittedBlock, filterSupersededInteractiveBlockIds } from "@/core/genui/visibility";
 import { useI18n } from "@/core/i18n/hooks";
+import { useAgent } from "@/core/agents";
 import {
   buildTokenDebugSteps,
   type TokenUsageInlineMode,
@@ -44,6 +45,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import { AssistantAvatar } from "./assistant-avatar";
 import { GenerationProcessPanel } from "./generation-process-panel";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
@@ -196,6 +198,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  agentName,
 }: {
   className?: string;
   threadId: string;
@@ -205,8 +208,10 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  agentName?: string;
 }) {
   const { t } = useI18n();
+  const { agent } = useAgent(agentName);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   // LangGraph streaming sometimes yields the same final AI message twice
@@ -1122,6 +1127,13 @@ export function MessageList({
                   group.type === "assistant" && "group/assistant-turn",
                 )}
               >
+                {group.type === "assistant" && (
+                  <AssistantAvatar
+                    icon={agent?.icon}
+                    displayName={agent?.display_name ?? agent?.name}
+                    className="mb-2"
+                  />
+                )}
                 {group.messages.map((msg) => {
                   return (
                     <MessageListItem

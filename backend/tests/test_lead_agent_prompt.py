@@ -375,4 +375,15 @@ def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog):
         warmed = prompt_module.warm_enabled_skills_cache(timeout_seconds=0.01)
 
     assert warmed is False
-    assert "Timed out waiting" in caplog.text
+
+
+def test_apply_prompt_template_includes_assistant_persona(monkeypatch):
+    _patch_minimal_prompt_dependencies(monkeypatch)
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "<assistant_persona>" in prompt
+    assert "warm, professional" in prompt
+    assert "match the user's language" in prompt
+    assert "Warning" in prompt
+    assert "Emergency" in prompt

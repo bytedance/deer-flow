@@ -28,6 +28,39 @@ from deerflow.models import create_chat_model
 logger = logging.getLogger(__name__)
 
 
+def _run_coroutine_sync(coro):
+    """Run an async coroutine from a synchronous context.
+
+    Uses a new event loop on a separate thread to avoid the
+    "asyncio.run() cannot be called from a running event loop" error
+    when called from within FastAPI/LangGraph's event loop.
+    """
+    import asyncio
+    import threading
+
+    result = None
+    exception = None
+
+    def _run():
+        nonlocal result, exception
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(coro)
+        except BaseException as e:
+            exception = e
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    thread.join()
+
+    if exception is not None:
+        raise exception
+    return result
+
+
 def _get_runtime_config(config: RunnableConfig) -> dict:
     """Merge legacy configurable options with LangGraph runtime context."""
     cfg = dict(config.get("configurable", {}) or {})
@@ -363,8 +396,6 @@ def _load_tenant_mcp_configs(tenant_id: str) -> dict[str, dict] | None:
     persistence engine is not available or no servers are configured.
     """
     try:
-        import asyncio
-
         from deerflow.persistence.engine import get_session_factory
 
         sf = get_session_factory()
@@ -378,14 +409,7 @@ def _load_tenant_mcp_configs(tenant_id: str) -> dict[str, dict] | None:
         async def _fetch():
             return await repo.list_by_tenant(tenant_id, include_disabled=False)
 
-        try:
-            asyncio.get_running_loop()
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                servers = executor.submit(asyncio.run, _fetch()).result()
-        except RuntimeError:
-            servers = asyncio.run(_fetch())
+        servers = _run_coroutine_sync(_fetch())
 
         if not servers:
             return None
@@ -441,16 +465,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         async def _check_tenant():
             return await _tenant_repo.get(tenant_id)
 
-        import asyncio
-
-        try:
-            asyncio.get_running_loop()
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                tc = executor.submit(asyncio.run, _check_tenant()).result()
-        except RuntimeError:
-            tc = asyncio.run(_check_tenant())
+        tc = _run_coroutine_sync(_check_tenant())
 
         if tc is None:
             raise PermissionError(f"Tenant {tenant_id!r} does not exist")
@@ -536,6 +551,28 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if agent_config and agent_config.exclude_tools:
         exclude_set = set(agent_config.exclude_tools)
         tools = [t for t in tools if t.name not in exclude_set]
+
+    # Prioritize industrial tools when industrial skills are enabled
+    if agent_config and agent_config.skills:
+        from deerflow.skills.storage import get_or_new_skill_storage
+        from deerflow.skills.types import SkillTier
+
+        try:
+            storage = get_or_new_skill_storage()
+            industrial_skill_names = {
+                s.name for s in storage.load_skills(enabled_only=True) if s.tier == SkillTier.CORE_INDUSTRIAL
+            }
+            has_industrial = bool(set(agent_config.skills) & industrial_skill_names)
+            if has_industrial:
+                industrial_tool_prefixes = (
+                    "device_", "ins_", "monitoring_", "diagnosis_", "vibration_",
+                    "trend_", "report_", "equipment_", "fault_",
+                )
+                industrial_tools = [t for t in tools if any(t.name.startswith(p) for p in industrial_tool_prefixes)]
+                other_tools = [t for t in tools if not any(t.name.startswith(p) for p in industrial_tool_prefixes)]
+                tools = industrial_tools + other_tools
+        except Exception:
+            pass  # Non-critical: keep original ordering on storage failure
 
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),

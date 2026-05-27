@@ -6,7 +6,9 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ErrorCategory,
     ToolErrorHandlingMiddleware,
+    _map_exception_to_category,
     build_subagent_runtime_middlewares,
 )
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
@@ -245,3 +247,55 @@ def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
     assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
+
+
+class TestErrorCategoryMapping:
+    def test_timeout_error_maps_to_timeout_category(self):
+        exc = TimeoutError("request timed out")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.timeout
+        assert "稍等" in action or "重试" in action
+
+    def test_connection_error_maps_to_network_category(self):
+        exc = ConnectionError("connection refused")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.network_issue
+        assert "网络" in action or "检查" in action
+
+    def test_permission_error_maps_to_permission_category(self):
+        exc = PermissionError("403 forbidden")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.permission_denied
+        assert "管理员" in action or "权限" in action
+
+    def test_rate_limit_error_maps_to_rate_limited_category(self):
+        exc = RuntimeError("rate limit exceeded: 429")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.rate_limited
+        assert "频繁" in action or "稍后" in action
+
+    def test_not_found_error_maps_to_data_not_found_category(self):
+        exc = FileNotFoundError("404 not found")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.data_not_found
+        assert "过期" in action or "刷新" in action
+
+    def test_unknown_error_maps_to_service_unavailable(self):
+        exc = ValueError("something went wrong")
+        category, action = _map_exception_to_category(exc)
+        assert category == ErrorCategory.service_unavailable
+        assert "重试" in action or "客服" in action
+
+    def test_tool_error_message_includes_category_and_action(self):
+        middleware = ToolErrorHandlingMiddleware()
+        req = _request(name="web_search", tool_call_id="tc-99")
+
+        def _boom(_req):
+            raise ConnectionError("network unreachable")
+
+        result = middleware.wrap_tool_call(req, _boom)
+
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert result.additional_kwargs["error_category"] == "network_issue"
+        assert "网络" in result.additional_kwargs["suggested_action"]

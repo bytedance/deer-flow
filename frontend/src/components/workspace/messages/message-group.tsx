@@ -40,7 +40,9 @@ import { useArtifacts } from "../artifacts";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
+import { findToolCallErrorInfo } from "@/core/messages/tool-errors";
 import { MarkdownContent } from "./markdown-content";
+import { ToolErrorCard } from "./tool-error-card";
 
 export function MessageGroup({
   className,
@@ -211,6 +213,7 @@ export function MessageGroup({
       <ToolCall
         key={step.id}
         {...step}
+        messages={messages}
         isLast={options?.isLast}
         isLoading={isLoading}
         tokenDebugStep={
@@ -416,6 +419,7 @@ function ToolCall({
   name,
   args,
   result,
+  messages,
   isLast = false,
   isLoading = false,
   tokenDebugStep,
@@ -425,6 +429,7 @@ function ToolCall({
   name: string;
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
+  messages: Message[];
   isLast?: boolean;
   isLoading?: boolean;
   tokenDebugStep?: TokenDebugStep;
@@ -441,6 +446,8 @@ function ToolCall({
     ) : (
       fallback
     );
+
+  const errorInfo = id ? findToolCallErrorInfo(id, messages) : null;
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -674,15 +681,14 @@ function ToolCall({
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (name === "render_ui") {
-      // The render_ui tool is implementation plumbing for GenUI blocks —
-      // operators don't need to see the tool name, only that the agent is
-      // preparing an interactive form.
       return (
         <ChainOfThoughtStep
           key={id}
           label={resolveLabel(description ?? t.toolCalls.preparingForm)}
           icon={WrenchIcon}
-        ></ChainOfThoughtStep>
+        >
+          {errorInfo && <ToolErrorCard errorInfo={errorInfo} />}
+        </ChainOfThoughtStep>
       );
     }
     return (
@@ -690,7 +696,9 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {errorInfo && <ToolErrorCard errorInfo={errorInfo} />}
+      </ChainOfThoughtStep>
     );
   }
 }

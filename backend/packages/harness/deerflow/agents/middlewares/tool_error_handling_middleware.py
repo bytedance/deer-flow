@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
+from enum import Enum
 from typing import override
 
 from langchain.agents import AgentState
@@ -18,6 +19,44 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 
 
+class ErrorCategory(str, Enum):
+    """User-friendly error categories for empathetic error messages."""
+
+    network_issue = "network_issue"
+    timeout = "timeout"
+    service_unavailable = "service_unavailable"
+    data_not_found = "data_not_found"
+    permission_denied = "permission_denied"
+    rate_limited = "rate_limited"
+
+
+def _map_exception_to_category(exc: Exception) -> tuple[ErrorCategory, str]:
+    """Map an exception to an ErrorCategory and suggested action.
+
+    Returns:
+        tuple[ErrorCategory, str]: (category, suggested_action_zh)
+    """
+    exc_name = exc.__class__.__name__.lower()
+    exc_str = str(exc).lower()
+
+    if "timeout" in exc_name or "timeout" in exc_str:
+        return ErrorCategory.timeout, "请稍等一下再试，或者缩小分析的时间范围"
+
+    if "connection" in exc_name or "network" in exc_name or "socket" in exc_name:
+        return ErrorCategory.network_issue, "请检查网络连接后重试"
+
+    if "permission" in exc_name or "forbidden" in exc_name or "403" in exc_str:
+        return ErrorCategory.permission_denied, "这个功能可能需要联系管理员开通"
+
+    if "rate" in exc_name or "429" in exc_str or "limit" in exc_str:
+        return ErrorCategory.rate_limited, "请求过于频繁，请稍后再试"
+
+    if "notfound" in exc_name or "404" in exc_str or "not found" in exc_str:
+        return ErrorCategory.data_not_found, "数据可能已过期，请尝试刷新或换个条件查询"
+
+    return ErrorCategory.service_unavailable, "请稍后重试，或者联系客服获取帮助"
+
+
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
@@ -28,12 +67,18 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if len(detail) > 500:
             detail = detail[:497] + "..."
 
+        category, suggested_action = _map_exception_to_category(exc)
+
         content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
         return ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
+            additional_kwargs={
+                "error_category": category.value,
+                "suggested_action": suggested_action,
+            },
         )
 
     @override
