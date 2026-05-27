@@ -484,7 +484,7 @@ def test_create_summarization_middleware_preserves_frontend_update_key_contract(
     must keep that suffix stable even when using a DeerFlow-specific subclass.
 
     Temporary regression guard for issue#2965. Remove this test once the
-    frontend and backend have a stronger explicit contract than matching 
+    frontend and backend have a stronger explicit contract than matching
     middleware-generated update keys.
     """
 
