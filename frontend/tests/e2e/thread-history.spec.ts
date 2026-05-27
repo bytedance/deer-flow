@@ -91,4 +91,31 @@ test.describe("Thread history", () => {
     await expect(main.getByText("First conversation")).toHaveCount(0);
     await expect(main.getByText("Second conversation")).toBeVisible();
   });
+
+  test("chats list page can archive and restore a thread", async ({ page }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto("/workspace/chats");
+
+    const main = page.locator("main");
+    const row = main.locator("div.border-b", {
+      hasText: "First conversation",
+    });
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.hover();
+    await row.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Archive" }).click();
+
+    await expect(main.getByText("First conversation")).toHaveCount(0);
+    await page.getByRole("tab", { name: "Archived" }).click();
+    await expect(main.getByText("First conversation")).toBeVisible();
+
+    await row.hover();
+    await row.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Restore" }).click();
+
+    await expect(main.getByText("First conversation")).toHaveCount(0);
+    await page.getByRole("tab", { name: "Chats" }).click();
+    await expect(main.getByText("First conversation")).toBeVisible();
+  });
 });

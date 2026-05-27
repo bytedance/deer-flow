@@ -1,6 +1,6 @@
 "use client";
 
-import { MoreHorizontal, Trash2 } from "lucide-react";
+import { Archive, MoreHorizontal, RotateCcw, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
@@ -13,22 +13,31 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
-import { useDeleteThread, useThreads } from "@/core/threads/hooks";
+import {
+  useArchiveThread,
+  useDeleteThread,
+  useThreads,
+} from "@/core/threads/hooks";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { env } from "@/env";
 
+type ThreadView = "active" | "archived";
+
 export default function ChatsPage() {
   const { t } = useI18n();
-  const { data: threads } = useThreads();
+  const { data: threads } = useThreads(undefined, { includeArchived: true });
+  const { mutate: archiveThread } = useArchiveThread();
   const { mutate: deleteThread } = useDeleteThread();
   const [search, setSearch] = useState("");
+  const [threadView, setThreadView] = useState<ThreadView>("active");
 
   useEffect(() => {
     document.title = `${t.pages.chats} - ${t.pages.appName}`;
@@ -36,23 +45,40 @@ export default function ChatsPage() {
 
   const filteredThreads = useMemo(() => {
     return threads?.filter((thread) => {
-      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
+      const archived = thread.metadata?.archived === true;
+      return (
+        archived === (threadView === "archived") &&
+        titleOfThread(thread).toLowerCase().includes(search.toLowerCase())
+      );
     });
-  }, [threads, search]);
+  }, [threads, search, threadView]);
   return (
     <WorkspaceContainer>
       <WorkspaceHeader></WorkspaceHeader>
       <WorkspaceBody>
         <div className="flex size-full flex-col">
           <header className="flex shrink-0 items-center justify-center pt-8">
-            <Input
-              type="search"
-              className="h-12 w-full max-w-(--container-width-md) text-xl"
-              placeholder={t.chats.searchChats}
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+            <div className="flex w-full max-w-(--container-width-md) flex-col gap-3">
+              <Input
+                type="search"
+                className="h-12 w-full text-xl"
+                placeholder={t.chats.searchChats}
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <Tabs
+                value={threadView}
+                onValueChange={(value) => setThreadView(value as ThreadView)}
+              >
+                <TabsList variant="line">
+                  <TabsTrigger value="active">{t.pages.chats}</TabsTrigger>
+                  <TabsTrigger value="archived">
+                    {t.common.archived}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
           </header>
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
@@ -88,6 +114,26 @@ export default function ChatsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              archiveThread({
+                                threadId: thread.thread_id,
+                                archived: threadView !== "archived",
+                              })
+                            }
+                          >
+                            {threadView === "archived" ? (
+                              <>
+                                <RotateCcw />
+                                <span>{t.common.restore}</span>
+                              </>
+                            ) : (
+                              <>
+                                <Archive />
+                                <span>{t.common.archive}</span>
+                              </>
+                            )}
+                          </DropdownMenuItem>
                           <DropdownMenuItem
                             variant="destructive"
                             onSelect={() =>

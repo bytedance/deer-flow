@@ -42,6 +42,12 @@ export type ThreadStreamOptions = {
   onToolEnd?: (event: ToolEndEvent) => void;
 };
 
+function isArchivedThread(thread: AgentThread): boolean {
+  return (
+    (thread.metadata as Record<string, unknown> | undefined)?.archived === true
+  );
+}
+
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
@@ -812,10 +818,11 @@ export function useThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { includeArchived = false }: { includeArchived?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params],
+    queryKey: ["threads", "search", params, { includeArchived }],
     queryFn: async () => {
       const maxResults = params.limit;
       const initialOffset = params.offset ?? 0;
@@ -826,7 +833,10 @@ export function useThreads(
       if (maxResults !== undefined && maxResults <= 0) {
         const response =
           await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
+        const threads = response as AgentThread[];
+        return includeArchived
+          ? threads
+          : threads.filter((thread) => !isArchivedThread(thread));
       }
 
       const pageSize =
@@ -843,7 +853,7 @@ export function useThreads(
         }
 
         const currentLimit =
-          typeof maxResults === "number"
+          typeof maxResults === "number" && includeArchived
             ? Math.min(pageSize, maxResults - threads.length)
             : pageSize;
 
@@ -857,7 +867,11 @@ export function useThreads(
           offset,
         })) as AgentThread[];
 
-        threads.push(...response);
+        threads.push(
+          ...(includeArchived
+            ? response
+            : response.filter((thread) => !isArchivedThread(thread))),
+        );
 
         if (response.length < currentLimit) {
           break;
@@ -866,7 +880,9 @@ export function useThreads(
         offset += response.length;
       }
 
-      return threads;
+      return typeof maxResults === "number"
+        ? threads.slice(0, maxResults)
+        : threads;
     },
     refetchOnWindowFocus: false,
   });
@@ -955,6 +971,65 @@ export function useDeleteThread() {
             return oldData;
           }
           return oldData.filter((t) => t.thread_id !== threadId);
+        },
+      );
+    },
+    onSettled() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    },
+  });
+}
+
+export function useArchiveThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      archived,
+    }: {
+      threadId: string;
+      archived: boolean;
+    }) => {
+      const response = await fetch(
+        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ metadata: { archived } }),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response
+          .json()
+          .catch(() => ({ detail: "Failed to update thread." }));
+        throw new Error(error.detail ?? "Failed to update thread.");
+      }
+    },
+    onSuccess(_, { threadId, archived }) {
+      queryClient.setQueriesData(
+        {
+          queryKey: ["threads", "search"],
+          exact: false,
+        },
+        (oldData: Array<AgentThread> | undefined) => {
+          if (oldData == null) {
+            return oldData;
+          }
+          return oldData.map((thread) => {
+            if (thread.thread_id !== threadId) {
+              return thread;
+            }
+            return {
+              ...thread,
+              metadata: {
+                ...(thread.metadata ?? {}),
+                archived,
+              },
+            };
+          });
         },
       );
     },

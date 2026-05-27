@@ -21,9 +21,12 @@ export const enUS: Translations = {
   common: {
     home: "Home",
     settings: "Settings",
+    archive: "Archive",
+    archived: "Archived",
     delete: "Delete",
     edit: "Edit",
     rename: "Rename",
+    restore: "Restore",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",

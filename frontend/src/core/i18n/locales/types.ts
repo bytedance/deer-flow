@@ -10,9 +10,12 @@ export interface Translations {
   common: {
     home: string;
     settings: string;
+    archive: string;
+    archived: string;
     delete: string;
     edit: string;
     rename: string;
+    restore: string;
     share: string;
     openInNewWindow: string;
     close: string;

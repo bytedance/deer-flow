@@ -21,9 +21,12 @@ export const zhCN: Translations = {
   common: {
     home: "首页",
     settings: "设置",
+    archive: "归档",
+    archived: "已归档",
     delete: "删除",
     edit: "编辑",
     rename: "重命名",
+    restore: "恢复",
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",

@@ -24,6 +24,7 @@ export type MockThread = {
   thread_id: string;
   title?: string;
   updated_at?: string;
+  archived?: boolean;
   agent_name?: string;
   messages?: unknown[];
   artifacts?: string[];
@@ -59,7 +60,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       thread_id: t.thread_id,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
-      metadata: t.agent_name ? { agent_name: t.agent_name } : {},
+      metadata: {
+        ...(t.agent_name ? { agent_name: t.agent_name } : {}),
+        ...(t.archived ? { archived: true } : {}),
+      },
       status: "idle",
       values: { title: t.title ?? "Untitled" },
     }));
@@ -112,6 +116,25 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Direct backend thread delete - used by the chat delete menu.
   void page.route("**/api/threads/*", (route) => {
+    if (route.request().method() === "PATCH") {
+      const pathname = new URL(route.request().url()).pathname;
+      const threadId = decodeURIComponent(pathname.split("/").pop() ?? "");
+      const thread = threads.find((t) => t.thread_id === threadId);
+      if (thread) {
+        const body = route.request().postDataJSON() as {
+          metadata?: { archived?: boolean };
+        };
+        thread.archived = body.metadata?.archived === true;
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          metadata: { archived: thread?.archived === true },
+        }),
+      });
+    }
     if (route.request().method() === "DELETE") {
       const pathname = new URL(route.request().url()).pathname;
       const threadId = decodeURIComponent(pathname.split("/").pop() ?? "");
