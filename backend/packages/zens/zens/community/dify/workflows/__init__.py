@@ -1,4 +1,4 @@
-"""Dify community tool for DeerFlow zens extension."""
+"""Dify workflow tools."""
 
 from zens.community.dify.workflows.aml import dify_aml_tool
 from zens.community.dify.workflows.general import dify_general_tool
