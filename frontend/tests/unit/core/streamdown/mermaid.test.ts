@@ -45,6 +45,26 @@ test("preserves mermaid fence metadata", () => {
   );
 });
 
+test("normalizes labelled dotted arrows with inconsistent spacing", () => {
+  const markdown = [
+    "```mermaid",
+    'A--"sealed memory"-.->F',
+    'B --"resonance"-.-> A',
+    'C-- "handoff" -.->D',
+    "```",
+  ].join("\n");
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(
+    [
+      "```mermaid",
+      'A -. "sealed memory" .-> F',
+      'B -. "resonance" .-> A',
+      'C -. "handoff" .-> D',
+      "```",
+    ].join("\n"),
+  );
+});
+
 test("preserves empty mermaid fences", () => {
   const markdown = ["```mermaid", "```"].join("\n");
 

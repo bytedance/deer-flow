@@ -2,7 +2,7 @@ const MERMAID_OPENING_FENCE_RE =
   /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*mermaid(?:[ \t].*)?$/i;
 
 const LABELLED_DOTTED_ARROW_RE =
-  /^(\s*)(.+?)\s+--\s+("[^"\n]+"|'[^'\n]+')\s+-\.->\s+(.+?)\s*$/;
+  /^(\s*)(.+?)\s*--\s*("[^"\n]+"|'[^'\n]+')\s*-\.->\s*(.+?)\s*$/;
 
 function normalizeMermaidCode(code: string): string {
   return code
@@ -43,11 +43,7 @@ export function normalizeMermaidMarkdown(markdown: string): string {
   const normalizedLines: string[] = [];
 
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-
-    if (line === undefined) {
-      break;
-    }
+    const line = lines[index]!;
 
     const openingFenceMatch = MERMAID_OPENING_FENCE_RE.exec(line);
 
@@ -68,11 +64,7 @@ export function normalizeMermaidMarkdown(markdown: string): string {
     let cursor = index + 1;
 
     for (; cursor < lines.length; cursor += 1) {
-      const candidateLine = lines[cursor];
-
-      if (candidateLine === undefined) {
-        break;
-      }
+      const candidateLine = lines[cursor]!;
 
       if (isClosingFence(candidateLine, openingFence)) {
         closingLine = candidateLine;
