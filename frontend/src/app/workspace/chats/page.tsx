@@ -2,9 +2,17 @@
 
 import { Archive, MoreHorizontal, RotateCcw, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,6 +46,13 @@ export default function ChatsPage() {
   const { mutate: deleteThread } = useDeleteThread();
   const [search, setSearch] = useState("");
   const [threadView, setThreadView] = useState<ThreadView>("active");
+  const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [lastSelectedThreadId, setLastSelectedThreadId] = useState<
+    string | null
+  >(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
     document.title = `${t.pages.chats} - ${t.pages.appName}`;
@@ -52,6 +67,86 @@ export default function ChatsPage() {
       );
     });
   }, [threads, search, threadView]);
+
+  const visibleThreadIds = useMemo(
+    () => filteredThreads?.map((thread) => thread.thread_id) ?? [],
+    [filteredThreads],
+  );
+  const visibleThreadIdSet = useMemo(
+    () => new Set(visibleThreadIds),
+    [visibleThreadIds],
+  );
+  const selectedCount = selectedThreadIds.size;
+
+  useEffect(() => {
+    setSelectedThreadIds((selected) => {
+      const visibleSelected = new Set(
+        [...selected].filter((threadId) => visibleThreadIdSet.has(threadId)),
+      );
+      return visibleSelected.size === selected.size
+        ? selected
+        : visibleSelected;
+    });
+    setLastSelectedThreadId((threadId) =>
+      threadId && visibleThreadIdSet.has(threadId) ? threadId : null,
+    );
+  }, [visibleThreadIdSet]);
+
+  const handleSelectAll = () => {
+    setSelectedThreadIds(new Set(visibleThreadIds));
+    setLastSelectedThreadId(visibleThreadIds.at(-1) ?? null);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedThreadIds(new Set());
+    setLastSelectedThreadId(null);
+  };
+
+  const handleToggleThreadSelection = (
+    threadId: string,
+    event: MouseEvent<HTMLInputElement>,
+  ) => {
+    setSelectedThreadIds((selected) => {
+      const nextSelected = new Set(selected);
+      if (event.shiftKey && lastSelectedThreadId) {
+        const startIndex = visibleThreadIds.indexOf(lastSelectedThreadId);
+        const endIndex = visibleThreadIds.indexOf(threadId);
+        if (startIndex !== -1 && endIndex !== -1) {
+          const [from, to] =
+            startIndex < endIndex
+              ? [startIndex, endIndex]
+              : [endIndex, startIndex];
+          visibleThreadIds
+            .slice(from, to + 1)
+            .forEach((visibleThreadId) => nextSelected.add(visibleThreadId));
+          return nextSelected;
+        }
+      }
+      if (nextSelected.has(threadId)) {
+        nextSelected.delete(threadId);
+      } else {
+        nextSelected.add(threadId);
+      }
+      return nextSelected;
+    });
+    setLastSelectedThreadId(threadId);
+  };
+
+  const handleArchiveSelected = (archived: boolean) => {
+    selectedThreadIds.forEach((threadId) => {
+      archiveThread({ threadId, archived });
+    });
+    handleClearSelection();
+  };
+
+  const handleDeleteSelected = () => {
+    selectedThreadIds.forEach((threadId) => {
+      deleteThread({ threadId });
+    });
+    setDeleteDialogOpen(false);
+    handleClearSelection();
+  };
+
   return (
     <WorkspaceContainer>
       <WorkspaceHeader></WorkspaceHeader>
@@ -78,6 +173,50 @@ export default function ChatsPage() {
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
+              {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                visibleThreadIds.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleSelectAll}
+                    >
+                      {t.common.selectAll}
+                    </Button>
+                    {selectedCount > 0 && (
+                      <>
+                        <span className="text-muted-foreground text-sm">
+                          {t.common.selected} {selectedCount}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            handleArchiveSelected(threadView !== "archived")
+                          }
+                        >
+                          {threadView === "archived"
+                            ? t.common.restore
+                            : t.common.archive}
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setDeleteDialogOpen(true)}
+                        >
+                          {t.common.delete}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleClearSelection}
+                        >
+                          {t.common.cancel}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
             </div>
           </header>
           <main className="min-h-0 flex-1">
@@ -88,6 +227,19 @@ export default function ChatsPage() {
                     key={thread.thread_id}
                     className="group/chat-row flex items-center gap-2 border-b p-4"
                   >
+                    {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                      <input
+                        aria-label={titleOfThread(thread)}
+                        type="checkbox"
+                        className="size-4 shrink-0 accent-current"
+                        checked={selectedThreadIds.has(thread.thread_id)}
+                        readOnly
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleToggleThreadSelection(thread.thread_id, event);
+                        }}
+                      />
+                    )}
                     <Link
                       className="min-w-0 flex-1"
                       href={pathOfThread(thread)}
@@ -152,6 +304,27 @@ export default function ChatsPage() {
             </ScrollArea>
           </main>
         </div>
+        <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t.chats.deleteSelectedTitle}</DialogTitle>
+              <DialogDescription>
+                {t.chats.deleteSelectedDescription}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setDeleteDialogOpen(false)}
+              >
+                {t.common.cancel}
+              </Button>
+              <Button variant="destructive" onClick={handleDeleteSelected}>
+                {t.common.delete}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </WorkspaceBody>
     </WorkspaceContainer>
   );

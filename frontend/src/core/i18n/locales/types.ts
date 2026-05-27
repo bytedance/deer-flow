@@ -35,6 +35,8 @@ export interface Translations {
     preview: string;
     cancel: string;
     save: string;
+    selectAll: string;
+    selected: string;
     install: string;
     create: string;
     import: string;
@@ -185,6 +187,8 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    deleteSelectedTitle: string;
+    deleteSelectedDescription: string;
   };
 
   // Page titles (document title)

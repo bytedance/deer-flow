@@ -46,6 +46,8 @@ export const zhCN: Translations = {
     preview: "预览",
     cancel: "取消",
     save: "保存",
+    selectAll: "全选",
+    selected: "已选",
     install: "安装",
     create: "创建",
     import: "导入",
@@ -242,6 +244,8 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    deleteSelectedTitle: "删除所选对话？",
+    deleteSelectedDescription: "此操作无法撤销。",
   },
 
   // Page titles (document title)

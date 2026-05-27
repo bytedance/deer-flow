@@ -8,7 +8,6 @@ import {
   MoreHorizontal,
   Pencil,
   Share2,
-  Trash2,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
@@ -27,7 +26,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -52,7 +50,6 @@ import {
 } from "@/core/threads/export";
 import {
   useArchiveThread,
-  useDeleteThread,
   useRenameThread,
   useThreads,
 } from "@/core/threads/hooks";
@@ -72,7 +69,6 @@ export function RecentChatList() {
     }>();
   const { data: threads = [] } = useThreads();
   const { mutate: archiveThread } = useArchiveThread();
-  const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
   // Rename dialog state
@@ -96,16 +92,6 @@ export function RecentChatList() {
       });
     },
     [agentNameFromPath, threads],
-  );
-
-  const handleDelete = useCallback(
-    (threadId: string) => {
-      deleteThread({ threadId });
-      if (threadId === threadIdFromPath) {
-        void router.push(getNextThreadPath(threadId));
-      }
-    },
-    [deleteThread, getNextThreadPath, router, threadIdFromPath],
   );
 
   const handleArchive = useCallback(
@@ -277,13 +263,6 @@ export function RecentChatList() {
                               >
                                 <Archive className="text-muted-foreground" />
                                 <span>{t.common.archive}</span>
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onSelect={() => handleDelete(thread.thread_id)}
-                              >
-                                <Trash2 className="text-muted-foreground" />
-                                <span>{t.common.delete}</span>
                               </DropdownMenuItem>
                             </DropdownMenuContent>
                           </DropdownMenu>

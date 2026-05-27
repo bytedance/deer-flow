@@ -46,6 +46,8 @@ export const enUS: Translations = {
     preview: "Preview",
     cancel: "Cancel",
     save: "Save",
+    selectAll: "Select all",
+    selected: "Selected",
     install: "Install",
     create: "Create",
     import: "Import",
@@ -254,6 +256,8 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    deleteSelectedTitle: "Delete selected chats?",
+    deleteSelectedDescription: "This cannot be undone.",
   },
 
   // Page titles (document title)
