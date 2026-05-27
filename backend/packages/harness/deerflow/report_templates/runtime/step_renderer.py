@@ -192,7 +192,7 @@ def build_device_selector_props(
 
 def _render_field(field_obj: dict[str, Any], state: RuntimeState) -> dict[str, Any]:
     """Materialise dynamic options for ``select``/``multi-select`` fields."""
-    out = dict(field_obj)
+    out = {k: v for k, v in field_obj.items() if v is not None}
     src = out.pop("options_source", None)
     if src is None:
         return out

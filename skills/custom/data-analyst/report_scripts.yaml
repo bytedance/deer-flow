@@ -405,25 +405,6 @@ scripts:
     timeout_seconds: 30
     max_output_bytes: 10485760
 
-  diagnosis_analysis:
-    entry: scripts/diagnosis_analysis.py
-    kind: [transform]
-    description: "生成候选原因、证据链、影响评估和建议（§13.2 证据）"
-    args_schema:
-      input:
-        type: file_path
-        required: true
-        description: "fault_context.json 路径"
-      timeline:
-        type: file_path
-        description: "fault_timeline.json 路径（可选，runtime 注入）"
-    output_files:
-      - id: diagnosis_analysis
-        path: "{run_output_dir}/data/diagnosis_analysis.json"
-        description: "诊断结果（findings/evidence/impact/recommendations）"
-    timeout_seconds: 60
-    max_output_bytes: 10485760
-
   query_failure_data:
     entry: scripts/query_failure_data.py
     kind: [data_step]
