@@ -284,18 +284,29 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
+    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
     normalized_new_facts = []
+    dropped_new_fact = not isinstance(new_facts, list)
     if isinstance(new_facts, list):
         for fact in new_facts:
             normalized_fact = _normalize_memory_update_fact(fact)
             if normalized_fact is not None:
                 normalized_new_facts.append(normalized_fact)
+            else:
+                dropped_new_fact = True
+
+    if normalized_facts_to_remove and dropped_new_fact:
+        raise json.JSONDecodeError(
+            "Unsafe partial memory update: factsToRemove with malformed newFacts",
+            json.dumps(update_data, ensure_ascii=False),
+            0,
+        )
 
     return {
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
         "newFacts": normalized_new_facts,
-        "factsToRemove": [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else [],
+        "factsToRemove": normalized_facts_to_remove,
     }
 
 

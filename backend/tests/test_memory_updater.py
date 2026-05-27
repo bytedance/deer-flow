@@ -698,6 +698,19 @@ class TestUpdateMemoryStructuredResponse:
         assert saved_memory["facts"][0]["confidence"] == 0.91
         assert saved_memory["facts"][0]["sourceError"] == "parse issue"
 
+    def test_malformed_replacement_update_fails_closed(self):
+        """Malformed replacement facts should not turn remove+add into delete-only."""
+        response = (
+            '{"user": {}, "history": {}, '
+            '"newFacts": [{"content": "replacement fact", "category": "context", "confidence": "bad"}], '
+            '"factsToRemove": ["fact_old"]}'
+        )
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is False
+        mock_storage.save.assert_not_called()
+
     def test_async_update_memory_delegates_to_sync(self):
         """aupdate_memory should delegate to sync _do_update_memory_sync via to_thread."""
         updater = MemoryUpdater()
