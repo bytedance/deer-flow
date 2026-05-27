@@ -316,6 +316,14 @@ def test_pump_soul_uses_two_step_real_rule_flow():
     assert "diagnosis_features.json" in soul
     assert "INS_ACCESS_TOKEN" in soul
     assert "不考虑起停机状态" in soul
+    command_match = re.search(
+        r"python /mnt/skills/custom/pump-fault-diagnosis/scripts/run_pump_rule_diagnosis.py .*?pump_rule_result\.json",
+        soul,
+        re.DOTALL,
+    )
+    assert command_match, "pump rule command block missing"
+    assert "--start-time" not in command_match.group(0)
+    assert "--end-time" not in command_match.group(0)
 
 
 # --- Reciprocating-specific orbit prohibition ---

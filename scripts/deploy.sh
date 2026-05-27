@@ -46,6 +46,7 @@ DOCKER_DIR="$REPO_ROOT/docker"
 COMPOSE_CMD=(docker-compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox:latest"
+LOCAL_SANDBOX_IMAGE_PREFIX="deer-flow-sandbox"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -188,6 +189,44 @@ get_configured_sandbox_image() {
     fi
 }
 
+detect_database_backend() {
+    local database_backend=""
+
+    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "sqlite"; return; }
+
+    database_backend=$(awk '
+        /^[[:space:]]*database:[[:space:]]*$/ { in_database=1; next }
+        in_database && /^[^[:space:]#]/ { in_database=0 }
+        in_database && /^[[:space:]]*backend:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*backend:[[:space:]]*/, "", line)
+            gsub(/["'\'']/, "", line)
+            print line
+            exit
+        }
+    ' "$DEER_FLOW_CONFIG_PATH")
+
+    if [ -n "$database_backend" ]; then
+        echo "$database_backend"
+    else
+        echo "sqlite"
+    fi
+}
+
+configure_uv_extras() {
+    local database_backend
+    database_backend="$(detect_database_backend)"
+
+    if [ "$database_backend" = "postgres" ]; then
+        if [[ " ${UV_EXTRAS:-} " != *" postgres "* ]]; then
+            export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }postgres"
+        fi
+        echo -e "${BLUE}Database backend: postgres (UV_EXTRAS=$UV_EXTRAS)${NC}"
+    else
+        echo -e "${BLUE}Database backend: $database_backend${NC}"
+    fi
+}
+
 build_custom_sandbox_image() {
     local sandbox_image="$1"
 
@@ -202,7 +241,7 @@ build_custom_sandbox_image() {
 ensure_sandbox_image_ready() {
     local sandbox_image="$1"
 
-    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ] || [[ "$sandbox_image" == "$LOCAL_SANDBOX_IMAGE_PREFIX"* ]]; then
         build_custom_sandbox_image "$sandbox_image"
         return
     fi
@@ -246,6 +285,7 @@ if [ "$CMD" = "build" ]; then
     fi
 
     sandbox_mode="$(detect_sandbox_mode)"
+    configure_uv_extras
     if [ "$sandbox_mode" != "local" ]; then
         export SANDBOX_IMAGE="$(get_configured_sandbox_image)"
         ensure_sandbox_image_ready "$SANDBOX_IMAGE"
@@ -274,6 +314,7 @@ echo ""
 # Only needed for start / up — determines whether provisioner is launched.
 
 sandbox_mode="$(detect_sandbox_mode)"
+configure_uv_extras
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 if [ "$sandbox_mode" != "local" ]; then
     export SANDBOX_IMAGE="$(get_configured_sandbox_image)"

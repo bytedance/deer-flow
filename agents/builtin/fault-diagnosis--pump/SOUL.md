@@ -116,10 +116,9 @@
 - `diagnosis_date` 必须匹配 `^\d{4}-\d{2}-\d{2}$`。
 - `diagnosis_hour` 必须为 `"0"`-`"23"` 之间的字符串。
 
-拼装诊断时间窗口：
+拼装诊断时间：
 
-- `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
-- `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
+- `diagnosis_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
 
 ### 步骤 2：执行受管机泵规则运行时
 
@@ -130,14 +129,13 @@ python /mnt/skills/custom/pump-fault-diagnosis/scripts/run_pump_rule_diagnosis.p
   --machine-id "{machineId}" \
   --component-id "{componentId}" \
   --component-name "{componentName}" \
-  --diagnosis-time "{start_iso}" \
-  --start-time "{start_iso}" \
-  --end-time "{end_iso}" \
+  --diagnosis-time "{diagnosis_iso}" \
   --output /mnt/user-data/outputs/pump_rule_result.json
 ```
 
 说明：
 
+- **不要传 `--start-time` 或 `--end-time`**。机泵规则运行时会自动计算截至 `diagnosis_iso` 的 24 小时窗口；显式传入起止时间会覆盖为窄窗口，容易导致趋势数据为空。
 - 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
 - `INS_BASE_URL` 是可选部署级环境变量，未配置时使用工具默认值。
 - 规则运行时优先通过 `/ins-os-manage/organize/getComponentByMachineIds?operateType=1&machineIds={machineId}` 获取组件树，按所选 `componentId` 向下展开 `unitType=3` 测点；组件树不可用时才回退到 `getPointConfigs`。振动测点类型仅使用 `23`、`24`、`26`、`27`。

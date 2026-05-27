@@ -13,6 +13,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
 DEFAULT_SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 CUSTOM_SANDBOX_IMAGE="deer-flow-sandbox:latest"
+LOCAL_SANDBOX_IMAGE_PREFIX="deer-flow-sandbox"
 
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
@@ -60,6 +61,48 @@ detect_sandbox_mode() {
         fi
     else
         echo "local"
+    fi
+}
+
+detect_database_backend() {
+    local config_file="$PROJECT_ROOT/config.yaml"
+    local database_backend=""
+
+    if [ ! -f "$config_file" ]; then
+        echo "sqlite"
+        return
+    fi
+
+    database_backend=$(awk '
+        /^[[:space:]]*database:[[:space:]]*$/ { in_database=1; next }
+        in_database && /^[^[:space:]#]/ { in_database=0 }
+        in_database && /^[[:space:]]*backend:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*backend:[[:space:]]*/, "", line)
+            gsub(/["'\'']/, "", line)
+            print line
+            exit
+        }
+    ' "$config_file")
+
+    if [ -n "$database_backend" ]; then
+        echo "$database_backend"
+    else
+        echo "sqlite"
+    fi
+}
+
+configure_uv_extras() {
+    local database_backend
+    database_backend="$(detect_database_backend)"
+
+    if [ "$database_backend" = "postgres" ]; then
+        if [[ " ${UV_EXTRAS:-} " != *" postgres "* ]]; then
+            export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }postgres"
+        fi
+        echo -e "${BLUE}Database backend: postgres (UV_EXTRAS=$UV_EXTRAS)${NC}"
+    else
+        echo -e "${BLUE}Database backend: $database_backend${NC}"
     fi
 }
 
@@ -129,7 +172,7 @@ build_custom_sandbox_image() {
 ensure_sandbox_image_ready() {
     local sandbox_image="$1"
 
-    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ]; then
+    if [ "$sandbox_image" = "$CUSTOM_SANDBOX_IMAGE" ] || [[ "$sandbox_image" == "$LOCAL_SANDBOX_IMAGE_PREFIX"* ]]; then
         build_custom_sandbox_image "$sandbox_image"
         return
     fi
@@ -226,6 +269,7 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
     SANDBOX_IMAGE="$(get_configured_sandbox_image)"
+    configure_uv_extras
 
     services="frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
@@ -331,6 +375,7 @@ start-backend-dev() {
 
     sandbox_mode="$(detect_sandbox_mode)"
     SANDBOX_IMAGE="$(get_configured_sandbox_image)"
+    configure_uv_extras
 
     services="nginx gateway"
     if [ "$sandbox_mode" = "provisioner" ]; then
