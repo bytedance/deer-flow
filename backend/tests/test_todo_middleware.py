@@ -511,6 +511,11 @@ class TestWrapModelCall:
 
 
 class TestTodoMiddlewareAgentGraphIntegration:
+    def test_uses_deerflow_thread_state_schema(self):
+        mw = TodoMiddleware()
+
+        assert mw.state_schema is ThreadState
+
     def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
         mw = TodoMiddleware()
         model = _CapturingFakeMessagesListChatModel(

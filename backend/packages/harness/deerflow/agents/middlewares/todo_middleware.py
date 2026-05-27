@@ -172,6 +172,10 @@ class TodoMiddleware(TodoListMiddleware):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # Keep the todo channel definition identical to DeerFlow's graph state.
+        # The base LangChain middleware registers PlanningState.todos as a
+        # LastValue channel, which conflicts with ThreadState's reducer.
+        self.state_schema = ThreadState
         self._lock = threading.Lock()
         self._pending_completion_reminders: dict[tuple[str, str], list[str]] = {}
         self._completion_reminder_counts: dict[tuple[str, str], int] = {}
