@@ -1,16 +1,25 @@
 /**
  * Industrial Skills Telemetry
  *
- * Tracks usage metrics for industrial vs foundation skills,
- * onboarding completion rates, and skill tier distribution.
+ * Tracks adoption depth for industrial intelligence:
+ * - Workflow completions
+ * - Template usage
+ * - Agent creation
+ * - Onboarding completion
+ * - Skill invocations
  */
 
 type TelemetryEventType =
   | "skill_invocation"
+  | "onboarding_started"
   | "onboarding_complete"
   | "onboarding_skip"
   | "tier_change"
-  | "batch_tier_change";
+  | "batch_tier_change"
+  | "industrial_agent_created"
+  | "industrial_workflow_completed"
+  | "industrial_template_used"
+  | "first_workflow_run";
 
 interface TelemetryEvent {
   type: TelemetryEventType;
@@ -21,6 +30,10 @@ interface TelemetryEvent {
   from_tier?: string;
   to_tier?: string;
   count?: number;
+  template_id?: string;
+  workflow_type?: string;
+  stage?: string;
+  duration_ms?: number;
   timestamp: number;
 }
 
@@ -92,6 +105,20 @@ export function trackSkillInvocation(
 }
 
 /**
+ * Track onboarding started
+ */
+export function trackOnboardingStarted(
+  userId?: string,
+  tenantId?: string
+): void {
+  enqueue({
+    type: "onboarding_started",
+    user_id: userId,
+    tenant_id: tenantId,
+  });
+}
+
+/**
  * Track onboarding completion
  */
 export function trackOnboardingComplete(
@@ -152,6 +179,68 @@ export function trackBatchTierChange(
     type: "batch_tier_change",
     count,
     to_tier: toTier,
+    user_id: userId,
+    tenant_id: tenantId,
+  });
+}
+
+/**
+ * Track industrial workflow completion
+ */
+export function trackWorkflowCompleted(
+  workflowType: string,
+  durationMs?: number,
+  userId?: string,
+  tenantId?: string
+): void {
+  enqueue({
+    type: "industrial_workflow_completed",
+    workflow_type: workflowType,
+    duration_ms: durationMs,
+    user_id: userId,
+    tenant_id: tenantId,
+  });
+}
+
+/**
+ * Track industrial template usage
+ */
+export function trackTemplateUsed(
+  templateId: string,
+  userId?: string,
+  tenantId?: string
+): void {
+  enqueue({
+    type: "industrial_template_used",
+    template_id: templateId,
+    user_id: userId,
+    tenant_id: tenantId,
+  });
+}
+
+/**
+ * Track industrial agent creation
+ */
+export function trackAgentCreated(
+  userId?: string,
+  tenantId?: string
+): void {
+  enqueue({
+    type: "industrial_agent_created",
+    user_id: userId,
+    tenant_id: tenantId,
+  });
+}
+
+/**
+ * Track first workflow run (adoption funnel stage)
+ */
+export function trackFirstWorkflowRun(
+  userId?: string,
+  tenantId?: string
+): void {
+  enqueue({
+    type: "first_workflow_run",
     user_id: userId,
     tenant_id: tenantId,
   });

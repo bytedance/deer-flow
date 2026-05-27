@@ -19,6 +19,24 @@ from app.gateway.deps import get_agent_usage_repo
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
+
+def _emit_industrial_agent_created(user_id: str | None = None, tenant_id: str | None = None) -> None:
+    """Emit an industrial_agent_created telemetry event (best-effort)."""
+    try:
+        from app.gateway.routers.industrial_skills_telemetry import IndustrialSkillTelemetryEvent, _metrics
+        import time
+
+        _metrics.record(
+            IndustrialSkillTelemetryEvent(
+                type="industrial_agent_created",
+                user_id=user_id,
+                tenant_id=tenant_id,
+                timestamp=time.time() * 1000,
+            )
+        )
+    except Exception:
+        logger.debug("Failed to emit industrial_agent_created telemetry", exc_info=True)
+
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
@@ -343,14 +361,50 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
             config_data["tool_groups"] = request.tool_groups
         if request.skills is not None:
             config_data["skills"] = request.skills
+        else:
+            # Pre-enable industrial skills when no skills are specified
+            from deerflow.skills.storage import get_or_new_skill_storage
+            from deerflow.skills.types import SkillTier
+
+            storage = get_or_new_skill_storage()
+            industrial_skills = [
+                s.name for s in storage.load_skills(enabled_only=True) if s.tier == SkillTier.CORE_INDUSTRIAL
+            ]
+            if industrial_skills:
+                config_data["skills"] = industrial_skills
+                logger.info(f"Pre-enabled {len(industrial_skills)} industrial skills for new agent '{normalized_name}'")
+                _emit_industrial_agent_created(user_id=user_id, tenant_id=get_current_tenant_id())
 
         config_file = agent_dir / "config.yaml"
         with open(config_file, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-        # Write SOUL.md
+        # Write SOUL.md with industrial context if empty
+        soul_content = request.soul
+        if not soul_content or not soul_content.strip():
+            soul_content = """# Industrial Intelligence Agent
+
+You are an industrial intelligence specialist focused on equipment monitoring, fault diagnosis, and predictive maintenance.
+
+## Core Capabilities
+- **Equipment Health Monitoring**: Track vibration, temperature, and other critical parameters
+- **Fault Diagnosis**: Identify root causes of equipment anomalies and failures
+- **Predictive Maintenance**: Generate trend reports and maintenance recommendations
+- **Industrial Reports**: Create comprehensive analysis reports with actionable insights
+
+## Approach
+- Always prioritize safety and operational continuity
+- Provide specific, actionable recommendations based on data analysis
+- Reference industry standards and best practices when applicable
+- Escalate critical issues with clear urgency indicators
+
+## Communication Style
+- Use precise technical terminology appropriate for industrial engineers
+- Present findings in structured formats (tables, bullet points, summaries)
+- Include confidence levels and data sources for all conclusions
+"""
         soul_file = agent_dir / "SOUL.md"
-        soul_file.write_text(request.soul, encoding="utf-8")
+        soul_file.write_text(soul_content, encoding="utf-8")
 
         logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
 
@@ -691,6 +745,19 @@ async def fork_agent(name: str) -> AgentResponse:
         config_data["tool_groups"] = source_config.tool_groups
     if source_config.skills is not None:
         config_data["skills"] = source_config.skills
+    else:
+        # Pre-enable industrial skills when source has no skills specified
+        from deerflow.skills.storage import get_or_new_skill_storage
+        from deerflow.skills.types import SkillTier
+
+        storage = get_or_new_skill_storage()
+        industrial_skills = [
+            s.name for s in storage.load_skills(enabled_only=True) if s.tier == SkillTier.CORE_INDUSTRIAL
+        ]
+        if industrial_skills:
+            config_data["skills"] = industrial_skills
+            logger.info(f"Pre-enabled {len(industrial_skills)} industrial skills for forked agent '{name}'")
+            _emit_industrial_agent_created(user_id=user_id, tenant_id=tenant_id)
     if source_config.mcp_servers:
         config_data["mcp_servers"] = source_config.mcp_servers
     if source_config.tags:

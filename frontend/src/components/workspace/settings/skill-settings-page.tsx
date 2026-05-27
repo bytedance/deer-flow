@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill, SkillTier } from "@/core/skills/type";
@@ -175,13 +176,29 @@ function SkillSettingsList({
               </ItemDescription>
             </ItemContent>
             <ItemActions>
-              <Switch
-                checked={skill.enabled}
-                disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
-                onCheckedChange={(checked) =>
-                  enableSkill({ skillName: skill.name, enabled: checked })
-                }
-              />
+              {skill.tier === "core-industrial" ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-block">
+                      <Switch
+                        checked={skill.enabled}
+                        disabled
+                      />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>工业智能技能不可禁用。如需禁用，请先将其层级更改为基础工具。</p>
+                  </TooltipContent>
+                </Tooltip>
+              ) : (
+                <Switch
+                  checked={skill.enabled}
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  onCheckedChange={(checked) =>
+                    enableSkill({ skillName: skill.name, enabled: checked })
+                  }
+                />
+              )}
             </ItemActions>
           </Item>
         ))}

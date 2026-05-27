@@ -10,6 +10,16 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -61,10 +71,24 @@ export default function AdminSkillsPage() {
   const [filterTier, setFilterTier] = useState<SkillTier | "all">("all");
   const [updating, setUpdating] = useState<string | null>(null);
   const [batchUpdating, setBatchUpdating] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean;
+    skillName: string;
+    targetTier: SkillTier;
+  }>({ open: false, skillName: "", targetTier: "foundation" });
 
   const filteredSkills = skills.filter(
     (skill) => filterTier === "all" || skill.tier === filterTier,
   );
+
+  const handleTierChangeRequest = (skillName: string, tier: SkillTier) => {
+    const skill = skills.find((s) => s.name === skillName);
+    if (skill?.tier === "core-industrial" && tier === "foundation") {
+      setConfirmDialog({ open: true, skillName, targetTier: tier });
+    } else {
+      handleTierChange(skillName, tier);
+    }
+  };
 
   const handleTierChange = async (skillName: string, tier: SkillTier) => {
     setUpdating(skillName);
@@ -80,6 +104,7 @@ export default function AdminSkillsPage() {
       toast.error(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
       setUpdating(null);
+      setConfirmDialog({ open: false, skillName: "", targetTier: "foundation" });
     }
   };
 
@@ -247,7 +272,7 @@ export default function AdminSkillsPage() {
                 selected={selectedSkills.has(skill.name)}
                 updating={updating === skill.name}
                 onToggleSelect={() => toggleSkillSelection(skill.name)}
-                onTierChange={(tier) => handleTierChange(skill.name, tier)}
+                onTierChange={(tier) => handleTierChangeRequest(skill.name, tier)}
               />
             ))}
           </TableBody>
@@ -257,6 +282,32 @@ export default function AdminSkillsPage() {
       <div className="text-muted-foreground text-sm">
         Showing {filteredSkills.length} of {skills.length} skills
       </div>
+
+      <AlertDialog
+        open={confirmDialog.open}
+        onOpenChange={(open) => setConfirmDialog({ ...confirmDialog, open })}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认降级工业智能技能</AlertDialogTitle>
+            <AlertDialogDescription>
+              您即将将技能 <strong>{confirmDialog.skillName}</strong> 从"工业智能"降级为"基础工具"。
+              <br /><br />
+              降级后，该技能将不再作为平台的核心工业能力展示，且可以被禁用。
+              <br /><br />
+              此操作会影响平台的工业智能优先策略。确定要继续吗？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => handleTierChange(confirmDialog.skillName, confirmDialog.targetTier)}
+            >
+              确认降级
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

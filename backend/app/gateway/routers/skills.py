@@ -330,6 +330,19 @@ async def batch_update_skill_tier(request: SkillBatchTierRequest, config: AppCon
         if not_found:
             raise HTTPException(status_code=404, detail=f"Skills not found: {', '.join(not_found)}")
 
+        # Reject bulk demotion of core-industrial skills
+        if request.tier == SkillTier.FOUNDATION:
+            industrial_skills = [name for name in request.skill_names if skill_map[name].tier == SkillTier.CORE_INDUSTRIAL]
+            if industrial_skills:
+                logger.warning(
+                    f"Attempted bulk demotion of {len(industrial_skills)} industrial skills - rejected",
+                    extra={"skills": industrial_skills, "target_tier": request.tier.value, "action": "bulk_tier_change_rejected"}
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Bulk demotion of industrial skills is not allowed. Change tiers individually: {', '.join(industrial_skills)}",
+                )
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             config_path = Path.cwd().parent / "extensions_config.json"
@@ -349,6 +362,15 @@ async def batch_update_skill_tier(request: SkillBatchTierRequest, config: AppCon
         skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
         updated = [s for s in skills if s.name in set(request.skill_names)]
         logger.info("Batch tier update: %d skills → %s", len(updated), request.tier.value)
+        logger.info(
+            f"Batch skill tier changed",
+            extra={
+                "skill_count": len(updated),
+                "skill_names": list(request.skill_names),
+                "target_tier": request.tier.value,
+                "action": "batch_tier_change"
+            }
+        )
         return SkillsListResponse(skills=[_skill_to_response(s) for s in updated])
     except HTTPException:
         raise
@@ -394,6 +416,17 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
 
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        # Reject disabling core-industrial skills
+        if not request.enabled and skill.tier == SkillTier.CORE_INDUSTRIAL:
+            logger.warning(
+                f"Attempted to disable industrial skill '{skill_name}' - rejected",
+                extra={"skill_name": skill_name, "tier": skill.tier.value, "action": "disable_rejected"}
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"Industrial skills cannot be disabled. Change tier to foundation first.",
+            )
 
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
@@ -464,6 +497,15 @@ async def update_skill_tier(skill_name: str, request: SkillTierUpdateRequest, co
             raise HTTPException(status_code=500, detail=f"Failed to reload skill '{skill_name}' after tier update")
 
         logger.info("Skill '%s' tier updated to %s", skill_name, request.tier.value)
+        logger.info(
+            f"Skill tier changed",
+            extra={
+                "skill_name": skill_name,
+                "old_tier": skill.tier.value if skill.tier else None,
+                "new_tier": request.tier.value,
+                "action": "tier_change"
+            }
+        )
         return _skill_to_response(updated)
     except HTTPException:
         raise
