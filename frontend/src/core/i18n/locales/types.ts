@@ -189,6 +189,8 @@ export interface Translations {
     searchChats: string;
     deleteSelectedTitle: string;
     deleteSelectedDescription: string;
+    updateSelectedFailed: string;
+    deleteSelectedFailed: string;
   };
 
   // Page titles (document title)

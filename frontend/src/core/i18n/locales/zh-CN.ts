@@ -246,6 +246,8 @@ export const zhCN: Translations = {
     searchChats: "搜索对话",
     deleteSelectedTitle: "删除所选对话？",
     deleteSelectedDescription: "此操作无法撤销。",
+    updateSelectedFailed: "部分对话更新失败。",
+    deleteSelectedFailed: "部分对话删除失败。",
   },
 
   // Page titles (document title)

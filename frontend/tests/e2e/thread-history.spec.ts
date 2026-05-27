@@ -6,7 +6,7 @@ import {
   MOCK_THREAD_ID_2,
 } from "./utils/mock-api";
 
-const threads = () => [
+const makeThreads = () => [
   {
     thread_id: MOCK_THREAD_ID,
     title: "First conversation",
@@ -21,7 +21,7 @@ const threads = () => [
 
 test.describe("Thread history", () => {
   test("sidebar shows existing threads", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats/new");
 
@@ -33,7 +33,7 @@ test.describe("Thread history", () => {
   });
 
   test("clicking a thread in sidebar navigates to it", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats/new");
 
@@ -50,7 +50,7 @@ test.describe("Thread history", () => {
   });
 
   test("sidebar can archive a thread", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats/new");
 
@@ -68,7 +68,7 @@ test.describe("Thread history", () => {
   });
 
   test("existing thread loads historical messages", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     // Navigate directly to an existing thread
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
@@ -80,7 +80,7 @@ test.describe("Thread history", () => {
   });
 
   test("chats list page shows all threads", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats");
 
@@ -95,7 +95,7 @@ test.describe("Thread history", () => {
   test("chats list page can select all and delete selected threads", async ({
     page,
   }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats");
 
@@ -117,7 +117,7 @@ test.describe("Thread history", () => {
   test("chats list page can shift-select and archive selected threads", async ({
     page,
   }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats");
 
@@ -140,7 +140,7 @@ test.describe("Thread history", () => {
   });
 
   test("chats list page can delete a thread", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats");
 
@@ -158,7 +158,7 @@ test.describe("Thread history", () => {
   });
 
   test("chats list page can archive and restore a thread", async ({ page }) => {
-    mockLangGraphAPI(page, { threads: threads() });
+    mockLangGraphAPI(page, { threads: makeThreads() });
 
     await page.goto("/workspace/chats");
 

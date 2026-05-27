@@ -27,6 +27,15 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 
+type ThreadSearchParams = NonNullable<Parameters<ThreadsClient["search"]>[0]>;
+
+const DEFAULT_THREAD_SEARCH_PARAMS: ThreadSearchParams = {
+  limit: 50,
+  sortBy: "updated_at",
+  sortOrder: "desc",
+  select: ["thread_id", "updated_at", "values", "metadata"],
+};
+
 export type ToolEndEvent = {
   name: string;
   data: unknown;
@@ -812,17 +821,12 @@ export function useThreadHistory(threadId: string) {
 }
 
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
-    limit: 50,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "metadata"],
-  },
+  params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
   { includeArchived = false }: { includeArchived?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params, { includeArchived }],
+    queryKey: ["threads", "search", params, includeArchived],
     queryFn: async () => {
       const maxResults = params.limit;
       const initialOffset = params.offset ?? 0;
@@ -853,7 +857,7 @@ export function useThreads(
         }
 
         const currentLimit =
-          typeof maxResults === "number" && includeArchived
+          typeof maxResults === "number"
             ? Math.min(pageSize, maxResults - threads.length)
             : pageSize;
 
@@ -1034,12 +1038,7 @@ export function useArchiveThread() {
           if (oldData == null) {
             return;
           }
-          const queryOptions = queryKey.at(-1);
-          const includeArchived =
-            typeof queryOptions === "object" &&
-            queryOptions != null &&
-            "includeArchived" in queryOptions &&
-            queryOptions.includeArchived === true;
+          const includeArchived = queryKey.at(-1) === true;
           const nextData =
             archived && !includeArchived
               ? oldData.filter((thread) => thread.thread_id !== threadId)

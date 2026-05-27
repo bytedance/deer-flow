@@ -258,6 +258,8 @@ export const enUS: Translations = {
     searchChats: "Search chats",
     deleteSelectedTitle: "Delete selected chats?",
     deleteSelectedDescription: "This cannot be undone.",
+    updateSelectedFailed: "Failed to update some chats.",
+    deleteSelectedFailed: "Failed to delete some chats.",
   },
 
   // Page titles (document title)

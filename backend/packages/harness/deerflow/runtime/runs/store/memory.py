@@ -77,7 +77,17 @@ class MemoryRunStore(RunStore):
         self._runs.pop(run_id, None)
 
     async def delete_by_thread(self, thread_id, *, user_id=None):
-        run_ids = [run_id for run_id, run in self._runs.items() if run["thread_id"] == thread_id and (user_id is None or run.get("user_id") == user_id)]
+        def matches_thread(run):
+            if run["thread_id"] != thread_id:
+                return False
+            if user_id is None:
+                return True
+            return run.get("user_id") == user_id
+
+        run_ids = []
+        for run_id, run in self._runs.items():
+            if matches_thread(run):
+                run_ids.append(run_id)
         for run_id in run_ids:
             self._runs.pop(run_id, None)
         return len(run_ids)

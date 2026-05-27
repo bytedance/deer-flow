@@ -40,6 +40,7 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 import { env } from "@/env";
 
 type ThreadView = "active" | "archived";
+const BULK_ACTION_BATCH_SIZE = 5;
 
 export default function ChatsPage() {
   const { t } = useI18n();
@@ -142,15 +143,13 @@ export default function ChatsPage() {
 
   const handleArchiveSelected = async (archived: boolean) => {
     setBulkActionPending(true);
-    const results = await Promise.allSettled(
-      [...selectedThreadIds].map((threadId) =>
-        archiveThreadAsync({ threadId, archived, invalidate: false }),
-      ),
+    const results = await runThreadBatch([...selectedThreadIds], (threadId) =>
+      archiveThreadAsync({ threadId, archived, invalidate: false }),
     );
     void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     setBulkActionPending(false);
     if (results.some((result) => result.status === "rejected")) {
-      toast.error("Failed to update some chats.");
+      toast.error(t.chats.updateSelectedFailed);
       return;
     }
     handleClearSelection();
@@ -158,15 +157,13 @@ export default function ChatsPage() {
 
   const handleDeleteSelected = async () => {
     setBulkActionPending(true);
-    const results = await Promise.allSettled(
-      [...selectedThreadIds].map((threadId) =>
-        deleteThreadAsync({ threadId, invalidate: false }),
-      ),
+    const results = await runThreadBatch([...selectedThreadIds], (threadId) =>
+      deleteThreadAsync({ threadId, invalidate: false }),
     );
     void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     setBulkActionPending(false);
     if (results.some((result) => result.status === "rejected")) {
-      toast.error("Failed to delete some chats.");
+      toast.error(t.chats.deleteSelectedFailed);
       return;
     }
     setDeleteDialogOpen(false);
@@ -368,4 +365,25 @@ export default function ChatsPage() {
       </WorkspaceBody>
     </WorkspaceContainer>
   );
+}
+
+async function runThreadBatch(
+  threadIds: string[],
+  action: (threadId: string) => Promise<unknown>,
+) {
+  const results: PromiseSettledResult<unknown>[] = [];
+  for (
+    let index = 0;
+    index < threadIds.length;
+    index += BULK_ACTION_BATCH_SIZE
+  ) {
+    results.push(
+      ...(await Promise.allSettled(
+        threadIds
+          .slice(index, index + BULK_ACTION_BATCH_SIZE)
+          .map((threadId) => action(threadId)),
+      )),
+    );
+  }
+  return results;
 }
