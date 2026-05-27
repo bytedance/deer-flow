@@ -1,6 +1,6 @@
 import stat
 
-from deerflow.skills.permissions import make_skill_tree_sandbox_readable
+from deerflow.skills.permissions import make_skill_tree_sandbox_readable, make_skill_written_path_sandbox_readable
 
 
 def _mode(path):
@@ -35,3 +35,29 @@ def test_skill_tree_readability_includes_hidden_paths_and_removes_sandbox_write(
     assert _mode(env_file) == 0o644
     assert _mode(hidden_file) == 0o644
     assert _mode(script_file) == 0o755
+
+
+def test_written_path_readability_is_limited_to_written_path(tmp_path):
+    root = tmp_path / "demo-skill"
+    ref_dir = root / "references"
+    sibling_dir = root / "templates"
+    ref_dir.mkdir(parents=True)
+    sibling_dir.mkdir()
+    target = ref_dir / "guide.md"
+    sibling = sibling_dir / "note.md"
+    target.write_text("guide", encoding="utf-8")
+    sibling.write_text("note", encoding="utf-8")
+
+    root.chmod(0o700)
+    ref_dir.chmod(0o700)
+    target.chmod(0o600)
+    sibling_dir.chmod(0o700)
+    sibling.chmod(0o600)
+
+    make_skill_written_path_sandbox_readable(root, target)
+
+    assert _mode(root) == 0o755
+    assert _mode(ref_dir) == 0o755
+    assert _mode(target) == 0o644
+    assert _mode(sibling_dir) == 0o700
+    assert _mode(sibling) == 0o600

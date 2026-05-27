@@ -44,7 +44,7 @@ def test_write_is_atomic_overwrite(tmp_path, storage):
     assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "second"
 
 
-def test_write_makes_skill_tree_sandbox_readable(tmp_path, storage):
+def test_write_makes_written_path_sandbox_readable(tmp_path, storage):
     skill_dir = tmp_path / "custom" / "demo-skill"
     skill_dir.mkdir(parents=True)
     skill_dir.chmod(0o700)

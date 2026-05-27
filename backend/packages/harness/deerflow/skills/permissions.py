@@ -19,3 +19,16 @@ def make_skill_tree_sandbox_readable(target: Path) -> None:
     make_skill_path_sandbox_readable(target)
     for path in target.rglob("*"):
         make_skill_path_sandbox_readable(path)
+
+
+def make_skill_written_path_sandbox_readable(skill_root: Path, target: Path) -> None:
+    resolved_root = skill_root.resolve()
+    resolved_target = target.resolve()
+    resolved_target.relative_to(resolved_root)
+
+    make_skill_path_sandbox_readable(resolved_root)
+    current = resolved_root
+    for part in resolved_target.parent.relative_to(resolved_root).parts:
+        current = current / part
+        make_skill_path_sandbox_readable(current)
+    make_skill_path_sandbox_readable(resolved_target)
