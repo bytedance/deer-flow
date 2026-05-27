@@ -21,6 +21,12 @@ elapsed=0
 interval=1
 
 is_port_listening() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; if (Get-NetTCPConnection -LocalPort $PORT -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
     if command -v lsof >/dev/null 2>&1; then
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0

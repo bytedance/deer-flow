@@ -1,7 +1,24 @@
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+
+
+def _configure_windows_event_loop_policy() -> None:
+    """Use an event loop policy compatible with async psycopg on Windows."""
+    if sys.platform != "win32":
+        return
+
+    selector_policy = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if selector_policy is None:
+        return
+
+    if not isinstance(asyncio.get_event_loop_policy(), selector_policy):
+        asyncio.set_event_loop_policy(selector_policy())
+
+
+_configure_windows_event_loop_policy()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -161,16 +178,10 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
-    # Load config and check necessary environment variables at startup.
-    # `startup_config` is a local snapshot used only for one-shot bootstrap
-    # work (logging level, langgraph_runtime engines, channels). Request-time
-    # config resolution always routes through `get_app_config()` in
-    # `app/gateway/deps.py::get_config()` so `config.yaml` edits become
-    # visible without a process restart. We deliberately do NOT cache this
-    # snapshot on `app.state` to keep that contract enforceable.
+    # Load config and check necessary environment variables at startup
     try:
-        startup_config = get_app_config()
-        apply_logging_level(startup_config.log_level)
+        app.state.config = get_app_config()
+        apply_logging_level(app.state.config.log_level)
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -180,7 +191,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app, startup_config):
+    async with langgraph_runtime(app):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -191,7 +202,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(startup_config)
+            channel_service = await start_channel_service(app.state.config)
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
