@@ -1,18 +1,14 @@
 "use client";
 
 import {
-  ActivityIcon,
   ArrowRightIcon,
   BookOpenIcon,
   BotIcon,
   BugIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
-  ClipboardCheckIcon,
-  FactoryIcon,
   FileTextIcon,
   HistoryIcon,
-  LineChartIcon,
   MessagesSquare,
   Settings2Icon,
   WrenchIcon,
@@ -52,30 +48,6 @@ const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   BookOpen: BookOpenIcon,
   Bug: BugIcon,
 };
-
-const INDUSTRIAL_NAV_ITEMS = [
-  {
-    label: "设备监测",
-    labelEn: "Monitoring",
-    path: "/workspace/agents/monitoring-analysis/chats/new",
-    icon: ActivityIcon,
-    locked: true,
-  },
-  {
-    label: "故障诊断",
-    labelEn: "Diagnosis",
-    path: "/workspace/agents/device-diagnosis/chats/new",
-    icon: ClipboardCheckIcon,
-    locked: true,
-  },
-  {
-    label: "趋势报告",
-    labelEn: "Trends",
-    path: "/workspace/agents/trend-report/chats/new",
-    icon: LineChartIcon,
-    locked: true,
-  },
-] as const;
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
@@ -124,35 +96,6 @@ export function WorkspaceNavChatList() {
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
-        {/* Industrial Workflows — always first, always visible */}
-        <SidebarMenuItem>
-          <SidebarMenuButton className="pointer-events-none opacity-60">
-            <FactoryIcon className="size-4" />
-            <span className="text-xs font-semibold uppercase tracking-wide">
-              {t.locale.localName === "中文" ? "工业智能" : "Industrial"}
-            </span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-
-        {INDUSTRIAL_NAV_ITEMS.map((item) => {
-          const isActive = pathname.startsWith(item.path.replace("/chats/new", ""));
-          return (
-            <SidebarMenuItem key={item.path}>
-              <SidebarMenuButton isActive={isActive} asChild>
-                <Link className="text-muted-foreground" href={item.path}>
-                  <item.icon className="size-4" />
-                  <span>{t.locale.localName === "中文" ? item.label : item.labelEn}</span>
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          );
-        })}
-
-        {/* Divider */}
-        <SidebarMenuItem>
-          <div className="mx-2 my-2 border-t" />
-        </SidebarMenuItem>
-
         <SidebarMenuItem>
           <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
             <Link className="text-muted-foreground" href="/workspace/chats">

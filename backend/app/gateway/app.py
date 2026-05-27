@@ -703,6 +703,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     app.include_router(report_template_telemetry.router)
     app.include_router(blueprints.router)
     app.include_router(marketplace.router)
+    app.include_router(marketplace.publish_router)
 
     # Tenant MCP Servers CRUD API
     app.include_router(tenant_mcp_servers.router)

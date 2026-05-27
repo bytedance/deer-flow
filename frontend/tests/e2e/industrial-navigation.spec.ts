@@ -2,36 +2,17 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-test.describe("Industrial navigation", () => {
-  test("industrial workflows appear first in sidebar", async ({ page }) => {
+test.describe("Sidebar navigation", () => {
+  test("agents section is collapsible", async ({ page }) => {
     mockLangGraphAPI(page);
 
     await page.goto("/workspace/chats/new");
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
 
-    // Industrial section label should be visible
-    await expect(sidebar.getByText("工业智能")).toBeVisible({ timeout: 15_000 });
-
-    // Industrial workflow links should be present
-    const monitoringLink = sidebar.locator(
-      "a[href='/workspace/agents/monitoring-analysis/chats/new']"
-    );
-    const diagnosisLink = sidebar.locator(
-      "a[href='/workspace/agents/device-diagnosis/chats/new']"
-    );
-    const trendLink = sidebar.locator(
-      "a[href='/workspace/agents/trend-report/chats/new']"
-    );
-
-    await expect(monitoringLink).toBeVisible({ timeout: 10_000 });
-    await expect(diagnosisLink).toBeVisible({ timeout: 10_000 });
-    await expect(trendLink).toBeVisible({ timeout: 10_000 });
-
-    // Get all menu items and verify industrial items come before general items
-    const menuItems = sidebar.locator("[data-sidebar='menu-button']");
-    const firstItemText = await menuItems.first().textContent();
-    expect(firstItemText).toContain("工业智能");
+    // Agents section trigger should be visible
+    const agentsTrigger = sidebar.getByText("智能体").first();
+    await expect(agentsTrigger).toBeVisible({ timeout: 15_000 });
   });
 
   test("Tools menu is collapsible", async ({ page }) => {
@@ -88,66 +69,28 @@ test.describe("Industrial navigation", () => {
     // Should be collapsed after reload
     await expect(kbLink).not.toBeVisible({ timeout: 3_000 });
   });
-
-  test("industrial workflow links navigate correctly", async ({ page }) => {
-    mockLangGraphAPI(page);
-
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    const monitoringLink = sidebar.locator(
-      "a[href='/workspace/agents/monitoring-analysis/chats/new']"
-    );
-
-    await expect(monitoringLink).toBeVisible({ timeout: 15_000 });
-    await monitoringLink.click();
-
-    await page.waitForURL("**/workspace/agents/monitoring-analysis/chats/new");
-    await expect(page).toHaveURL(
-      /\/workspace\/agents\/monitoring-analysis\/chats\/new/
-    );
-  });
 });
 
-test.describe("Landing page Quick Access", () => {
-  test("Quick Access section shows industrial workflows", async ({ page }) => {
-    await page.goto("/");
-
-    // Quick Access heading should be visible
-    await expect(page.getByText("Quick Access")).toBeVisible({ timeout: 10_000 });
-
-    // Three workflow cards should be present
-    await expect(page.getByText("设备监测")).toBeVisible();
-    await expect(page.getByText("故障诊断")).toBeVisible();
-    await expect(page.getByText("趋势报告")).toBeVisible();
-  });
-
-  test("Quick Access cards link to correct workflows", async ({ page }) => {
+test.describe("Landing page", () => {
+  test("hero section has enter workspace button", async ({ page }) => {
     mockLangGraphAPI(page);
 
     await page.goto("/");
 
-    // Click monitoring card
-    const monitoringCard = page.locator("a", { hasText: "设备监测" }).first();
-    await expect(monitoringCard).toBeVisible({ timeout: 10_000 });
-    await monitoringCard.click();
+    // "进入工作台" button should be visible
+    const enterWorkspace = page.getByRole("link", { name: /进入工作台/ });
+    await expect(enterWorkspace).toBeVisible({ timeout: 10_000 });
 
-    await page.waitForURL("**/workspace/agents/monitoring-analysis/chats/new");
-    await expect(page).toHaveURL(
-      /\/workspace\/agents\/monitoring-analysis\/chats\/new/
-    );
+    await enterWorkspace.click();
+    await page.waitForURL("**/workspace");
   });
 
-  test("hero section has industrial workflow quick start button", async ({ page }) => {
-    mockLangGraphAPI(page);
-
+  test("feature cards are displayed", async ({ page }) => {
     await page.goto("/");
 
-    // "开始监测" button should be visible
-    const startMonitoring = page.getByRole("link", { name: /开始监测/ });
-    await expect(startMonitoring).toBeVisible({ timeout: 10_000 });
-
-    await startMonitoring.click();
-    await page.waitForURL("**/workspace/agents/monitoring-analysis/chats/new");
+    await expect(page.getByText("实时监测")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("智能诊断")).toBeVisible();
+    await expect(page.getByText("运行报告")).toBeVisible();
+    await expect(page.getByText("对话操作")).toBeVisible();
   });
 });

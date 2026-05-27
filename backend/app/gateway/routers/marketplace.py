@@ -424,5 +424,7 @@ async def approve_listing(
     }
 
 
-# Merge routers
-router.include_router(publish_router)
+# publish_router is registered separately in app.py (no prefix)
+# so that /api/report-templates/{id}/publish-to-marketplace and
+# /api/template-marketplace/{id}/approve are not nested under
+# the /api/template-marketplace prefix.

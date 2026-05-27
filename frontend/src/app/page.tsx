@@ -1,36 +1,9 @@
-import {
-  ActivityIcon,
-  ClipboardCheckIcon,
-  LineChartIcon,
-  type LucideIcon,
-  MessageSquareIcon,
-} from "lucide-react";
+import { BotIcon } from "lucide-react";
 import Link from "next/link";
 
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { Button } from "@/components/ui/button";
-
-const INDUSTRIAL_WORKFLOWS = [
-  {
-    label: "设备监测",
-    description: "实时查看装置运行状态与关键测点数据。",
-    path: "/workspace/agents/monitoring-analysis/chats/new",
-    icon: ActivityIcon,
-  },
-  {
-    label: "故障诊断",
-    description: "基于振动频谱与趋势特征的故障识别与根因分析。",
-    path: "/workspace/agents/device-diagnosis/chats/new",
-    icon: ClipboardCheckIcon,
-  },
-  {
-    label: "趋势报告",
-    description: "日报、周报、月报由 AI 自动生成并导出。",
-    path: "/workspace/agents/trend-report/chats/new",
-    icon: LineChartIcon,
-  },
-] as const;
 
 export default function LandingPage() {
   return (
@@ -47,31 +20,12 @@ export default function LandingPage() {
             面向石油石化行业，以 AI 驱动实时监测、故障诊断与运行报告。
           </p>
           <div className="flex gap-3 mt-4">
-            <Link href="/workspace/agents/monitoring-analysis/chats/new">
-              <Button size="lg">开始监测</Button>
-            </Link>
             <Link href="/workspace">
-              <Button size="lg" variant="outline">
+              <Button size="lg">
+                <BotIcon className="mr-2 size-4" />
                 进入工作台
               </Button>
             </Link>
-          </div>
-        </section>
-
-        <section className="py-8">
-          <h2 className="text-muted-foreground mb-4 text-center text-sm font-semibold uppercase tracking-wide">
-            Quick Access
-          </h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            {INDUSTRIAL_WORKFLOWS.map((workflow) => (
-              <WorkflowCard
-                key={workflow.path}
-                label={workflow.label}
-                description={workflow.description}
-                path={workflow.path}
-                icon={workflow.icon}
-              />
-            ))}
           </div>
         </section>
 
@@ -113,30 +67,5 @@ function FeatureCard({
         {description}
       </p>
     </div>
-  );
-}
-
-function WorkflowCard({
-  label,
-  description,
-  path,
-  icon: Icon,
-}: {
-  label: string;
-  description: string;
-  path: string;
-  icon: LucideIcon;
-}) {
-  return (
-    <Link
-      href={path}
-      className="border-border/60 bg-card hover:border-primary/50 hover:bg-accent/50 flex flex-col gap-3 rounded-lg border p-6 transition-colors"
-    >
-      <Icon className="text-primary size-6" />
-      <h3 className="text-lg font-semibold">{label}</h3>
-      <p className="text-muted-foreground text-sm leading-relaxed">
-        {description}
-      </p>
-    </Link>
   );
 }
