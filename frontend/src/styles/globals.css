@@ -70,10 +70,22 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Hover-capable variant. Use ``hoverable:group-hover:opacity-100`` instead
+   of ``group-hover:opacity-100`` for UI elements that are hover-only — on
+   touch devices those hover states never trigger, so we need a separate
+   rule to keep them reachable. */
+@custom-variant hoverable (@media (hover: hover) and (pointer: fine));
+
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
     "Segoe UI Symbol", "Noto Color Emoji";
+
+  /* Custom breakpoint for Samsung Galaxy Tab S9 in portrait (800×1280 CSS).
+     Tailwind defaults place 800 px in the dead zone between ``md`` (768)
+     and ``lg`` (1024). ``tab`` makes the Tab-portrait specifically
+     targetable without pulling phones into the same rule. */
+  --breakpoint-tab: 800px;
 
   --animate-fade-in: fade-in 1.1s;
   @keyframes fade-in {
@@ -389,4 +401,92 @@
   --container-width-sm: calc(var(--spacing) * 144);
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
+
+  /* Safe-area insets resolve to 0 on devices without cutouts, and to the
+     device-reported values on iPhone (notch / Dynamic Island / Home
+     Indicator) once ``viewport-fit=cover`` is set in the viewport meta
+     (see src/app/layout.tsx). Exposed as CSS variables so utility
+     classes below can compose them without needing ``env()`` inlined
+     everywhere. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+
+  /* Virtual-keyboard insets. Composed from two sources so every browser
+     is covered:
+       - env(keyboard-inset-bottom) — VirtualKeyboard API, Chromium 94+.
+       - --keyboard-inset-js — set by the useVisualViewport hook by
+         measuring window.visualViewport. This is the only source that
+         works on iOS Safari (which ships neither the VirtualKeyboard
+         API nor the interactive-widget meta directive).
+     ``max()`` picks whichever is larger so we always reflect the real
+     occlusion, regardless of which browser we are on. */
+  --keyboard-bottom: max(
+    env(keyboard-inset-bottom, 0px),
+    var(--keyboard-inset-js, 0px)
+  );
+}
+
+/* Touch-device quality-of-life. The grey tap highlight rectangle on iOS
+   Safari and some Android Chromiums interferes with custom button
+   styles; this removes it without affecting focus rings. */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Safe-area utilities. Composable with Tailwind padding utilities, e.g.
+   ``<div className="pb-safe">`` adds exactly the device-reported
+   home-indicator inset. ``pb-safe-or-4`` adds either the inset or 1rem,
+   whichever is bigger — useful when the content has its own baseline
+   padding but must never be hidden behind the home indicator. */
+@utility pt-safe {
+  padding-top: var(--safe-top);
+}
+@utility pr-safe {
+  padding-right: var(--safe-right);
+}
+@utility pb-safe {
+  padding-bottom: var(--safe-bottom);
+}
+@utility pl-safe {
+  padding-left: var(--safe-left);
+}
+@utility px-safe {
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+@utility py-safe {
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+}
+@utility mt-safe {
+  margin-top: var(--safe-top);
+}
+@utility mb-safe {
+  margin-bottom: var(--safe-bottom);
+}
+
+/* Bottom padding that expands when the on-screen keyboard opens so the
+   content beneath it (typically the InputBox) remains visible. Falls
+   back to the safe-area inset (home indicator) when no keyboard. Use
+   on fixed / absolute bottom-anchored elements. */
+@utility pb-keyboard {
+  padding-bottom: max(var(--keyboard-bottom), var(--safe-bottom));
+}
+@utility bottom-keyboard {
+  bottom: max(var(--keyboard-bottom), var(--safe-bottom));
+}
+
+/* Minimum touch target size for finger input. Apple HIG requires 44pt,
+   Google Material requires 48dp — we enforce 44px which satisfies HIG
+   and is one pixel shy of Material's requirement but still comfortably
+   above the 7mm minimum both specs are derived from. The rule only
+   applies on coarse / non-hover pointers (touchscreens), so desktop
+   icon buttons keep their compact size. */
+@utility touch-target {
+  @media (hover: none) and (pointer: coarse) {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
 }

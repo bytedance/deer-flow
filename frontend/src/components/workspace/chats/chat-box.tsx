@@ -11,6 +11,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { env } from "@/env";
+import { useIsNarrow } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import {
@@ -20,8 +21,14 @@ import {
 } from "../artifacts";
 import { useThread } from "../messages/context";
 
+// Desktop / wide-viewport split: chat on the left, artifacts on the right
+// with a resizable divider.
 const CLOSE_MODE = { chat: 100, artifacts: 0 };
-const OPEN_MODE = { chat: 60, artifacts: 40 };
+const OPEN_MODE_WIDE = { chat: 60, artifacts: 40 };
+// Narrow (phone + tablet-portrait): the artifact panel replaces the chat
+// entirely when opened. A 60/40 split at 800 px would leave 480/320 px —
+// both columns below the comfortable reading width for code.
+const OPEN_MODE_NARROW = { chat: 0, artifacts: 100 };
 
 const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   children,
@@ -90,15 +97,16 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     return pathname.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   }, [pathname]);
 
+  const isNarrow = useIsNarrow();
+
   useEffect(() => {
-    if (layoutRef.current) {
-      if (artifactPanelOpen) {
-        layoutRef.current.setLayout(OPEN_MODE);
-      } else {
-        layoutRef.current.setLayout(CLOSE_MODE);
-      }
+    if (!layoutRef.current) return;
+    if (artifactPanelOpen) {
+      layoutRef.current.setLayout(isNarrow ? OPEN_MODE_NARROW : OPEN_MODE_WIDE);
+    } else {
+      layoutRef.current.setLayout(CLOSE_MODE);
     }
-  }, [artifactPanelOpen]);
+  }, [artifactPanelOpen, isNarrow]);
 
   return (
     <ResizablePanelGroup
@@ -115,6 +123,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
         className={cn(
           "opacity-33 hover:opacity-100",
           !artifactPanelOpen && "pointer-events-none opacity-0",
+          // On narrow viewports the two panels do a full tab-switch
+          // (0/100 ↔ 100/0) rather than sharing space, so a draggable
+          // handle has no meaning — hide it completely to avoid a
+          // dead-zone strip across the screen.
+          "max-lg:pointer-events-none max-lg:opacity-0",
         )}
       />
       <ResizablePanel
