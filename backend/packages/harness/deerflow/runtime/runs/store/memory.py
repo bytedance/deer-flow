@@ -46,8 +46,13 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
         }
 
-    async def get(self, run_id):
-        return self._runs.get(run_id)
+    async def get(self, run_id, *, user_id=None):
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        if user_id is not None and run.get("user_id") != user_id:
+            return None
+        return run
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
         results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
@@ -60,6 +65,13 @@ class MemoryRunStore(RunStore):
             if error is not None:
                 self._runs[run_id]["error"] = error
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        return False
+
+    async def update_model_name(self, run_id, model_name):
+        if run_id in self._runs:
+            self._runs[run_id]["model_name"] = model_name
+            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def delete(self, run_id):
         self._runs.pop(run_id, None)
@@ -71,6 +83,15 @@ class MemoryRunStore(RunStore):
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            return True
+        return False
+
+    async def update_run_progress(self, run_id, **kwargs):
+        if run_id in self._runs and self._runs[run_id].get("status") == "running":
+            for key, value in kwargs.items():
+                if value is not None:
+                    self._runs[run_id][key] = value
+            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
@@ -78,8 +99,15 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in ("success", "error")]
+    async def list_inflight(self, *, before=None):
+        now = before or datetime.now(UTC).isoformat()
+        results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
+        results.sort(key=lambda r: r["created_at"])
+        return results
+
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             model = r.get("model_name") or "unknown"

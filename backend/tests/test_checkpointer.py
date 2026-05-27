@@ -291,7 +291,7 @@ class TestAsyncCheckpointer:
     @pytest.mark.anyio
     async def test_sqlite_creates_parent_dir_via_to_thread(self):
         """Async SQLite setup should move mkdir off the event loop."""
-        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+        from deerflow.runtime.checkpointer.async_provider import _prepare_sqlite_checkpointer_path, make_checkpointer
 
         mock_config = MagicMock()
         mock_config.checkpointer = CheckpointerConfig(type="sqlite", connection_string="relative/test.db")
@@ -310,20 +310,61 @@ class TestAsyncCheckpointer:
         with (
             patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
             patch.dict(sys.modules, {"langgraph.checkpoint.sqlite.aio": mock_module}),
-            patch("deerflow.runtime.checkpointer.async_provider.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
             patch(
-                "deerflow.runtime.checkpointer.async_provider.resolve_sqlite_conn_str",
+                "deerflow.runtime.checkpointer.async_provider.asyncio.to_thread",
+                new_callable=AsyncMock,
                 return_value="/tmp/resolved/test.db",
-            ),
+            ) as mock_to_thread,
         ):
             async with make_checkpointer() as saver:
                 assert saver is mock_saver
 
         mock_to_thread.assert_awaited_once()
         called_fn, called_path = mock_to_thread.await_args.args
-        assert called_fn.__name__ == "ensure_sqlite_parent_dir"
-        assert called_path == "/tmp/resolved/test.db"
+        assert called_fn is _prepare_sqlite_checkpointer_path
+        assert called_path == "relative/test.db"
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/test.db")
+        mock_saver.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_database_sqlite_creates_parent_dir_via_to_thread(self):
+        """Unified database SQLite setup should also move path IO off the event loop."""
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.runtime.checkpointer.async_provider import _prepare_database_sqlite_checkpointer_path, make_checkpointer
+
+        db_config = DatabaseConfig(backend="sqlite", sqlite_dir="relative-data")
+        mock_config = MagicMock()
+        mock_config.checkpointer = None
+        mock_config.database = db_config
+
+        mock_saver = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_saver
+        mock_cm.__aexit__.return_value = False
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string.return_value = mock_cm
+
+        mock_module = MagicMock()
+        mock_module.AsyncSqliteSaver = mock_saver_cls
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite.aio": mock_module}),
+            patch(
+                "deerflow.runtime.checkpointer.async_provider.asyncio.to_thread",
+                new_callable=AsyncMock,
+                return_value="/tmp/data/deerflow.db",
+            ) as mock_to_thread,
+        ):
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        mock_to_thread.assert_awaited_once()
+        called_fn, called_db_config = mock_to_thread.await_args.args
+        assert called_fn is _prepare_database_sqlite_checkpointer_path
+        assert called_db_config is db_config
+        mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/data/deerflow.db")
         mock_saver.setup.assert_awaited_once()
 
 
