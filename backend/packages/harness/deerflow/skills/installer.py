@@ -14,6 +14,13 @@ import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_static_scanner import (
+    StaticFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan,
+    static_findings_to_dicts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +34,14 @@ class SkillAlreadyExistsError(ValueError):
 
 class SkillSecurityScanError(ValueError):
     """Raised when a skill archive fails security scanning."""
+
+    findings: list[StaticFinding]
+    skill_name: str | None
+
+    def __init__(self, message: str, *, findings: list[StaticFinding] | None = None, skill_name: str | None = None) -> None:
+        super().__init__(message)
+        self.findings = static_findings_to_dicts(findings or [])
+        self.skill_name = skill_name
 
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
@@ -172,8 +187,19 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
 
+async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str) -> None:
+    try:
+        await asyncio.to_thread(enforce_static_scan, skill_dir, skill_name=skill_name)
+    except StaticScanBlockedError as e:
+        raise SkillSecurityScanError(str(e), findings=e.findings, skill_name=e.skill_name) from e
+    except StaticScannerError as e:
+        raise SkillSecurityScanError(f"Static security scan failed for skill '{skill_name}': {e}", skill_name=skill_name) from e
+
+
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
     """Run the skill security scanner against all installable text and script files."""
+    await _scan_static_skill_archive_or_raise(skill_dir, skill_name)
+
     skill_md = skill_dir / "SKILL.md"
     await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
 

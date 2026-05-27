@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Any
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any, NoReturn
 from weakref import WeakValueDictionary
 
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_static_scanner import (
+    StaticFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan,
+)
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
@@ -50,13 +60,47 @@ def _history_record(*, action: str, file_path: str, prev_content: str | None, ne
     }
 
 
-async def _scan_or_raise(content: str, *, executable: bool, location: str) -> dict[str, str]:
+async def _scan_or_raise(content: str, *, executable: bool, location: str) -> dict[str, Any]:
     result = await scan_skill_content(content, executable=executable, location=location)
     if result.decision == "block":
         raise ValueError(f"Security scan blocked the write: {result.reason}")
     if executable and result.decision != "allow":
         raise ValueError(f"Security scan rejected executable content: {result.reason}")
     return {"decision": result.decision, "reason": result.reason}
+
+
+def _raise_static_block(error: StaticScanBlockedError) -> NoReturn:
+    payload = {
+        "skill_name": error.skill_name,
+        "findings": error.findings,
+    }
+    raise ValueError(f"{error} Findings: {json.dumps(payload, ensure_ascii=False)}") from error
+
+
+def _raise_static_scan_failure(name: str, error: StaticScannerError) -> NoReturn:
+    raise ValueError(f"Static security scan failed for skill '{name}': {error}") from error
+
+
+async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], skill_storage: SkillStorage | None = None) -> list[StaticFinding]:
+    def _scan_candidate() -> list[StaticFinding]:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / name
+            if skill_storage is None:
+                skill_dir.mkdir(parents=True)
+            else:
+                shutil.copytree(skill_storage.get_custom_skill_dir(name), skill_dir)
+            for relative_path, content in updates.items():
+                target = skill_dir / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            return enforce_static_scan(skill_dir, skill_name=name)
+
+    try:
+        return await _to_thread(_scan_candidate)
+    except StaticScanBlockedError as e:
+        _raise_static_block(e)
+    except StaticScannerError as e:
+        _raise_static_scan_failure(name, e)
 
 
 async def _to_thread(func, /, *args, **kwargs):
@@ -96,7 +140,9 @@ async def _skill_manage_impl(
             if content is None:
                 raise ValueError("content is required for create.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
             await _to_thread(
                 skill_storage.append_history,
@@ -111,7 +157,9 @@ async def _skill_manage_impl(
             if content is None:
                 raise ValueError("content is required for edit.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan["static_findings"] = static_findings
             skill_file = skill_storage.get_custom_skill_file(name)
             prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
@@ -137,7 +185,9 @@ async def _skill_manage_impl(
             replacement_count = expected_count if expected_count is not None else 1
             new_content = prev_content.replace(find, replace, replacement_count)
             await _to_thread(skill_storage.validate_skill_markdown_content, name, new_content)
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: new_content})
             scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
             await _to_thread(
                 skill_storage.append_history,
@@ -171,7 +221,9 @@ async def _skill_manage_impl(
             exists = await _to_thread(target.exists)
             prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
+            static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}")
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, path, content)
             await _to_thread(
                 skill_storage.append_history,

@@ -1,0 +1,36 @@
+rules:
+  - id: python-dynamic-exec
+    languages:
+      - python
+    severity: ERROR
+    message: Python dynamic code execution primitive is used in a skill file.
+    metadata:
+      deerflow_severity: CRITICAL
+      remediation: Remove dynamic execution and replace it with explicit, typed logic.
+    paths:
+      include:
+        - "*.py"
+        - "**/*.py"
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+      - pattern: __import__(...)
+      - pattern: compile(..., "exec", ...)
+      - pattern: compile(..., 'exec', ...)
+
+  - id: python-shell-true
+    languages:
+      - python
+    severity: ERROR
+    message: Python shell execution primitive is used in a skill file.
+    metadata:
+      deerflow_severity: CRITICAL
+      remediation: Use subprocess with an argument list and shell=False, or remove shell execution.
+    paths:
+      include:
+        - "*.py"
+        - "**/*.py"
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)

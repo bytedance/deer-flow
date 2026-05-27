@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
+from deerflow.skills.security_static_scanner import StaticScannerError
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
 
@@ -140,6 +141,52 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
     assert refresh_calls == []
 
 
+def test_install_skill_archive_static_scan_block_returns_findings(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(
+        tmp_path,
+        "static-blocked-skill",
+        "---\nname: static-blocked-skill\ndescription: Static blocked skill\n---\n\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAtestonlytestonlytestonly\n-----END RSA PRIVATE KEY-----\n",
+    )
+    refresh_calls = []
+    llm_calls = []
+
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return ScanResult(decision="allow", reason="ok")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/static-blocked-skill.skill"})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["skill_name"] == "static-blocked-skill"
+    assert detail["findings"][0]["rule_id"] == "secret-private-key"
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert not (skills_root / "custom" / "static-blocked-skill").exists()
+
+
 def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     custom_dir = skills_root / "custom" / "demo-skill"
@@ -184,6 +231,50 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         assert rollback_response.status_code == 200
         assert rollback_response.json()["description"] == "Demo skill"
         assert refresh_calls == ["refresh", "refresh"]
+
+
+def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    custom_dir = skills_root / "custom" / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    original_content = _skill_content("demo-skill")
+    (custom_dir / "SKILL.md").write_text(original_content, encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    refresh_calls = []
+    llm_calls = []
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    async def _scan(*args, **kwargs):
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_scan("allow", "ok")
+
+    def _broken_static_scan(skill_dir, *, skill_name=None):
+        raise StaticScannerError("semgrep unavailable")
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
+    monkeypatch.setattr("app.gateway.routers.skills.enforce_static_scan", _broken_static_scan)
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/skills/custom/demo-skill",
+            json={"content": _skill_content("demo-skill", "Edited skill")},
+        )
+
+    assert response.status_code == 400
+    assert "Static security scan failed" in response.json()["detail"]
+    assert "semgrep unavailable" in response.json()["detail"]
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
 
 
 def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
