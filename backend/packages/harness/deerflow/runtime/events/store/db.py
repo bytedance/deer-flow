@@ -90,10 +90,10 @@ class DbRunEventStore(RunEventStore):
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Use FOR UPDATE to serialize seq assignment within a thread.
-                # NOTE: with_for_update() on aggregates is a no-op on SQLite;
-                # the UNIQUE(thread_id, seq) constraint catches races there.
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                # Lock the highest-seq row to serialize seq assignment within
+                # a thread.  FOR UPDATE on aggregates (func.max) is rejected
+                # by PostgreSQL, so we lock the actual row instead.
+                max_seq = await session.scalar(select(RunEventRow.seq).where(RunEventRow.thread_id == thread_id).order_by(RunEventRow.seq.desc()).limit(1).with_for_update())
                 seq = (max_seq or 0) + 1
                 row = RunEventRow(
                     thread_id=thread_id,
@@ -115,11 +115,11 @@ class DbRunEventStore(RunEventStore):
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Get max seq for the thread (assume all events in batch belong to same thread).
-                # NOTE: with_for_update() on aggregates is a no-op on SQLite;
-                # the UNIQUE(thread_id, seq) constraint catches races there.
+                # Lock the highest-seq row to serialize seq assignment within
+                # a thread.  FOR UPDATE on aggregates (func.max) is rejected
+                # by PostgreSQL, so we lock the actual row instead.
                 thread_id = events[0]["thread_id"]
-                max_seq = await session.scalar(select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id).with_for_update())
+                max_seq = await session.scalar(select(RunEventRow.seq).where(RunEventRow.thread_id == thread_id).order_by(RunEventRow.seq.desc()).limit(1).with_for_update())
                 seq = max_seq or 0
                 rows = []
                 for e in events:
