@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Archive,
   Download,
   FileJson,
   FileText,
@@ -50,6 +51,7 @@ import {
   exportThreadAsMarkdown,
 } from "@/core/threads/export";
 import {
+  useArchiveThread,
   useDeleteThread,
   useRenameThread,
   useThreads,
@@ -69,6 +71,7 @@ export function RecentChatList() {
       agent_name?: string;
     }>();
   const { data: threads = [] } = useThreads();
+  const { mutate: archiveThread } = useArchiveThread();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -77,25 +80,42 @@ export function RecentChatList() {
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  const getNextThreadPath = useCallback(
+    (threadId: string) => {
+      const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
+      if (threadIndex > -1) {
+        if (threads[threadIndex + 1]) {
+          return pathOfThread(threads[threadIndex + 1]!);
+        }
+        if (threads[threadIndex - 1]) {
+          return pathOfThread(threads[threadIndex - 1]!);
+        }
+      }
+      return pathOfThread("new", {
+        agent_name: agentNameFromPath,
+      });
+    },
+    [agentNameFromPath, threads],
+  );
+
   const handleDelete = useCallback(
     (threadId: string) => {
       deleteThread({ threadId });
       if (threadId === threadIdFromPath) {
-        const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
-        let nextThreadPath = pathOfThread("new", {
-          agent_name: agentNameFromPath,
-        });
-        if (threadIndex > -1) {
-          if (threads[threadIndex + 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex + 1]!);
-          } else if (threads[threadIndex - 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex - 1]!);
-          }
-        }
-        void router.push(nextThreadPath);
+        void router.push(getNextThreadPath(threadId));
       }
     },
-    [agentNameFromPath, deleteThread, router, threadIdFromPath, threads],
+    [deleteThread, getNextThreadPath, router, threadIdFromPath],
+  );
+
+  const handleArchive = useCallback(
+    (threadId: string) => {
+      archiveThread({ threadId, archived: true });
+      if (threadId === threadIdFromPath) {
+        void router.push(getNextThreadPath(threadId));
+      }
+    },
+    [archiveThread, getNextThreadPath, router, threadIdFromPath],
   );
 
   const handleRenameClick = useCallback(
@@ -252,6 +272,12 @@ export function RecentChatList() {
                                   </DropdownMenuItem>
                                 </DropdownMenuSubContent>
                               </DropdownMenuSub>
+                              <DropdownMenuItem
+                                onSelect={() => handleArchive(thread.thread_id)}
+                              >
+                                <Archive className="text-muted-foreground" />
+                                <span>{t.common.archive}</span>
+                              </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onSelect={() => handleDelete(thread.thread_id)}

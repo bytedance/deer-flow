@@ -49,6 +49,23 @@ test.describe("Thread history", () => {
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
   });
 
+  test("sidebar can archive a thread", async ({ page }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto("/workspace/chats/new");
+
+    const firstThread = page.locator('[data-sidebar="menu-item"]', {
+      hasText: "First conversation",
+    });
+    await expect(firstThread).toBeVisible({ timeout: 15_000 });
+    await firstThread.hover();
+    await firstThread.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Archive" }).click();
+
+    await expect(page.getByText("First conversation")).toHaveCount(0);
+    await expect(page.getByText("Second conversation")).toBeVisible();
+  });
+
   test("existing thread loads historical messages", async ({ page }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
