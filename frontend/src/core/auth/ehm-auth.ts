@@ -26,7 +26,9 @@ function base64UrlDecode(str: string): string {
 
 /**
  * Decode the payload of a JWT without verifying the signature.
- * Returns null if the token is malformed.
+ * Returns null only if the token is structurally malformed (not 3 parts,
+ * base64 decode fails, or JSON parse fails). Accepts any identifier shape
+ * in the payload — ins-base JWTs may carry id, userId, or sub.
  */
 function decodeJwtPayload(token: string): EhmTokenPayload | null {
   try {
@@ -34,7 +36,7 @@ function decodeJwtPayload(token: string): EhmTokenPayload | null {
     const encodedPayload = parts[1];
     if (parts.length !== 3 || !encodedPayload) return null;
     const payload = JSON.parse(base64UrlDecode(encodedPayload));
-    if (typeof payload.id !== "number") return null;
+    if (typeof payload !== "object" || payload === null) return null;
     return payload as EhmTokenPayload;
   } catch {
     return null;
@@ -46,6 +48,16 @@ function base64Decode(str: string): string {
     return atob(str);
   }
   return Buffer.from(str, "base64").toString("utf-8");
+}
+
+function readClientCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  for (const pair of document.cookie.split("; ")) {
+    if (pair.startsWith(`${name}=`)) {
+      return decodeURIComponent(pair.slice(name.length + 1));
+    }
+  }
+  return null;
 }
 
 /**
@@ -75,11 +87,24 @@ export function getServerEhmUser(cookieStore: {
 
 /**
  * Check whether the given token is still valid (not expired).
+ * Returns true when the token cannot be decoded or has no exp claim —
+ * the server is the final authority on validity.
  */
 export function isEhmTokenValid(token: string): boolean {
   const payload = decodeJwtPayload(token);
-  if (!payload) return false;
+  if (!payload) return true;
+  if (typeof payload.exp !== "number") return true;
   return payload.exp * 1000 > Date.now();
+}
+
+/**
+ * Check only whether the token's exp claim has passed.
+ * Returns false when the token cannot be decoded (let the server decide).
+ */
+export function isEhmTokenExpired(token: string): boolean {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number") return false;
+  return payload.exp * 1000 <= Date.now();
 }
 
 /**
@@ -96,6 +121,39 @@ export function getServerEhmToken(
 }
 
 /**
+ * Client-side: read the EHM token from cookies.
+ */
+export function getClientEhmToken(): string | null {
+  return readClientCookie(EHM_TOKEN_COOKIE);
+}
+
+/**
+ * Client-side: check if an EHM token cookie exists.
+ */
+export function hasClientEhmToken(): boolean {
+  return getClientEhmToken() !== null;
+}
+
+/**
+ * Client-side: set the EHM token and user info cookies.
+ */
+export function setEhmCookies(token: string, userInfoBase64?: string): void {
+  document.cookie = `${EHM_TOKEN_COOKIE}=${token}; path=/; SameSite=Lax; max-age=86400`;
+  if (userInfoBase64) {
+    document.cookie = `${EHM_USER_COOKIE}=${userInfoBase64}; path=/; SameSite=Lax; max-age=86400`;
+  }
+}
+
+/**
+ * Client-side: clear all EHM cookies.
+ */
+export function clearEhmCookies(): void {
+  if (typeof document === "undefined") return;
+  document.cookie = `${EHM_TOKEN_COOKIE}=; path=/; max-age=0`;
+  document.cookie = `${EHM_USER_COOKIE}=; path=/; max-age=0`;
+}
+
+/**
  * Client-side: set the EHM token and user info cookies, then redirect.
  */
 export function setEhmCookieAndRedirect(
@@ -103,9 +161,6 @@ export function setEhmCookieAndRedirect(
   targetPath: string,
   userInfoBase64?: string,
 ) {
-  document.cookie = `${EHM_TOKEN_COOKIE}=${token}; path=/; SameSite=Lax; max-age=86400`;
-  if (userInfoBase64) {
-    document.cookie = `${EHM_USER_COOKIE}=${userInfoBase64}; path=/; SameSite=Lax; max-age=86400`;
-  }
+  setEhmCookies(token, userInfoBase64);
   window.location.href = targetPath;
 }

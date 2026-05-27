@@ -50,6 +50,7 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
     response.set_cookie(
         key="access_token",
         value=token_value,
+        path="/",
         httponly=True,
         secure=is_https,
         samesite="lax",
@@ -63,6 +64,7 @@ def _set_refresh_cookie(response: Response, refresh_value: str, request: Request
     response.set_cookie(
         key="refresh_token",
         value=refresh_value,
+        path="/",
         httponly=True,
         secure=is_https,
         samesite="lax",
@@ -149,7 +151,7 @@ async def refresh(request: Request, response: Response, body: InsBaseRefreshRequ
 
 
 @router.post("/authenticate", response_model=InsBaseAuthResponse)
-async def authenticate(request: Request):
+async def authenticate(request: Request, response: Response):
     """Verify a token via ins-base-rpc /auth/authentication."""
     access_token = request.cookies.get("access_token")
     if not access_token:
@@ -182,6 +184,8 @@ async def authenticate(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效 token 或 token 已过期",
         )
+
+    _set_session_cookie(response, access_token, request)
 
     permissions = getattr(user, "ins_base_permissions", [])
     return InsBaseAuthResponse(

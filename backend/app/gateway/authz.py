@@ -161,12 +161,47 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
+class _DictUser:
+    """Adapter for dict-based user objects from create_auth_middleware.
+
+    The ins_base auth path in create_auth_middleware sets ``request.state.user``
+    as a plain dict. This wrapper satisfies the attribute-access protocol
+    used by ``_principal_from_request`` and other downstream consumers.
+
+    Maps dict keys to attribute names expected by downstream code:
+    - ``"role"`` → ``system_role``
+    - ``"username"`` → ``email`` (alias, both accessible)
+    """
+
+    _KEY_ALIASES = {
+        "system_role": "role",
+    }
+
+    def __init__(self, user_dict: dict) -> None:
+        self._dict = user_dict
+
+    def __getattr__(self, name: str):
+        actual_key = self._KEY_ALIASES.get(name, name)
+        try:
+            return self._dict[actual_key]
+        except KeyError:
+            raise AttributeError(name)
+
+
 async def _authenticate(request: Request) -> AuthContext:
     """Authenticate request and return AuthContext.
 
-    Delegates to deps.get_optional_user_from_request() for the JWT→User pipeline.
-    Returns AuthContext with user=None for anonymous requests.
+    First checks if the outer auth middleware already validated the user
+    (``request.state.user`` is set). If so, reuses it to avoid redundant
+    ins-base-rpc calls. Falls back to full JWT→User pipeline only when
+    the middleware hasn't run or didn't set a user.
     """
+    if hasattr(request.state, "user") and request.state.user is not None:
+        user = request.state.user
+        if isinstance(user, dict):
+            user = _DictUser(user)
+        return AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+
     from app.gateway.deps import get_optional_user_from_request
 
     user = await get_optional_user_from_request(request)

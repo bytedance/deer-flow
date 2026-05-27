@@ -39,6 +39,31 @@ def _is_whitelisted(path: str) -> bool:
     return path in _AUTH_WHITELIST or path.startswith("/docs") or path.startswith("/redoc")
 
 
+class _UserState:
+    """Attribute-accessible user object set on ``request.state.user``.
+
+    Downstream code (``_principal_from_request``, ``require_permission``, etc.)
+    accesses user fields via ``getattr(user, "system_role")`` which silently
+    returns the default for plain dicts. This wrapper makes the same access
+    pattern work regardless of how the middleware constructed the user.
+
+    Maps ``"role"`` → ``system_role`` to match the dict key used by
+    ``create_auth_middleware``.
+    """
+
+    _KEY_ALIASES = {"system_role": "role"}
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def __getattr__(self, name: str):
+        actual_key = self._KEY_ALIASES.get(name, name)
+        try:
+            return self._data[actual_key]
+        except KeyError:
+            raise AttributeError(name)
+
+
 def _is_admin_path(path: str) -> bool:
     """Check if a request path is an admin API endpoint."""
     return path.startswith("/api/admin/")
@@ -156,14 +181,14 @@ def create_auth_middleware():
                             if error is not None:
                                 return error
                             ctx_token = set_current_tenant_id(tenant_id)
-                            request.state.user = {
+                            request.state.user = _UserState({
                                 "id": getattr(user, "id", tenant_id),
                                 "username": getattr(user, "email", "ins-base-user"),
                                 "tenant_id": tenant_id,
                                 "role": getattr(user, "system_role", "member"),
                                 "auth_method": "ins_base",
                                 "ins_base_token": access_token,
-                            }
+                            })
                             try:
                                 return await call_next(request)
                             finally:
@@ -227,12 +252,12 @@ def create_auth_middleware():
                 if error is not None:
                     return error
                 ctx_token = set_current_tenant_id(tenant_id)
-                request.state.user = {
+                request.state.user = _UserState({
                     "username": f"apikey:{meta['name']}",
                     "tenant_id": tenant_id,
                     "role": "member",
                     "auth_method": "api_key",
-                }
+                })
                 try:
                     return await call_next(request)
                 finally:
@@ -270,12 +295,12 @@ def create_auth_middleware():
                 return error
 
             ctx_token = set_current_tenant_id(tenant_id)
-            request.state.user = {
+            request.state.user = _UserState({
                 "username": payload["sub"],
                 "tenant_id": tenant_id,
                 "role": payload.get("role", "member"),
                 "auth_method": "jwt",
-            }
+            })
             try:
                 return await call_next(request)
             finally:

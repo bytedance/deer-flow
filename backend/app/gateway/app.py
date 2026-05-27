@@ -33,6 +33,7 @@ from app.gateway.routers import (
     feedback,
     genui,
     genui_telemetry,
+    greetings,
     ins_base_auth,
     insights,
     knowledge_bases,
@@ -52,6 +53,7 @@ from app.gateway.routers import (
     system,
     tenant_agents,
     tenant_connectors,
+    tenant_industrial_migration,
     tenant_mcp_servers,
     tenant_status,
     thread_runs,
@@ -687,6 +689,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Tenant status API is mounted at /api/tenant
     app.include_router(tenant_status.router)
+    app.include_router(tenant_industrial_migration.router)
 
     # Knowledge base API
     app.include_router(knowledge_bases.router)
@@ -712,6 +715,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # GenUI telemetry and block recovery API
     app.include_router(genui_telemetry.router)
+
+    # Personalized greeting API
+    app.include_router(greetings.router)
 
     # Organize tree API (proxy to ins-bus-rpc)
     app.include_router(organize.router)

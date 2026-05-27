@@ -36,6 +36,7 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
     response.set_cookie(
         key="access_token",
         value=token_value,
+        path="/",
         httponly=True,
         secure=is_https,
         samesite="lax",
@@ -49,6 +50,7 @@ def _set_refresh_cookie(response: Response, refresh_value: str, request: Request
     response.set_cookie(
         key="refresh_token",
         value=refresh_value,
+        path="/",
         httponly=True,
         secure=is_https,
         samesite="lax",

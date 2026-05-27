@@ -350,9 +350,13 @@ class InsBaseAuthProvider(AuthProvider):
         except (RpcConnectionError, RpcTimeoutError) as e:
             logger.exception("ins-base-rpc /auth/authentication transport failed")
             raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
+        except RpcNotConfiguredError as e:
+            raise AuthProviderUnavailableError("ins-base RPC client not configured") from e
         except Exception as e:
-            logger.exception("ins-base-rpc /auth/authentication call failed")
-            return None
+            logger.exception("ins-base-rpc /auth/authentication call failed with unexpected error")
+            raise AuthProviderUnavailableError(
+                f"ins-base authentication returned unexpected error: {e}"
+            ) from e
 
         code = response.get("code", 0)
         if code != 200:

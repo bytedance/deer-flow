@@ -45,6 +45,10 @@ def _setup_config():
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
 
 
+def _get_set_cookie_headers(resp) -> list[str]:
+    return [value for key, value in resp.headers.multi_items() if key.lower() == "set-cookie"]
+
+
 @pytest.mark.asyncio
 async def test_ins_base_login_endpoint(rsa_key_pair):
     """POST /api/v1/auth/ins-base/login calls ins-base-rpc and returns token."""
@@ -169,6 +173,30 @@ async def test_ins_base_authenticate_success():
     data = response.json()
     assert data["authenticated"] is True
     assert "read" in data["permissions"]
+
+
+@pytest.mark.asyncio
+async def test_ins_base_authenticate_bearer_sets_session_cookie():
+    """Bearer authenticate should bootstrap gateway session cookies for EHM auto-login."""
+    _setup_config()
+    client = _make_client()
+
+    mock_provider = MagicMock()
+    mock_provider.get_user = AsyncMock(return_value=type("obj", (), {
+        "ins_base_permissions": ["read"],
+        "email": "user@example.com",
+    })())
+
+    with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
+        response = client.post(
+            "/api/v1/auth/ins-base/authenticate",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+    assert response.status_code == 200
+    cookies = _get_set_cookie_headers(response)
+    assert any("access_token=valid-token" in header for header in cookies)
+    assert any("csrf_token=" in header for header in cookies)
 
 
 @pytest.mark.asyncio

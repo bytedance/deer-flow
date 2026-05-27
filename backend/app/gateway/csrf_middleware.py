@@ -71,20 +71,26 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         _is_auth = is_auth_endpoint(request)
 
         if should_check_csrf(request) and not _is_auth:
-            cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-            header_token = request.headers.get(CSRF_HEADER_NAME)
+            # EHM auto-login users authenticate via iframe-injected token
+            # and never go through the standard login flow, so they have
+            # no csrf_token cookie. Exempt them from CSRF validation.
+            is_ehm_user = request.cookies.get("ehm_token") is not None
 
-            if not cookie_token or not header_token:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
-                )
+            if not is_ehm_user:
+                cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+                header_token = request.headers.get(CSRF_HEADER_NAME)
 
-            if not secrets.compare_digest(cookie_token, header_token):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "CSRF token mismatch."},
-                )
+                if not cookie_token or not header_token:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
+                    )
+
+                if not secrets.compare_digest(cookie_token, header_token):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "CSRF token mismatch."},
+                    )
 
         response = await call_next(request)
 
@@ -96,6 +102,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
+                path="/",
                 httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
                 secure=is_https,
                 samesite="strict",
