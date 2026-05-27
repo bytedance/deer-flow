@@ -157,14 +157,6 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
-    if isinstance(runtime_context, dict):
-        logger.info(
-            "merge_run_context_overrides: context_keys=%s runtime_context_keys=%s runtime_user_id=%s",
-            sorted(context.keys()),
-            sorted(runtime_context.keys()),
-            runtime_context.get("user_id"),
-        )
-
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
     """Stamp the authenticated user into the run context for background tools.
