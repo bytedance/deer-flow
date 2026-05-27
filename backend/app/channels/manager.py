@@ -15,7 +15,14 @@ import httpx
 from langgraph_sdk.errors import ConflictError
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    PENDING_CLARIFICATION_METADATA_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
@@ -198,6 +205,32 @@ def _extract_response_text(result: dict | list) -> str:
                 if text:
                     return text
     return ""
+
+
+def _has_current_turn_clarification(result: dict | list) -> bool:
+    """Return True when the current turn asked for clarification."""
+    if isinstance(result, list):
+        messages = result
+    elif isinstance(result, dict):
+        messages = result.get("messages", [])
+    else:
+        return False
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "human":
+            break
+        if msg.get("type") == "tool" and msg.get("name") == "ask_clarification":
+            return True
+    return False
+
+
+def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
+    metadata = _slim_metadata(base_metadata)
+    if pending_clarification:
+        metadata[PENDING_CLARIFICATION_METADATA_KEY] = True
+    return metadata
 
 
 def _extract_text_content(content: Any) -> str:
@@ -790,6 +823,7 @@ class ChannelManager:
                 raise
 
         response_text = _extract_response_text(result)
+        pending_clarification = _has_current_turn_clarification(result)
         artifacts = _extract_artifacts(result)
 
         logger.info(
@@ -815,7 +849,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
-            metadata=_slim_metadata(msg.metadata),
+            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -877,7 +911,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
-                        metadata=_slim_metadata(msg.metadata),
+                        metadata=_response_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -891,6 +925,7 @@ class ChannelManager:
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
+            pending_clarification = _has_current_turn_clarification(result)
             artifacts = _extract_artifacts(result)
             response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
@@ -922,7 +957,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
-                    metadata=_slim_metadata(msg.metadata),
+                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
 
