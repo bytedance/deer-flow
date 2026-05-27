@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { type Control, Controller, useForm } from "react-hook-form";
 
 import type { InteractionState } from "@/core/genui/store";
+import { useI18n } from "@/core/i18n/hooks";
 
 interface FormFieldValidation {
   min?: number;
@@ -86,6 +87,7 @@ function MultiSelectField({
   searchable?: boolean;
   maxVisible?: number;
 }) {
+  const { t } = useI18n();
   const [search, setSearch] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
@@ -206,7 +208,7 @@ function MultiSelectField({
         <div className="border-b p-2">
           <input
             type="text"
-            placeholder="🔍 搜索..."
+            placeholder={t.genui.searchPlaceholder}
             className="w-full rounded-md border bg-background px-3 py-1.5 text-sm"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -226,7 +228,7 @@ function MultiSelectField({
             disabled={disabled}
             className="rounded border"
           />
-          全选 ({filteredOptions.length})
+          {t.genui.selectAll} ({filteredOptions.length})
         </label>
       </div>
 
@@ -238,7 +240,7 @@ function MultiSelectField({
       >
         {filteredOptions.length === 0 ? (
           <div className="p-4 text-center text-xs text-muted-foreground">
-            无数据
+            {t.genui.noData}
           </div>
         ) : useVirtual && virtualRange ? (
           <div style={{ height: virtualRange.totalHeight, position: "relative" }}>
@@ -271,7 +273,7 @@ function MultiSelectField({
                       onClick={() => handleGroupSelectAll(groupOpts)}
                       disabled={disabled ?? groupAllSelected}
                     >
-                      全选
+                      {t.genui.selectAllOptions}
                     </button>
                     <button
                       type="button"
@@ -279,7 +281,7 @@ function MultiSelectField({
                       onClick={() => handleGroupDeselectAll(groupOpts)}
                       disabled={disabled}
                     >
-                      全不选
+                      {t.genui.deselectAll}
                     </button>
                   </div>
                 </div>
@@ -293,7 +295,7 @@ function MultiSelectField({
       </div>
 
       <div className="border-t px-3 py-1.5 text-xs text-muted-foreground">
-        已选：{value.length} / {options.length}
+        {t.genui.selectedCount}：{value.length} / {options.length}
       </div>
     </div>
   );

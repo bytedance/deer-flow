@@ -69,6 +69,11 @@ export const enUS: Translations = {
       "Create your own Agent Skill to bring industry know-how into the EHM AI Workspace.\nCustom skills can query data, generate reports, and back almost any analysis workflow.",
   },
 
+  greetingCard: {
+    loading: "Preparing greeting…",
+    defaultSuggestions: ["Check device status", "Generate today's report", "Analyze anomaly trends"],
+  },
+
   // Clipboard
   clipboard: {
     copyToClipboard: "Copy to clipboard",
@@ -229,6 +234,7 @@ export const enUS: Translations = {
       "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
     nameStepPlaceholder: "e.g. code-reviewer",
     nameStepContinue: "Continue",
+    templateLabel: "Choose a template",
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
@@ -440,6 +446,26 @@ export const enUS: Translations = {
     layer_runtime: "Runtime",
     layer_gateway: "Gateway",
     layer_external: "External",
+  },
+
+  errors: {
+    network_issue: "Network connection issue detected. Please check your connection and try again.",
+    timeout: "Request timed out. Please wait a moment and try again, or narrow the analysis time range.",
+    service_unavailable: "Service is temporarily unavailable. Please retry later, or contact support for help.",
+    data_not_found: "No data found. It may have expired — try refreshing or adjusting your query.",
+    permission_denied: "Insufficient permissions. This feature may require admin approval.",
+    rate_limited: "Too many requests. Please wait a moment before trying again.",
+    showDetails: "Show details",
+    hideDetails: "Hide details",
+    retry: "Retry",
+    technicalDetails: "Technical details",
+  },
+
+  statusIndicators: {
+    thinking: "Thinking…",
+    queryingData: "Querying data…",
+    generatingReport: "Generating report…",
+    analyzing: "Analyzing…",
   },
 
   subtasks: {
@@ -765,6 +791,21 @@ export const enUS: Translations = {
     published: "Published",
     version: "Version",
     visibility: "Visibility",
+    // Report templates page
+    pageTitle: "Report Templates",
+    pageDescription: "Manage custom report templates, versions, and publish status.",
+    visibilityPrivate: "My Templates",
+    visibilityTenant: "Tenant Shared",
+    visibilityBuiltin: "Built-in",
+    statusDraft: "Draft",
+    statusPublished: "Published",
+    statusArchived: "Archived",
+    createTemplate: "Create Template",
+    templateMarketplace: "Template Marketplace",
+    loadingFailed: "Loading failed",
+    emptyMyTemplates: "You don't have any custom templates yet. Click \"Create Template\" in the top right to get started.",
+    emptyNoTemplates: "No templates.",
+    updatedAt: "Updated at",
   },
 
   editor: {
@@ -845,5 +886,97 @@ export const enUS: Translations = {
     skip: "Skip",
     next: "Next",
     back: "Back",
+  },
+
+  // Report Runs
+  reportRuns: {
+    pageTitle: "Report History",
+    pageDescription: "View generated report run records and their corresponding conversations.",
+    statusPending: "Pending",
+    statusRunning: "Running",
+    statusSuccess: "Success",
+    statusFailed: "Failed",
+    statusCancelled: "Cancelled",
+    loading: "Loading...",
+    loadingFailed: "Loading failed",
+    emptyRuns: "No report run records yet. Run a report in a sub-agent or custom template first.",
+    emptyChats: "No report conversations",
+    headerRunId: "Run ID",
+    headerTemplate: "Template",
+    headerVersion: "Version",
+    headerStatus: "Status",
+    headerCreatedAt: "Created At",
+    headerParams: "Parameters",
+    headerSourceChat: "Source Chat",
+    tabRuns: "Runs",
+    tabChats: "Conversations",
+    titlePrefix: "[Report]",
+    createTicket: "Create Ticket",
+    linkTicket: "Link Ticket",
+  },
+
+  // GenUI Components
+  genui: {
+    // Device types
+    deviceTypeRotating: "Rotating Machinery",
+    deviceTypePump: "Pump",
+    deviceTypeStatic: "Static Equipment",
+    deviceTypeReciprocating: "Reciprocating Machinery",
+    // Device selectors
+    ariaDeviceSelector: "Device Selector",
+    ariaDeviceMultiSelector: "Multi-Device Selector",
+    ariaSubDeviceSelector: "Sub-Device Selector",
+    loadingOrgTree: "Loading org tree...",
+    loadingSubDevices: "Loading sub-devices...",
+    loadingFailed: "Loading failed",
+    retry: "Retry",
+    selectOrgNode: "Select an org node",
+    noDevicesUnderNode: "No devices under this node",
+    noSubDevices: "No sub-devices under this device",
+    selectAll: "Select All",
+    selected: "Selected",
+    confirmSelection: "Confirm Selection",
+    submitting: "Submitting...",
+    subDeviceList: "Sub-Device List",
+    // Form block
+    searchPlaceholder: "🔍 Search...",
+    selectAllOptions: "Select All",
+    deselectAll: "Deselect All",
+    noData: "No data",
+    selectedCount: "Selected",
+    submit: "Submit",
+    skip: "Skip",
+    // Markdown block
+    saveSuccess: "Saved successfully",
+    discardUnsaved: "Discard unsaved changes?",
+    edit: "Edit",
+    save: "Save",
+    // Metric block
+    ariaDeviation: "Deviation",
+    ariaSetpoint: "Setpoint",
+    ariaLowLowLimit: "Low-Low Limit",
+    ariaLowLimit: "Low Limit",
+    ariaHighLimit: "High Limit",
+    ariaHighHighLimit: "High-High Limit",
+    // Status block
+    statusRunning: "Running",
+    statusStopped: "Stopped",
+    statusMaintenance: "Maintenance",
+    statusStandby: "Standby",
+    statusFault: "Fault",
+    statusCommLoss: "Comm Loss",
+    // Alarm block
+    alarmCritical: "Critical",
+    alarmHigh: "High",
+    alarmMedium: "Medium",
+    alarmLow: "Low",
+    alarmJournal: "Journal",
+    noAlarms: "No alarms",
+    acknowledged: "Acknowledged",
+    alarmLevel: "Level",
+    // Org tree panel
+    searchOrgPlaceholder: "Search...",
+    noMatches: "No matches",
+    noOrgData: "No org data",
   },
 };

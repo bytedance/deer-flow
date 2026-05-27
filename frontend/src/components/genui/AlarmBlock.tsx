@@ -12,6 +12,8 @@
 
 import { AlertTriangleIcon, CheckIcon, InfoIcon } from "lucide-react";
 
+import { useI18n } from "@/core/i18n/hooks";
+
 type AlarmLevel = "critical" | "high" | "medium" | "low" | "journal";
 
 interface AlarmItem {
@@ -40,14 +42,6 @@ const LEVEL_BG: Record<AlarmLevel, string> = {
   journal: "bg-alarm-journal text-alarm-foreground",
 };
 
-const LEVEL_LABEL_ZH: Record<AlarmLevel, string> = {
-  critical: "紧急",
-  high: "高",
-  medium: "中",
-  low: "低",
-  journal: "记录",
-};
-
 function AlarmIcon({ level }: { level: AlarmLevel }) {
   if (level === "critical" || level === "high") {
     return <AlertTriangleIcon className="size-3.5" aria-hidden="true" />;
@@ -59,7 +53,16 @@ function AlarmIcon({ level }: { level: AlarmLevel }) {
 }
 
 export default function AlarmBlock({ block }: AlarmBlockProps) {
+  const { t } = useI18n();
   const items = Array.isArray(block.props.items) ? block.props.items : [];
+
+  const LEVEL_LABEL: Record<AlarmLevel, string> = {
+    critical: t.genui.alarmCritical,
+    high: t.genui.alarmHigh,
+    medium: t.genui.alarmMedium,
+    low: t.genui.alarmLow,
+    journal: t.genui.alarmJournal,
+  };
 
   if (items.length === 0) {
     return (
@@ -68,7 +71,7 @@ export default function AlarmBlock({ block }: AlarmBlockProps) {
         role="region"
         aria-label={block.props.title ?? "alarms"}
       >
-        无报警
+        {t.genui.noAlarms}
       </div>
     );
   }
@@ -93,10 +96,10 @@ export default function AlarmBlock({ block }: AlarmBlockProps) {
           >
             <span
               className={`inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[10px] font-semibold uppercase ${LEVEL_BG[item.level] ?? LEVEL_BG.journal}`}
-              aria-label={`${LEVEL_LABEL_ZH[item.level] ?? item.level} 级`}
+              aria-label={`${LEVEL_LABEL[item.level] ?? item.level} ${t.genui.alarmLevel}`}
             >
               <AlarmIcon level={item.level} />
-              {LEVEL_LABEL_ZH[item.level] ?? item.level}
+              {LEVEL_LABEL[item.level] ?? item.level}
             </span>
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <p className="text-foreground leading-snug break-words">
@@ -124,10 +127,10 @@ export default function AlarmBlock({ block }: AlarmBlockProps) {
             {item.acked && (
               <span
                 className="text-muted-foreground inline-flex items-center gap-0.5 text-[10px]"
-                aria-label="已确认"
+                aria-label={t.genui.acknowledged}
               >
                 <CheckIcon className="size-3" />
-                已确认
+                {t.genui.acknowledged}
               </span>
             )}
           </li>

@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/core/i18n/hooks";
+
 /**
  * StatusBlock — operating-state badge for a single equipment / unit.
  *
@@ -29,15 +31,6 @@ interface StatusBlockProps {
   };
 }
 
-const STATUS_LABEL_ZH: Record<StatusKind, string> = {
-  running: "运行",
-  stopped: "停机",
-  maint: "维修",
-  standby: "备用",
-  fault: "故障",
-  "comm-loss": "失联",
-};
-
 const STATUS_BG: Record<StatusKind, string> = {
   running: "bg-status-running text-status-foreground",
   stopped: "bg-status-stopped text-status-foreground",
@@ -48,10 +41,21 @@ const STATUS_BG: Record<StatusKind, string> = {
 };
 
 export default function StatusBlock({ block }: StatusBlockProps) {
+  const { t } = useI18n();
   const { props } = block;
+
+  const STATUS_LABEL: Record<StatusKind, string> = {
+    running: t.genui.statusRunning,
+    stopped: t.genui.statusStopped,
+    maint: t.genui.statusMaintenance,
+    standby: t.genui.statusStandby,
+    fault: t.genui.statusFault,
+    "comm-loss": t.genui.statusCommLoss,
+  };
+
   const safeStatus: StatusKind =
-    props.status in STATUS_LABEL_ZH ? props.status : "stopped";
-  const labelText = STATUS_LABEL_ZH[safeStatus];
+    props.status in STATUS_LABEL ? props.status : "stopped";
+  const labelText = STATUS_LABEL[safeStatus];
 
   return (
     <div

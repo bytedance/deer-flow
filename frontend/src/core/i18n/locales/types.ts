@@ -54,6 +54,12 @@ export interface Translations {
     createYourOwnSkillDescription: string;
   };
 
+  // Greeting Card (personal-assistant-ux)
+  greetingCard: {
+    loading: string;
+    defaultSuggestions: string[];
+  };
+
   // Clipboard
   clipboard: {
     copyToClipboard: string;
@@ -154,6 +160,7 @@ export interface Translations {
     nameStepHint: string;
     nameStepPlaceholder: string;
     nameStepContinue: string;
+    templateLabel: string;
     nameStepInvalidError: string;
     nameStepAlreadyExistsError: string;
     nameStepNetworkError: string;
@@ -352,6 +359,28 @@ export interface Translations {
     layer_runtime: string;
     layer_gateway: string;
     layer_external: string;
+  };
+
+  // Empathetic error handling (personal-assistant-ux)
+  errors: {
+    network_issue: string;
+    timeout: string;
+    service_unavailable: string;
+    data_not_found: string;
+    permission_denied: string;
+    rate_limited: string;
+    showDetails: string;
+    hideDetails: string;
+    retry: string;
+    technicalDetails: string;
+  };
+
+  // Assistant status indicators (personal-assistant-ux)
+  statusIndicators: {
+    thinking: string;
+    queryingData: string;
+    generatingReport: string;
+    analyzing: string;
   };
 
   // Subtasks
@@ -662,6 +691,21 @@ export interface Translations {
     published: string;
     version: string;
     visibility: string;
+    // Report templates page
+    pageTitle: string;
+    pageDescription: string;
+    visibilityPrivate: string;
+    visibilityTenant: string;
+    visibilityBuiltin: string;
+    statusDraft: string;
+    statusPublished: string;
+    statusArchived: string;
+    createTemplate: string;
+    templateMarketplace: string;
+    loadingFailed: string;
+    emptyMyTemplates: string;
+    emptyNoTemplates: string;
+    updatedAt: string;
   };
 
   // Template Editor
@@ -734,5 +778,97 @@ export interface Translations {
     skip: string;
     next: string;
     back: string;
+  };
+
+  // Report Runs
+  reportRuns: {
+    pageTitle: string;
+    pageDescription: string;
+    statusPending: string;
+    statusRunning: string;
+    statusSuccess: string;
+    statusFailed: string;
+    statusCancelled: string;
+    loading: string;
+    loadingFailed: string;
+    emptyRuns: string;
+    emptyChats: string;
+    headerRunId: string;
+    headerTemplate: string;
+    headerVersion: string;
+    headerStatus: string;
+    headerCreatedAt: string;
+    headerParams: string;
+    headerSourceChat: string;
+    tabRuns: string;
+    tabChats: string;
+    titlePrefix: string;
+    createTicket: string;
+    linkTicket: string;
+  };
+
+  // GenUI Components
+  genui: {
+    // Device types
+    deviceTypeRotating: string;
+    deviceTypePump: string;
+    deviceTypeStatic: string;
+    deviceTypeReciprocating: string;
+    // Device selectors
+    ariaDeviceSelector: string;
+    ariaDeviceMultiSelector: string;
+    ariaSubDeviceSelector: string;
+    loadingOrgTree: string;
+    loadingSubDevices: string;
+    loadingFailed: string;
+    retry: string;
+    selectOrgNode: string;
+    noDevicesUnderNode: string;
+    noSubDevices: string;
+    selectAll: string;
+    selected: string;
+    confirmSelection: string;
+    submitting: string;
+    subDeviceList: string;
+    // Form block
+    searchPlaceholder: string;
+    selectAllOptions: string;
+    deselectAll: string;
+    noData: string;
+    selectedCount: string;
+    submit: string;
+    skip: string;
+    // Markdown block
+    saveSuccess: string;
+    discardUnsaved: string;
+    edit: string;
+    save: string;
+    // Metric block
+    ariaDeviation: string;
+    ariaSetpoint: string;
+    ariaLowLowLimit: string;
+    ariaLowLimit: string;
+    ariaHighLimit: string;
+    ariaHighHighLimit: string;
+    // Status block
+    statusRunning: string;
+    statusStopped: string;
+    statusMaintenance: string;
+    statusStandby: string;
+    statusFault: string;
+    statusCommLoss: string;
+    // Alarm block
+    alarmCritical: string;
+    alarmHigh: string;
+    alarmMedium: string;
+    alarmLow: string;
+    alarmJournal: string;
+    noAlarms: string;
+    acknowledged: string;
+    alarmLevel: string;
+    // Org tree panel
+    searchOrgPlaceholder: string;
+    noMatches: string;
+    noOrgData: string;
   };
 }

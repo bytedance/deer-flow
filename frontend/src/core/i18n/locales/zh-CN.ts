@@ -69,6 +69,11 @@ export const zhCN: Translations = {
       "创建你自己的 Agent Skill，把行业经验沉淀到 EHM AI 工作台。\n自定义技能可以查询数据、生成报告，几乎承接任何分析流程。",
   },
 
+  greetingCard: {
+    loading: "正在准备问候…",
+    defaultSuggestions: ["查看设备状态", "生成今日报告", "分析异常趋势"],
+  },
+
   // Clipboard
   clipboard: {
     copyToClipboard: "复制到剪贴板",
@@ -206,6 +211,7 @@ export const zhCN: Translations = {
       "只允许字母、数字和连字符，存储时自动转为小写（例如 code-reviewer）",
     nameStepPlaceholder: "例如 code-reviewer",
     nameStepContinue: "继续",
+    templateLabel: "选择模板",
     nameStepInvalidError: "名称无效，只允许字母、数字和连字符",
     nameStepAlreadyExistsError: "已存在同名智能体",
     nameStepNetworkError: "网络请求失败，请检查网络或后端连接",
@@ -409,6 +415,26 @@ export const zhCN: Translations = {
     layer_runtime: "运行时",
     layer_gateway: "网关",
     layer_external: "外部",
+  },
+
+  errors: {
+    network_issue: "网络连接出了问题，请检查网络后重试。",
+    timeout: "请求超时了，请稍等一下再试，或者缩小分析的时间范围。",
+    service_unavailable: "服务暂时不可用，请稍后重试，或者联系客服获取帮助。",
+    data_not_found: "没有找到相关数据，可能已过期，请尝试刷新或换个条件查询。",
+    permission_denied: "权限不足，这个功能可能需要联系管理员开通。",
+    rate_limited: "请求过于频繁，请稍后再试。",
+    showDetails: "查看详情",
+    hideDetails: "收起详情",
+    retry: "重试",
+    technicalDetails: "技术详情",
+  },
+
+  statusIndicators: {
+    thinking: "正在思考…",
+    queryingData: "正在查询数据…",
+    generatingReport: "正在生成报告…",
+    analyzing: "正在分析…",
   },
 
   subtasks: {
@@ -728,6 +754,21 @@ export const zhCN: Translations = {
     published: "发布于",
     version: "版本",
     visibility: "可见性",
+    // Report templates page
+    pageTitle: "报告模板",
+    pageDescription: "管理自定义报告模板、版本和发布状态。",
+    visibilityPrivate: "我的模板",
+    visibilityTenant: "租户共享",
+    visibilityBuiltin: "预置模板",
+    statusDraft: "草稿",
+    statusPublished: "已发布",
+    statusArchived: "已归档",
+    createTemplate: "创建模板",
+    templateMarketplace: "模板市场",
+    loadingFailed: "加载失败",
+    emptyMyTemplates: "你还没有自定义模板。点击右上角「创建模板」开始。",
+    emptyNoTemplates: "暂无模板。",
+    updatedAt: "更新于",
   },
 
   editor: {
@@ -805,5 +846,97 @@ export const zhCN: Translations = {
     skip: "跳过",
     next: "下一步",
     back: "返回",
+  },
+
+  // Report Runs
+  reportRuns: {
+    pageTitle: "报告历史",
+    pageDescription: "查看已生成的报告运行记录及其对应的对话。",
+    statusPending: "等待中",
+    statusRunning: "运行中",
+    statusSuccess: "成功",
+    statusFailed: "失败",
+    statusCancelled: "已取消",
+    loading: "加载中…",
+    loadingFailed: "加载失败",
+    emptyRuns: "暂无报告运行记录。先在子智能体或自定义模板中跑一次报告。",
+    emptyChats: "暂无报告对话",
+    headerRunId: "运行 ID",
+    headerTemplate: "模板",
+    headerVersion: "版本",
+    headerStatus: "状态",
+    headerCreatedAt: "创建时间",
+    headerParams: "参数摘要",
+    headerSourceChat: "来源对话",
+    tabRuns: "运行记录",
+    tabChats: "对话",
+    titlePrefix: "[报告]",
+    createTicket: "创建整改单",
+    linkTicket: "关联整改单",
+  },
+
+  // GenUI Components
+  genui: {
+    // Device types
+    deviceTypeRotating: "旋转机组",
+    deviceTypePump: "机泵",
+    deviceTypeStatic: "静设备",
+    deviceTypeReciprocating: "往复机组",
+    // Device selectors
+    ariaDeviceSelector: "设备选择器",
+    ariaDeviceMultiSelector: "设备多选选择器",
+    ariaSubDeviceSelector: "子设备选择器",
+    loadingOrgTree: "加载组织树中...",
+    loadingSubDevices: "加载子设备中...",
+    loadingFailed: "加载失败",
+    retry: "重试",
+    selectOrgNode: "请选择组织节点",
+    noDevicesUnderNode: "该组织节点下无设备",
+    noSubDevices: "该设备下无子设备",
+    selectAll: "全选",
+    selected: "已选",
+    confirmSelection: "确认选择",
+    submitting: "提交中...",
+    subDeviceList: "子设备列表",
+    // Form block
+    searchPlaceholder: "🔍 搜索...",
+    selectAllOptions: "全选",
+    deselectAll: "全不选",
+    noData: "无数据",
+    selectedCount: "已选",
+    submit: "提交",
+    skip: "跳过",
+    // Markdown block
+    saveSuccess: "保存成功",
+    discardUnsaved: "放弃未保存的更改？",
+    edit: "编辑",
+    save: "保存",
+    // Metric block
+    ariaDeviation: "偏差",
+    ariaSetpoint: "设定点",
+    ariaLowLowLimit: "低低限",
+    ariaLowLimit: "低限",
+    ariaHighLimit: "高限",
+    ariaHighHighLimit: "高高限",
+    // Status block
+    statusRunning: "运行",
+    statusStopped: "停机",
+    statusMaintenance: "维修",
+    statusStandby: "备用",
+    statusFault: "故障",
+    statusCommLoss: "失联",
+    // Alarm block
+    alarmCritical: "紧急",
+    alarmHigh: "高",
+    alarmMedium: "中",
+    alarmLow: "低",
+    alarmJournal: "记录",
+    noAlarms: "无报警",
+    acknowledged: "已确认",
+    alarmLevel: "级",
+    // Org tree panel
+    searchOrgPlaceholder: "搜索...",
+    noMatches: "无匹配结果",
+    noOrgData: "无组织数据",
   },
 };

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
+import { useI18n } from "@/core/i18n/hooks";
 
 import type { DeviceQueryParams, OrgTreeNode, SelectedDevice } from "./device-selector-types";
 import { collectDevices } from "./device-selector-utils";
@@ -36,15 +37,16 @@ function getBaseUrl(): string {
   return process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
 }
 
-const DEVICE_TYPE_LABELS: Record<number, string> = {
-  1: "旋转机组",
-  4: "机泵",
-  6: "静设备",
-  9: "往复机组",
-};
-
 export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiBlockProps) {
+  const { t } = useI18n();
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
+
+  const DEVICE_TYPE_LABELS: Record<number, string> = {
+    1: t.genui.deviceTypeRotating,
+    4: t.genui.deviceTypePump,
+    6: t.genui.deviceTypeStatic,
+    9: t.genui.deviceTypeReciprocating,
+  };
   const { title, queryParams, maxSelect, filterDeviceType } = props;
   const { user } = useAuth();
 
@@ -163,22 +165,22 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? "设备多选选择器"}>
+    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? t.genui.ariaDeviceMultiSelector}>
       {title && <h3 className="mb-2 text-sm font-medium">{title}</h3>}
 
       {loading ? (
         <div className="flex h-80 items-center justify-center text-xs text-muted-foreground">
-          加载组织树中...
+          {t.genui.loadingOrgTree}
         </div>
       ) : fetchError ? (
         <div className="flex h-80 items-center justify-center text-xs text-red-600">
-          加载失败: {fetchError}
+          {t.genui.loadingFailed}: {fetchError}
           <button
             type="button"
             className="ml-2 underline"
             onClick={fetchTree}
           >
-            重试
+            {t.genui.retry}
           </button>
         </div>
       ) : (
@@ -197,7 +199,7 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
           <div className="flex w-1/2 flex-col overflow-hidden rounded-md border">
             {!selectedOrgNode ? (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                请选择组织节点
+                {t.genui.selectOrgNode}
               </div>
             ) : (
               <>
@@ -212,13 +214,13 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
                       disabled={isDisabled}
                       className="rounded border"
                     />
-                    全选 ({devices.length})
+                    {t.genui.selectAll} ({devices.length})
                   </label>
                 </div>
                 <div className="flex-1 overflow-y-auto">
                   {devices.length === 0 ? (
                     <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                      该组织节点下无设备
+                      {t.genui.noDevicesUnderNode}
                     </div>
                   ) : (
                     <div className="space-y-0">
@@ -253,7 +255,7 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
                 </div>
                 <div className="flex items-center justify-between border-t px-2 py-2">
                   <span className="text-xs text-muted-foreground">
-                    已选: {selectedDevices.size}
+                    {t.genui.selected}: {selectedDevices.size}
                     {maxSelect ? ` / ${maxSelect}` : ""}
                   </span>
                   <button
@@ -262,7 +264,7 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
                     onClick={handleSubmit}
                     disabled={isDisabled || selectedDevices.size === 0}
                   >
-                    {interactionState?.status === "loading" ? "提交中..." : "确认选择"}
+                    {interactionState?.status === "loading" ? t.genui.submitting : t.genui.confirmSelection}
                   </button>
                 </div>
               </>

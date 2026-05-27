@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
+import { useI18n } from "@/core/i18n/hooks";
 
 import type { DeviceQueryParams, OrgTreeNode } from "./device-selector-types";
 import OrgTreePanel from "./OrgTreePanel";
@@ -47,13 +48,6 @@ function collectDevices(node: OrgTreeNode): OrgTreeNode[] {
   return devices.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
 }
 
-const DEVICE_TYPE_LABELS: Record<number, string> = {
-  1: "旋转机组",
-  4: "机泵",
-  6: "静设备",
-  9: "往复机组",
-};
-
 const SUB_DEVICE_TYPE_FILTER: Record<number, number[]> = {
   1: [80],
   4: [50],
@@ -68,7 +62,15 @@ function getBaseUrl(): string {
 }
 
 export default function SubDeviceSelectorBlock({ block }: SubDeviceSelectorBlockProps) {
+  const { t } = useI18n();
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
+
+  const DEVICE_TYPE_LABELS: Record<number, string> = {
+    1: t.genui.deviceTypeRotating,
+    4: t.genui.deviceTypePump,
+    6: t.genui.deviceTypeStatic,
+    9: t.genui.deviceTypeReciprocating,
+  };
   const { title, queryParams } = props;
   const { user } = useAuth();
 
@@ -185,18 +187,18 @@ export default function SubDeviceSelectorBlock({ block }: SubDeviceSelectorBlock
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? "子设备选择器"}>
+    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? t.genui.ariaSubDeviceSelector}>
       {title && <h3 className="mb-2 text-sm font-medium">{title}</h3>}
 
       {treeLoading ? (
         <div className="flex h-80 items-center justify-center text-xs text-muted-foreground">
-          加载组织树中...
+          {t.genui.loadingOrgTree}
         </div>
       ) : treeError ? (
         <div className="flex h-80 items-center justify-center text-xs text-red-600">
-          加载失败: {treeError}
+          {t.genui.loadingFailed}: {treeError}
           <button type="button" className="ml-2 underline" onClick={fetchTree}>
-            重试
+            {t.genui.retry}
           </button>
         </div>
       ) : (
@@ -217,11 +219,11 @@ export default function SubDeviceSelectorBlock({ block }: SubDeviceSelectorBlock
             <div className="flex-1 overflow-y-auto rounded-md border p-2">
               {!selectedOrgNode ? (
                 <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                  请选择组织节点
+                  {t.genui.selectOrgNode}
                 </div>
               ) : devices.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                  该组织节点下无设备
+                  {t.genui.noDevicesUnderNode}
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -251,28 +253,28 @@ export default function SubDeviceSelectorBlock({ block }: SubDeviceSelectorBlock
             {selectedParentDevice && (
               <div className="flex-1 overflow-y-auto rounded-md border p-2">
                 <div className="mb-1 text-xs text-muted-foreground">
-                  子设备列表
+                  {t.genui.subDeviceList}
                   {selectedParentDevice.type in DEVICE_TYPE_LABELS &&
                     `（${DEVICE_TYPE_LABELS[selectedParentDevice.type]}）`}
                 </div>
                 {subLoading ? (
                   <div className="flex h-24 items-center justify-center text-xs text-muted-foreground">
-                    加载子设备中...
+                    {t.genui.loadingSubDevices}
                   </div>
                 ) : subError ? (
                   <div className="flex h-24 items-center justify-center text-xs text-red-600">
-                    加载失败: {subError}
+                    {t.genui.loadingFailed}: {subError}
                     <button
                       type="button"
                       className="ml-2 underline"
                       onClick={() => handleParentDeviceClick(selectedParentDevice)}
                     >
-                      重试
+                      {t.genui.retry}
                     </button>
                   </div>
                 ) : filteredSubDevices.length === 0 ? (
                   <div className="flex h-24 items-center justify-center text-xs text-muted-foreground">
-                    该设备下无子设备
+                    {t.genui.noSubDevices}
                   </div>
                 ) : (
                   <div className="space-y-1">

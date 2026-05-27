@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
+import { useI18n } from "@/core/i18n/hooks";
 import { streamdownPlugins } from "@/core/streamdown";
 
 interface MarkdownBlockProps {
@@ -14,6 +15,7 @@ interface MarkdownBlockProps {
 }
 
 export default function MarkdownBlock({ block }: MarkdownBlockProps) {
+  const { t } = useI18n();
   // Subscribe directly to the specific block from the store so edits
   // are reflected immediately regardless of parent re-render timing.
   const storeBlock = useBlockStore(
@@ -36,12 +38,12 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
   const handleSave = useCallback(() => {
     useBlockStore.getState().updateBlockProps(block_id, { content: editContent });
     setIsEditing(false);
-    toast.success("保存成功");
+    toast.success(t.genui.saveSuccess);
   }, [block_id, editContent]);
 
   const handleCancel = useCallback(() => {
     if (editContent !== content) {
-      if (!window.confirm("放弃未保存的更改？")) return;
+      if (!window.confirm(t.genui.discardUnsaved)) return;
     }
     setIsEditing(false);
   }, [editContent, content]);
@@ -57,7 +59,7 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
             className="shrink-0 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             onClick={handleStartEdit}
           >
-            编辑
+            {t.genui.edit}
           </button>
         )}
       </div>
@@ -73,13 +75,13 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
               className="rounded px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground"
               onClick={handleCancel}
             >
-              取消
+              {t.common.cancel}
             </button>
             <button
               className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
               onClick={handleSave}
             >
-              保存
+              {t.genui.save}
             </button>
           </div>
         </div>

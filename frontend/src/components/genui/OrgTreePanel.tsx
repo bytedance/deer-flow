@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 
+import { useI18n } from "@/core/i18n/hooks";
+
 import type { OrgTreeNode } from "./device-selector-types";
 
 interface OrgTreePanelProps {
@@ -106,6 +108,7 @@ function HighlightLabel({ text, highlight }: { text: string; highlight: string }
 }
 
 export default function OrgTreePanel({ treeData, onSelectOrgNode, selectedOrgId, disabled }: OrgTreePanelProps) {
+  const { t } = useI18n();
   const [searchText, setSearchText] = useState("");
 
   const rootOrgNodes = useMemo(() => {
@@ -121,7 +124,7 @@ export default function OrgTreePanel({ treeData, onSelectOrgNode, selectedOrgId,
         <input
           type="text"
           className="w-full rounded border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50"
-          placeholder="搜索..."
+          placeholder={t.genui.searchOrgPlaceholder}
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
         />
@@ -129,7 +132,7 @@ export default function OrgTreePanel({ treeData, onSelectOrgNode, selectedOrgId,
       <div className="flex-1 overflow-y-auto">
         {rootOrgNodes.length === 0 ? (
           <div className="p-4 text-center text-xs text-muted-foreground">
-            {searchText ? "无匹配结果" : "无组织数据"}
+            {searchText ? t.genui.noMatches : t.genui.noOrgData}
           </div>
         ) : (
           rootOrgNodes

@@ -16,6 +16,8 @@ import {
   ArrowUpIcon,
 } from "lucide-react";
 
+import { useI18n } from "@/core/i18n/hooks";
+
 type MetricStatus =
   | "running"
   | "stopped"
@@ -86,6 +88,7 @@ function deltaTone(direction?: "up" | "down" | "flat"): {
 }
 
 export default function MetricBlock({ block }: MetricBlockProps) {
+  const { t } = useI18n();
   const { props } = block;
   const display = formatValue(props.value, props.precision);
   const { cls: deltaCls, Icon: DeltaIcon } = deltaTone(props.delta?.direction);
@@ -127,7 +130,7 @@ export default function MetricBlock({ block }: MetricBlockProps) {
       {props.delta && (
         <div
           className={`inline-flex items-center gap-0.5 text-xs ${deltaCls}`}
-          aria-label={`偏差 ${props.delta.direction ?? "flat"} ${props.delta.value}`}
+          aria-label={`${t.genui.ariaDeviation} ${props.delta.direction ?? "flat"} ${props.delta.value}`}
         >
           <DeltaIcon className="size-3" aria-hidden="true" />
           <span style={{ fontVariantNumeric: "tabular-nums" }}>
@@ -146,27 +149,27 @@ export default function MetricBlock({ block }: MetricBlockProps) {
           style={{ fontVariantNumeric: "tabular-nums" }}
         >
           {props.setpoint !== undefined && (
-            <span aria-label="设定点">
+            <span aria-label={t.genui.ariaSetpoint}>
               SP {formatValue(props.setpoint, props.precision)}
             </span>
           )}
           {props.range?.ll !== undefined && (
-            <span aria-label="低低限">
+            <span aria-label={t.genui.ariaLowLowLimit}>
               LL {formatValue(props.range.ll, props.precision)}
             </span>
           )}
           {props.range?.l !== undefined && (
-            <span aria-label="低限">
+            <span aria-label={t.genui.ariaLowLimit}>
               L {formatValue(props.range.l, props.precision)}
             </span>
           )}
           {props.range?.h !== undefined && (
-            <span aria-label="高限">
+            <span aria-label={t.genui.ariaHighLimit}>
               H {formatValue(props.range.h, props.precision)}
             </span>
           )}
           {props.range?.hh !== undefined && (
-            <span aria-label="高高限">
+            <span aria-label={t.genui.ariaHighHighLimit}>
               HH {formatValue(props.range.hh, props.precision)}
             </span>
           )}

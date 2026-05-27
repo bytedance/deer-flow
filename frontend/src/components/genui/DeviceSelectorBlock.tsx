@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { InteractionState } from "@/core/genui/store";
+import { useI18n } from "@/core/i18n/hooks";
 
 import type { DeviceQueryParams, OrgTreeNode, SelectedDevice } from "./device-selector-types";
 import { collectDevices } from "./device-selector-utils";
@@ -27,13 +28,6 @@ interface DeviceSelectorBlockProps {
   };
 }
 
-const DEVICE_TYPE_LABELS: Record<number, string> = {
-  1: "旋转机组",
-  4: "机泵",
-  6: "静设备",
-  9: "往复机组",
-};
-
 function getBaseUrl(): string {
   if (typeof window !== "undefined") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,7 +37,15 @@ function getBaseUrl(): string {
 }
 
 export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps) {
+  const { t } = useI18n();
   const { block_id, props, callback_id, interactionState, onInteraction } = block;
+
+  const DEVICE_TYPE_LABELS: Record<number, string> = {
+    1: t.genui.deviceTypeRotating,
+    4: t.genui.deviceTypePump,
+    6: t.genui.deviceTypeStatic,
+    9: t.genui.deviceTypeReciprocating,
+  };
   const { title, queryParams, filterDeviceType } = props;
   const { user } = useAuth();
 
@@ -121,22 +123,22 @@ export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps)
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? "设备选择器"}>
+    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title ?? t.genui.ariaDeviceSelector}>
       {title && <h3 className="mb-2 text-sm font-medium">{title}</h3>}
 
       {loading ? (
         <div className="flex h-80 items-center justify-center text-xs text-muted-foreground">
-          加载组织树中...
+          {t.genui.loadingOrgTree}
         </div>
       ) : fetchError ? (
         <div className="flex h-80 items-center justify-center text-xs text-red-600">
-          加载失败: {fetchError}
+          {t.genui.loadingFailed}: {fetchError}
           <button
             type="button"
             className="ml-2 underline"
             onClick={fetchTree}
           >
-            重试
+            {t.genui.retry}
           </button>
         </div>
       ) : (
@@ -155,11 +157,11 @@ export default function DeviceSelectorBlock({ block }: DeviceSelectorBlockProps)
           <div className="w-1/2 overflow-y-auto rounded-md border p-2">
             {!selectedOrgNode ? (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                请选择组织节点
+                {t.genui.selectOrgNode}
               </div>
             ) : devices.length === 0 ? (
               <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                该组织节点下无设备
+                {t.genui.noDevicesUnderNode}
               </div>
             ) : (
               <div className="space-y-1">
