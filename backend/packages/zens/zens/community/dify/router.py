@@ -81,14 +81,16 @@ def _get_tool_config(tool_name: str) -> ToolConfigResult:
 def _get_workflow_logger(tool_name: str) -> logging.Logger:
     """Return a logger that writes per-workflow log files to backend/logs/dify_{tool_name}.log."""
     if tool_name not in _workflow_loggers:
-        logger = logging.getLogger(f"zens.community.dify.{tool_name}")
-        logger.setLevel(logging.DEBUG)
-        _logs_dir = Path(__file__).resolve().parent.parent.parent.parent / "logs"
-        _logs_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(_logs_dir / f"dify_{tool_name}.log", mode="a", encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-        logger.addHandler(handler)
-        _workflow_loggers[tool_name] = logger
+        with _lock:
+            if tool_name not in _workflow_loggers:
+                logger = logging.getLogger(f"zens.community.dify.{tool_name}")
+                logger.setLevel(logging.DEBUG)
+                _logs_dir = Path(__file__).resolve().parent.parent.parent.parent / "logs"
+                _logs_dir.mkdir(parents=True, exist_ok=True)
+                handler = logging.FileHandler(_logs_dir / f"dify_{tool_name}.log", mode="a", encoding="utf-8")
+                handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+                logger.addHandler(handler)
+                _workflow_loggers[tool_name] = logger
     return _workflow_loggers[tool_name]
 
 

@@ -1,5 +1,6 @@
 """Dify HTTP client for chatflow apps."""
 
+import json
 import logging
 from pathlib import Path
 
@@ -112,8 +113,6 @@ class DifyClient:
                 chunks — all answer fragments in order
                 conversation_id — last non-empty conversation_id from the stream
         """
-        import json
-
         logger.debug("Dify streaming request: query=%r, conversation_id=%r, user=%r", query, conversation_id, user)
         url = f"{self.base_url}/v1/chat-messages"
         headers = {
