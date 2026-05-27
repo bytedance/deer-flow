@@ -666,6 +666,27 @@ class TestUpdateMemoryStructuredResponse:
         saved_memory = mock_storage.save.call_args.args[0]
         assert [fact["content"] for fact in saved_memory["facts"]] == ["User works on DeerFlow"]
 
+    def test_fact_schema_guard_coerces_and_filters_nested_fields(self):
+        """Malformed fact entries should be normalized per fact, not fail the whole update."""
+        response = (
+            '{"user": {}, "history": {}, "newFacts": ['
+            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  "}, '
+            '{"content": "skip invalid confidence", "category": "context", "confidence": "high"}, '
+            '{"content": 12, "category": "context", "confidence": 0.9}, '
+            '{"content": " ", "category": "context", "confidence": 0.9}'
+            '], "factsToRemove": []}'
+        )
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert len(saved_memory["facts"]) == 1
+        assert saved_memory["facts"][0]["content"] == "User likes async updates"
+        assert saved_memory["facts"][0]["category"] == "context"
+        assert saved_memory["facts"][0]["confidence"] == 0.91
+        assert saved_memory["facts"][0]["sourceError"] == "parse issue"
+
     def test_async_update_memory_delegates_to_sync(self):
         """aupdate_memory should delegate to sync _do_update_memory_sync via to_thread."""
         updater = MemoryUpdater()

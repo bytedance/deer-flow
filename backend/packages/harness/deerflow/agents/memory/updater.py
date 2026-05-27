@@ -230,17 +230,71 @@ def _extract_text(content: Any) -> str:
 _MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
 
 
+def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
+    """Normalize a single fact entry from a model-produced memory update."""
+    if not isinstance(fact, dict):
+        return None
+
+    raw_content = fact.get("content")
+    if not isinstance(raw_content, str):
+        return None
+    content = raw_content.strip()
+    if not content:
+        return None
+
+    raw_category = fact.get("category")
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "context"
+
+    raw_confidence = fact.get("confidence", 0.5)
+    if isinstance(raw_confidence, bool):
+        return None
+    if isinstance(raw_confidence, str):
+        raw_confidence = raw_confidence.strip()
+        if not raw_confidence:
+            return None
+        try:
+            raw_confidence = float(raw_confidence)
+        except ValueError:
+            return None
+    elif isinstance(raw_confidence, (int, float)):
+        raw_confidence = float(raw_confidence)
+    else:
+        return None
+
+    if not math.isfinite(raw_confidence):
+        return None
+
+    normalized_fact = {
+        "content": content,
+        "category": category,
+        "confidence": raw_confidence,
+    }
+    source_error = fact.get("sourceError")
+    if isinstance(source_error, str):
+        normalized_source_error = source_error.strip()
+        if normalized_source_error:
+            normalized_fact["sourceError"] = normalized_source_error
+
+    return normalized_fact
+
+
 def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]:
     """Coerce parsed memory update data into the shape consumed by _apply_updates."""
     user = update_data.get("user")
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
+    normalized_new_facts = []
+    if isinstance(new_facts, list):
+        for fact in new_facts:
+            normalized_fact = _normalize_memory_update_fact(fact)
+            if normalized_fact is not None:
+                normalized_new_facts.append(normalized_fact)
 
     return {
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
-        "newFacts": [fact for fact in new_facts if isinstance(fact, dict)] if isinstance(new_facts, list) else [],
+        "newFacts": normalized_new_facts,
         "factsToRemove": [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else [],
     }
 
