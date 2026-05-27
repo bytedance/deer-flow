@@ -43,7 +43,6 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
   const marketplaceSource = template?.marketplace_source;
   const { listing: upstreamListing } = useMarketplaceListing(
     marketplaceSource?.listing_id ?? "",
-    { enabled: !!marketplaceSource },
   );
 
   const [selectedVersion, setSelectedVersion] = useState<number>(0);

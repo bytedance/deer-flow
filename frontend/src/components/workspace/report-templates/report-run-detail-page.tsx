@@ -111,9 +111,7 @@ export function ReportRunDetailPage({ runId }: Props) {
   const { run, isLoading, error } = useReportRun(runId);
   const { payload } = useReportRunPayload(runId);
   const searchParams = useSearchParams();
-  const { detail: templateDetail } = useReportTemplate(run?.template_id ?? "", {
-    enabled: !!run?.template_id,
-  });
+  const { detail: templateDetail } = useReportTemplate(run?.template_id ?? "");
   const marketplaceSource = templateDetail?.template?.marketplace_source;
   const payloadBlocks = useMemo(
     () => buildPayloadBlocks(runId, payload),

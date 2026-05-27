@@ -147,25 +147,25 @@ export function ClosureDetailDrawer({
                           {e.from_status ?? "—"} → {e.to_status ?? "—"}{" "}
                           {e.actor_id && `· ${e.actor_id}`}
                         </div>
-                        {e.payload?.verification_summary && (
+                        {!!e.payload?.verification_summary && (
                           <div className="mt-1.5 rounded bg-emerald-500/10 px-2 py-1 text-[11px]">
                             <span className="font-medium text-emerald-700 dark:text-emerald-300">验证摘要：</span>
                             <span className="text-muted-foreground whitespace-pre-wrap">
-                              {e.payload.verification_summary}
+                              {String(e.payload.verification_summary)}
                             </span>
                           </div>
                         )}
-                        {e.payload?.rejection_reason && (
+                        {!!e.payload?.rejection_reason && (
                           <div className="mt-1.5 rounded bg-red-500/10 px-2 py-1 text-[11px]">
                             <span className="font-medium text-red-700 dark:text-red-300">退回原因：</span>
                             <span className="text-muted-foreground whitespace-pre-wrap">
-                              {e.payload.rejection_reason}
+                              {String(e.payload.rejection_reason)}
                             </span>
                           </div>
                         )}
-                        {e.payload?.assignee_id && e.action === "assign" && (
+                        {!!e.payload?.assignee_id && e.action === "assign" && (
                           <div className="text-muted-foreground mt-0.5 text-[11px]">
-                            派单给：{e.payload.assignee_id}
+                            派单给：{String(e.payload.assignee_id)}
                           </div>
                         )}
                       </li>

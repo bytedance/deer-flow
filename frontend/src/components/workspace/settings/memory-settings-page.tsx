@@ -583,7 +583,7 @@ export function MemorySettingsPage() {
                 if (values.length === 0) return;
                 setVisibleLayers(values);
                 if (!values.includes(activeTab)) {
-                  setActiveTab(values[0]);
+                  setActiveTab(values[0] ?? "");
                 }
               }}
               variant="outline"
