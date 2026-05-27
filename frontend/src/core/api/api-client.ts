@@ -38,6 +38,39 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
   return { ...init, headers };
 }
 
+export function isInactiveRunStreamError(error: unknown): boolean {
+  const status =
+    typeof error === "object" && error !== null
+      ? Reflect.get(error, "status")
+      : undefined;
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : typeof error === "object" && error !== null
+          ? String(Reflect.get(error, "message") ?? "")
+          : "";
+
+  return (
+    (status === 409 || message.includes("HTTP 409")) &&
+    message.includes("not active on this worker") &&
+    message.includes("cannot be streamed")
+  );
+}
+
+export function clearReconnectRun(
+  threadId: string | null | undefined,
+  runId: string,
+): void {
+  if (typeof window === "undefined" || !threadId) return;
+
+  const key = `lg:stream:${threadId}`;
+  if (window.sessionStorage.getItem(key) === runId) {
+    window.sessionStorage.removeItem(key);
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -59,12 +92,21 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     )) as typeof client.runs.stream;
 
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
-  client.runs.joinStream = ((threadId, runId, options) =>
-    originalJoinStream(
-      threadId,
-      runId,
-      sanitizeRunStreamOptions(options),
-    )) as typeof client.runs.joinStream;
+  client.runs.joinStream = async function* (threadId, runId, options) {
+    try {
+      yield* originalJoinStream(
+        threadId,
+        runId,
+        sanitizeRunStreamOptions(options),
+      );
+    } catch (error) {
+      if (isInactiveRunStreamError(error)) {
+        clearReconnectRun(threadId, runId);
+        return;
+      }
+      throw error;
+    }
+  } as typeof client.runs.joinStream;
 
   return client;
 }
