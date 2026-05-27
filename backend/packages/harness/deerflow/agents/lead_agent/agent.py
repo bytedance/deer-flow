@@ -455,17 +455,52 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     tenant_id = cfg.get("tenant_id", "default")
 
     # Enforce tenant exists and is_active — LangGraph Server requests bypass Gateway auth middleware
-    from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.tenant.repository import TenantRepository
+    from deerflow.persistence.engine import get_engine
+    from deerflow.config.tenant_storage import TenantConfig
 
-    sf = get_session_factory()
-    if sf is not None:
-        _tenant_repo = TenantRepository(sf)
+    _engine = get_engine()
+    if _engine is not None:
+        # str(engine.url) masks the password as ***; render_as_string
+        # with hide_password=False preserves the real credentials so
+        # the sync psycopg driver can authenticate.
+        _db_url = _engine.url.render_as_string(hide_password=False)
 
-        async def _check_tenant():
-            return await _tenant_repo.get(tenant_id)
+        def _check_tenant():
+            from sqlalchemy import create_engine as _create_sync_engine, text
 
-        tc = _run_coroutine_sync(_check_tenant())
+            # Use a synchronous engine on a worker thread to avoid the
+            # "Future attached to a different loop" error that asyncpg
+            # triggers on Windows (ProactorEventLoop) when a disposable
+            # AsyncEngine is created outside FastAPI's loop.
+            _sync_url = _db_url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+            _temp = _create_sync_engine(_sync_url)
+            try:
+                with _temp.connect() as conn:
+                    # Use text() to avoid ORM metadata resolution issues
+                    # when querying outside a Session on a standalone engine.
+                    result = conn.execute(
+                        text("SELECT tenant_id, name, is_active, daily_quota_usd, "
+                             "monthly_quota_usd, created_at FROM tenants "
+                             "WHERE tenant_id = :tid"),
+                        {"tid": tenant_id},
+                    ).mappings().one_or_none()
+                    if result is None:
+                        return None
+                    return TenantConfig(
+                        tenant_id=result["tenant_id"],
+                        name=result["name"],
+                        created_at=result["created_at"].isoformat() if result["created_at"] else "",
+                        is_active=result["is_active"],
+                        daily_quota_usd=result["daily_quota_usd"],
+                        monthly_quota_usd=result["monthly_quota_usd"],
+                    )
+            finally:
+                _temp.dispose()
+
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            tc = _pool.submit(_check_tenant).result()
 
         if tc is None:
             raise PermissionError(f"Tenant {tenant_id!r} does not exist")
