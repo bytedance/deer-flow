@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Search, Star, Download, Filter } from "lucide-react";
+import { Search, Star, Download, Filter, Factory } from "lucide-react";
 
 import { useMarketplaceListings } from "@/core/marketplace/hooks";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,12 @@ export function MarketplacePage() {
     return Array.from(cats);
   }, [listings]);
 
+  const featuredIndustrial = useMemo(() => {
+    return listings.filter(
+      (l) => l.is_featured && l.category === "industrial"
+    );
+  }, [listings]);
+
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -49,6 +55,38 @@ export function MarketplacePage() {
           Discover, install, and share report templates
         </p>
       </header>
+
+      {/* Featured Industrial Intelligence Section */}
+      {featuredIndustrial.length > 0 && (
+        <div className="border-b bg-accent/30 px-6 py-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Factory className="h-5 w-5 text-primary" />
+            <h2 className="text-sm font-semibold">Industrial Intelligence</h2>
+            <Button
+              variant="link"
+              size="sm"
+              className="ml-auto h-auto p-0 text-xs"
+              onClick={() =>
+                router.push("/workspace/template-marketplace/industrial")
+              }
+            >
+              View all
+            </Button>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {featuredIndustrial.slice(0, 3).map((listing) => (
+              <ListingCard
+                key={listing.id}
+                listing={listing}
+                onClick={() =>
+                  router.push(`/workspace/template-marketplace/${listing.id}`)
+                }
+                featured
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Search and filters */}
       <div className="flex items-center gap-3 border-b px-6 py-3">
@@ -129,9 +167,11 @@ export function MarketplacePage() {
 function ListingCard({
   listing,
   onClick,
+  featured = false,
 }: {
   listing: MarketplaceListing;
   onClick: () => void;
+  featured?: boolean;
 }) {
   return (
     <Card
@@ -143,11 +183,18 @@ function ListingCard({
           <h3 className="line-clamp-1 text-sm font-semibold">
             {listing.display_name}
           </h3>
-          {listing.category && (
-            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {listing.category}
-            </span>
-          )}
+          <div className="flex items-center gap-1">
+            {featured && (
+              <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                Featured
+              </span>
+            )}
+            {listing.category && (
+              <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {listing.category}
+              </span>
+            )}
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">

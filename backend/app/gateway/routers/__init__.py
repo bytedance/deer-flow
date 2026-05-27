@@ -26,6 +26,7 @@ _ROUTER_MODULES = {
     "skills",
     "suggestions",
     "tenant_status",
+    "tenant_industrial_migration",
     "thread_runs",
     "threads",
     "uploads",
