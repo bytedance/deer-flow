@@ -40,9 +40,13 @@ WORKDIR /app
 # Copy backend source code
 COPY backend ./backend
 
-# Install dependencies with cache mount
+# Install dependencies (no cache mount — all packages must be baked into image for offline use)
 # When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
-RUN --mount=type=cache,target=/root/.cache/uv \
+# --frozen: do not update lock file (requires uv.lock to exist)
+# UV_LINK_MODE=copy: copy packages into venv instead of linking from cache
+RUN --mount=type=cache,target=/root/.cache/uv,uid=0 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
     sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
