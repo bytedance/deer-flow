@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ export function IndustrialOnboardingOverlay() {
   const { t } = useI18n();
   const { shouldShowOnboarding, completeOnboarding, recordOperation } =
     useIndustrialOnboarding();
+  const router = useRouter();
   const [currentStep, setCurrentStep] = useState<OnboardingStep>(0);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -58,6 +60,7 @@ export function IndustrialOnboardingOverlay() {
   const handleFinish = () => {
     recordOperation("trend_report");
     completeOnboarding();
+    router.push("/workspace/chats/new");
   };
 
   return (

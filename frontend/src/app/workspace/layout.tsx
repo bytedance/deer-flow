@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { CommandPalette } from "@/components/workspace/command-palette";
+import { IndustrialMigrationDialog } from "@/components/workspace/industrial-migration-dialog";
 import { TenantGuardWrapper } from "@/components/workspace/tenant-guard-wrapper";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { AuthProvider } from "@/core/auth/AuthProvider";
@@ -46,6 +47,7 @@ export default async function WorkspaceLayout({
             <SidebarInset className="min-w-0">{children}</SidebarInset>
           </SidebarProvider>
           <CommandPalette />
+          <IndustrialMigrationDialog />
           <Toaster position="top-center" />
         </TenantGuardWrapper>
       </QueryClientProvider>

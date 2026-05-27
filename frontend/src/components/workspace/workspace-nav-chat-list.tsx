@@ -1,16 +1,21 @@
 "use client";
 
 import {
+  ActivityIcon,
   ArrowRightIcon,
   BookOpenIcon,
   BotIcon,
   BugIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
+  ClipboardCheckIcon,
+  FactoryIcon,
   FileTextIcon,
   HistoryIcon,
+  LineChartIcon,
   MessagesSquare,
   Settings2Icon,
+  WrenchIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -39,6 +44,7 @@ import { ThreadActionMenu } from "./report-templates/thread-action-menu";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
 const REPORT_THREADS_KEY = "sidebar-report-threads-collapsed";
+const TOOLS_MENU_KEY = "sidebar-tools-collapsed";
 
 const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   FileText: FileTextIcon,
@@ -46,6 +52,30 @@ const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   BookOpen: BookOpenIcon,
   Bug: BugIcon,
 };
+
+const INDUSTRIAL_NAV_ITEMS = [
+  {
+    label: "设备监测",
+    labelEn: "Monitoring",
+    path: "/workspace/agents/monitoring-analysis/chats/new",
+    icon: ActivityIcon,
+    locked: true,
+  },
+  {
+    label: "故障诊断",
+    labelEn: "Diagnosis",
+    path: "/workspace/agents/device-diagnosis/chats/new",
+    icon: ClipboardCheckIcon,
+    locked: true,
+  },
+  {
+    label: "趋势报告",
+    labelEn: "Trends",
+    path: "/workspace/agents/trend-report/chats/new",
+    icon: LineChartIcon,
+    locked: true,
+  },
+] as const;
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
@@ -61,6 +91,11 @@ export function WorkspaceNavChatList() {
   const [agentsOpen, setAgentsOpen] = useState(() => {
     if (typeof window === "undefined") return true;
     return localStorage.getItem(STORAGE_KEY) !== "true";
+  });
+
+  const [toolsOpen, setToolsOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(TOOLS_MENU_KEY) !== "true";
   });
 
   const [activeGroup, setActiveGroup] = useState<Agent | null>(null);
@@ -82,9 +117,42 @@ export function WorkspaceNavChatList() {
     localStorage.setItem(STORAGE_KEY, agentsOpen ? "false" : "true");
   }, [agentsOpen]);
 
+  useEffect(() => {
+    localStorage.setItem(TOOLS_MENU_KEY, toolsOpen ? "false" : "true");
+  }, [toolsOpen]);
+
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
+        {/* Industrial Workflows — always first, always visible */}
+        <SidebarMenuItem>
+          <SidebarMenuButton className="pointer-events-none opacity-60">
+            <FactoryIcon className="size-4" />
+            <span className="text-xs font-semibold uppercase tracking-wide">
+              {t.locale.localName === "中文" ? "工业智能" : "Industrial"}
+            </span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        {INDUSTRIAL_NAV_ITEMS.map((item) => {
+          const isActive = pathname.startsWith(item.path.replace("/chats/new", ""));
+          return (
+            <SidebarMenuItem key={item.path}>
+              <SidebarMenuButton isActive={isActive} asChild>
+                <Link className="text-muted-foreground" href={item.path}>
+                  <item.icon className="size-4" />
+                  <span>{t.locale.localName === "中文" ? item.label : item.labelEn}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          );
+        })}
+
+        {/* Divider */}
+        <SidebarMenuItem>
+          <div className="mx-2 my-2 border-t" />
+        </SidebarMenuItem>
+
         <SidebarMenuItem>
           <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
             <Link className="text-muted-foreground" href="/workspace/chats">
@@ -151,36 +219,6 @@ export function WorkspaceNavChatList() {
           </Collapsible>
         </SidebarMenuItem>
 
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/knowledge-bases")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/knowledge-bases"
-            >
-              <BookOpenIcon />
-              <span>{t.sidebar.knowledgeBases}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/capabilities")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/capabilities"
-            >
-              <Settings2Icon className="size-4" />
-              <span>平台能力</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-
         {defectClosureEnabled && (
           <ClosedLoopNavItem active={pathname.startsWith("/workspace/closed-loop")} />
         )}
@@ -212,19 +250,72 @@ export function WorkspaceNavChatList() {
           );
         })}
 
+        {/* Collapsible Tools menu */}
         <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/debug/a2ui")}
-            asChild
-          >
-            <Link
-              className="text-muted-foreground"
-              href="/workspace/debug/a2ui"
-            >
-              <BugIcon />
-              <span>{t.sidebar.a2uiDebug}</span>
-            </Link>
-          </SidebarMenuButton>
+          <Collapsible open={toolsOpen} onOpenChange={setToolsOpen}>
+            <CollapsibleTrigger asChild>
+              <SidebarMenuButton>
+                <WrenchIcon className="size-4" />
+                <span className="flex-1 text-left">
+                  {t.locale.localName === "中文" ? "工具" : "Tools"}
+                </span>
+                <ChevronDownIcon
+                  className={cn(
+                    "size-4 transition-transform",
+                    !toolsOpen && "-rotate-90",
+                  )}
+                />
+              </SidebarMenuButton>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <SidebarMenu className="ml-3 border-l pl-2">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname.startsWith("/workspace/knowledge-bases")}
+                    asChild
+                  >
+                    <Link
+                      className="text-muted-foreground"
+                      href="/workspace/knowledge-bases"
+                    >
+                      <BookOpenIcon />
+                      <span>{t.sidebar.knowledgeBases}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname.startsWith("/workspace/capabilities")}
+                    asChild
+                  >
+                    <Link
+                      className="text-muted-foreground"
+                      href="/workspace/capabilities"
+                    >
+                      <Settings2Icon className="size-4" />
+                      <span>{t.locale.localName === "中文" ? "平台能力" : "Capabilities"}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname.startsWith("/workspace/debug/a2ui")}
+                    asChild
+                  >
+                    <Link
+                      className="text-muted-foreground"
+                      href="/workspace/debug/a2ui"
+                    >
+                      <BugIcon />
+                      <span>{t.sidebar.a2uiDebug}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </SidebarMenu>
+            </CollapsibleContent>
+          </Collapsible>
         </SidebarMenuItem>
       </SidebarMenu>
 

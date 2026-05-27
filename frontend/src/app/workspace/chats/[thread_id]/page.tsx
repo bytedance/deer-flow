@@ -12,6 +12,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { GreetingCard } from "@/components/workspace/chats/greeting-card";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { IndustrialOnboardingOverlay } from "@/components/workspace/industrial-onboarding-overlay";
 import { InputBox } from "@/components/workspace/input-box";
@@ -25,6 +26,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
+import { useGreeting } from "@/core/greeting/use-greeting";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
@@ -97,6 +99,18 @@ export default function ChatPage() {
     [sendMessage, threadId],
   );
 
+  const { greeting, isLoading: isGreetingLoading } = useGreeting(
+    threadId,
+    isNewThread,
+  );
+
+  const handleSuggestionClick = useCallback(
+    (suggestion: string) => {
+      void sendMessage(threadId, { text: suggestion, files: [] });
+    },
+    [sendMessage, threadId],
+  );
+
   useEffect(() => {
     const handler = (e: Event) => {
       const { threadId: eventThreadId, callbackId, payload } = (e as CustomEvent).detail;
@@ -162,6 +176,7 @@ export default function ChatPage() {
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
                 tokenUsageInlineMode={tokenUsageInlineMode}
+                agentName={settings.context.agent_name as string | undefined}
               />
             </div>
             <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
@@ -200,7 +215,17 @@ export default function ChatPage() {
                     }
                     context={settings.context}
                     extraHeader={
-                      isNewThread && <Welcome mode={settings.context.mode} />
+                      isNewThread &&
+                      (greeting ? (
+                        <GreetingCard
+                          greeting={greeting.greeting}
+                          suggestions={greeting.suggestions}
+                          isLoading={isGreetingLoading}
+                          onSuggestionClick={handleSuggestionClick}
+                        />
+                      ) : (
+                        <Welcome mode={settings.context.mode} />
+                      ))
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||

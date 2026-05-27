@@ -4,7 +4,9 @@ import {
   ArrowLeftIcon,
   BotIcon,
   CheckCircleIcon,
+  FactoryIcon,
   InfoIcon,
+  MicroscopeIcon,
   MoreHorizontalIcon,
   SaveIcon,
 } from "lucide-react";
@@ -50,6 +52,33 @@ type SetupAgentStatus = "idle" | "requested" | "completed";
 const NAME_RE = /^[A-Za-z0-9-]+$/;
 const SAVE_HINT_STORAGE_KEY = "deerflow.agent-create.save-hint-seen";
 const AGENT_READ_RETRY_DELAYS_MS = [200, 500, 1_000, 2_000];
+
+const AGENT_TEMPLATES = [
+  {
+    name: "industrial-agent",
+    displayName: "Industrial Intelligence Agent",
+    displayNameZh: "工业智能 Agent",
+    description: "Equipment monitoring, fault diagnosis, and predictive maintenance",
+    descriptionZh: "设备监测、故障诊断与预测性维护",
+    iconName: "FactoryIcon",
+  },
+  {
+    name: "research-agent",
+    displayName: "Research Agent",
+    displayNameZh: "研究 Agent",
+    description: "Deep research, analysis, and report generation",
+    descriptionZh: "深度研究、分析与报告生成",
+    iconName: "MicroscopeIcon",
+  },
+  {
+    name: "general-agent",
+    displayName: "General Purpose Agent",
+    displayNameZh: "通用 Agent",
+    description: "Versatile assistant for various tasks",
+    descriptionZh: "多用途智能助手",
+    iconName: "BotIcon",
+  },
+] as const;
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -308,11 +337,17 @@ export default function NewAgentPage() {
   );
 
   if (step === "name") {
+    const iconMap = {
+      FactoryIcon,
+      MicroscopeIcon,
+      BotIcon,
+    } as const;
+
     return (
       <div className="flex size-full flex-col">
         {header}
         <main className="flex flex-1 flex-col items-center justify-center px-4">
-          <div className="w-full max-w-sm space-y-8">
+          <div className="w-full max-w-md space-y-8">
             <div className="space-y-3 text-center">
               <div className="bg-primary/10 mx-auto flex h-14 w-14 items-center justify-center rounded-full">
                 <BotIcon className="text-primary h-7 w-7" />
@@ -324,6 +359,47 @@ export default function NewAgentPage() {
                 <p className="text-muted-foreground text-sm">
                   {t.agents.nameStepHint}
                 </p>
+              </div>
+            </div>
+
+            {/* Template selection */}
+            <div className="space-y-2">
+              <p className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                {t.agents.templateLabel || "Choose a template"}
+              </p>
+              <div className="grid gap-2">
+                {AGENT_TEMPLATES.map((tmpl) => {
+                  const Icon = iconMap[tmpl.iconName as keyof typeof iconMap] ?? BotIcon;
+                  const isSelected = nameInput === tmpl.name;
+                  return (
+                    <button
+                      key={tmpl.name}
+                      type="button"
+                      onClick={() => {
+                        setNameInput(tmpl.name);
+                        setNameError("");
+                      }}
+                      className={cn(
+                        "flex items-center gap-3 rounded-lg border p-3 text-left transition-all hover:bg-muted",
+                        isSelected
+                          ? "border-primary bg-primary/5 ring-1 ring-primary"
+                          : "hover:border-primary/50",
+                      )}
+                    >
+                      <div className="bg-muted flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
+                        <Icon className="text-foreground h-4 w-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium">
+                          {t.locale.localName === "中文" ? tmpl.displayNameZh : tmpl.displayName}
+                        </div>
+                        <div className="text-muted-foreground text-xs truncate">
+                          {t.locale.localName === "中文" ? tmpl.descriptionZh : tmpl.description}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 

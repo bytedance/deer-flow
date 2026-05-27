@@ -203,9 +203,9 @@ function BlueprintCard({
 
         {blueprint.tags.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-1">
-            {blueprint.tags.slice(0, 3).map((tag) => (
+            {blueprint.tags.slice(0, 3).map((tag, i) => (
               <span
-                key={tag}
+                key={`${tag}-${i}`}
                 className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground"
               >
                 {tag}

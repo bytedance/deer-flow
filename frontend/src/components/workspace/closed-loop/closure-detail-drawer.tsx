@@ -124,10 +124,13 @@ export function ClosureDetailDrawer({
                   {[...events]
                     .sort(
                       (a, b) =>
-                        new Date(b.occurred_at).getTime() -
-                        new Date(a.occurred_at).getTime(),
+                        new Date(b.created_at).getTime() -
+                        new Date(a.created_at).getTime(),
                     )
-                    .map((e) => (
+                    .map((e) => {
+                      const ts = e.created_at ? new Date(e.created_at) : null;
+                      const tsValid = ts !== null && !Number.isNaN(ts.getTime());
+                      return (
                       <li
                         key={e.id}
                         className="bg-muted/30 rounded border p-2"
@@ -135,15 +138,39 @@ export function ClosureDetailDrawer({
                         <div className="flex items-center justify-between">
                           <span className="font-medium">{e.action}</span>
                           <span className="text-muted-foreground">
-                            {new Date(e.occurred_at).toLocaleString("zh-CN")}
+                            {tsValid
+                              ? ts.toLocaleString("zh-CN")
+                              : "—"}
                           </span>
                         </div>
                         <div className="text-muted-foreground mt-0.5">
                           {e.from_status ?? "—"} → {e.to_status ?? "—"}{" "}
                           {e.actor_id && `· ${e.actor_id}`}
                         </div>
+                        {e.payload?.verification_summary && (
+                          <div className="mt-1.5 rounded bg-emerald-500/10 px-2 py-1 text-[11px]">
+                            <span className="font-medium text-emerald-700 dark:text-emerald-300">验证摘要：</span>
+                            <span className="text-muted-foreground whitespace-pre-wrap">
+                              {e.payload.verification_summary}
+                            </span>
+                          </div>
+                        )}
+                        {e.payload?.rejection_reason && (
+                          <div className="mt-1.5 rounded bg-red-500/10 px-2 py-1 text-[11px]">
+                            <span className="font-medium text-red-700 dark:text-red-300">退回原因：</span>
+                            <span className="text-muted-foreground whitespace-pre-wrap">
+                              {e.payload.rejection_reason}
+                            </span>
+                          </div>
+                        )}
+                        {e.payload?.assignee_id && e.action === "assign" && (
+                          <div className="text-muted-foreground mt-0.5 text-[11px]">
+                            派单给：{e.payload.assignee_id}
+                          </div>
+                        )}
                       </li>
-                    ))}
+                      );
+                    })}
                 </ol>
               </section>
             </>

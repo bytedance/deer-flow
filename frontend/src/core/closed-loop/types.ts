@@ -63,7 +63,7 @@ export interface ClosureTicketEvent {
   to_status: ClosureStatus | null;
   actor_id: string | null;
   payload: Record<string, unknown>;
-  occurred_at: string;
+  created_at: string;
 }
 
 export interface PageMeta {
