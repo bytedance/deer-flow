@@ -189,6 +189,10 @@ class ReportTemplateRecord(BaseModel):
     current_version: int = 0
     dsl_version: str = "1"
     tags: list[str] = Field(default_factory=list)
+    category: str | None = None
+    is_featured: bool = False
+    install_count: int = 0
+    run_count: int = 0
     created_at: str
     updated_at: str
     etag: str
@@ -310,6 +314,10 @@ class IndexEntry(BaseModel):
     status: TemplateStatus
     current_version: int
     tags: list[str] = Field(default_factory=list)
+    category: str | None = None
+    is_featured: bool = False
+    install_count: int = 0
+    run_count: int = 0
     updated_at: str
 
 

@@ -135,12 +135,18 @@ class MarketplaceRepository:
             stmt = stmt.where(and_(*conditions))
             count_stmt = count_stmt.where(and_(*conditions))
 
-        # Sort
+        # Sort: boost featured/industrial templates first, then apply user sort
         sort_col = getattr(MarketplaceListingRow, sort_by, MarketplaceListingRow.created_at)
         if sort_order == "desc":
-            stmt = stmt.order_by(sort_col.desc())
+            stmt = stmt.order_by(
+                MarketplaceListingRow.is_featured.desc(),
+                sort_col.desc(),
+            )
         else:
-            stmt = stmt.order_by(sort_col.asc())
+            stmt = stmt.order_by(
+                MarketplaceListingRow.is_featured.desc(),
+                sort_col.asc(),
+            )
 
         stmt = stmt.offset(offset).limit(limit)
 

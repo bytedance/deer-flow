@@ -257,6 +257,7 @@ class FileSystemReportTemplateRepository:
         tenant_id: str,
         description: str = "",
         tags: list[str] | None = None,
+        category: str | None = None,
     ) -> ReportTemplateRecord:
         """Create a new draft template under ``scope``."""
         if scope.visibility == "builtin":
@@ -265,6 +266,9 @@ class FileSystemReportTemplateRepository:
         template_id = new_template_id()
         validate_user_tenant_id(owner_user_id)
         validate_user_tenant_id(tenant_id)
+
+        # Auto-set featured flag for industrial templates
+        is_featured = category == "industrial"
 
         now = now_iso()
         record = ReportTemplateRecord(
@@ -278,6 +282,8 @@ class FileSystemReportTemplateRepository:
             status="draft",
             current_version=0,
             tags=tags or [],
+            category=category,
+            is_featured=is_featured,
             created_at=now,
             updated_at=now,
             etag=uuid.uuid4().hex,

@@ -79,6 +79,8 @@ class ScriptDescriptorYaml(BaseModel):
     output_files: list[OutputFile] = Field(default_factory=list)
     timeout_seconds: int = Field(default=60, gt=0, le=3600)
     max_output_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    dependencies: list[str] = Field(default_factory=list)
+    optional_dependencies: list[str] = Field(default_factory=list)
 
 
 class ReportScriptsYaml(BaseModel):
@@ -112,6 +114,8 @@ class ScriptDescriptor:
     output_files: tuple[OutputFile, ...]
     timeout_seconds: int
     max_output_bytes: int
+    dependencies: tuple[str, ...] = ()
+    optional_dependencies: tuple[str, ...] = ()
 
     @property
     def entry_path(self) -> Path:
@@ -259,6 +263,8 @@ def _build_registry_from_skills(
                 output_files=tuple(spec.output_files),
                 timeout_seconds=spec.timeout_seconds,
                 max_output_bytes=spec.max_output_bytes,
+                dependencies=tuple(spec.dependencies),
+                optional_dependencies=tuple(spec.optional_dependencies),
             )
 
     return ScriptRegistry(scripts=descriptors)

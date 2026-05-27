@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { useCallback } from "react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useI18n } from "@/core/i18n/hooks";
 import { useReportRuns, useReportThreads } from "@/core/report-templates";
 import type { RunStatus } from "@/core/report-templates/types";
 import { buildCrossPageURL, logCrossPageNavigation } from "@/core/models/navigation";
@@ -12,14 +13,6 @@ import { titleOfThread, pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { ThreadActionMenu } from "./thread-action-menu";
-
-const STATUS_LABEL: Record<RunStatus, string> = {
-  pending: "等待中",
-  running: "运行中",
-  success: "成功",
-  failed: "失败",
-  cancelled: "已取消",
-};
 
 const STATUS_COLOR: Record<RunStatus, string> = {
   pending: "bg-muted text-muted-foreground",
@@ -30,22 +23,31 @@ const STATUS_COLOR: Record<RunStatus, string> = {
 };
 
 function RunsTab() {
+  const { t } = useI18n();
   const { runs, isLoading, error } = useReportRuns({ limit: 100 });
 
+  const STATUS_LABEL: Record<RunStatus, string> = {
+    pending: t.reportRuns.statusPending,
+    running: t.reportRuns.statusRunning,
+    success: t.reportRuns.statusSuccess,
+    failed: t.reportRuns.statusFailed,
+    cancelled: t.reportRuns.statusCancelled,
+  };
+
   if (isLoading) {
-    return <div className="text-muted-foreground text-sm">加载中…</div>;
+    return <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>;
   }
   if (error) {
     return (
       <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
-        加载失败：{String(error)}
+        {t.reportRuns.loadingFailed}：{String(error)}
       </div>
     );
   }
   if (runs.length === 0) {
     return (
       <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
-        暂无报告运行记录。先在子智能体或自定义模板中跑一次报告。
+        {t.reportRuns.emptyRuns}
       </div>
     );
   }
@@ -55,13 +57,13 @@ function RunsTab() {
       <table className="min-w-full text-sm">
         <thead className="bg-muted/50 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">运行 ID</th>
-            <th className="px-3 py-2 text-left font-medium">模板</th>
-            <th className="px-3 py-2 text-left font-medium">版本</th>
-            <th className="px-3 py-2 text-left font-medium">状态</th>
-            <th className="px-3 py-2 text-left font-medium">创建时间</th>
-            <th className="px-3 py-2 text-left font-medium">参数摘要</th>
-            <th className="px-3 py-2 text-left font-medium">来源对话</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerRunId}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerTemplate}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerVersion}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerStatus}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerCreatedAt}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerParams}</th>
+            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerSourceChat}</th>
           </tr>
         </thead>
         <tbody>
@@ -153,22 +155,23 @@ function RunsTab() {
 }
 
 function ChatsTab() {
+  const { t } = useI18n();
   const { threads, isLoading, error } = useReportThreads();
 
   if (isLoading) {
-    return <div className="text-muted-foreground text-sm">加载中…</div>;
+    return <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>;
   }
   if (error) {
     return (
       <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
-        加载失败：{String(error)}
+        {t.reportRuns.loadingFailed}：{String(error)}
       </div>
     );
   }
   if (threads.length === 0) {
     return (
       <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
-        暂无报告对话
+        {t.reportRuns.emptyChats}
       </div>
     );
   }
@@ -201,6 +204,7 @@ function ChatsTab() {
 }
 
 export function ReportRunsPage() {
+  const { t } = useI18n();
   const searchParams = useSearchParams();
   const tab = searchParams.get("tab") === "chats" ? "chats" : "runs";
 
@@ -216,16 +220,16 @@ export function ReportRunsPage() {
   return (
     <div className="flex h-full flex-col gap-4 p-6">
       <header>
-        <h1 className="text-2xl font-semibold">报告历史</h1>
+        <h1 className="text-2xl font-semibold">{t.reportRuns.pageTitle}</h1>
         <p className="text-muted-foreground mt-1 text-sm">
-          查看已生成的报告运行记录及其对应的对话。
+          {t.reportRuns.pageDescription}
         </p>
       </header>
 
       <Tabs value={tab} onValueChange={handleTabChange}>
         <TabsList>
-          <TabsTrigger value="runs">运行记录</TabsTrigger>
-          <TabsTrigger value="chats">对话</TabsTrigger>
+          <TabsTrigger value="runs">{t.reportRuns.tabRuns}</TabsTrigger>
+          <TabsTrigger value="chats">{t.reportRuns.tabChats}</TabsTrigger>
         </TabsList>
         <TabsContent value="runs" className="mt-4">
           <RunsTab />

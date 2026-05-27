@@ -37,6 +37,7 @@ export interface MarketplaceListing {
   avg_rating: number;
   review_count: number;
   install_count: number;
+  is_featured: boolean;
   status: string;
   created_by: string;
   created_at: string;

@@ -23,6 +23,10 @@ import {
   useTemplateDSL,
   type ReportTemplateDSL,
 } from "@/core/report-templates/use-template-dsl";
+import {
+  applyResolvedAuthError,
+  resolveAuthError,
+} from "@/core/auth/api-error";
 import { Button } from "@/components/ui/button";
 import {
   Tabs,
@@ -92,6 +96,12 @@ export function TemplateEditorPage() {
       dslHook.markClean();
       toast.success("Template saved");
     } catch (err) {
+      const authError = resolveAuthError(err, "保存");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
       toast.error((err as Error).message || "Failed to save");
     } finally {
       setIsSaving(false);
@@ -115,6 +125,12 @@ export function TemplateEditorPage() {
       });
       toast.success("Template published");
     } catch (err) {
+      const authError = resolveAuthError(err, "发布");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
       toast.error((err as Error).message || "Failed to publish");
     } finally {
       setIsPublishing(false);
@@ -147,7 +163,7 @@ export function TemplateEditorPage() {
             </h1>
             <p className="text-xs text-muted-foreground">
               {dslHook.isDirty ? "Unsaved changes" : "All changes saved"}
-              {detail.template.status === "published" && ` · v${detail.template.current_version}`}
+              {detail.template.status === "published" && ` | v${detail.template.current_version}`}
             </p>
           </div>
         </div>

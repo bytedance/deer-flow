@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import yaml from "js-yaml";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface FormField {
   name: string;
@@ -11,6 +11,7 @@ export interface FormField {
   default?: unknown;
   placeholder?: string;
   description?: string;
+  searchable?: boolean;
   options?: { label: string; value: string }[];
 }
 

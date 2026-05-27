@@ -6,6 +6,7 @@ import { useEffect, useMemo } from "react";
 import { Store } from "lucide-react";
 
 import { GenUIRenderer } from "@/components/genui/GenUIRenderer";
+import { useI18n } from "@/core/i18n/hooks";
 import type { DataFileEntry, ReportRun } from "@/core/report-templates";
 import type { UIBlock } from "@/core/genui/store";
 import {
@@ -106,6 +107,7 @@ function buildPayloadBlocks(
 }
 
 export function ReportRunDetailPage({ runId }: Props) {
+  const { t } = useI18n();
   const { run, isLoading, error } = useReportRun(runId);
   const { payload } = useReportRunPayload(runId);
   const searchParams = useSearchParams();
@@ -147,7 +149,9 @@ export function ReportRunDetailPage({ runId }: Props) {
     source_type: "report",
     source_run_id: run.id,
     source_thread_id: run.thread_id || undefined,
-    title: run.template_id ? `[报告] ${run.template_id}: ${run.id}` : `[报告] ${run.id}`,
+    title: run.template_id
+      ? `${t.reportRuns.titlePrefix} ${run.template_id}: ${run.id}`
+      : `${t.reportRuns.titlePrefix} ${run.id}`,
     description: run.error_message || undefined,
     device_id: (run.parameters_summary as Record<string, unknown>)?.device_id as string | undefined,
   };
@@ -193,7 +197,7 @@ export function ReportRunDetailPage({ runId }: Props) {
         <div className="flex gap-2">
           <CreateClosureTicketDialog
             sourceContext={ticketSource}
-            triggerLabel="创建整改单"
+            triggerLabel={t.reportRuns.createTicket}
             triggerVariant="outline"
           />
           {md && (
@@ -334,7 +338,7 @@ export function ReportRunDetailPage({ runId }: Props) {
       </section>
 
       <section className="rounded border bg-card p-4">
-        <h2 className="mb-2 text-sm font-medium">关联整改单</h2>
+        <h2 className="mb-2 text-sm font-medium">{t.reportRuns.linkTicket}</h2>
         <LinkedClosureTickets sourceRunId={run.id} />
       </section>
 

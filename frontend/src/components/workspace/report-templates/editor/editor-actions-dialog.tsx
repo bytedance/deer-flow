@@ -24,6 +24,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import {
+  applyResolvedAuthError,
+  resolveAuthError,
+} from "@/core/auth/api-error";
 import { publishToMarketplace, exportTemplatePackage } from "@/core/marketplace/api";
 
 interface EditorActionsDialogProps {
@@ -93,6 +97,12 @@ function PublishToMarketplaceDialog({
       toast.success(result.message || "Published to marketplace");
       onOpenChange(false);
     } catch (err) {
+      const authError = resolveAuthError(err, "发布");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
       toast.error((err as Error).message || "Failed to publish");
     } finally {
       setIsSubmitting(false);
@@ -205,6 +215,12 @@ function ExportTemplateDialog({
       toast.success("Template exported");
       onOpenChange(false);
     } catch (err) {
+      const authError = resolveAuthError(err, "导出");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
       toast.error((err as Error).message || "Failed to export");
     } finally {
       setIsExporting(false);

@@ -1,6 +1,5 @@
 "use client";
 
-import { useCallback } from "react";
 import {
   DndContext,
   closestCenter,
@@ -19,13 +18,61 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-
 import type { FormStep, FormField } from "@/core/report-templates/use-template-dsl";
+import { cn } from "@/lib/utils";
+
+const FORM_FIELD_TYPES = new Set([
+  "text",
+  "select",
+  "multi-select",
+  "date",
+  "device-selector",
+]);
+
+function createDefaultField(type: string): FormField {
+  const name = `field_${Date.now().toString(36)}`;
+  switch (type) {
+    case "select":
+      return {
+        name,
+        type,
+        label: "Select",
+        required: false,
+        options: [
+          { label: "Option 1", value: "option_1" },
+          { label: "Option 2", value: "option_2" },
+        ],
+      };
+    case "multi-select":
+      return {
+        name,
+        type,
+        label: "Multi-Select",
+        required: false,
+        options: [
+          { label: "Option 1", value: "option_1" },
+          { label: "Option 2", value: "option_2" },
+        ],
+      };
+    case "device-selector":
+      return {
+        name,
+        type,
+        label: "Device Selector",
+        required: false,
+        searchable: true,
+      };
+    case "date":
+      return { name, type, label: "Date", required: false };
+    default:
+      return { name, type, label: "Text Input", required: false };
+  }
+}
 
 interface FormStepsPanelProps {
   steps: FormStep[];
@@ -43,6 +90,56 @@ export function FormStepsPanel({
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const [dragOverStepId, setDragOverStepId] = useState<string | null>(null);
+  const [isDragOverCanvas, setIsDragOverCanvas] = useState(false);
+
+  const handleFieldDragOver = useCallback((e: React.DragEvent) => {
+    const types = Array.from(e.dataTransfer.types);
+    if (types.includes("application/template-component")) {
+      e.preventDefault();
+    }
+  }, []);
+
+  const handleCanvasDrop = useCallback(
+    (e: React.DragEvent, targetStepId?: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragOverCanvas(false);
+      setDragOverStepId(null);
+      const type = e.dataTransfer.getData("application/template-component");
+      if (!type || !FORM_FIELD_TYPES.has(type)) return;
+
+      const newField = createDefaultField(type);
+
+      if (targetStepId) {
+        onUpdate((prev) =>
+          prev.map((s) =>
+            s.id === targetStepId
+              ? { ...s, fields: [...s.fields, newField] }
+              : s,
+          ),
+        );
+        onSelect(targetStepId);
+      } else {
+        const newId = `step_${Date.now().toString(36)}`;
+        const newStep: FormStep = {
+          id: newId,
+          title: `Step ${(steps.length ?? 0) + 1}`,
+          fields: [newField],
+        };
+        onUpdate((prev) => {
+          const updated = [...prev, newStep];
+          return updated.map((s, i) => ({
+            ...s,
+            next: i < updated.length - 1 ? updated[i + 1]!.id : undefined,
+          }));
+        });
+        onSelect(newId);
+      }
+    },
+    [steps.length, onUpdate, onSelect],
   );
 
   const handleDragEnd = useCallback(
@@ -108,8 +205,25 @@ export function FormStepsPanel({
 
   if (steps.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-        <p className="mb-3 text-sm">No form steps yet</p>
+      <div
+        className={cn(
+          "flex flex-col items-center justify-center rounded-lg border-2 border-dashed py-12 text-muted-foreground transition-colors",
+          isDragOverCanvas
+            ? "border-primary bg-primary/5"
+            : "border-transparent",
+        )}
+        onDragOver={(e) => {
+          handleFieldDragOver(e);
+          setIsDragOverCanvas(true);
+        }}
+        onDragLeave={() => setIsDragOverCanvas(false)}
+        onDrop={(e) => handleCanvasDrop(e)}
+      >
+        <p className="mb-3 text-sm">
+          {isDragOverCanvas
+            ? "Drop to create a new step"
+            : "No form steps yet"}
+        </p>
         <Button variant="outline" size="sm" onClick={addStep}>
           <Plus className="mr-1 h-4 w-4" />
           Add First Step
@@ -119,7 +233,15 @@ export function FormStepsPanel({
   }
 
   return (
-    <div className="space-y-3">
+    <div
+      className="space-y-3"
+      onDragOver={(e) => {
+        handleFieldDragOver(e);
+        setIsDragOverCanvas(true);
+      }}
+      onDragLeave={() => setIsDragOverCanvas(false)}
+      onDrop={(e) => handleCanvasDrop(e)}
+    >
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -132,9 +254,19 @@ export function FormStepsPanel({
               step={step}
               index={index}
               isSelected={selectedId === step.id}
+              isDragOver={dragOverStepId === step.id}
               onSelect={() => onSelect(step.id)}
               onRemove={() => removeStep(step.id)}
               onTitleChange={(title) => updateStepTitle(step.id, title)}
+              onFieldDragOver={(e) => {
+                handleFieldDragOver(e);
+                setDragOverStepId(step.id);
+              }}
+              onFieldDragLeave={() => setDragOverStepId(null)}
+              onFieldDrop={(e) => {
+                e.stopPropagation();
+                handleCanvasDrop(e, step.id);
+              }}
             />
           ))}
         </SortableContext>
@@ -152,18 +284,26 @@ interface SortableStepCardProps {
   step: FormStep;
   index: number;
   isSelected: boolean;
+  isDragOver: boolean;
   onSelect: () => void;
   onRemove: () => void;
   onTitleChange: (title: string) => void;
+  onFieldDragOver: (e: React.DragEvent) => void;
+  onFieldDragLeave: () => void;
+  onFieldDrop: (e: React.DragEvent) => void;
 }
 
 function SortableStepCard({
   step,
   index,
   isSelected,
+  isDragOver,
   onSelect,
   onRemove,
   onTitleChange,
+  onFieldDragOver,
+  onFieldDragLeave,
+  onFieldDrop,
 }: SortableStepCardProps) {
   const {
     attributes,
@@ -184,7 +324,21 @@ function SortableStepCard({
     <Card
       ref={setNodeRef}
       style={style}
-      className={isSelected ? "border-primary" : ""}
+      className={cn(
+        isSelected && "border-primary",
+        isDragOver && "border-primary/50 ring-2 ring-primary/20",
+      )}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onFieldDragOver(e);
+      }}
+      onDragLeave={(e) => {
+        const relatedTarget = e.relatedTarget as Node | null;
+        if (relatedTarget && e.currentTarget.contains(relatedTarget)) return;
+        onFieldDragLeave();
+      }}
+      onDrop={onFieldDrop}
     >
       <CardHeader className="flex flex-row items-center gap-2 p-3">
         <div

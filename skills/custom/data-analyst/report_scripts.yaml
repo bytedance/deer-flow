@@ -913,6 +913,9 @@ scripts:
         type: file_path
         required: true
         description: "diagnosis_features.json 路径"
+      timeline:
+        type: file_path
+        description: "fault_timeline.json 路径（可选，runtime 注入）"
     output_files:
       - id: diagnosis_analysis
         path: "{run_output_dir}/data/diagnosis_analysis.json"

@@ -24,7 +24,6 @@ from deerflow.report_templates.blueprint_repository import (
     get_blueprint_repository,
 )
 from deerflow.report_templates.service import get_repository as get_template_repository
-from deerflow.report_templates.records import new_template_id, now_iso
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -140,37 +139,26 @@ async def create_from_blueprint(
     user_id = get_effective_user_id()
     tenant_id = get_current_tenant_id()
 
-    # Build a new template record from the blueprint DSL
-    from deerflow.report_templates.records import ReportTemplateRecord, Visibility
+    from deerflow.report_templates.repository import Scope
 
-    template_id = new_template_id()
-    record = ReportTemplateRecord(
-        id=template_id,
-        name=body.name,
-        description=bp.description,
-        visibility=Visibility(body.visibility),
-        owner_user_id=user_id if body.visibility == "private" else None,
-        tenant_id=tenant_id if body.visibility in ("tenant", "private") else None,
-        current_version=0,
-        created_at=now_iso(),
-        updated_at=now_iso(),
-    )
+    if body.visibility == "private":
+        scope = Scope.private(user_id)
+    elif body.visibility == "tenant":
+        scope = Scope.tenant(tenant_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"unsupported visibility: {body.visibility}")
 
-    # Save as draft with the blueprint's DSL
     template_repo = get_template_repository()
     try:
-        from deerflow.report_templates.repository import Scope
+        record = template_repo.create_template(
+            scope=scope,
+            name=body.name,
+            display_name=body.name,
+            owner_user_id=user_id,
+            tenant_id=tenant_id,
+            description=bp.description,
+        )
 
-        if body.visibility == "private":
-            scope = Scope.private(user_id)
-        elif body.visibility == "tenant":
-            scope = Scope.tenant(tenant_id)
-        else:
-            raise HTTPException(status_code=400, detail=f"unsupported visibility: {body.visibility}")
-
-        template_repo.create_template(scope, record)
-
-        # Save the DSL as a draft version
         dsl_dict = bp.base_dsl.model_dump(mode="json")
         dsl_dict["name"] = body.name
         dsl_dict["display_name"] = body.name
@@ -178,7 +166,13 @@ async def create_from_blueprint(
 
         import yaml
         dsl_yaml = yaml.dump(dsl_dict, default_flow_style=False, allow_unicode=True)
-        template_repo.save_draft(scope, template_id, dsl_yaml, expected_etag=None)
+        template_repo.save_draft(
+            scope=scope,
+            template_id=record.id,
+            dsl=dsl_dict,
+            dsl_yaml=dsl_yaml,
+            expected_etag=record.etag,
+        )
 
     except HTTPException:
         raise
@@ -187,6 +181,6 @@ async def create_from_blueprint(
         raise HTTPException(status_code=500, detail=f"Failed to create template: {e}")
 
     return CreateFromBlueprintResponse(
-        template_id=template_id,
+        template_id=record.id,
         message=f"Created template '{body.name}' from blueprint '{bp.name}'",
     )

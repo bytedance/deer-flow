@@ -5,33 +5,35 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 import { useReportTemplates } from "@/core/report-templates";
 import type { Visibility } from "@/core/report-templates/types";
 import { cn } from "@/lib/utils";
 
-const SCOPES: { value: Visibility; label: string }[] = [
-  { value: "private", label: "我的模板" },
-  { value: "tenant", label: "租户共享" },
-  { value: "builtin", label: "预置模板" },
-];
-
-const STATUS_LABEL: Record<string, string> = {
-  draft: "草稿",
-  published: "已发布",
-  archived: "已归档",
-};
-
 export function ReportTemplatesPage() {
+  const { t } = useI18n();
   const [scope, setScope] = useState<Visibility>("private");
   const { templates, isLoading, error } = useReportTemplates(scope);
+
+  const SCOPES: { value: Visibility; label: string }[] = [
+    { value: "private", label: t.marketplace.visibilityPrivate },
+    { value: "tenant", label: t.marketplace.visibilityTenant },
+    { value: "builtin", label: t.marketplace.visibilityBuiltin },
+  ];
+
+  const STATUS_LABEL: Record<string, string> = {
+    draft: t.marketplace.statusDraft,
+    published: t.marketplace.statusPublished,
+    archived: t.marketplace.statusArchived,
+  };
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">报告模板</h1>
+          <h1 className="text-2xl font-semibold">{t.marketplace.pageTitle}</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            管理自定义报告模板、版本和发布状态。
+            {t.marketplace.pageDescription}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -40,12 +42,12 @@ export function ReportTemplatesPage() {
             className="text-muted-foreground hover:text-foreground text-sm transition-colors"
           >
             <StoreIcon className="mr-1 inline size-4" />
-            模板市场
+            {t.marketplace.templateMarketplace}
           </Link>
           <Button asChild>
             <Link href="/workspace/report-templates/new">
               <PlusIcon className="mr-1 size-4" />
-              创建模板
+              {t.marketplace.createTemplate}
             </Link>
           </Button>
         </div>
@@ -73,18 +75,18 @@ export function ReportTemplatesPage() {
       </nav>
 
       {isLoading && (
-        <div className="text-muted-foreground text-sm">加载中…</div>
+        <div className="text-muted-foreground text-sm">{t.marketplace.loading}</div>
       )}
       {error && (
         <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
-          加载失败：{String(error)}
+          {t.marketplace.loadingFailed}：{String(error)}
         </div>
       )}
       {!isLoading && !error && templates.length === 0 && (
         <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
           {scope === "private"
-            ? "你还没有自定义模板。点击右上角「创建模板」开始。"
-            : "暂无模板。"}
+            ? t.marketplace.emptyMyTemplates
+            : t.marketplace.emptyNoTemplates}
         </div>
       )}
 
@@ -130,7 +132,7 @@ export function ReportTemplatesPage() {
                   </div>
                 )}
                 <div className="text-muted-foreground mt-auto pt-3 text-xs">
-                  更新于 {new Date(tpl.updated_at).toLocaleString()}
+                  {t.marketplace.updatedAt} {new Date(tpl.updated_at).toLocaleString()}
                 </div>
               </Link>
             </li>

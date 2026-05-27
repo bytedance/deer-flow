@@ -1,12 +1,27 @@
 "use client";
 
+import { Store, Trash2 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Store } from "lucide-react";
 
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  applyResolvedAuthError,
+  resolveAuthError,
+} from "@/core/auth/api-error";
+import { useMarketplaceListing } from "@/core/marketplace/hooks";
+import {
   useArchiveReportTemplate,
+  useDeleteReportTemplate,
   usePublishReportTemplate,
   useReportTemplate,
   useReportTemplateVersions,
@@ -14,13 +29,13 @@ import {
   useUpdateReportTemplate,
   useValidateReportTemplate,
 } from "@/core/report-templates";
-import { useMarketplaceListing } from "@/core/marketplace/hooks";
 
 interface Props {
   templateId: string;
 }
 
 export function ReportTemplateDetailPage({ templateId }: Props) {
+  const router = useRouter();
   const { detail, isLoading, error } = useReportTemplate(templateId);
   const { versions } = useReportTemplateVersions(templateId);
   const template = detail?.template ?? null;
@@ -37,11 +52,11 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
     selectedVersion >= 0 ? selectedVersion : 0,
   );
 
-  const [editedYaml, setEditedYaml] = useState<string>("");
-  const [editedJson, setEditedJson] = useState<string>("");
+  const [editedYaml, setEditedYaml] = useState("");
+  const [editedJson, setEditedJson] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
-  // Sync editor when snapshot loads.
   useEffect(() => {
     if (!snapshot) return;
     setEditedYaml(snapshot.dsl_yaml);
@@ -53,8 +68,10 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
   const publish = usePublishReportTemplate(templateId);
   const validate = useValidateReportTemplate(templateId);
   const archive = useArchiveReportTemplate(templateId);
+  const deleteTemplate = useDeleteReportTemplate(templateId);
 
   const isPublished = template?.status === "published";
+  const isArchived = template?.status === "archived";
   const canEdit = template && !isPublished && template.visibility !== "builtin";
 
   function parseDsl(): Record<string, unknown> | null {
@@ -62,8 +79,8 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
       const parsed = JSON.parse(editedJson) as Record<string, unknown>;
       setParseError(null);
       return parsed;
-    } catch (e) {
-      setParseError((e as Error).message);
+    } catch (err) {
+      setParseError((err as Error).message);
       return null;
     }
   }
@@ -75,12 +92,12 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
     if (result.valid) {
       toast.success(
         result.warnings.length > 0
-          ? `校验通过（${result.warnings.length} 个警告）`
-          : "校验通过",
+          ? `Validation passed with ${result.warnings.length} warning(s)`
+          : "Validation passed",
       );
-    } else {
-      toast.error(`校验失败：${result.errors.length} 个错误`);
+      return;
     }
+    toast.error(`Validation failed with ${result.errors.length} error(s)`);
   }
 
   async function handleSave() {
@@ -93,9 +110,15 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
         dsl_yaml: editedYaml,
         expected_etag: template.etag,
       });
-      toast.success("草稿已保存");
-    } catch (e) {
-      toast.error(`保存失败：${(e as Error).message}`);
+      toast.success("Draft saved");
+    } catch (err) {
+      const authError = resolveAuthError(err, "保存");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
+      toast.error(`Save failed: ${(err as Error).message}`);
     }
   }
 
@@ -106,9 +129,15 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
         expected_current_version: template.current_version,
         changelog: "",
       });
-      toast.success("已发布新版本");
-    } catch (e) {
-      toast.error(`发布失败：${(e as Error).message}`);
+      toast.success("New version published");
+    } catch (err) {
+      const authError = resolveAuthError(err, "发布");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
+      toast.error(`Publish failed: ${(err as Error).message}`);
     }
   }
 
@@ -116,23 +145,48 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
     if (!template) return;
     try {
       await archive.mutateAsync(template.etag);
-      toast.success("模板已归档");
-    } catch (e) {
-      toast.error(`归档失败：${(e as Error).message}`);
+      toast.success("Template archived");
+    } catch (err) {
+      const authError = resolveAuthError(err, "归档");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
+      toast.error(`Archive failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleDelete() {
+    if (!template) return;
+    try {
+      await deleteTemplate.mutateAsync(template.etag);
+      toast.success("Template deleted");
+      setShowDeleteDialog(false);
+      router.push("/workspace/report-templates");
+    } catch (err) {
+      const authError = resolveAuthError(err, "删除");
+      if (authError) {
+        toast.error(authError.message);
+        applyResolvedAuthError(authError, window.location.pathname);
+        return;
+      }
+      toast.error(`Delete failed: ${(err as Error).message}`);
     }
   }
 
   if (isLoading) {
-    return <div className="p-6 text-sm text-muted-foreground">加载中…</div>;
+    return <div className="p-6 text-sm text-muted-foreground">Loading...</div>;
   }
+
   if (error || !template) {
     return (
       <div className="p-6">
         <Link href="/workspace/report-templates" className="text-sm underline">
-          ← 返回列表
+          Back to templates
         </Link>
         <div className="mt-4 rounded border border-destructive bg-destructive/10 p-3 text-sm">
-          {error ? String(error) : "模板不存在"}
+          {error ? String(error) : "Template not found"}
         </div>
       </div>
     );
@@ -146,15 +200,15 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             href="/workspace/report-templates"
             className="text-muted-foreground text-xs underline-offset-2 hover:underline"
           >
-            ← 报告模板
+            Back to report templates
           </Link>
           <h1 className="mt-1 text-2xl font-semibold">
             {template.display_name}
           </h1>
           <div className="text-muted-foreground mt-1 text-xs">
-            <code className="font-mono">{template.name}</code> ·{" "}
-            <span className="capitalize">{template.visibility}</span> · v
-            {template.current_version} · {template.status}
+            <code className="font-mono">{template.name}</code> |{" "}
+            <span className="capitalize">{template.visibility}</span> | v
+            {template.current_version} | {template.status}
           </div>
           {marketplaceSource && (
             <div className="mt-1.5 flex items-center gap-2">
@@ -182,7 +236,7 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             onClick={handleValidate}
             disabled={validate.isPending}
           >
-            校验 DSL
+            Validate DSL
           </button>
           <button
             type="button"
@@ -190,7 +244,7 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             onClick={handleSave}
             disabled={!canEdit || update.isPending}
           >
-            保存草稿
+            Save draft
           </button>
           <button
             type="button"
@@ -198,21 +252,31 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             onClick={handlePublish}
             disabled={!canEdit || publish.isPending}
           >
-            {publish.isPending ? "发布中…" : "发布新版本"}
+            {publish.isPending ? "Publishing..." : "Publish new version"}
           </button>
           <button
             type="button"
             className="rounded border px-3 py-1.5 text-sm text-muted-foreground hover:bg-accent"
             onClick={handleArchive}
           >
-            归档
+            Archive
           </button>
+          {isArchived && (
+            <button
+              type="button"
+              className="rounded border border-destructive/30 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+              onClick={() => setShowDeleteDialog(true)}
+            >
+              <Trash2 className="mr-1 inline h-3.5 w-3.5" />
+              Delete
+            </button>
+          )}
         </div>
       </header>
 
       <div className="grid flex-1 grid-cols-[200px_1fr] gap-4 overflow-hidden">
         <aside className="overflow-y-auto rounded border bg-card p-3">
-          <h2 className="mb-2 text-sm font-medium">版本</h2>
+          <h2 className="mb-2 text-sm font-medium">Versions</h2>
           <ul className="space-y-1 text-sm">
             <li>
               <button
@@ -220,17 +284,17 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
                 className={`w-full rounded px-2 py-1 text-left ${selectedVersion === 0 ? "bg-accent font-medium" : "hover:bg-accent"}`}
                 onClick={() => setSelectedVersion(0)}
               >
-                v0 工作草稿
+                v0 Working draft
               </button>
             </li>
-            {versions.map((v) => (
-              <li key={v}>
+            {versions.map((version) => (
+              <li key={version}>
                 <button
                   type="button"
-                  className={`w-full rounded px-2 py-1 text-left ${selectedVersion === v ? "bg-accent font-medium" : "hover:bg-accent"}`}
-                  onClick={() => setSelectedVersion(v)}
+                  className={`w-full rounded px-2 py-1 text-left ${selectedVersion === version ? "bg-accent font-medium" : "hover:bg-accent"}`}
+                  onClick={() => setSelectedVersion(version)}
                 >
-                  v{v}
+                  v{version}
                 </button>
               </li>
             ))}
@@ -240,14 +304,14 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
         <main className="flex flex-col gap-3 overflow-hidden rounded border bg-card p-3">
           {parseError && (
             <div className="rounded border border-destructive bg-destructive/10 p-2 text-xs">
-              JSON 解析失败：{parseError}
+              JSON parse failed: {parseError}
             </div>
           )}
           {!canEdit && (
             <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs">
               {isPublished
-                ? "已发布版本不可原地编辑——请通过 fork 创建新草稿。"
-                : "Builtin 模板只读。"}
+                ? "Published versions cannot be edited in place. Fork the template to continue."
+                : "Builtin templates are read-only."}
             </div>
           )}
           <label className="text-xs font-medium text-muted-foreground">
@@ -261,7 +325,7 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             spellCheck={false}
           />
           <label className="text-xs font-medium text-muted-foreground">
-            DSL YAML (备注/注释保留)
+            DSL YAML
           </label>
           <textarea
             className="min-h-[120px] flex-1 rounded border bg-background p-3 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
@@ -272,6 +336,35 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
           />
         </main>
       </div>
+
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete template</DialogTitle>
+            <DialogDescription>
+              This will permanently delete <strong>{template.display_name}</strong> and all its versions. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button
+              type="button"
+              className="rounded border px-3 py-1.5 text-sm hover:bg-accent"
+              onClick={() => setShowDeleteDialog(false)}
+              disabled={deleteTemplate.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="rounded bg-destructive px-3 py-1.5 text-sm text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50"
+              onClick={handleDelete}
+              disabled={deleteTemplate.isPending}
+            >
+              {deleteTemplate.isPending ? "Deleting..." : "Delete permanently"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
