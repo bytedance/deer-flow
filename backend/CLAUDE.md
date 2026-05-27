@@ -88,17 +88,52 @@ make stop       # Stop all services
 
 **Backend directory** (for backend development only):
 ```bash
-make install    # Install backend dependencies
-make dev        # Run Gateway API with reload (port 8001)
-make gateway    # Run Gateway API only (port 8001)
-make test       # Run all backend tests
-make lint       # Lint with ruff
-make format     # Format code with ruff
+make install            # Install backend dependencies
+make dev                # Run Gateway API with reload (port 8001)
+make gateway            # Run Gateway API only (port 8001)
+make test               # Run all backend tests
+make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
+make lint               # Lint with ruff
+make format             # Format code with ruff
 ```
+
+The `detect-blocking-io` target parses `app/`, `packages/harness/deerflow/`,
+and `scripts/` with AST. By default it reports only blocking IO candidates that
+are inside async code, reachable from async code in the same file, or reachable
+from sync-only `AgentMiddleware` before/after hooks that LangGraph can execute
+on the async graph path. It prints a concise summary and writes complete JSON
+findings to `.deer-flow/blocking-io-findings.json` at the repository root
+(both `make detect-blocking-io` from the repo root and `cd backend && make
+detect-blocking-io` resolve to the same repo-root path). JSON findings include
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code` for model-assisted or manual review. `priority` is a deterministic
+review ordering from operation type, not proof of a bug. Bare-name same-file
+calls are resolved by function name, so duplicate helper names in one file can
+conservatively over-report async reachability. It is intentionally
+informational and is not run from CI in this round.
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+Blocking-IO runtime gate (`tests/blocking_io/`):
+- Wraps every item under `tests/blocking_io/` with a strict Blockbuster
+  context scoped to `app.*` and `deerflow.*` (see
+  `tests/support/detectors/blocking_io_runtime.py`). Any sync blocking IO
+  call whose stack passes through DeerFlow business code while running on
+  the asyncio event loop raises `BlockingError` and fails the test.
+- Two regression anchors live there: `test_skills_load.py` (locks the
+  `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
+  for #1917) and `test_sqlite_lifespan.py` (locks the offload around
+  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912).
+- `test_gate_smoke.py` is a meta-test asserting the gate actually catches
+  unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
+  opt-out works.
+- Coverage boundary: the gate only sees code that test execution actually
+  touches. Static AST coverage is a separate concern (out of scope for
+  this PR).
+- CI: runs on every PR via `.github/workflows/backend-blocking-io-tests.yml`,
+  hard-fail.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`

@@ -362,6 +362,7 @@ make dev        # Run Gateway API + embedded agent runtime (port 8001)
 make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
+make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
 ```
 
 ### Code Style
@@ -377,6 +378,18 @@ make format     # Format code (ruff)
 ```bash
 uv run pytest
 ```
+
+`make detect-blocking-io` statically scans backend business code for blocking
+IO that may run on the backend event loop and is not test-coverage-bound. It
+prints a concise summary for human review and writes complete JSON findings to
+`.deer-flow/blocking-io-findings.json` at the repository root (regardless of
+whether the target is invoked from the repo root or from `backend/`). JSON
+findings include both broad IO category and review-oriented fields such as
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code`. `priority` is a deterministic review ordering from the operation type,
+not proof of a bug. Bare-name same-file calls are resolved by function name,
+so duplicate helper names in one file can conservatively over-report async
+reachability.
 
 ---
 
