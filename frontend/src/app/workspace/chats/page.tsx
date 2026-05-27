@@ -1,8 +1,10 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Archive, MoreHorizontal, RotateCcw, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { type MouseEvent, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -41,9 +43,12 @@ type ThreadView = "active" | "archived";
 
 export default function ChatsPage() {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const { data: threads } = useThreads(undefined, { includeArchived: true });
-  const { mutate: archiveThread } = useArchiveThread();
-  const { mutate: deleteThread } = useDeleteThread();
+  const { mutate: archiveThread, mutateAsync: archiveThreadAsync } =
+    useArchiveThread();
+  const { mutate: deleteThread, mutateAsync: deleteThreadAsync } =
+    useDeleteThread();
   const [search, setSearch] = useState("");
   const [threadView, setThreadView] = useState<ThreadView>("active");
   const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(
@@ -53,6 +58,7 @@ export default function ChatsPage() {
     string | null
   >(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [bulkActionPending, setBulkActionPending] = useState(false);
 
   useEffect(() => {
     document.title = `${t.pages.chats} - ${t.pages.appName}`;
@@ -104,11 +110,13 @@ export default function ChatsPage() {
 
   const handleToggleThreadSelection = (
     threadId: string,
-    event: MouseEvent<HTMLInputElement>,
+    event: ChangeEvent<HTMLInputElement>,
   ) => {
+    const shiftKey =
+      "shiftKey" in event.nativeEvent && event.nativeEvent.shiftKey === true;
     setSelectedThreadIds((selected) => {
       const nextSelected = new Set(selected);
-      if (event.shiftKey && lastSelectedThreadId) {
+      if (shiftKey && lastSelectedThreadId) {
         const startIndex = visibleThreadIds.indexOf(lastSelectedThreadId);
         const endIndex = visibleThreadIds.indexOf(threadId);
         if (startIndex !== -1 && endIndex !== -1) {
@@ -132,17 +140,35 @@ export default function ChatsPage() {
     setLastSelectedThreadId(threadId);
   };
 
-  const handleArchiveSelected = (archived: boolean) => {
-    selectedThreadIds.forEach((threadId) => {
-      archiveThread({ threadId, archived });
-    });
+  const handleArchiveSelected = async (archived: boolean) => {
+    setBulkActionPending(true);
+    const results = await Promise.allSettled(
+      [...selectedThreadIds].map((threadId) =>
+        archiveThreadAsync({ threadId, archived, invalidate: false }),
+      ),
+    );
+    void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    setBulkActionPending(false);
+    if (results.some((result) => result.status === "rejected")) {
+      toast.error("Failed to update some chats.");
+      return;
+    }
     handleClearSelection();
   };
 
-  const handleDeleteSelected = () => {
-    selectedThreadIds.forEach((threadId) => {
-      deleteThread({ threadId });
-    });
+  const handleDeleteSelected = async () => {
+    setBulkActionPending(true);
+    const results = await Promise.allSettled(
+      [...selectedThreadIds].map((threadId) =>
+        deleteThreadAsync({ threadId, invalidate: false }),
+      ),
+    );
+    void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    setBulkActionPending(false);
+    if (results.some((result) => result.status === "rejected")) {
+      toast.error("Failed to delete some chats.");
+      return;
+    }
     setDeleteDialogOpen(false);
     handleClearSelection();
   };
@@ -181,6 +207,7 @@ export default function ChatsPage() {
                       size="sm"
                       className="h-7 px-2"
                       onClick={handleSelectAll}
+                      disabled={bulkActionPending}
                     >
                       {t.common.selectAll}
                     </Button>
@@ -194,8 +221,11 @@ export default function ChatsPage() {
                           size="sm"
                           className="h-7 px-2"
                           onClick={() =>
-                            handleArchiveSelected(threadView !== "archived")
+                            void handleArchiveSelected(
+                              threadView !== "archived",
+                            )
                           }
+                          disabled={bulkActionPending}
                         >
                           {threadView === "archived"
                             ? t.common.restore
@@ -206,6 +236,7 @@ export default function ChatsPage() {
                           size="sm"
                           className="text-destructive hover:text-destructive h-7 px-2"
                           onClick={() => setDeleteDialogOpen(true)}
+                          disabled={bulkActionPending}
                         >
                           {t.common.delete}
                         </Button>
@@ -214,6 +245,7 @@ export default function ChatsPage() {
                           size="sm"
                           className="h-7 px-2"
                           onClick={handleClearSelection}
+                          disabled={bulkActionPending}
                         >
                           {t.common.cancel}
                         </Button>
@@ -238,8 +270,7 @@ export default function ChatsPage() {
                         type="checkbox"
                         className="size-4 shrink-0 accent-current"
                         checked={selectedThreadIds.has(thread.thread_id)}
-                        readOnly
-                        onClick={(event) => {
+                        onChange={(event) => {
                           event.stopPropagation();
                           handleToggleThreadSelection(thread.thread_id, event);
                         }}
@@ -324,7 +355,11 @@ export default function ChatsPage() {
               >
                 {t.common.cancel}
               </Button>
-              <Button variant="destructive" onClick={handleDeleteSelected}>
+              <Button
+                variant="destructive"
+                onClick={() => void handleDeleteSelected()}
+                disabled={bulkActionPending}
+              >
                 {t.common.delete}
               </Button>
             </DialogFooter>

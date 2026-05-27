@@ -937,7 +937,12 @@ export function useDeleteThread() {
   const queryClient = useQueryClient();
   const apiClient = getAPIClient();
   return useMutation({
-    mutationFn: async ({ threadId }: { threadId: string }) => {
+    mutationFn: async ({
+      threadId,
+    }: {
+      threadId: string;
+      invalidate?: boolean;
+    }) => {
       if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
         try {
           await apiClient.threads.delete(threadId);
@@ -974,8 +979,10 @@ export function useDeleteThread() {
         },
       );
     },
-    onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    onSettled(_, __, variables) {
+      if (variables?.invalidate !== false) {
+        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      }
     },
   });
 }
@@ -989,7 +996,12 @@ export function useArchiveThread() {
     }: {
       threadId: string;
       archived: boolean;
+      invalidate?: boolean;
     }) => {
+      if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
+        return;
+      }
+
       const response = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
         {
@@ -1009,32 +1021,47 @@ export function useArchiveThread() {
       }
     },
     onSuccess(_, { threadId, archived }) {
-      queryClient.setQueriesData(
-        {
+      if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
+        return;
+      }
+
+      queryClient
+        .getQueriesData<Array<AgentThread>>({
           queryKey: ["threads", "search"],
           exact: false,
-        },
-        (oldData: Array<AgentThread> | undefined) => {
+        })
+        .forEach(([queryKey, oldData]) => {
           if (oldData == null) {
-            return oldData;
+            return;
           }
-          return oldData.map((thread) => {
-            if (thread.thread_id !== threadId) {
-              return thread;
-            }
-            return {
-              ...thread,
-              metadata: {
-                ...(thread.metadata ?? {}),
-                archived,
-              },
-            };
-          });
-        },
-      );
+          const queryOptions = queryKey.at(-1);
+          const includeArchived =
+            typeof queryOptions === "object" &&
+            queryOptions != null &&
+            "includeArchived" in queryOptions &&
+            queryOptions.includeArchived === true;
+          const nextData =
+            archived && !includeArchived
+              ? oldData.filter((thread) => thread.thread_id !== threadId)
+              : oldData.map((thread) => {
+                  if (thread.thread_id !== threadId) {
+                    return thread;
+                  }
+                  return {
+                    ...thread,
+                    metadata: {
+                      ...(thread.metadata ?? {}),
+                      archived,
+                    },
+                  };
+                });
+          queryClient.setQueryData(queryKey, nextData);
+        });
     },
-    onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    onSettled(_, __, variables) {
+      if (variables?.invalidate !== false) {
+        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      }
     },
   });
 }

@@ -197,12 +197,9 @@ class RunRepository(RunStore):
             conditions = [RunRow.thread_id == thread_id]
             if resolved_user_id is not None:
                 conditions.append(RunRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunRow).where(*conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunRow).where(*conditions))
-                await session.commit()
-            return count
+            result = await session.execute(delete(RunRow).where(*conditions))
+            await session.commit()
+            return result.rowcount or 0
 
     async def list_pending(self, *, before=None):
         if before is None:

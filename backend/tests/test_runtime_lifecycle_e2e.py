@@ -56,6 +56,7 @@ class _RunController:
 
     def __init__(self) -> None:
         self.started = threading.Event()
+        self.blocked = threading.Event()
         self.checkpoint_written = threading.Event()
         self.cancelled = threading.Event()
         self.release = threading.Event()
@@ -109,12 +110,16 @@ class _ScriptedAgent:
         yield _stream_item_for_mode(stream_mode, state)
 
         if self.block_after_first_chunk:
+            self.controller.blocked.set()
             try:
                 while not self.controller.release.is_set():
                     await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 self.controller.cancelled.set()
                 raise
+            finally:
+                if not self.controller.release.is_set():
+                    self.controller.cancelled.set()
 
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):
@@ -560,6 +565,7 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         assert created.status_code == 200, created.text
         run_id = created.json()["run_id"]
         assert controller.started.wait(5), "fake agent never started"
+        assert controller.blocked.wait(5), "fake agent never reached blocking section"
 
         cancelled = client.post(
             f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
