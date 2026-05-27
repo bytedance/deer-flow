@@ -604,7 +604,13 @@ class ChannelManager:
             self._default_session.get("context"),
             channel_layer.get("context"),
             user_layer.get("context"),
-            {"thread_id": thread_id},
+            {
+                "thread_id": thread_id,
+                # Preserve the sender identity from the inbound channel message so
+                # downstream interceptors (e.g. MCP auth header injection) don't
+                # fall back to default user context outside web auth flows.
+                "user_id": msg.user_id,
+            },
         )
 
         # Custom agents are implemented as lead_agent + agent_name context.

@@ -152,6 +152,19 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
 
+    # ``user_id`` must be available to runtime tools/interceptors (e.g. MCP auth
+    # header injection), but it is not a configurable model/runtime tuning knob.
+    if "user_id" in context and isinstance(runtime_context, dict):
+        runtime_context.setdefault("user_id", context["user_id"])
+
+    if isinstance(runtime_context, dict):
+        logger.info(
+            "merge_run_context_overrides: context_keys=%s runtime_context_keys=%s runtime_user_id=%s",
+            sorted(context.keys()),
+            sorted(runtime_context.keys()),
+            runtime_context.get("user_id"),
+        )
+
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
     """Stamp the authenticated user into the run context for background tools.
@@ -164,6 +177,9 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
+        return
+
+    if getattr(user, "system_role", None) == "internal":
         return
 
     runtime_context = config.setdefault("context", {})
