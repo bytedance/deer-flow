@@ -10,7 +10,8 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
@@ -112,12 +113,20 @@ class DbRunEventStore(RunEventStore):
     async def put_batch(self, events):
         if not events:
             return []
+        try:
+            return await self._put_batch_impl(events)
+        except IntegrityError:
+            logger.warning(
+                "IntegrityError in put_batch (sequence drift?) — syncing and retrying",
+                exc_info=True,
+            )
+            await self._sync_sequence()
+            return await self._put_batch_impl(events)
+
+    async def _put_batch_impl(self, events):
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Lock the highest-seq row to serialize seq assignment within
-                # a thread.  FOR UPDATE on aggregates (func.max) is rejected
-                # by PostgreSQL, so we lock the actual row instead.
                 thread_id = events[0]["thread_id"]
                 max_seq = await session.scalar(select(RunEventRow.seq).where(RunEventRow.thread_id == thread_id).order_by(RunEventRow.seq.desc()).limit(1).with_for_update())
                 seq = max_seq or 0
@@ -147,6 +156,25 @@ class DbRunEventStore(RunEventStore):
                     session.add(row)
                     rows.append(row)
             return [self._row_to_dict(r) for r in rows]
+
+    @staticmethod
+    async def _sync_sequence() -> None:
+        """Reset the run_events id sequence to MAX(id)."""
+        from deerflow.persistence.engine import get_engine
+
+        engine = get_engine()
+        if engine is None or engine.url.get_backend_name() != "postgresql":
+            return
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "SELECT setval("
+                    "  pg_get_serial_sequence('run_events', 'id'),"
+                    "  COALESCE((SELECT MAX(id) FROM run_events), 0)"
+                    ")"
+                ))
+        except Exception:
+            logger.warning("Failed to sync run_events sequence", exc_info=True)
 
     async def list_messages(
         self,

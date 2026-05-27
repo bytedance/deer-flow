@@ -358,6 +358,39 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
+async def _sync_postgres_sequences() -> None:
+    """Reset autoincrement sequences to MAX(id) so nextval() never collides.
+
+    After pg_restore or manual INSERT with explicit IDs the sequence
+    value can lag behind the actual data.  Without this, the next
+    ``session.add(row)`` triggers an IntegrityError on the PK.
+
+    No-op for SQLite (autoincrement is rowid-based, no sequence drift)
+    and memory backends.
+    """
+    from sqlalchemy import text
+
+    from deerflow.persistence.engine import get_engine
+
+    engine = get_engine()
+    if engine is None or engine.url.get_backend_name() != "postgresql":
+        return
+
+    tables = ("run_events", "memory_audit")
+    try:
+        async with engine.begin() as conn:
+            for table in tables:
+                await conn.execute(text(
+                    f"SELECT setval("
+                    f"  pg_get_serial_sequence('{table}', 'id'),"
+                    f"  COALESCE((SELECT MAX(id) FROM {table}), 0)"
+                    f")"
+                ))
+            logger.info("PostgreSQL sequences synced for %s", ", ".join(tables))
+    except Exception:
+        logger.warning("Failed to sync PostgreSQL sequences (non-fatal)", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -391,6 +424,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Ensure admin user exists (auto-create on first boot)
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
+
+        # Sync PostgreSQL autoincrement sequences with actual data.
+        # After pg_restore / manual inserts the sequence can lag behind
+        # MAX(id), causing IntegrityError on the next insert.
+        await _sync_postgres_sequences()
 
         # Start the closed-loop overdue-scan periodic task. No-op when
         # closure_service is unavailable (backend=memory).
