@@ -153,10 +153,10 @@ export default function ChatsPage() {
       <WorkspaceBody>
         <div className="flex size-full flex-col">
           <header className="flex shrink-0 items-center justify-center pt-8">
-            <div className="flex w-full max-w-(--container-width-md) flex-col gap-3">
+            <div className="flex w-full max-w-(--container-width-md) flex-col gap-3 px-4">
               <Input
                 type="search"
-                className="h-12 w-full text-xl"
+                className="h-11 w-full text-base"
                 placeholder={t.chats.searchChats}
                 autoFocus
                 value={search}
@@ -175,22 +175,24 @@ export default function ChatsPage() {
               </Tabs>
               {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                 visibleThreadIds.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="bg-muted/30 flex min-h-9 w-fit max-w-full flex-wrap items-center gap-2 rounded-md border px-2 py-1">
                     <Button
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
+                      className="h-7 px-2"
                       onClick={handleSelectAll}
                     >
                       {t.common.selectAll}
                     </Button>
                     {selectedCount > 0 && (
                       <>
-                        <span className="text-muted-foreground text-sm">
+                        <span className="text-muted-foreground px-1 text-sm">
                           {t.common.selected} {selectedCount}
                         </span>
                         <Button
-                          variant="outline"
+                          variant="ghost"
                           size="sm"
+                          className="h-7 px-2"
                           onClick={() =>
                             handleArchiveSelected(threadView !== "archived")
                           }
@@ -200,8 +202,9 @@ export default function ChatsPage() {
                             : t.common.archive}
                         </Button>
                         <Button
-                          variant="destructive"
+                          variant="ghost"
                           size="sm"
+                          className="text-destructive hover:text-destructive h-7 px-2"
                           onClick={() => setDeleteDialogOpen(true)}
                         >
                           {t.common.delete}
@@ -209,6 +212,7 @@ export default function ChatsPage() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          className="h-7 px-2"
                           onClick={handleClearSelection}
                         >
                           {t.common.cancel}
@@ -221,11 +225,12 @@ export default function ChatsPage() {
           </header>
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
-              <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
+              <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col gap-1 px-4">
                 {filteredThreads?.map((thread) => (
                   <div
                     key={thread.thread_id}
-                    className="group/chat-row flex items-center gap-2 border-b p-4"
+                    data-selected={selectedThreadIds.has(thread.thread_id)}
+                    className="group/chat-row hover:bg-muted/40 data-[selected=true]:border-border data-[selected=true]:bg-muted/50 flex items-center gap-3 rounded-md border border-b border-transparent px-3 py-3 transition-colors"
                   >
                     {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                       <input
