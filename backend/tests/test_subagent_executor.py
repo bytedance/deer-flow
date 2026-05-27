@@ -291,7 +291,7 @@ class TestAgentConstruction:
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
-        assert captured["agent"]["system_prompt"] == base_config.system_prompt
+        assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
     async def test_load_skill_messages_uses_explicit_app_config_for_skill_storage(
@@ -330,6 +330,124 @@ class TestAgentConstruction:
         assert captured["app_config"] is app_config
         assert len(messages) == 1
         assert "Use demo skill" in messages[0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_consolidates_system_prompt_and_skills(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state merges system_prompt and skills into one SystemMessage."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill instructions here", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
+        assert len(messages) == 2
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert isinstance(messages[0], SystemMessage)
+        assert isinstance(messages[1], HumanMessage)
+        # SystemMessage should contain both the system_prompt and skill content
+        assert base_config.system_prompt in messages[0].content
+        assert "Skill instructions here" in messages[0].content
+        # HumanMessage should be the task
+        assert messages[1].content == "Do the task"
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_skills_only_system_prompt(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """_build_initial_state works when there are no skills."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert base_config.system_prompt in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_system_prompt_with_skills(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """_build_initial_state works when there is no system_prompt but there are skills."""
+        SubagentConfig = classes["SubagentConfig"]
+
+        config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt=None,
+            max_turns=10,
+            timeout_seconds=60,
+        )
+
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("Skill content", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
+
+        state, _filtered_tools = await executor._build_initial_state("Do the task")
+
+        messages = state["messages"]
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], SystemMessage)
+        assert "Skill content" in messages[0].content
+        assert isinstance(messages[1], HumanMessage)
 
 
 # -----------------------------------------------------------------------------
@@ -513,6 +631,70 @@ class TestAsyncExecutionPath:
         # Should fallback to string representation of last message
         assert result.status == SubagentStatus.COMPLETED
         assert "Task" in result.result
+
+    @pytest.mark.anyio
+    async def test_aexecute_passes_at_most_one_system_message_to_agent(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """Regression: messages sent to agent.astream must contain at most one
+        SystemMessage and it must be the first message.
+
+        This catches any regression where system_prompt would be re-injected
+        via create_agent() (e.g. system_prompt not passed as None) and appear
+        as a second SystemMessage, which providers like vLLM and Xinference
+        reject with "System message must be at the beginning."
+        """
+        from langchain_core.messages import AIMessage, SystemMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        # Set up a skill so both system_prompt AND skill content are present,
+        # maximising the chance of catching a double-SystemMessage regression.
+        skill_dir = tmp_path / "regression-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Skill instruction text", encoding="utf-8")
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+        )
+
+        captured_states: list[dict] = []
+
+        async def capturing_astream(state, **kwargs):
+            captured_states.append(state)
+            yield {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert len(captured_states) == 1, "astream should be called exactly once"
+        initial_messages = captured_states[0]["messages"]
+
+        system_messages = [m for m in initial_messages if isinstance(m, SystemMessage)]
+        assert len(system_messages) <= 1, f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
+        if system_messages:
+            assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
+            # The consolidated SystemMessage must carry both the system_prompt
+            # and all skill content — nothing should be split across two messages.
+            assert base_config.system_prompt in system_messages[0].content
+            assert "Skill instruction text" in system_messages[0].content
 
 
 class TestSkillAllowedTools:
@@ -943,6 +1125,15 @@ class TestAsyncToolSupport:
 class TestThreadSafety:
     """Test thread safety of executor operations."""
 
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        """Import the executor module with real classes."""
+        import importlib
+
+        from deerflow.subagents import executor
+
+        return importlib.reload(executor)
+
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -987,6 +1178,68 @@ class TestThreadSafety:
         for result in results:
             assert result.status == SubagentStatus.COMPLETED
             assert "Result" in result.result
+
+    def test_terminal_status_is_published_after_payload_fields(self, executor_module, monkeypatch):
+        """Readers must not observe terminal status before terminal payload is complete."""
+        SubagentResult = executor_module.SubagentResult
+        SubagentStatus = executor_module.SubagentStatus
+
+        now_entered = threading.Event()
+        release_now = threading.Event()
+        completed_at = datetime(2026, 5, 1, 12, 0, 0)
+        writer_errors: list[BaseException] = []
+
+        class BlockingDateTime:
+            @staticmethod
+            def now():
+                now_entered.set()
+                release_now.wait(timeout=5)
+                return completed_at
+
+        monkeypatch.setattr(executor_module, "datetime", BlockingDateTime)
+
+        result = SubagentResult(
+            task_id="test-terminal-publication-order",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+        )
+        token_usage_records = [
+            {
+                "source_run_id": "run-1",
+                "caller": "subagent:test-agent",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            }
+        ]
+
+        def set_terminal():
+            try:
+                assert result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result="done",
+                    token_usage_records=token_usage_records,
+                )
+            except BaseException as exc:
+                writer_errors.append(exc)
+
+        writer = threading.Thread(target=set_terminal)
+        writer.start()
+
+        assert now_entered.wait(timeout=3), "try_set_terminal did not reach completed_at assignment"
+        assert result.completed_at is None
+        assert result.status == SubagentStatus.RUNNING
+        assert result.token_usage_records == token_usage_records
+
+        release_now.set()
+        writer.join(timeout=3)
+
+        assert not writer.is_alive(), "try_set_terminal did not finish"
+        assert writer_errors == []
+        assert result.completed_at == completed_at
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "done"
+        assert result.token_usage_records == token_usage_records
 
 
 # -----------------------------------------------------------------------------
@@ -1421,6 +1674,69 @@ class TestCooperativeCancellation:
         assert result.status.value == SubagentStatus.CANCELLED.value
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
+
+    def test_late_completion_after_timeout_does_not_overwrite_timed_out(self, executor_module, classes, msg):
+        """Late completion from the execution worker must not overwrite TIMED_OUT."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        short_config = classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=0.05,
+        )
+
+        first_chunk_seen = threading.Event()
+        finish_stream = threading.Event()
+        execution_done = threading.Event()
+
+        async def mock_astream(*args, **kwargs):
+            yield {"messages": [msg.human("Task"), msg.ai("late completion", "msg-late")]}
+            first_chunk_seen.set()
+            deadline = asyncio.get_running_loop().time() + 5
+            while not finish_stream.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.001)
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=short_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+        original_aexecute = executor._aexecute
+
+        async def tracked_aexecute(task, result_holder=None):
+            try:
+                return await original_aexecute(task, result_holder)
+            finally:
+                execution_done.set()
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent), patch.object(executor, "_aexecute", tracked_aexecute):
+            task_id = executor.execute_async("Task")
+            assert first_chunk_seen.wait(timeout=3), "stream did not yield initial chunk"
+
+            result = executor_module._background_tasks[task_id]
+            assert result.cancel_event.wait(timeout=3), "timeout handler did not request cancellation"
+            assert result.status.value == SubagentStatus.TIMED_OUT.value
+            timed_out_error = result.error
+            timed_out_completed_at = result.completed_at
+
+            finish_stream.set()
+            assert execution_done.wait(timeout=3), "execution worker did not finish"
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        assert result.status.value == SubagentStatus.TIMED_OUT.value
+        assert result.result is None
+        assert result.error == timed_out_error
+        assert result.completed_at == timed_out_completed_at
 
     def test_cleanup_removes_cancelled_task(self, executor_module, classes):
         """Test that cleanup removes a CANCELLED task (terminal state)."""

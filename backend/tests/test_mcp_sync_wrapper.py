@@ -1,11 +1,14 @@
 import asyncio
+import contextvars
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from deerflow.mcp.tools import _make_sync_tool_wrapper, get_mcp_tools
+from deerflow.mcp.tools import get_mcp_tools
+from deerflow.tools.sync import make_sync_tool_wrapper
 
 
 class MockArgs(BaseModel):
@@ -51,14 +54,13 @@ def test_mcp_tool_sync_wrapper_generation():
 
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
-    """Test the actual helper function from production code (Fix for Comment 1 & 3)."""
+    """Test the shared sync wrapper from production code."""
 
     async def mock_coro(x: int):
         await asyncio.sleep(0.01)
         return f"async_result: {x}"
 
-    # Test the real helper function exported from deerflow.mcp.tools
-    sync_func = _make_sync_tool_wrapper(mock_coro, "test_tool")
+    sync_func = make_sync_tool_wrapper(mock_coro, "test_tool")
 
     async def run_in_loop():
         # This call should succeed due to ThreadPoolExecutor in the real helper
@@ -69,17 +71,69 @@ def test_mcp_tool_sync_wrapper_in_running_loop():
     assert result == "async_result: 100"
 
 
+def test_sync_wrapper_preserves_contextvars_in_running_loop():
+    """The executor branch preserves LangGraph-style contextvars."""
+    current_value: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_value", default=None)
+
+    async def mock_coro() -> str | None:
+        return current_value.get()
+
+    sync_func = make_sync_tool_wrapper(mock_coro, "test_tool")
+
+    async def run_in_loop() -> str | None:
+        token = current_value.set("from-parent-context")
+        try:
+            return sync_func()
+        finally:
+            current_value.reset(token)
+
+    assert asyncio.run(run_in_loop()) == "from-parent-context"
+
+
+def test_sync_wrapper_preserves_runnable_config_injection():
+    """LangChain can still inject RunnableConfig after an async tool is wrapped."""
+    captured: dict[str, object] = {}
+
+    async def mock_coro(x: int, config: RunnableConfig = None):
+        captured["thread_id"] = ((config or {}).get("configurable") or {}).get("thread_id")
+        return f"result: {x}"
+
+    mock_tool = StructuredTool(
+        name="test_tool",
+        description="test description",
+        args_schema=MockArgs,
+        func=make_sync_tool_wrapper(mock_coro, "test_tool"),
+        coroutine=mock_coro,
+    )
+
+    result = mock_tool.invoke({"x": 42}, config={"configurable": {"thread_id": "thread-123"}})
+
+    assert result == "result: 42"
+    assert captured["thread_id"] == "thread-123"
+
+
+def test_sync_wrapper_preserves_regular_config_argument():
+    """Only RunnableConfig-annotated coroutine params get special config injection."""
+
+    async def mock_coro(config: str):
+        return config
+
+    sync_func = make_sync_tool_wrapper(mock_coro, "test_tool")
+
+    assert sync_func(config="user-config") == "user-config"
+
+
 def test_mcp_tool_sync_wrapper_exception_logging():
-    """Test the actual helper's error logging (Fix for Comment 3)."""
+    """Test the shared sync wrapper's error logging."""
 
     async def error_coro():
         raise ValueError("Tool failure")
 
-    sync_func = _make_sync_tool_wrapper(error_coro, "error_tool")
+    sync_func = make_sync_tool_wrapper(error_coro, "error_tool")
 
-    with patch("deerflow.mcp.tools.logger.error") as mock_log_error:
+    with patch("deerflow.tools.sync.logger.error") as mock_log_error:
         with pytest.raises(ValueError, match="Tool failure"):
             sync_func()
         mock_log_error.assert_called_once()
         # Verify the tool name is in the log message
-        assert "error_tool" in mock_log_error.call_args[0][0]
+        assert mock_log_error.call_args[0][1] == "error_tool"

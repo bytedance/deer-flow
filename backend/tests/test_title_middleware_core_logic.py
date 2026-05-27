@@ -93,7 +93,7 @@ class TestTitleMiddlewareCoreLogic:
         assert middleware._should_generate_title(state) is False
 
     def test_generate_title_uses_async_model_and_respects_max_chars(self, monkeypatch):
-        _set_test_title_config(max_chars=12)
+        _set_test_title_config(max_chars=12, model_name=None)
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="短标题"))
@@ -109,7 +109,7 @@ class TestTitleMiddlewareCoreLogic:
         title = result["title"]
 
         assert title == "短标题"
-        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False)
+        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False, attach_tracing=False)
         model.ainvoke.assert_awaited_once()
         assert model.ainvoke.await_args.kwargs["config"] == {
             "run_name": "title_agent",
@@ -141,6 +141,7 @@ class TestTitleMiddlewareCoreLogic:
         title_middleware_module.create_chat_model.assert_called_once_with(
             name="title-model",
             thinking_enabled=False,
+            attach_tracing=False,
             app_config=app_config,
         )
 
