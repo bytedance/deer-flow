@@ -700,11 +700,7 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_malformed_replacement_update_fails_closed(self):
         """Malformed replacement facts should not turn remove+add into delete-only."""
-        response = (
-            '{"user": {}, "history": {}, '
-            '"newFacts": [{"content": "replacement fact", "category": "context", "confidence": "bad"}], '
-            '"factsToRemove": ["fact_old"]}'
-        )
+        response = '{"user": {}, "history": {}, "newFacts": [{"content": "replacement fact", "category": "context", "confidence": "bad"}], "factsToRemove": ["fact_old"]}'
 
         result, mock_storage = self._run_update_with_response(response)
 
