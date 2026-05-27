@@ -90,7 +90,15 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
         pool = AsyncConnectionPool(
             config.connection_string,
-            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 6,
+            },
             check=AsyncConnectionPool.check_connection,
         )
         async with pool:
@@ -145,7 +153,15 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
         pool = AsyncConnectionPool(
             db_config.postgres_url,
-            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 6,
+            },
             check=AsyncConnectionPool.check_connection,
         )
         async with pool:
