@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 
 import { normalizeMermaidMarkdown } from "@/core/streamdown/mermaid";
+import { preprocessStreamdownMarkdown } from "@/core/streamdown/preprocess";
 
 test("normalizes labelled dotted arrows inside mermaid fences", () => {
   const markdown = [
@@ -57,5 +58,43 @@ test("normalizes labelled dotted arrows inside tilde mermaid fences", () => {
 
   expect(normalizeMermaidMarkdown(markdown)).toBe(
     ["~~~mermaid", 'A -. "sealed memory" .-> F', "~~~"].join("\n"),
+  );
+});
+
+test("normalizes mermaid fences with longer backtick closing fences", () => {
+  const markdown = ["```mermaid", 'A -- "sealed memory" -.-> F', "````"].join(
+    "\n",
+  );
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(
+    ["```mermaid", 'A -. "sealed memory" .-> F', "````"].join("\n"),
+  );
+});
+
+test("normalizes mermaid fences with longer tilde closing fences", () => {
+  const markdown = ["~~~mermaid", 'A -- "sealed memory" -.-> F', "~~~~"].join(
+    "\n",
+  );
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(
+    ["~~~mermaid", 'A -. "sealed memory" .-> F', "~~~~"].join("\n"),
+  );
+});
+
+test("preprocesses markdown only when mermaid normalization can apply", () => {
+  const textOnlyMarkdown = 'A -- "sealed memory" -.-> F';
+  const plainMermaidMarkdown = ["```mermaid", "A --> F", "```"].join("\n");
+  const labelledMermaidMarkdown = [
+    "```mermaid",
+    'A -- "sealed memory" -.-> F',
+    "```",
+  ].join("\n");
+
+  expect(preprocessStreamdownMarkdown(textOnlyMarkdown)).toBe(textOnlyMarkdown);
+  expect(preprocessStreamdownMarkdown(plainMermaidMarkdown)).toBe(
+    plainMermaidMarkdown,
+  );
+  expect(preprocessStreamdownMarkdown(labelledMermaidMarkdown)).toBe(
+    ["```mermaid", 'A -. "sealed memory" .-> F', "```"].join("\n"),
   );
 });
