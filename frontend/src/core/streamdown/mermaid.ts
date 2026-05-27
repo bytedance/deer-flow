@@ -1,6 +1,8 @@
 const MERMAID_OPENING_FENCE_RE =
   /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*mermaid(?:[ \t].*)?$/i;
 
+const WINDOWS_LINE_ENDING_RE = /\r\n?/g;
+
 const LABELLED_DOTTED_ARROW_RE =
   /^(\s*)(.+?)\s*--\s*("[^"\n]+"|'[^'\n]+')\s*-\.->\s*(.+?)\s*$/;
 
@@ -39,7 +41,7 @@ function isClosingFence(line: string, fence: string): boolean {
 }
 
 export function normalizeMermaidMarkdown(markdown: string): string {
-  const lines = markdown.split("\n");
+  const lines = markdown.replace(WINDOWS_LINE_ENDING_RE, "\n").split("\n");
   const normalizedLines: string[] = [];
 
   for (let index = 0; index < lines.length; index += 1) {

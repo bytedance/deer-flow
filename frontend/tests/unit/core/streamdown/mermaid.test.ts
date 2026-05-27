@@ -65,6 +65,16 @@ test("normalizes labelled dotted arrows with inconsistent spacing", () => {
   );
 });
 
+test("normalizes mermaid fences with CRLF line endings", () => {
+  const markdown = ["```mermaid", 'A--"sealed memory"-.->F', "```"].join(
+    "\r\n",
+  );
+
+  expect(normalizeMermaidMarkdown(markdown)).toBe(
+    ["```mermaid", 'A -. "sealed memory" .-> F', "```"].join("\n"),
+  );
+});
+
 test("preserves empty mermaid fences", () => {
   const markdown = ["```mermaid", "```"].join("\n");
 
