@@ -62,6 +62,16 @@ test("keeps newer reconnect metadata", () => {
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
 });
 
+test("ignores reconnect metadata storage access failures", () => {
+  vi.stubGlobal("window", {
+    get sessionStorage() {
+      throw new DOMException("Blocked", "SecurityError");
+    },
+  });
+
+  expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
+});
+
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
@@ -87,4 +97,27 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
   ).resolves.toMatchObject({ done: true });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("rethrows unrelated streaming errors", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-1", "run-1");
+  vi.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      return new Response(JSON.stringify({ detail: "run is still active" }), {
+        status: 409,
+      });
+    }),
+  );
+
+  await expect(
+    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+  ).rejects.toThrow("HTTP 409");
+
+  expect(sessionStorage.removeItem).not.toHaveBeenCalled();
 });

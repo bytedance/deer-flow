@@ -52,6 +52,9 @@ export function isInactiveRunStreamError(error: unknown): boolean {
           ? String(Reflect.get(error, "message") ?? "")
           : "";
 
+  // Match the gateway's store-only run response in
+  // backend/app/gateway/routers/thread_runs.py until the API exposes a
+  // structured error code for inactive run streams.
   return (
     (status === 409 || message.includes("HTTP 409")) &&
     message.includes("not active on this worker") &&
