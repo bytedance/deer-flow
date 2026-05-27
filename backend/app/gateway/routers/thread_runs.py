@@ -179,19 +179,21 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
     run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
+    completed = True
     if record.task is not None:
-        await wait_for_run_completion(bridge, record, request, run_mgr)
+        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
-    checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-        if checkpoint_tuple is not None:
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
-    except Exception:
-        logger.exception("Failed to fetch final state for run %s", record.run_id)
+    if completed:
+        checkpointer = get_checkpointer(request)
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            checkpoint_tuple = await checkpointer.aget_tuple(config)
+            if checkpoint_tuple is not None:
+                checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+                channel_values = checkpoint.get("channel_values", {})
+                return serialize_channel_values(channel_values)
+        except Exception:
+            logger.exception("Failed to fetch final state for run %s", record.run_id)
 
     return {"status": record.status.value, "error": record.error}
 

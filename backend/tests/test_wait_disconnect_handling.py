@@ -76,10 +76,11 @@ class TestWaitForRunCompletion:
                 await bridge.publish_end(record.run_id)
 
             asyncio.create_task(finish_soon())
-            await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 wait_for_run_completion(bridge, record, request, mgr),
                 timeout=2.0,
             )
+            assert completed is True
             assert record.status == RunStatus.success
 
         asyncio.run(run())
@@ -104,11 +105,12 @@ class TestWaitForRunCompletion:
                 await bridge.publish(record.run_id, "values", {"step": 1})
 
             asyncio.create_task(publish_until_cancel())
-            await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 wait_for_run_completion(bridge, record, request, mgr),
                 timeout=2.0,
             )
 
+            assert completed is False
             assert record.status == RunStatus.interrupted
             # Drain the cancelled sleeper so it does not linger past the test.
             try:
@@ -136,12 +138,14 @@ class TestWaitForRunCompletion:
                 await bridge.publish(record.run_id, "values", {"step": 1})
 
             asyncio.create_task(publish_then_end())
-            await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 wait_for_run_completion(bridge, record, request, mgr),
                 timeout=2.0,
             )
 
-            # Run was not cancelled.
+            # Disconnected before END — helper still reports incomplete so the
+            # caller skips checkpoint serialization, but the run keeps going.
+            assert completed is False
             assert record.status == RunStatus.running
             sleeper.cancel()
 
@@ -162,11 +166,12 @@ class TestWaitForRunCompletion:
             await bridge.publish_end(record.run_id)
             request = _FakeRequest(disconnect_after=0)
 
-            await asyncio.wait_for(
+            completed = await asyncio.wait_for(
                 wait_for_run_completion(bridge, record, request, mgr),
                 timeout=2.0,
             )
 
+            assert completed is True
             assert record.status == RunStatus.success
 
         asyncio.run(run())

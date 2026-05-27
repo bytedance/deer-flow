@@ -409,7 +409,7 @@ async def wait_for_run_completion(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
-) -> None:
+) -> bool:
     """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
 
     The non-streaming ``/wait`` endpoints used to ``await record.task``
@@ -425,15 +425,28 @@ async def wait_for_run_completion(
     background run when ``record.on_disconnect`` is ``cancel``.  The bridge's
     heartbeat sentinels guarantee at least one wake-up per
     ``heartbeat_interval`` even when the agent emits no events for a while.
+
+    Returns:
+        ``True`` when ``END_SENTINEL`` was observed (run reached a terminal
+        state), ``False`` when the loop exited because the client
+        disconnected.  Callers must skip checkpoint serialization on
+        ``False`` so a partial checkpoint is not returned as a normal
+        response.
     """
+    completed = False
     try:
         async for entry in bridge.subscribe(record.run_id):
+            # END_SENTINEL means the run reached a terminal state; honour it
+            # even if the client just disconnected so the caller still serializes
+            # the real final checkpoint.
+            if entry is END_SENTINEL:
+                completed = True
+                return True
             if await request.is_disconnected():
                 break
-            if entry is END_SENTINEL:
-                return
             # Heartbeats and regular events: keep waiting for END_SENTINEL.
+        return completed
     finally:
-        if record.status in (RunStatus.pending, RunStatus.running):
+        if not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
