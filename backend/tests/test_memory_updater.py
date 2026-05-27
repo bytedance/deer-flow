@@ -563,6 +563,28 @@ class TestUpdateMemoryStructuredResponse:
         model.invoke = MagicMock(return_value=response)
         return model
 
+    def _run_update_with_response(self, content):
+        updater = MemoryUpdater()
+        mock_storage = MagicMock()
+        mock_storage.save = MagicMock(return_value=True)
+
+        with (
+            patch.object(updater, "_get_model", return_value=self._make_mock_model(content)),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True, fact_confidence_threshold=0.7, max_facts=100)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Remember that I prefer concise updates."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Got it."
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg], thread_id="thread-memory")
+
+        return result, mock_storage
+
     def test_string_response_parses(self):
         updater = MemoryUpdater()
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -608,6 +630,82 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+
+    def test_wrapped_json_responses_parse(self):
+        """Memory update should tolerate provider wrappers around valid JSON."""
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], "factsToRemove": []}'
+        response_variants = [
+            f"<think>Analyze the conversation first.</think>\n{valid_json}",
+            f"<think>Analyze the conversation first.\n{valid_json}",
+            f"Here is the memory update:\n{valid_json}",
+            f"{valid_json}\nDone.",
+            f"```json\n{valid_json}\n```",
+        ]
+
+        for content in response_variants:
+            result, mock_storage = self._run_update_with_response(content)
+
+            assert result is True
+            saved_memory = mock_storage.save.call_args.args[0]
+            assert saved_memory["facts"][0]["content"] == "User prefers concise updates"
+
+    def test_ignores_unrelated_json_before_memory_update(self):
+        """Parser should not select unrelated JSON objects before the memory update."""
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9}], "factsToRemove": []}'
+        response = f'Example object: {{"user": "alice"}}\nActual memory update:\n{valid_json}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert saved_memory["facts"][0]["content"] == "Remember the actual update"
+
+    def test_invalid_json_response_is_skipped_without_saving(self):
+        """Truncated JSON should remain a safe skipped update, not guessed repair."""
+        result, mock_storage = self._run_update_with_response('{"user": {}, "history": {}, "newFacts": [')
+
+        assert result is False
+        mock_storage.save.assert_not_called()
+
+    def test_schema_guard_ignores_invalid_update_fields(self):
+        """Parsed JSON with bad field types should not break the memory update."""
+        response = '{"user": "bad", "history": [], "newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], "factsToRemove": "bad"}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert [fact["content"] for fact in saved_memory["facts"]] == ["User works on DeerFlow"]
+
+    def test_fact_schema_guard_coerces_and_filters_nested_fields(self):
+        """Malformed fact entries should be normalized per fact, not fail the whole update."""
+        response = (
+            '{"user": {}, "history": {}, "newFacts": ['
+            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  "}, '
+            '{"content": "skip invalid confidence", "category": "context", "confidence": "high"}, '
+            '{"content": 12, "category": "context", "confidence": 0.9}, '
+            '{"content": " ", "category": "context", "confidence": 0.9}'
+            '], "factsToRemove": []}'
+        )
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert len(saved_memory["facts"]) == 1
+        assert saved_memory["facts"][0]["content"] == "User likes async updates"
+        assert saved_memory["facts"][0]["category"] == "context"
+        assert saved_memory["facts"][0]["confidence"] == 0.91
+        assert saved_memory["facts"][0]["sourceError"] == "parse issue"
+
+    def test_malformed_replacement_update_fails_closed(self):
+        """Malformed replacement facts should not turn remove+add into delete-only."""
+        response = '{"user": {}, "history": {}, "newFacts": [{"content": "replacement fact", "category": "context", "confidence": "bad"}], "factsToRemove": ["fact_old"]}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is False
+        mock_storage.save.assert_not_called()
 
     def test_async_update_memory_delegates_to_sync(self):
         """aupdate_memory should delegate to sync _do_update_memory_sync via to_thread."""
