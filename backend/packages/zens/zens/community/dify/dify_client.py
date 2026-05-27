@@ -16,8 +16,9 @@ _logs_dir.mkdir(parents=True, exist_ok=True)
 _file_handler = logging.FileHandler(_logs_dir / "dify.log", mode="a", encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 _file_handler.setLevel(logging.DEBUG)
-logger.addHandler(_file_handler)
-logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    logger.addHandler(_file_handler)
+    logger.setLevel(logging.DEBUG)
 
 
 class DifyAPIError(Exception):
@@ -153,6 +154,9 @@ class DifyClient:
                 continue
             if not line.startswith(b"data: ") or current_event != "message":
                 continue
+            # "data: " is 7 bytes (including space); [6:] strips "data:" (6 bytes),
+            # leaving the leading space which .strip() removes. This is equivalent
+            # to [7:] but matches the startswith("data: ") prefix length for clarity.
             data_str = line.decode("utf-8")[6:].strip()
             if not data_str:
                 continue
