@@ -39,6 +39,11 @@ def _threads_ns() -> tuple[str, ...]:
     return ("threads", get_current_tenant_id())
 
 
+def _deleted_threads_ns() -> tuple[str, ...]:
+    """Return the Store namespace for deleted-thread tombstones."""
+    return ("deleted_threads", get_current_tenant_id())
+
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
@@ -265,6 +270,14 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         except Exception:
             logger.debug("Could not delete store record for thread %s (not critical)", thread_id)
 
+        # Write a tombstone so Phase 2 of /search does not re-add this
+        # thread via lazy migration when checkpoints still exist on disk
+        # (the postgres checkpointer does not expose adelete_thread).
+        try:
+            await store.aput(_deleted_threads_ns(), thread_id, {"deleted_at": now_iso()})
+        except Exception:
+            logger.debug("Could not write deletion marker for thread %s (non-fatal)", thread_id)
+
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
@@ -373,10 +386,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
-
-    # -----------------------------------------------------------------------
-    # Phase 1: ThreadMetaStore
-    # -----------------------------------------------------------------------
+    store = get_store(request)
     merged: dict[str, ThreadResponse] = {}
 
     try:
@@ -413,11 +423,29 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     # -----------------------------------------------------------------------
     current_tenant = get_current_tenant_id()
     current_user = get_effective_user_id()
+
+    # Load tombstones written by DELETE /threads/{id} so we do not
+    # re-discover (and re-create) threads the user explicitly removed.
+    # The postgres checkpointer does not expose adelete_thread, so
+    # checkpoint rows outlive the Store deletion — without this guard
+    # the lazy migration below would resurrect them as "Untitled".
+    deleted_thread_ids: set[str] = set()
+    if store is not None:
+        try:
+            deleted_items = await store.alist(_deleted_threads_ns())
+            deleted_thread_ids = {item.key for item in deleted_items}
+        except Exception:
+            logger.debug("Could not load deleted-thread markers (non-fatal)")
+
     try:
         async for checkpoint_tuple in checkpointer.alist(None):
             cfg = getattr(checkpoint_tuple, "config", {})
             thread_id = cfg.get("configurable", {}).get("thread_id")
             if not thread_id:
+                continue
+
+            # Skip explicitly deleted threads — do not resurrect them.
+            if thread_id in deleted_thread_ids:
                 continue
 
             # Skip sub-graph checkpoints (checkpoint_ns is non-empty for those)
