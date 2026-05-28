@@ -52,19 +52,6 @@ memory can include cache and other kernel-accounted memory.
 Save the raw JSON when comparing backends so totals, pod names, images,
 requests, limits, and timestamps can be audited later.
 
-## Known AIO Memory Levers
-
-The AIO sandbox image supports `DISABLE_JUPYTER` and `DISABLE_CODE_SERVER`.
-In provisioner mode, enable them through `SANDBOX_DISABLE_JUPYTER=true` and
-`SANDBOX_DISABLE_CODE_SERVER=true` when the deployment does not need the
-in-sandbox Jupyter or code-server services.
-
-On a local kind baseline, the default idle sandbox was about 0.8 GiB. Disabling
-Jupyter and code-server reduced the idle Pod to about 0.4 GiB. Temporarily
-stopping browser, VNC, browser MCP, and Openbox reduced it further to about
-0.18 GiB, so browser-stack lazy startup should be evaluated as a separate,
-larger change.
-
 ## Candidate Runtime Matrix
 
 For AIO, CubeSandbox, OpenSandbox, gVisor, Kata, or another candidate, compare

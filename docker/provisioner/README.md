@@ -138,8 +138,6 @@ The provisioner is configured via environment variables (set in [docker-compose-
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | Container image for sandbox Pods |
-| `SANDBOX_DISABLE_JUPYTER` | `false` | Set to `true` to pass `DISABLE_JUPYTER=true` to sandbox Pods |
-| `SANDBOX_DISABLE_CODE_SERVER` | `false` | Set to `true` to pass `DISABLE_CODE_SERVER=true` to sandbox Pods |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
