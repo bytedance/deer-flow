@@ -109,7 +109,7 @@ class PatchedChatMiMo(ChatOpenAI):
         if generation_chunk is None:
             return None
 
-        choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
+        choices = chunk.get("choices", [])
         if choices:
             delta = choices[0].get("delta") or {}
             reasoning = _extract_reasoning_content(delta)
@@ -130,7 +130,7 @@ class PatchedChatMiMo(ChatOpenAI):
         response_dict = response if isinstance(response, dict) else response.model_dump()
         choices = response_dict.get("choices", [])
 
-        generations: list[ChatGeneration] = []
+        patched_generations: list[ChatGeneration] | None = None
         for index, generation in enumerate(result.generations):
             choice = choices[index] if index < len(choices) else {}
             choice_message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
@@ -140,10 +140,11 @@ class PatchedChatMiMo(ChatOpenAI):
 
             message = generation.message
             if reasoning is not _MISSING and isinstance(message, AIMessage):
-                generation = ChatGeneration(
+                if patched_generations is None:
+                    patched_generations = list(result.generations)
+                patched_generations[index] = ChatGeneration(
                     message=_with_reasoning_content(message, reasoning),
                     generation_info=generation.generation_info,
                 )
-            generations.append(generation)
 
-        return ChatResult(generations=generations, llm_output=result.llm_output)
+        return ChatResult(generations=patched_generations or result.generations, llm_output=result.llm_output)
