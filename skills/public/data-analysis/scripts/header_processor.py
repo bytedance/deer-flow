@@ -16,8 +16,11 @@ def _flatten_single_sheet(
     wb = openpyxl.load_workbook(file_path)
     ws = wb[sheet_name]
 
+    # 一次计算 fill_map，所有函数共用
+    fill_map = fill_merged_cells(ws)
+
     # Step 1: 读取预览（含合并单元格填充）
-    preview = read_excel_preview(ws, max_rows=20)
+    preview = read_excel_preview(ws, max_rows=20, fill_map=fill_map)
 
     # Step 2: 检测表头结构
     header_info = detect_header_structure(preview)
@@ -33,9 +36,9 @@ def _flatten_single_sheet(
     header_block = preview[skip_rows:skip_rows + header_rows]
     flattened_headers = flatten_headers(header_block, header_info)
 
-    # Step 4: 读取数据行
+    # Step 4: 读取数据行（含合并单元格填充）
     data_start_row = header_info["data_start_row"]
-    data_rows = read_data_rows(ws, data_start_row)
+    data_rows = read_data_rows(ws, data_start_row, fill_map=fill_map)
 
     wb.close()
 
@@ -56,20 +59,21 @@ def flatten_excel_headers(file_path: str, output_dir: str) -> dict[str, str] | N
     file_hash = compute_file_hash(file_path)
 
     wb = openpyxl.load_workbook(file_path)
-    results: dict[str, str] = {}
-
-    for sheet_name in wb.sheetnames:
-        flat_csv = _flatten_single_sheet(file_path, sheet_name, output_dir, file_hash)
-        if flat_csv:
-            results[sheet_name] = flat_csv
-
-    wb.close()
+    try:
+        results: dict[str, str] = {}
+        for sheet_name in wb.sheetnames:
+            flat_csv = _flatten_single_sheet(file_path, sheet_name, output_dir, file_hash)
+            if flat_csv:
+                results[sheet_name] = flat_csv
+    finally:
+        wb.close()
 
     return results if results else None
 
-def read_excel_preview(ws, max_rows: int = 20) -> list[list]:
+def read_excel_preview(ws, max_rows: int = 20, fill_map: dict | None = None) -> list[list]:
     """读取前 N 行，应用 fill_merged_cells 填充合并单元格。"""
-    fill_map = fill_merged_cells(ws)
+    if fill_map is None:
+        fill_map = fill_merged_cells(ws)
     rows = []
     for i, row in enumerate(ws.iter_rows(values_only=True)):
         if i >= max_rows:
@@ -224,15 +228,23 @@ def flatten_headers(header_block: list[list], header_info: dict) -> list[str]:
 
     return flattened
 
-def read_data_rows(ws, data_start_row: int) -> list[list]:
+def read_data_rows(ws, data_start_row: int, fill_map: dict | None = None) -> list[list]:
     """
     从 data_start_row（1-indexed）读取所有数据行。
     """
+    if fill_map is None:
+        fill_map = fill_merged_cells(ws)
     rows = []
     for i, row in enumerate(ws.iter_rows(values_only=True)):
         # iter_rows 从第1行开始，i=0 对应 row 1
         if i >= data_start_row - 1:
-            rows.append(list(row))
+            filled_row = []
+            for j, val in enumerate(row):
+                row_num = i + 1
+                col_num = j + 1
+                filled_val = fill_map.get((row_num, col_num), val)
+                filled_row.append(filled_val)
+            rows.append(filled_row)
     return rows
 
 def save_flat_csv(headers: list[str], data_rows: list[list], output_path: str) -> None:

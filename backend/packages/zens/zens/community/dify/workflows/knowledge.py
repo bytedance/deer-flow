@@ -13,12 +13,13 @@ def dify_knowledge_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
 ) -> str:
-    """知识问答工作流。
+    """知识问答工作流（需在 query 中包含"dify"或"知识库"关键词触发）。
 
-    当用户问到以下场景时调用本工具：
-    - 知识库检索 / 百科查询 / 常识问题
-    - 文档查阅 / 资料查找 / 知识获取
+    当用户显式要求查询知识库时调用本工具：
+    - 知识库检索 / 知识查询 / 文档查阅
     - 产品说明 / 操作指南 / 业务介绍
+
+    注意：query 中需包含"dify"、"知识库"或"查询知识库"等关键词，模型才会触发本工具。
 
     Args:
         query: 用户的知识性或百科类问题。

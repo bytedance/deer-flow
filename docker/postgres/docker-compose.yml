@@ -1,7 +1,6 @@
-
 services:
   pgvector:
-    image: docker.io/library/postgres:16-alpine 
+    image: docker.io/library/postgres:16-alpine
     platform: linux/amd64
     container_name: postgres16
     restart: unless-stopped
@@ -13,10 +12,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - /Users/raidery/data/postgres15:/var/lib/postgresql/data  
+      - /Users/raidery/data/postgres15:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pgsql -d pgsql"]
       interval: 5s
       timeout: 5s
       retries: 5
-

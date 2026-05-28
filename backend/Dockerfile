@@ -47,7 +47,7 @@ COPY backend ./backend
 RUN --mount=type=cache,target=/root/.cache/uv,uid=0 \
     UV_LINK_MODE=copy \
     UV_NO_CACHE=1 \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --all-packages ${UV_EXTRAS:+--extra $UV_EXTRAS}"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
