@@ -476,17 +476,8 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
-def test_create_summarization_middleware_preserves_frontend_update_key_contract(monkeypatch):
-    """LangGraph update keys use the middleware class name plus hook name.
-
-    The frontend treats any ``*.SummarizationMiddleware.before_model`` update as
-    the summarization state reset signal, so the lead agent's runtime middleware
-    must keep that suffix stable even when using a DeerFlow-specific subclass.
-
-    Temporary regression guard for issue#2965. Remove this test once the
-    frontend and backend have a stronger explicit contract than matching
-    middleware-generated update keys.
-    """
+def test_create_summarization_middleware_uses_frontend_supported_update_key(monkeypatch):
+    """LangGraph update keys use the middleware class name plus hook name."""
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     app_config.summarization = SummarizationConfig(enabled=True)
@@ -500,7 +491,7 @@ def test_create_summarization_middleware_preserves_frontend_update_key_contract(
 
     assert middleware is not None
     update_key = f"{type(middleware).__name__}.before_model"
-    assert update_key.endswith("SummarizationMiddleware.before_model")
+    assert update_key == "DeerFlowSummarizationMiddleware.before_model"
 
 
 def test_create_summarization_middleware_threads_resolved_app_config_to_model(monkeypatch):

@@ -91,6 +91,24 @@ test("mergeMessages keeps a visible history message when a hidden live message r
   ]);
 });
 
+test("mergeMessages lets a visible live message replace overlapping hidden history", () => {
+  const hiddenHistoryHuman = {
+    id: "human-1",
+    type: "human",
+    content: "<system-reminder>hidden</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const liveHuman = {
+    id: "human-1",
+    type: "human",
+    content: "visible user prompt",
+  } as Message;
+
+  expect(mergeMessages([hiddenHistoryHuman], [liveHuman], [])).toEqual([
+    liveHuman,
+  ]);
+});
+
 test("getSummarizationMiddlewareMessages matches DeerFlow summarization update keys", () => {
   const removeAll = {
     id: "__remove_all__",
@@ -111,6 +129,40 @@ test("getSummarizationMiddlewareMessages matches DeerFlow summarization update k
       },
     }),
   ).toEqual([removeAll, summary]);
+});
+
+test("getSummarizationMiddlewareMessages matches base LangChain summarization update keys", () => {
+  const summary = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "summary",
+  } as Message;
+
+  expect(
+    getSummarizationMiddlewareMessages({
+      "SummarizationMiddleware.before_model": {
+        messages: [summary],
+      },
+    }),
+  ).toEqual([summary]);
+});
+
+test("getSummarizationMiddlewareMessages ignores unrelated suffix-sharing update keys", () => {
+  const summary = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "summary",
+  } as Message;
+
+  expect(
+    getSummarizationMiddlewareMessages({
+      "OtherSummarizationMiddleware.before_model": {
+        messages: [summary],
+      },
+    }),
+  ).toBeUndefined();
 });
 
 test("getVisibleOptimisticMessages hides optimistic user input after server human arrives", () => {

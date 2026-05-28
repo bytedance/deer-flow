@@ -50,6 +50,11 @@ function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
+  "SummarizationMiddleware.before_model",
+  "DeerFlowSummarizationMiddleware.before_model",
+]);
+
 function messageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
@@ -68,6 +73,11 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
+  // This is a UI-display dedupe rule, not a general LangChain message-stream
+  // contract. Hidden messages that share an identity with a visible message are
+  // treated as control messages for this merged view; hidden messages carrying
+  // independent tracing/task semantics should use a distinct id or a custom
+  // stream/state channel instead of relying on message dedupe preservation.
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
@@ -109,6 +119,10 @@ export function mergeMessages(
   threadMessages: Message[],
   optimisticMessages: Message[],
 ): Message[] {
+  // Only visible live messages should trim overlapping history. Hidden messages
+  // are UI control messages in this path, not observability records; any hidden
+  // message that must survive as task/tracing data should use custom events or a
+  // separate state channel instead of participating in this overlap heuristic.
   const threadMessageIds = new Set(
     threadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
@@ -172,7 +186,7 @@ export function getSummarizationMiddlewareMessages(
   }
 
   for (const [key, update] of Object.entries(data)) {
-    if (!key.endsWith("SummarizationMiddleware.before_model")) {
+    if (!SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS.has(key)) {
       continue;
     }
     if (typeof update !== "object" || update === null) {
