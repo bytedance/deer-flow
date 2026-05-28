@@ -10,6 +10,17 @@ import { MessageList } from "@/components/workspace/messages";
 import { getBackendBaseURL } from "@/core/config";
 import { SubtasksProvider } from "@/core/tasks/context";
 import type { AgentThreadState, ThreadShareResponse } from "@/core/threads";
+import { readErrorDetail } from "@/core/threads/api";
+
+async function readShareLoadError(response: Response) {
+  const message = await readErrorDetail(
+    response,
+    response.status === 404 ? "Share not found" : "Failed to load share",
+  );
+  return message.includes(`(${response.status})`)
+    ? message
+    : `${message} (${response.status})`;
+}
 
 export default function SharePage() {
   const { share_id: shareId } = useParams<{ share_id: string }>();
@@ -25,7 +36,7 @@ export default function SharePage() {
           `${getBackendBaseURL()}/api/shares/${encodeURIComponent(shareId)}`,
         );
         if (!response.ok) {
-          throw new Error("Share not found");
+          throw new Error(await readShareLoadError(response));
         }
         const data = (await response.json()) as ThreadShareResponse;
         if (!cancelled) {

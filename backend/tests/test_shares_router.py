@@ -99,6 +99,19 @@ def test_create_share_snapshots_selected_messages_and_public_read() -> None:
     assert store.put_ttls == [shares._SHARE_TTL_MINUTES]
 
 
+def test_create_share_keeps_intentional_empty_title() -> None:
+    client, store, checkpointer = _build_share_app()
+    _seed_thread(store, checkpointer, "thread-share")
+
+    response = client.post(
+        "/api/shares/threads/thread-share",
+        json={"message_ids": ["human-1", "ai-1"], "title": ""},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["title"] == ""
+
+
 def test_create_share_rejects_unknown_message_id() -> None:
     client, store, checkpointer = _build_share_app()
     _seed_thread(store, checkpointer, "thread-share")
@@ -186,6 +199,38 @@ def test_get_share_deletes_expired_snapshot_when_ttl_is_unavailable() -> None:
         assert await store.aget(shares._SHARES_NS, share_id) is None
 
     asyncio.run(_assert_deleted())
+
+
+def test_create_share_cleans_expired_snapshots_beyond_first_batch_without_ttl() -> None:
+    client, store, checkpointer = _build_share_app(store_supports_ttl=False)
+    _seed_thread(store, checkpointer, "thread-share")
+
+    async def _seed_expired_shares() -> None:
+        for index in range(shares._EXPIRED_SHARE_CLEANUP_BATCH_SIZE + 5):
+            await store.aput(
+                shares._SHARES_NS,
+                f"expired-share-{index:03d}",
+                {
+                    "created_at": "2000-01-01T00:00:00+00:00",
+                    "expires_at": "2000-01-02T00:00:00+00:00",
+                    "messages": [],
+                },
+            )
+
+    asyncio.run(_seed_expired_shares())
+
+    response = client.post(
+        "/api/shares/threads/thread-share",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+
+    assert response.status_code == 200, response.text
+
+    async def _assert_expired_deleted() -> None:
+        items = await store.asearch(shares._SHARES_NS, limit=200, refresh_ttl=False)
+        assert not [item.key for item in items if item.key.startswith("expired-share-")]
+
+    asyncio.run(_assert_expired_deleted())
 
 
 def test_get_share_normalizes_stored_messages() -> None:

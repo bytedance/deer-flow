@@ -6,11 +6,43 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 
-async function readErrorDetail(response: Response, fallback: string) {
+function formatErrorDetail(detail: unknown): string | null {
+  if (typeof detail === "string" && detail) {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "msg" in item) {
+          const message = (item as { msg?: unknown }).msg;
+          return typeof message === "string" && message ? message : null;
+        }
+        return null;
+      })
+      .filter((message): message is string => Boolean(message));
+    if (messages.length > 0) {
+      return messages.join("; ");
+    }
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function readErrorDetail(response: Response, fallback: string) {
   try {
     const body = (await response.json()) as { detail?: unknown };
-    if (typeof body.detail === "string" && body.detail) {
-      return body.detail;
+    const detail = formatErrorDetail(body.detail);
+    if (detail) {
+      return detail;
     }
   } catch {
     // Ignore malformed error bodies and keep the stable fallback message.

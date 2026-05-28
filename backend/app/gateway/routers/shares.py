@@ -23,6 +23,8 @@ _SHARES_NS = ("shares",)
 _SHARE_ID_BYTES = 16
 _SHARE_RETENTION = timedelta(days=30)
 _SHARE_TTL_MINUTES = _SHARE_RETENTION.total_seconds() / 60
+_EXPIRED_SHARE_CLEANUP_BATCH_SIZE = 100
+_EXPIRED_SHARE_CLEANUP_MAX_BATCHES = 10
 
 
 class ShareCreateRequest(BaseModel):
@@ -121,11 +123,22 @@ async def _delete_expired_shares(store) -> None:
     if getattr(store, "supports_ttl", False):
         return
     try:
-        items = await store.asearch(_SHARES_NS, limit=100, refresh_ttl=False)
+        expired_items: list[tuple[tuple[str, ...], str]] = []
         now = datetime.now(UTC)
-        for item in items:
-            if _is_expired_share(item.value or {}, now=now):
-                await store.adelete(tuple(item.namespace), item.key)
+        for batch_index in range(_EXPIRED_SHARE_CLEANUP_MAX_BATCHES):
+            items = await store.asearch(
+                _SHARES_NS,
+                limit=_EXPIRED_SHARE_CLEANUP_BATCH_SIZE,
+                offset=batch_index * _EXPIRED_SHARE_CLEANUP_BATCH_SIZE,
+                refresh_ttl=False,
+            )
+            for item in items:
+                if _is_expired_share(item.value or {}, now=now):
+                    expired_items.append((tuple(item.namespace), item.key))
+            if len(items) < _EXPIRED_SHARE_CLEANUP_BATCH_SIZE:
+                break
+        for namespace, key in expired_items:
+            await store.adelete(namespace, key)
     except Exception:
         logger.debug("Failed to cleanup expired share snapshots", exc_info=True)
 
@@ -197,7 +210,7 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
 
     created_at = now_iso()
     expires_at = (datetime.now(UTC) + _SHARE_RETENTION).isoformat()
-    title = body.title or serialized_values.get("title")
+    title = serialized_values.get("title") if body.title is None else body.title
     if not isinstance(title, str):
         title = None
 

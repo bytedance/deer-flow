@@ -103,3 +103,41 @@ test("createThreadShare rejects with backend error detail", async () => {
     }),
   ).rejects.toThrow("Message IDs not found: missing-message");
 });
+
+test("createThreadShare rejects with validation array details", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 422,
+    json: async () => ({
+      detail: [
+        { msg: "Field required", loc: ["body", "message_ids"] },
+        { msg: "String should have at most 256 characters" },
+      ],
+    }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: [],
+    }),
+  ).rejects.toThrow(
+    "Field required; String should have at most 256 characters",
+  );
+});
+
+test("readErrorDetail formats object details", async () => {
+  const { readErrorDetail } = await import("@/core/threads/api");
+
+  await expect(
+    readErrorDetail(
+      {
+        status: 503,
+        json: async () => ({ detail: { error: "Store not available" } }),
+      } as Response,
+      "Failed to load share",
+    ),
+  ).resolves.toBe('{"error":"Store not available"}');
+});
