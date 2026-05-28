@@ -1,18 +1,10 @@
 "use client";
 
-import { SparklesIcon, TagsIcon } from "lucide-react";
+import { SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyContent,
@@ -31,14 +23,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { useLocalSettings } from "@/core/settings/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
-import {
-  getSkillRouteCategoryLabel,
-  SKILL_ROUTE_CATEGORIES,
-  type SkillCategoryBindings,
-  type SkillRouteCategory,
-} from "@/core/skills/routing";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
@@ -73,56 +58,11 @@ function SkillSettingsList({
   const { t } = useI18n();
   const router = useRouter();
   const [filter, setFilter] = useState<string>("public");
-  const [settings, setSettings] = useLocalSettings();
   const { mutate: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
   );
-  const categoryBindings: SkillCategoryBindings =
-    settings.context.skill_category_bindings ?? {};
-  const categoryLabels = useMemo(
-    () =>
-      ({
-        programming: t.inputBox.skillCategoryProgramming,
-        data_analysis: t.inputBox.skillCategoryDataAnalysis,
-        ppt_generation: t.inputBox.skillCategoryPpt,
-        image_generation: t.inputBox.skillCategoryImage,
-      }) satisfies Record<SkillRouteCategory, string>,
-    [
-      t.inputBox.skillCategoryDataAnalysis,
-      t.inputBox.skillCategoryImage,
-      t.inputBox.skillCategoryPpt,
-      t.inputBox.skillCategoryProgramming,
-    ],
-  );
-  const handleCategoryBindingChange = (
-    skillName: string,
-    category: SkillRouteCategory,
-    checked: boolean,
-  ) => {
-    const nextBindings = { ...categoryBindings };
-    const current = new Set(nextBindings[category] ?? []);
-    if (checked) {
-      current.add(skillName);
-    } else {
-      current.delete(skillName);
-    }
-    nextBindings[category] = Array.from(current);
-    const nextSelectedSkillNames = nextBindings[category] ?? [];
-    const clearSelectedCategory =
-      settings.context.skill_category === category &&
-      nextSelectedSkillNames.length === 0;
-    const contextUpdate = {
-      skill_category_bindings: nextBindings,
-      ...(clearSelectedCategory
-        ? { selected_skill_names: undefined, skill_category: undefined }
-        : settings.context.skill_category === category
-          ? { selected_skill_names: nextSelectedSkillNames }
-          : {}),
-    };
-    setSettings("context", contextUpdate);
-  };
   const handleCreateSkill = () => {
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");
@@ -160,45 +100,6 @@ function SkillSettingsList({
               </ItemDescription>
             </ItemContent>
             <ItemActions>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    disabled={
-                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      !skill.enabled
-                    }
-                    aria-label={t.settings.skills.bindCategory}
-                  >
-                    <TagsIcon className="size-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuLabel className="text-muted-foreground text-xs">
-                    {t.settings.skills.bindCategory}
-                  </DropdownMenuLabel>
-                  <DropdownMenuGroup>
-                    {SKILL_ROUTE_CATEGORIES.map((category) => (
-                      <DropdownMenuCheckboxItem
-                        key={category}
-                        checked={(categoryBindings[category] ?? []).includes(
-                          skill.name,
-                        )}
-                        onCheckedChange={(checked) =>
-                          handleCategoryBindingChange(
-                            skill.name,
-                            category,
-                            checked,
-                          )
-                        }
-                      >
-                        {getSkillRouteCategoryLabel(category, categoryLabels)}
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
               <Switch
                 checked={skill.enabled}
                 disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}

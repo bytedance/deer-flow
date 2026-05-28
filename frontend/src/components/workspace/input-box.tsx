@@ -60,12 +60,6 @@ import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useSkills } from "@/core/skills/hooks";
-import {
-  getSkillRouteCategoryLabel,
-  SKILL_ROUTE_CATEGORIES,
-  type SkillCategoryBindings,
-  type SkillRouteCategory,
-} from "@/core/skills/routing";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -93,20 +87,6 @@ import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
-
-function isSkillCategoryBindings(
-  value: unknown,
-): value is SkillCategoryBindings {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.values(value).every(
-      (items) =>
-        Array.isArray(items) && items.every((item) => typeof item === "string"),
-    )
-  );
-}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -248,42 +228,9 @@ export function InputBox({
     [enabledSkillNames, selectedSkillNames],
   );
 
-  const skillCategoryBindings = useMemo(
-    () =>
-      isSkillCategoryBindings(context.skill_category_bindings)
-        ? context.skill_category_bindings
-        : {},
-    [context.skill_category_bindings],
-  );
-  const selectedSkillCategory =
-    typeof context.skill_category === "string"
-      ? context.skill_category
-      : undefined;
-  const skillCategoryLabels = useMemo(
-    () =>
-      ({
-        programming: t.inputBox.skillCategoryProgramming,
-        data_analysis: t.inputBox.skillCategoryDataAnalysis,
-        ppt_generation: t.inputBox.skillCategoryPpt,
-        image_generation: t.inputBox.skillCategoryImage,
-      }) satisfies Record<SkillRouteCategory, string>,
-    [
-      t.inputBox.skillCategoryDataAnalysis,
-      t.inputBox.skillCategoryImage,
-      t.inputBox.skillCategoryPpt,
-      t.inputBox.skillCategoryProgramming,
-    ],
-  );
-
   const skillScopeLabel = useMemo(() => {
     if (!enabledSkills.length) {
       return t.inputBox.noSkills;
-    }
-    if (selectedSkillCategory) {
-      return getSkillRouteCategoryLabel(
-        selectedSkillCategory,
-        skillCategoryLabels,
-      );
     }
     if (!selectedSkillNames) {
       return t.inputBox.allSkills;
@@ -291,10 +238,8 @@ export function InputBox({
     return t.inputBox.selectedSkills(selectedSkillNameSet.size);
   }, [
     enabledSkills.length,
-    selectedSkillCategory,
     selectedSkillNameSet.size,
     selectedSkillNames,
-    skillCategoryLabels,
     t.inputBox,
   ]);
 
@@ -302,20 +247,8 @@ export function InputBox({
     onContextChange?.({
       ...context,
       selected_skill_names: undefined,
-      skill_category: undefined,
     });
   }, [context, onContextChange]);
-
-  const handleSkillCategorySelect = useCallback(
-    (category: string) => {
-      onContextChange?.({
-        ...context,
-        selected_skill_names: skillCategoryBindings[category] ?? [],
-        skill_category: category,
-      });
-    },
-    [context, onContextChange, skillCategoryBindings],
-  );
 
   const handleSkillToggle = useCallback(
     (skillName: string, checked: boolean) => {
@@ -328,7 +261,6 @@ export function InputBox({
       onContextChange?.({
         ...context,
         selected_skill_names: Array.from(next),
-        skill_category: undefined,
       });
     },
     [context, enabledSkillNames, onContextChange, selectedSkillNames],
@@ -667,7 +599,7 @@ export function InputBox({
                     {t.inputBox.skillScope}
                   </DropdownMenuLabel>
                   <DropdownMenuCheckboxItem
-                    checked={!selectedSkillNames && !selectedSkillCategory}
+                    checked={!selectedSkillNames}
                     onCheckedChange={(checked) => {
                       if (checked === true) {
                         handleAllSkillsSelect();
@@ -676,31 +608,6 @@ export function InputBox({
                   >
                     {t.inputBox.allSkills}
                   </DropdownMenuCheckboxItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel className="text-muted-foreground text-xs">
-                    {t.inputBox.skillCategories}
-                  </DropdownMenuLabel>
-                  {SKILL_ROUTE_CATEGORIES.map((category) => (
-                    <DropdownMenuCheckboxItem
-                      key={category}
-                      checked={selectedSkillCategory === category}
-                      disabled={
-                        (skillCategoryBindings[category] ?? []).length === 0
-                      }
-                      onCheckedChange={(checked) => {
-                        if (checked === true) {
-                          handleSkillCategorySelect(category);
-                        }
-                      }}
-                    >
-                      {getSkillRouteCategoryLabel(
-                        category,
-                        skillCategoryLabels,
-                      )}
-                    </DropdownMenuCheckboxItem>
-                  ))}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>

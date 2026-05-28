@@ -71,11 +71,6 @@ export interface Translations {
     allSkills: string;
     noSkills: string;
     selectedSkills: (count: number) => string;
-    skillCategories: string;
-    skillCategoryProgramming: string;
-    skillCategoryDataAnalysis: string;
-    skillCategoryPpt: string;
-    skillCategoryImage: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -388,7 +383,6 @@ export interface Translations {
       title: string;
       description: string;
       createSkill: string;
-      bindCategory: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;

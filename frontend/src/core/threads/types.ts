@@ -1,6 +1,5 @@
 import type { Message, Thread } from "@langchain/langgraph-sdk";
 
-import type { SkillCategoryBindings } from "../skills/routing";
 import type { Todo } from "../todos";
 
 export interface AgentThreadState extends Record<string, unknown> {
@@ -19,8 +18,6 @@ export interface AgentThreadContext extends Record<string, unknown> {
   reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
   selected_skill_names?: string[];
-  skill_category?: string;
-  skill_category_bindings?: SkillCategoryBindings;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {

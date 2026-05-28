@@ -87,11 +87,6 @@ export const enUS: Translations = {
     allSkills: "All skills",
     noSkills: "No enabled skills",
     selectedSkills: (count: number) => `${count} skills`,
-    skillCategories: "Categories",
-    skillCategoryProgramming: "Programming",
-    skillCategoryDataAnalysis: "Data analysis",
-    skillCategoryPpt: "PPT",
-    skillCategoryImage: "Image",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
@@ -167,7 +162,7 @@ export const enUS: Translations = {
         type: "separator",
       },
       {
-        suggestion: "New skill",
+        suggestion: "Skill",
         prompt:
           "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
         icon: SparklesIcon,
@@ -469,7 +464,6 @@ export const enUS: Translations = {
       description:
         "Manage the configuration and enabled status of the agent skills.",
       createSkill: "Create skill",
-      bindCategory: "Bind category",
       emptyTitle: "No agent skill yet",
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",

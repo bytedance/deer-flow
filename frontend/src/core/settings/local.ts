@@ -14,8 +14,6 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
     mode: undefined,
     reasoning_effort: undefined,
     selected_skill_names: undefined,
-    skill_category: undefined,
-    skill_category_bindings: {},
   },
 };
 
