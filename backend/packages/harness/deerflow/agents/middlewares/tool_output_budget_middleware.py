@@ -153,7 +153,7 @@ def _build_preview(
     tail = content[tail_start:] if tail_start < total else ""
 
     omitted = total - len(head) - len(tail)
-    ref = f"\n\n[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens). Use read_file with offset and limit to access specific sections. {omitted} chars omitted from this preview.]\n\n"
+    ref = f"\n\n[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens). Use read_file with start_line and end_line to access specific sections. {omitted} chars omitted from this preview.]\n\n"
 
     parts = [head, ref]
     if tail:

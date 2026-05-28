@@ -231,7 +231,7 @@ class TestBuildPreview:
         assert "_TAIL" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
-        assert "offset and limit" in preview
+        assert "start_line and end_line" in preview
 
     def test_reports_total_chars(self):
         content = "a" * 10000
