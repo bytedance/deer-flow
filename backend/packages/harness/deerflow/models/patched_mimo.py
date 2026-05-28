@@ -89,8 +89,8 @@ class PatchedChatMiMo(ChatOpenAI):
                     _restore_reasoning_content(payload_msg, orig_msg)
         else:
             ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
-            assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
-            for (idx, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
+            assistant_payloads = [m for m in payload_messages if m.get("role") == "assistant"]
+            for payload_msg, ai_msg in zip(assistant_payloads, ai_messages):
                 _restore_reasoning_content(payload_msg, ai_msg)
 
         return payload
