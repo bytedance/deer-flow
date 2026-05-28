@@ -49,6 +49,15 @@ def _is_public(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
 
 
+def _is_public_request(method: str, path: str) -> bool:
+    """Return True for routes that are intentionally anonymous."""
+    if _is_public(path):
+        return True
+    stripped = path.rstrip("/")
+    parts = stripped.split("/")
+    return method == "GET" and len(parts) == 4 and parts[:3] == ["", "api", "shares"] and bool(parts[3])
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Strict auth gate: reject requests without a valid session.
 
@@ -73,7 +82,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(request.url.path):
+        if _is_public_request(request.method, request.url.path):
             return await call_next(request)
 
         internal_user = None

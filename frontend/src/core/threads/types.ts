@@ -45,3 +45,13 @@ export interface ThreadTokenUsageResponse {
     middleware: number;
   };
 }
+
+export interface ThreadShareCreateResponse {
+  share_id: string;
+  title?: string | null;
+  created_at: string;
+}
+
+export interface ThreadShareResponse extends ThreadShareCreateResponse {
+  messages: Message[];
+}

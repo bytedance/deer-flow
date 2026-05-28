@@ -1,7 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
-import { ChevronUpIcon, Loader2Icon } from "lucide-react";
+import { ChevronUpIcon, Loader2Icon, Share2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 
 import {
   Conversation,
@@ -31,11 +32,13 @@ import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import { parseSubtaskResult } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import { createThreadShare } from "@/core/threads/api";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
+import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
@@ -50,6 +53,25 @@ import { SubtaskCard } from "./subtask-card";
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+function findPreviousHumanMessages(
+  groups: ReturnType<typeof getMessageGroups>,
+  groupIndex: number,
+) {
+  for (let index = groupIndex - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (!group) {
+      continue;
+    }
+    if (group.type === "human") {
+      return group.messages;
+    }
+    if (group.type === "assistant") {
+      return null;
+    }
+  }
+  return null;
+}
 
 function LoadMoreHistoryIndicator({
   isLoading,
@@ -165,6 +187,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  enableSharing = true,
 }: {
   className?: string;
   threadId: string;
@@ -174,6 +197,7 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  enableSharing?: boolean;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
@@ -196,21 +220,69 @@ export function MessageList({
     [messages, thread.getMessagesMetadata, thread.isLoading],
   );
 
-  const renderAssistantCopyButton = useCallback(
-    (messages: Message[], isStreaming: boolean) => {
+  const renderAssistantActions = useCallback(
+    (
+      messages: Message[],
+      isStreaming: boolean,
+      previousMessages: Message[],
+    ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
 
       if (!clipboardData) {
         return null;
       }
 
+      const shareMessageIds = [...previousMessages, ...messages]
+        .map((message) => message.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+
       return (
-        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
           <CopyButton clipboardData={clipboardData} />
+          {enableSharing && (
+            <Tooltip content={t.common.share}>
+              <Button
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+                onClick={async () => {
+                  if (shareMessageIds.length === 0) {
+                    toast.error(t.conversation.noMessages);
+                    return;
+                  }
+                  try {
+                    const share = await createThreadShare({
+                      threadId,
+                      messageIds: shareMessageIds,
+                      title: thread.values.title,
+                    });
+                    const shareUrl = new URL(
+                      `/share/${share.share_id}`,
+                      window.location.origin,
+                    ).toString();
+                    await navigator.clipboard.writeText(shareUrl);
+                    toast.success(t.clipboard.linkCopied);
+                  } catch {
+                    toast.error(t.clipboard.failedToCopyToClipboard);
+                  }
+                }}
+              >
+                <Share2Icon size={12} />
+              </Button>
+            </Tooltip>
+          )}
         </div>
       );
     },
-    [],
+    [
+      t.clipboard.failedToCopyToClipboard,
+      t.clipboard.linkCopied,
+      t.common.share,
+      t.conversation.noMessages,
+      enableSharing,
+      thread.values.title,
+      threadId,
+    ],
   );
 
   const renderTokenUsage = useCallback(
@@ -275,6 +347,8 @@ export function MessageList({
         />
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+          const previousMessages =
+            findPreviousHumanMessages(groupedMessages, groupIndex) ?? [];
 
           if (group.type === "human" || group.type === "assistant") {
             return (
@@ -301,12 +375,13 @@ export function MessageList({
                   turnUsageMessages,
                 })}
                 {group.type === "assistant" &&
-                  renderAssistantCopyButton(
+                  renderAssistantActions(
                     group.messages,
                     isAssistantMessageGroupStreaming(
                       group.messages,
                       streamingMessages,
                     ),
+                    previousMessages,
                   )}
               </div>
             );

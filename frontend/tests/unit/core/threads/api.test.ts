@@ -53,3 +53,36 @@ test("fetchThreadTokenUsage returns null for unavailable token usage", async () 
 
   await expect(fetchThreadTokenUsage("thread-1")).resolves.toBeNull();
 });
+
+test("createThreadShare posts selected message ids", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      share_id: "share-1",
+      title: "Shared answer",
+      created_at: "2026-05-28T00:00:00+00:00",
+    }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: ["human-1", "ai-1"],
+      title: "Shared answer",
+    }),
+  ).resolves.toMatchObject({ share_id: "share-1" });
+
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/shares/threads/thread-1"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message_ids: ["human-1", "ai-1"],
+        title: "Shared answer",
+      }),
+    },
+  );
+});
