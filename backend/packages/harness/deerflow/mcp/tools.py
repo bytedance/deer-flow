@@ -1,4 +1,4 @@
-"""Load MCP tools using langchain-mcp-adapters with persistent sessions."""
+"""Load MCP tools using langchain-mcp-adapters with stdio session pooling."""
 
 from __future__ import annotations
 
@@ -184,8 +184,10 @@ def _make_session_pool_tool(
 async def get_mcp_tools() -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
-    Tools are wrapped with persistent-session logic so that consecutive
-    calls within the same thread reuse the same MCP session.
+    Tools using stdio transport are wrapped with persistent-session logic so
+    consecutive calls within the same thread reuse the same MCP session.
+    HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
+    cleanup errors.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -262,6 +264,9 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
+        # Only pool stdio sessions. HTTP/SSE transports use anyio TaskGroups
+        # internally which cannot be closed from a different async task, so
+        # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
         server_names_by_prefix_length = tuple(sorted(servers_config, key=len, reverse=True))
         tool_servers = [_get_prefixed_tool_server(tool.name, server_names_by_prefix_length) for tool in tools]
@@ -275,16 +280,20 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         for tool, tool_server, exposed_name_candidate in zip(tools, tool_servers, exposed_name_candidates, strict=True):
             if tool_server is not None:
-                exposed_name = exposed_name_candidate if exposed_name_counts[exposed_name_candidate] == 1 else tool.name
-                wrapped_tools.append(
-                    _make_session_pool_tool(
-                        tool,
-                        tool_server,
-                        servers_config[tool_server],
-                        tool_interceptors,
-                        exposed_name=exposed_name,
+                transport = servers_config[tool_server].get("transport", "stdio")
+                if transport == "stdio":
+                    exposed_name = exposed_name_candidate if exposed_name_counts[exposed_name_candidate] == 1 else tool.name
+                    wrapped_tools.append(
+                        _make_session_pool_tool(
+                            tool,
+                            tool_server,
+                            servers_config[tool_server],
+                            tool_interceptors,
+                            exposed_name=exposed_name,
+                        )
                     )
-                )
+                else:
+                    wrapped_tools.append(tool)
             else:
                 wrapped_tools.append(tool)
 
