@@ -1620,11 +1620,9 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
-        requested_path = path
-        if _is_skills_path(path):
-            return f"Error: Direct reads from skills paths are blocked: {requested_path}. Use the skill_load tool instead."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
