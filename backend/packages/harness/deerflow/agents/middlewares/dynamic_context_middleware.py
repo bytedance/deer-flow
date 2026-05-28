@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
@@ -104,12 +105,13 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _build_full_reminder(self, runtime: Runtime) -> str:
         from deerflow.agents.lead_agent.prompt import _get_memory_context
-        from deerflow.agents.memory.runtime import is_runtime_memory_injection_enabled
 
         # Memory injection requires app-level permission and allows per-run opt-out.
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        context = getattr(runtime, "context", None)
+        runtime_allows_memory = not (isinstance(context, Mapping) and context.get("memory_enabled") is False)
         memory_context = ""
-        if injection_enabled and is_runtime_memory_injection_enabled(runtime):
+        if injection_enabled and runtime_allows_memory:
             memory_context = _get_memory_context(self._agent_name, app_config=self._app_config)
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
