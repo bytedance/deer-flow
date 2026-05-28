@@ -96,25 +96,30 @@ class _ScriptedAgent:
         del subgraphs
         self.controller.started.set()
 
-        thread_id = _thread_id_from_config(config)
-        human_text = _last_human_text(graph_input)
-        human = HumanMessage(content=human_text)
-        ai = await self.model.ainvoke([human], config=config)
-        state = {"messages": [human.model_dump(), ai.model_dump()], "title": self.title}
+        try:
+            thread_id = _thread_id_from_config(config)
+            human_text = _last_human_text(graph_input)
+            human = HumanMessage(content=human_text)
+            ai = await self.model.ainvoke([human], config=config)
+            state = {"messages": [human.model_dump(), ai.model_dump()], "title": self.title}
 
-        if self.checkpointer is not None:
-            await _write_checkpoint(self.checkpointer, thread_id=thread_id, state=state)
-        self.controller.checkpoint_written.set()
+            if self.checkpointer is not None:
+                await _write_checkpoint(self.checkpointer, thread_id=thread_id, state=state)
+            self.controller.checkpoint_written.set()
 
-        yield _stream_item_for_mode(stream_mode, state)
+            yield _stream_item_for_mode(stream_mode, state)
 
-        if self.block_after_first_chunk:
-            try:
+            if self.block_after_first_chunk:
                 while not self.controller.release.is_set():
                     await asyncio.sleep(0.05)
-            except asyncio.CancelledError:
-                self.controller.cancelled.set()
-                raise
+        except asyncio.CancelledError:
+            # Catch cancellation arriving anywhere in the body — including the
+            # `await ainvoke()` / `_write_checkpoint()` / `yield` points between
+            # ``started.set()`` and the original inner ``try`` — so tests that
+            # wait for ``cancelled`` after issuing ``POST /cancel`` no longer
+            # race with cancellation arriving early.
+            self.controller.cancelled.set()
+            raise
 
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):

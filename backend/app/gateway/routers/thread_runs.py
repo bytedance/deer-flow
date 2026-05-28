@@ -278,7 +278,12 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     )
 
 
-@router.api_route("/{thread_id}/runs/{run_id}/stream", methods=["GET", "POST"], response_model=None)
+# Register GET and POST as separate routes so each method gets a unique OpenAPI
+# operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
+# across both methods, which makes FastAPI emit the same ``operationId`` twice and
+# warn about a duplicate operation id during OpenAPI generation.
+@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
+@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
     thread_id: str,
