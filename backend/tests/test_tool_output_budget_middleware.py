@@ -474,6 +474,75 @@ class TestWrapToolCallEdgeCases:
 
 
 # ===========================================================================
+# MCP content_and_artifact format tests
+# ===========================================================================
+
+
+class TestMCPContentAndArtifact:
+    """MCP tools return content as list of content blocks, not plain strings."""
+
+    def test_text_content_blocks_are_budgeted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+            mw = ToolOutputBudgetMiddleware(config=config)
+            content = [{"type": "text", "text": "x" * 200}]
+            msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mcp")
+            req = _make_request(tool_name="mcp_tool", outputs_path=tmpdir)
+
+            result = mw.wrap_tool_call(req, lambda _: msg)
+
+            assert result is not msg
+            assert isinstance(result.content, str)
+            assert "Full mcp_tool output saved to" in result.content
+            assert result.tool_call_id == "tc-mcp"
+
+    def test_multiple_text_blocks_joined_and_budgeted(self):
+        config = ToolOutputConfig(externalize_min_chars=50, fallback_max_chars=100, fallback_head_chars=40, fallback_tail_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "a" * 80}, {"type": "text", "text": "b" * 80}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mcp2")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is not msg
+        assert "omitted" in result.content
+
+    def test_image_content_blocks_are_skipped(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "image", "data": "base64data" * 100}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-img")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+    def test_mixed_text_and_image_blocks_are_skipped(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "x" * 100}, {"type": "image", "data": "base64"}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mix")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+    def test_small_text_blocks_pass_through(self):
+        config = ToolOutputConfig(externalize_min_chars=1000)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = [{"type": "text", "text": "small result"}]
+        msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-sm")
+        req = _make_request(tool_name="mcp_tool")
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert result is msg
+
+
+# ===========================================================================
 # Async path tests
 # ===========================================================================
 
