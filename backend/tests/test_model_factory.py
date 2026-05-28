@@ -1000,15 +1000,16 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_create_chat_model_resolves_patched_mimo_provider():
+@pytest.mark.parametrize("model_id", ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash"])
+def test_create_chat_model_resolves_patched_mimo_provider(model_id):
     from deerflow.models.patched_mimo import PatchedChatMiMo
 
     model = ModelConfig(
-        name="mimo-thinking",
-        display_name="MiMo Thinking",
+        name=f"{model_id}-thinking",
+        display_name=f"{model_id} Thinking",
         description=None,
         use="deerflow.models.patched_mimo:PatchedChatMiMo",
-        model="mimo-v2.5-pro",
+        model=model_id,
         api_key="test-key",
         base_url="https://api.xiaomimimo.com/v1",
         supports_thinking=True,
@@ -1018,14 +1019,14 @@ def test_create_chat_model_resolves_patched_mimo_provider():
     cfg = _make_app_config([model])
 
     chat_model = factory_module.create_chat_model(
-        name="mimo-thinking",
+        name=f"{model_id}-thinking",
         thinking_enabled=True,
         app_config=cfg,
         attach_tracing=False,
     )
 
     assert isinstance(chat_model, PatchedChatMiMo)
-    assert chat_model.model_name == "mimo-v2.5-pro"
+    assert chat_model.model_name == model_id
     assert chat_model.extra_body["thinking"]["type"] == "enabled"
 
 
