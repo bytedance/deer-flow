@@ -1,4 +1,4 @@
-# Blocking IO Detection Usage And Maintenance
+# Blocking IO detection usage and maintenance
 
 This document describes how to use and maintain DeerFlow backend blocking-IO
 detection for async event-loop safety.
@@ -7,7 +7,7 @@ The goal is narrow: find and prevent synchronous IO from blocking backend
 async event-loop paths. Static and runtime detection are complementary, but
 they have different jobs.
 
-## Static Detector
+## Static detector
 
 The static detector is the discovery tool. It scans backend source code and
 reports candidate blocking-IO call sites that may need human review.
@@ -38,7 +38,7 @@ new static rules.
 Add a static rule only when review finds a recurring high-risk blocking
 pattern that is invisible to the current detector.
 
-## Runtime Detector
+## Runtime detector
 
 The runtime detector is the CI regression guard. It uses Blockbuster to fail a
 focused test when code under `app.*` or `deerflow.*` performs blocking IO on
@@ -55,7 +55,7 @@ paths from regressing. It does not prove that the entire backend is free of
 blocking IO; it only covers the production paths exercised by
 `backend/tests/blocking_io/`.
 
-## Maintenance Workflow
+## Maintenance workflow
 
 Use the static detector to find candidates, then use review to decide which
 async production paths are worth protecting in CI.
@@ -64,12 +64,12 @@ The normal workflow is:
 
 1. Run the static detector to find backend blocking-IO candidates.
 2. Use human review to pick high-risk production async paths.
-3. Add or update a focused runtime anchor in `tests/blocking_io/`.
+3. Add or update a focused runtime anchor in `backend/tests/blocking_io/`.
 4. Let CI prevent that path from regressing.
 
 Runtime detection has two maintenance paths.
 
-## Add A Runtime Rule
+### Add a runtime rule
 
 Add a runtime rule when Blockbuster's default rules do not cover a generic
 blocking primitive used by production code.
@@ -106,10 +106,10 @@ _PROJECT_BLOCKING_RULES = (
 Do not add a runtime rule just because a business path is not tested. A rule
 only expands what Blockbuster can intercept after code runs.
 
-## Add A Runtime Anchor
+### Add a runtime anchor
 
 Add a runtime anchor when a high-risk async production path should be protected
-by CI but no existing `tests/blocking_io/` test executes it.
+by CI but no existing `backend/tests/blocking_io/` test executes it.
 
 Anchors belong in:
 
@@ -132,7 +132,7 @@ Avoid testing only the low-level helper unless that helper is the production
 async entry point. The runtime gate is most useful when it protects the caller
 that production actually executes.
 
-## Current Runtime Coverage
+## Current runtime coverage
 
 The initial runtime anchors protect confirmed blocking-IO bug shapes:
 
