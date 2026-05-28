@@ -66,8 +66,13 @@ export function clearReconnectRun(
   if (typeof window === "undefined" || !threadId) return;
 
   const key = `lg:stream:${threadId}`;
-  if (window.sessionStorage.getItem(key) === runId) {
-    window.sessionStorage.removeItem(key);
+  try {
+    const storage = window.sessionStorage;
+    if (storage.getItem(key) === runId) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage access failures so reconnect cleanup never throws.
   }
 }
 
