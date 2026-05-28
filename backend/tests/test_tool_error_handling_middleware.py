@@ -9,6 +9,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
 )
+from deerflow.agents.middlewares.tool_output_truncation_middleware import ToolOutputTruncationMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
@@ -134,12 +135,13 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 6 baseline (ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling,
-    # SandboxAudit, ToolErrorHandling) + 1 SafetyFinishReasonMiddleware
+    # 7 baseline (ToolOutputTruncation, ThreadData, Sandbox, DanglingToolCall,
+    # LLMErrorHandling, SandboxAudit, ToolErrorHandling) + 1 SafetyFinishReasonMiddleware
     # (enabled by default — see SafetyFinishReasonConfig).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 
-    assert len(middlewares) == 7
+    assert len(middlewares) == 8
+    assert isinstance(middlewares[0], ToolOutputTruncationMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 

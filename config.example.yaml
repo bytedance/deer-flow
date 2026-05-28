@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -511,6 +511,16 @@ tools:
 
 tool_search:
   enabled: false
+
+# ============================================================================
+# Tool Output Protection
+# ============================================================================
+# Maximum UTF-8 bytes to keep from any tool result before it is sent back to the
+# model. This protects the next model call from oversized external tool output.
+# Set to 0 to disable.
+
+tool_output:
+  max_bytes: 50000
 
 # ============================================================================
 # Loop Detection Configuration
