@@ -151,6 +151,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    if "user_id" in context and isinstance(runtime_context, dict):
+        runtime_context.setdefault("user_id", context["user_id"])
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
@@ -164,6 +166,9 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
+        return
+
+    if getattr(user, "system_role", None) == "internal":
         return
 
     runtime_context = config.setdefault("context", {})
