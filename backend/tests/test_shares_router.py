@@ -115,3 +115,16 @@ def test_create_share_requires_thread_access() -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_create_share_returns_503_without_checkpointer() -> None:
+    client, store, _checkpointer = _build_share_app()
+    _seed_thread(store, _checkpointer, "thread-share")
+    client.app.state.checkpointer = None
+
+    response = client.post(
+        "/api/shares/threads/thread-share",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+
+    assert response.status_code == 503

@@ -55,6 +55,7 @@ export default function SharePage() {
         },
         isLoading: false,
         isThreadLoading: share === null && error === null,
+        getMessagesMetadata: () => [],
       }) as unknown as BaseStream<AgentThreadState>,
     [error, share],
   );

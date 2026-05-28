@@ -54,25 +54,6 @@ export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
-function findPreviousHumanMessages(
-  groups: ReturnType<typeof getMessageGroups>,
-  groupIndex: number,
-) {
-  for (let index = groupIndex - 1; index >= 0; index -= 1) {
-    const group = groups[index];
-    if (!group) {
-      continue;
-    }
-    if (group.type === "human") {
-      return group.messages;
-    }
-    if (group.type === "assistant") {
-      return null;
-    }
-  }
-  return null;
-}
-
 function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
@@ -203,9 +184,24 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
-  const groupedMessages = getMessageGroups(messages);
+  const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
+  const previousHumanMessagesByGroupIndex = useMemo(() => {
+    const previousByIndex: Message[][] = [];
+    let previousHumanMessages: Message[] | null = null;
+
+    groupedMessages.forEach((group, index) => {
+      previousByIndex[index] = previousHumanMessages ?? [];
+      if (group.type === "human") {
+        previousHumanMessages = group.messages;
+      } else if (group.type === "assistant") {
+        previousHumanMessages = null;
+      }
+    });
+
+    return previousByIndex;
+  }, [groupedMessages]);
   const tokenDebugSteps = useMemo(
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
@@ -260,10 +256,19 @@ export function MessageList({
                       `/share/${share.share_id}`,
                       window.location.origin,
                     ).toString();
-                    await navigator.clipboard.writeText(shareUrl);
+                    try {
+                      await navigator.clipboard.writeText(shareUrl);
+                    } catch {
+                      toast.error(t.clipboard.failedToCopyToClipboard);
+                      return;
+                    }
                     toast.success(t.clipboard.linkCopied);
-                  } catch {
-                    toast.error(t.clipboard.failedToCopyToClipboard);
+                  } catch (err) {
+                    toast.error(
+                      err instanceof Error
+                        ? err.message
+                        : "Failed to create share.",
+                    );
                   }
                 }}
               >
@@ -348,7 +353,7 @@ export function MessageList({
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           const previousMessages =
-            findPreviousHumanMessages(groupedMessages, groupIndex) ?? [];
+            previousHumanMessagesByGroupIndex[groupIndex] ?? [];
 
           if (group.type === "human" || group.type === "assistant") {
             return (

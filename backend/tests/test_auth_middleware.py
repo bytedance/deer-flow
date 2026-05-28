@@ -29,6 +29,7 @@ def test_public_paths(path: str):
 
 def test_public_share_read_request():
     assert _is_public_request("GET", "/api/shares/share-1") is True
+    assert _is_public_request("GET", "/api/shares/threads") is False
     assert _is_public_request("POST", "/api/shares/threads/thread-1") is False
     assert _is_public_request("GET", "/api/shares/threads/thread-1") is False
     assert _is_public_request("GET", "/api/shares-anything") is False
@@ -140,6 +141,10 @@ def _make_app():
     async def share_get():
         return {"ok": True}
 
+    @app.get("/api/shares/threads")
+    async def share_threads_reserved():
+        return {"ok": True}
+
     @app.post("/api/shares/threads/abc")
     async def share_create():
         return {"ok": True}
@@ -174,6 +179,11 @@ def test_public_share_path_no_cookie(client):
 
 def test_share_create_no_cookie_returns_401(client):
     res = client.post("/api/shares/threads/abc")
+    assert res.status_code == 401
+
+
+def test_share_threads_reserved_no_cookie_returns_401(client):
+    res = client.get("/api/shares/threads")
     assert res.status_code == 401
 
 

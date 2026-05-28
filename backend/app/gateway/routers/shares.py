@@ -86,6 +86,9 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
         raise HTTPException(status_code=503, detail="Store not available")
 
     checkpointer = get_checkpointer(request)
+    if checkpointer is None:
+        raise HTTPException(status_code=503, detail="Checkpointer not available")
+
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)

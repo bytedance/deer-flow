@@ -55,7 +55,7 @@ def _is_public_request(method: str, path: str) -> bool:
         return True
     stripped = path.rstrip("/")
     parts = stripped.split("/")
-    return method == "GET" and len(parts) == 4 and parts[:3] == ["", "api", "shares"] and bool(parts[3])
+    return method == "GET" and len(parts) == 4 and parts[:3] == ["", "api", "shares"] and bool(parts[3]) and parts[3] != "threads"
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

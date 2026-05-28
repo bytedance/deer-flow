@@ -86,3 +86,20 @@ test("createThreadShare posts selected message ids", async () => {
     },
   );
 });
+
+test("createThreadShare rejects with backend error detail", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 400,
+    json: async () => ({ detail: "Message IDs not found: missing-message" }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: ["missing-message"],
+    }),
+  ).rejects.toThrow("Message IDs not found: missing-message");
+});

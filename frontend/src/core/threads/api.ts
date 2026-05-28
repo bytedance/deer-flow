@@ -6,6 +6,18 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 
+async function readErrorDetail(response: Response, fallback: string) {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) {
+      return body.detail;
+    }
+  } catch {
+    // Ignore malformed error bodies and keep the stable fallback message.
+  }
+  return `${fallback} (${response.status})`;
+}
+
 export async function fetchThreadTokenUsage(
   threadId: string,
 ): Promise<ThreadTokenUsageResponse | null> {
@@ -48,7 +60,7 @@ export async function createThreadShare({
   );
 
   if (!response.ok) {
-    throw new Error("Failed to create share.");
+    throw new Error(await readErrorDetail(response, "Failed to create share."));
   }
 
   return (await response.json()) as ThreadShareCreateResponse;
