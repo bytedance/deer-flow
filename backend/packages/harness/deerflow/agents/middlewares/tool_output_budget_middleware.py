@@ -25,7 +25,9 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG = ToolOutputConfig()
+
+def _default_config() -> ToolOutputConfig:
+    return ToolOutputConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,13 @@ _EXT_MAP: dict[str, str] = {
 }
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Strip path separators and traversal components from a tool name."""
+    base = os.path.basename(name)
+    safe = base.replace("..", "").replace("/", "_").replace("\\", "_")
+    return safe or "unknown"
+
+
 def _externalize(
     content: str,
     *,
@@ -92,16 +101,22 @@ def _externalize(
     storage_subdir: str,
 ) -> str | None:
     """Write *content* to disk and return the virtual path, or ``None`` on failure."""
+    if os.path.isabs(storage_subdir) or ".." in storage_subdir:
+        return None
     storage_dir = os.path.join(outputs_path, storage_subdir)
     try:
         os.makedirs(storage_dir, exist_ok=True)
     except OSError:
         return None
 
+    safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
     short_id = uuid.uuid4().hex[:12]
-    filename = f"{tool_name}-{short_id}.{ext}"
+    filename = f"{safe_name}-{short_id}.{ext}"
     filepath = os.path.join(storage_dir, filename)
+
+    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+        return None
 
     try:
         with open(filepath, "w", encoding="utf-8") as f:
@@ -299,6 +314,29 @@ def _patch_tool_message(msg: ToolMessage, config: ToolOutputConfig, outputs_path
     return msg.model_copy(update=update)
 
 
+def _needs_budget(result: ToolMessage | Command, config: ToolOutputConfig) -> bool:
+    """Fast check whether *result* could need budgeting (avoids thread offload for small outputs)."""
+    threshold = min(config.externalize_min_chars, config.fallback_max_chars) if config.fallback_max_chars > 0 else config.externalize_min_chars
+    if threshold <= 0:
+        return False
+
+    def _check_msg(msg: ToolMessage) -> bool:
+        name = msg.name or ""
+        if name in config.exempt_tools:
+            return False
+        text = _message_text(msg.content)
+        return text is not None and len(text) > threshold
+
+    if isinstance(result, ToolMessage):
+        return _check_msg(result)
+    update = getattr(result, "update", None)
+    if isinstance(update, dict):
+        for msg in update.get("messages", []):
+            if isinstance(msg, ToolMessage) and _check_msg(msg):
+                return True
+    return False
+
+
 def _patch_result(result: ToolMessage | Command, config: ToolOutputConfig, outputs_path: str | None) -> ToolMessage | Command:
     """Apply budget to a tool call result (ToolMessage or Command)."""
     if isinstance(result, ToolMessage):
@@ -356,7 +394,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
 
     def __init__(self, config: ToolOutputConfig | None = None) -> None:
         super().__init__()
-        self._config = config or _DEFAULT_CONFIG
+        self._config = config if config is not None else _default_config()
 
     @classmethod
     def from_app_config(cls, app_config: Any) -> ToolOutputBudgetMiddleware:
@@ -387,6 +425,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         result = await handler(request)
         if not self._config.enabled:
+            return result
+        if not _needs_budget(result, self._config):
             return result
         outputs_path = _resolve_outputs_path(request)
         import asyncio

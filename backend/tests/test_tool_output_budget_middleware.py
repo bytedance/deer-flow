@@ -23,7 +23,9 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _build_preview,
     _externalize,
     _message_text,
+    _needs_budget,
     _patch_model_messages,
+    _sanitize_tool_name,
     _snap_to_line_boundary,
 )
 from deerflow.config.app_config import AppConfig
@@ -137,6 +139,82 @@ class TestExternalize:
             )
             assert path is not None
             assert path.endswith(".txt")
+
+
+class TestSanitizeToolName:
+    def test_strips_path_separators(self):
+        assert _sanitize_tool_name("../../etc/passwd") == "passwd"
+
+    def test_strips_backslashes(self):
+        result = _sanitize_tool_name("..\\..\\windows\\system32")
+        assert ".." not in result
+        assert "/" not in result
+
+    def test_normal_name_unchanged(self):
+        assert _sanitize_tool_name("bash") == "bash"
+
+    def test_empty_becomes_unknown(self):
+        assert _sanitize_tool_name("") == "unknown"
+
+    def test_dots_only_becomes_unknown(self):
+        assert _sanitize_tool_name("..") == "unknown"
+
+
+class TestExternalizePathTraversal:
+    def test_traversal_tool_name_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _externalize(
+                "data",
+                tool_name="../../etc/passwd",
+                tool_call_id="tc-1",
+                outputs_path=tmpdir,
+                storage_subdir=".tool-results",
+            )
+            assert path is not None
+            assert "passwd-" in path
+            assert "../" not in path
+
+    def test_absolute_storage_subdir_rejected(self):
+        path = _externalize(
+            "data",
+            tool_name="tool",
+            tool_call_id="tc-1",
+            outputs_path="/tmp",
+            storage_subdir="/etc/evil",
+        )
+        assert path is None
+
+    def test_traversal_storage_subdir_rejected(self):
+        path = _externalize(
+            "data",
+            tool_name="tool",
+            tool_call_id="tc-1",
+            outputs_path="/tmp",
+            storage_subdir="../../../etc",
+        )
+        assert path is None
+
+
+class TestNeedsBudget:
+    def test_small_output_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=1000)
+        msg = _tm("small", name="tool")
+        assert _needs_budget(msg, config) is False
+
+    def test_large_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = _tm("x" * 100, name="tool")
+        assert _needs_budget(msg, config) is True
+
+    def test_exempt_tool_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        msg = _tm("x" * 100, name="read_file")
+        assert _needs_budget(msg, config) is False
+
+    def test_multimodal_does_not_need_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10)
+        msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is False
 
 
 class TestBuildPreview:
