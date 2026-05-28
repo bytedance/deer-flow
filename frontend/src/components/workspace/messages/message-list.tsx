@@ -233,11 +233,17 @@ export function MessageList({
         .filter((id): id is string => typeof id === "string" && id.length > 0);
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div
+          className={cn(
+            "mt-2 flex justify-start gap-1 opacity-0 transition-opacity",
+            "delay-200 duration-300 group-hover/assistant-turn:opacity-100",
+          )}
+        >
           <CopyButton clipboardData={clipboardData} />
           {enableSharing && (
             <Tooltip content={t.common.share}>
               <Button
+                aria-label={t.common.share}
                 size="icon-sm"
                 type="button"
                 variant="ghost"

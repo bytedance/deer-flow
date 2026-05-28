@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -20,6 +21,8 @@ router = APIRouter(prefix="/api/shares", tags=["shares"])
 
 _SHARES_NS = ("shares",)
 _SHARE_ID_BYTES = 16
+_SHARE_RETENTION = timedelta(days=30)
+_SHARE_TTL_MINUTES = _SHARE_RETENTION.total_seconds() / 60
 
 
 class ShareCreateRequest(BaseModel):
@@ -45,6 +48,25 @@ class ShareResponse(BaseModel):
     created_at: str
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _is_expired_share(value: dict[str, Any], *, now: datetime | None = None) -> bool:
+    expires_at = _parse_iso_datetime(value.get("expires_at"))
+    if expires_at is None:
+        return False
+    return expires_at <= (now or datetime.now(UTC))
+
+
 def _extract_message_id(message: dict[str, Any]) -> str | None:
     message_id = message.get("id")
     return message_id if isinstance(message_id, str) and message_id else None
@@ -64,17 +86,48 @@ def _is_shareable_message(message: dict[str, Any]) -> bool:
     if message_type == "human":
         return _has_displayable_content(message)
     if message_type == "ai":
-        return _has_displayable_content(message) and not message.get("tool_calls") and not message.get("invalid_tool_calls")
+        has_tool_metadata = bool(message.get("tool_calls") or message.get("invalid_tool_calls"))
+        return _has_displayable_content(message) and not has_tool_metadata
     return False
 
 
+def _to_public_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields needed to render a public read-only message."""
+    public_message: dict[str, Any] = {
+        "type": message.get("type"),
+        "content": message.get("content"),
+    }
+    message_id = _extract_message_id(message)
+    if message_id is not None:
+        public_message["id"] = message_id
+    return public_message
+
+
 async def _put_unique_share(store, value: dict[str, Any]) -> str:
+    await _delete_expired_shares(store)
+    ttl = _SHARE_TTL_MINUTES if getattr(store, "supports_ttl", False) else None
     for _ in range(4):
         share_id = secrets.token_urlsafe(_SHARE_ID_BYTES)
         if await store.aget(_SHARES_NS, share_id) is None:
-            await store.aput(_SHARES_NS, share_id, value)
+            if ttl is None:
+                await store.aput(_SHARES_NS, share_id, value)
+            else:
+                await store.aput(_SHARES_NS, share_id, value, ttl=ttl)
             return share_id
     raise HTTPException(status_code=500, detail="Failed to create share")
+
+
+async def _delete_expired_shares(store) -> None:
+    if getattr(store, "supports_ttl", False):
+        return
+    try:
+        items = await store.asearch(_SHARES_NS, limit=100, refresh_ttl=False)
+        now = datetime.now(UTC)
+        for item in items:
+            if _is_expired_share(item.value or {}, now=now):
+                await store.adelete(tuple(item.namespace), item.key)
+    except Exception:
+        logger.debug("Failed to cleanup expired share snapshots", exc_info=True)
 
 
 @router.post("/threads/{thread_id}", response_model=ShareCreateResponse)
@@ -93,7 +146,10 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(config)
     except Exception:
-        logger.exception("Failed to get state for share source thread %s", sanitize_log_param(thread_id))
+        logger.exception(
+            "Failed to get state for share source thread %s",
+            sanitize_log_param(thread_id),
+        )
         raise HTTPException(status_code=500, detail="Failed to create share")
 
     if checkpoint_tuple is None:
@@ -111,17 +167,36 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
         raise HTTPException(status_code=400, detail="No message IDs selected")
 
     requested_id_set = set(requested_ids)
-    selected_messages = [message for message in all_messages if isinstance(message, dict) and _extract_message_id(message) in requested_id_set]
-    selected_id_set = {message_id for message in selected_messages if (message_id := _extract_message_id(message)) is not None}
+    selected_messages: list[dict[str, Any]] = []
+    selected_id_set: set[str] = set()
+    for message in all_messages:
+        if not isinstance(message, dict):
+            continue
+        message_id = _extract_message_id(message)
+        if message_id in requested_id_set:
+            selected_messages.append(message)
+            selected_id_set.add(message_id)
+
     missing_ids = [message_id for message_id in requested_ids if message_id not in selected_id_set]
     if missing_ids:
-        raise HTTPException(status_code=400, detail=f"Message IDs not found: {', '.join(missing_ids)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message IDs not found: {', '.join(missing_ids)}",
+        )
 
-    non_shareable_ids = [message_id for message in selected_messages if (message_id := _extract_message_id(message)) is not None and not _is_shareable_message(message)]
+    non_shareable_ids: list[str] = []
+    for message in selected_messages:
+        message_id = _extract_message_id(message)
+        if message_id is not None and not _is_shareable_message(message):
+            non_shareable_ids.append(message_id)
     if non_shareable_ids:
-        raise HTTPException(status_code=400, detail=f"Message IDs are not shareable: {', '.join(non_shareable_ids)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message IDs are not shareable: {', '.join(non_shareable_ids)}",
+        )
 
     created_at = now_iso()
+    expires_at = (datetime.now(UTC) + _SHARE_RETENTION).isoformat()
     title = body.title or serialized_values.get("title")
     if not isinstance(title, str):
         title = None
@@ -130,8 +205,9 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
         store,
         {
             "title": title,
-            "messages": selected_messages,
+            "messages": [_to_public_message(message) for message in selected_messages],
             "created_at": created_at,
+            "expires_at": expires_at,
         },
     )
     return ShareCreateResponse(share_id=share_id, title=title, created_at=created_at)
@@ -149,13 +225,21 @@ async def get_share(share_id: str, request: Request) -> ShareResponse:
         raise HTTPException(status_code=404, detail="Share not found")
 
     value = item.value or {}
+    if _is_expired_share(value):
+        await store.adelete(_SHARES_NS, share_id)
+        raise HTTPException(status_code=404, detail="Share not found")
+
     messages = value.get("messages", [])
     if not isinstance(messages, list):
         messages = []
+    public_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict) and _is_shareable_message(message):
+            public_messages.append(_to_public_message(message))
     title = value.get("title")
     return ShareResponse(
         share_id=share_id,
         title=title if isinstance(title, str) else None,
-        messages=messages,
+        messages=public_messages,
         created_at=value.get("created_at", ""),
     )

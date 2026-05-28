@@ -87,7 +87,7 @@ export default function SharePage() {
               <div className="min-h-0 flex-1">
                 <MessageList
                   className="min-h-screen"
-                  threadId=""
+                  threadId={shareId}
                   thread={thread}
                   hasMoreHistory={false}
                   enableSharing={false}
