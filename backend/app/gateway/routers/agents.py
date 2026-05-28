@@ -337,11 +337,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         if config_changed:
             updated = agent_cfg.model_dump(exclude_none=True)
             updated["name"] = agent_cfg.name
-            if "description" in fields_set:
-                if request.description is None:
-                    updated.pop("description", None)
-                else:
-                    updated["description"] = request.description
+            if "description" in fields_set and request.description is not None:
+                updated["description"] = request.description
 
             new_display_name = agent_cfg.display_name
             if "display_name" in fields_set:

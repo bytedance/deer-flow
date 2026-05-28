@@ -582,17 +582,6 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
-    def test_update_agent_null_description_clears_config_value(self, agent_client, tmp_path):
-        agent_client.post("/api/agents", json={"name": "desc-agent", "description": "old desc", "soul": "p"})
-
-        response = agent_client.put("/api/agents/desc-agent", json={"description": None})
-        assert response.status_code == 200
-        assert response.json()["description"] == ""
-
-        config_path = _user_agent_config_path(tmp_path, "desc-agent")
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert "description" not in config
-
     def test_update_agent_display_name(self, agent_client):
         agent_client.post("/api/agents", json={"name": "slug-agent", "soul": "p"})
 
