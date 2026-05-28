@@ -188,6 +188,18 @@ class TestBuildFallback:
         assert result.startswith("HEADSTART")
         assert "TAILEND" in result
 
+    def test_result_never_exceeds_max_chars(self):
+        """The marker itself has non-zero length; total must still respect max_chars."""
+        for max_chars in [200, 500, 1000, 5000, 20000]:
+            content = "x" * 50000
+            result = _build_fallback(content, tool_name="long_tool_name", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
+            assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+
+    def test_very_small_max_chars_does_not_crash(self):
+        content = "x" * 1000
+        result = _build_fallback(content, tool_name="t", max_chars=50, head_chars=20, tail_chars=10)
+        assert len(result) <= 50
+
 
 # ===========================================================================
 # Middleware integration tests — wrap_tool_call
@@ -202,14 +214,10 @@ class TestWrapToolCallPassThrough:
         assert result is msg
 
     def test_disabled_middleware_passes_through(self):
-        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(enabled=False))
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(enabled=False, externalize_min_chars=10, fallback_max_chars=20))
         msg = _tm("x" * 50000, name="bash")
         result = mw.wrap_tool_call(_make_request(), lambda _: msg)
-        # Even though it's disabled, the middleware still runs (enabled is for documentation)
-        # But since no thresholds are hit with default disabled behavior, let's verify
-        # Actually enabled=False is just a config flag; the middleware always applies budget
-        # The real check is thresholds
-        assert isinstance(result, ToolMessage)
+        assert result is msg
 
 
 class TestWrapToolCallExternalize:
@@ -455,12 +463,12 @@ class TestWrapToolCallEdgeCases:
     def test_no_runtime_state_uses_fallback(self):
         config = ToolOutputConfig(
             externalize_min_chars=50,
-            fallback_max_chars=100,
-            fallback_head_chars=40,
-            fallback_tail_chars=20,
+            fallback_max_chars=500,
+            fallback_head_chars=100,
+            fallback_tail_chars=50,
         )
         mw = ToolOutputBudgetMiddleware(config=config)
-        content = "x" * 200
+        content = "x" * 1000
         msg = _tm(content, name="tool")
         req = SimpleNamespace(
             tool_call={"name": "tool", "id": "tc-1"},
@@ -471,6 +479,7 @@ class TestWrapToolCallEdgeCases:
 
         assert isinstance(result, ToolMessage)
         assert "omitted" in result.content
+        assert len(result.content) <= 500
 
 
 # ===========================================================================
@@ -497,9 +506,9 @@ class TestMCPContentAndArtifact:
             assert result.tool_call_id == "tc-mcp"
 
     def test_multiple_text_blocks_joined_and_budgeted(self):
-        config = ToolOutputConfig(externalize_min_chars=50, fallback_max_chars=100, fallback_head_chars=40, fallback_tail_chars=20)
+        config = ToolOutputConfig(externalize_min_chars=50, fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
         mw = ToolOutputBudgetMiddleware(config=config)
-        content = [{"type": "text", "text": "a" * 80}, {"type": "text", "text": "b" * 80}]
+        content = [{"type": "text", "text": "a" * 300}, {"type": "text", "text": "b" * 300}]
         msg = ToolMessage(content=content, name="mcp_tool", tool_call_id="tc-mcp2")
         req = _make_request(tool_name="mcp_tool")
 
@@ -568,9 +577,9 @@ class TestAsyncPaths:
 
     @pytest.mark.anyio
     async def test_async_model_call_patches_history(self):
-        config = ToolOutputConfig(fallback_max_chars=100, fallback_head_chars=40, fallback_tail_chars=20)
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
         mw = ToolOutputBudgetMiddleware(config=config)
-        oversized = _tm("h" * 200, name="tool", tool_call_id="tc-h")
+        oversized = _tm("h" * 1000, name="tool", tool_call_id="tc-h")
         request = ModelRequest(model=None, messages=[oversized], tools=[], state={})
         captured: dict[str, ModelRequest] = {}
 
@@ -594,9 +603,9 @@ class TestAsyncPaths:
 
 class TestWrapModelCall:
     def test_oversized_historical_messages_truncated(self):
-        config = ToolOutputConfig(fallback_max_chars=100, fallback_head_chars=40, fallback_tail_chars=20)
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
         mw = ToolOutputBudgetMiddleware(config=config)
-        oversized = _tm("q" * 200, name="tool", tool_call_id="tc-q")
+        oversized = _tm("q" * 1000, name="tool", tool_call_id="tc-q")
         request = ModelRequest(model=None, messages=[oversized], tools=[], state={})
         captured: dict[str, ModelRequest] = {}
 
@@ -644,11 +653,11 @@ class TestWrapModelCall:
         assert captured["request"] is request
 
     def test_non_tool_messages_preserved(self):
-        config = ToolOutputConfig(fallback_max_chars=50)
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
         mw = ToolOutputBudgetMiddleware(config=config)
         human = HumanMessage(content="x" * 200)
         ai = AIMessage(content="y" * 200)
-        oversized_tool = _tm("z" * 200, name="tool")
+        oversized_tool = _tm("z" * 1000, name="tool")
         request = ModelRequest(model=None, messages=[human, ai, oversized_tool], tools=[], state={})
         captured: dict[str, ModelRequest] = {}
 
@@ -693,8 +702,8 @@ class TestPatchModelMessages:
         assert _patch_model_messages(messages, config) is None
 
     def test_patches_oversized_messages(self):
-        config = ToolOutputConfig(fallback_max_chars=50, fallback_head_chars=20, fallback_tail_chars=10)
-        messages = [_tm("x" * 100, name="tool")]
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [_tm("x" * 1000, name="tool")]
         result = _patch_model_messages(messages, config)
         assert result is not None
         assert len(result) == 1

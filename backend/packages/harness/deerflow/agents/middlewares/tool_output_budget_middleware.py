@@ -154,13 +154,23 @@ def _build_fallback(
     head_chars: int,
     tail_chars: int,
 ) -> str:
-    """Build a head+tail truncation when disk persistence is unavailable."""
+    """Build a head+tail truncation when disk persistence is unavailable.
+
+    The returned string is guaranteed to be no longer than *max_chars*.
+    """
     total = len(content)
     if max_chars <= 0 or total <= max_chars:
         return content
 
-    effective_head = min(head_chars, max_chars)
-    effective_tail = min(tail_chars, max(0, max_chars - effective_head))
+    marker_template = "\n\n[... {n} chars omitted from {tn} output. Persistent storage unavailable. Consider narrowing the query or using more specific parameters.]\n\n"
+    marker_overhead = len(marker_template.format(n=total, tn=tool_name))
+
+    if marker_overhead >= max_chars:
+        return content[:max_chars]
+
+    budget = max_chars - marker_overhead
+    effective_head = min(head_chars, budget)
+    effective_tail = min(tail_chars, max(0, budget - effective_head))
 
     head_end = _snap_to_line_boundary(content, min(effective_head, total))
     tail_start = max(head_end, total - effective_tail)
@@ -172,7 +182,7 @@ def _build_fallback(
     tail = content[tail_start:] if tail_start < total else ""
     omitted = total - len(head) - len(tail)
 
-    marker = f"\n\n[... {omitted} chars omitted from {tool_name} output. Persistent storage unavailable. Consider narrowing the query or using more specific parameters.]\n\n"
+    marker = marker_template.format(n=omitted, tn=tool_name)
 
     parts = [head, marker]
     if tail:
@@ -364,6 +374,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         result = handler(request)
+        if not self._config.enabled:
+            return result
         outputs_path = _resolve_outputs_path(request)
         return _patch_result(result, self._config, outputs_path)
 
@@ -374,8 +386,12 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         result = await handler(request)
+        if not self._config.enabled:
+            return result
         outputs_path = _resolve_outputs_path(request)
-        return _patch_result(result, self._config, outputs_path)
+        import asyncio
+
+        return await asyncio.to_thread(_patch_result, result, self._config, outputs_path)
 
     # -- model call hooks (historical message truncation) ------------------
 
@@ -385,11 +401,12 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        messages = getattr(request, "messages", None)
-        if isinstance(messages, list):
-            patched = _patch_model_messages(messages, self._config)
-            if patched is not None:
-                request = request.override(messages=patched)
+        if self._config.enabled:
+            messages = getattr(request, "messages", None)
+            if isinstance(messages, list):
+                patched = _patch_model_messages(messages, self._config)
+                if patched is not None:
+                    request = request.override(messages=patched)
         return handler(request)
 
     @override
@@ -398,9 +415,10 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        messages = getattr(request, "messages", None)
-        if isinstance(messages, list):
-            patched = _patch_model_messages(messages, self._config)
-            if patched is not None:
-                request = request.override(messages=patched)
+        if self._config.enabled:
+            messages = getattr(request, "messages", None)
+            if isinstance(messages, list):
+                patched = _patch_model_messages(messages, self._config)
+                if patched is not None:
+                    request = request.override(messages=patched)
         return await handler(request)
