@@ -1,13 +1,13 @@
 "use client";
 
+import { Database, GitBranch, Plus, Trash2 } from "lucide-react";
 import { useCallback } from "react";
-import { Plus, Trash2, Database, GitBranch } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-
+import { useI18n } from "@/core/i18n/hooks";
 import type { DataStep, Transform } from "@/core/report-templates/use-template-dsl";
 
 interface DataStepsPanelProps {
@@ -27,27 +27,26 @@ export function DataStepsPanel({
   selectedId,
   onSelect,
 }: DataStepsPanelProps) {
+  const { t } = useI18n();
+
   const addDataStep = useCallback(() => {
     const newId = `data_${Date.now().toString(36)}`;
-    onUpdateDataSteps((prev) => [
-      ...prev,
-      { id: newId, script: "" },
-    ]);
+    onUpdateDataSteps((prev) => [...prev, { id: newId, script: "" }]);
     onSelect(newId);
-  }, [onUpdateDataSteps, onSelect]);
+  }, [onSelect, onUpdateDataSteps]);
 
   const removeDataStep = useCallback(
     (id: string) => {
-      onUpdateDataSteps((prev) => prev.filter((s) => s.id !== id));
+      onUpdateDataSteps((prev) => prev.filter((step) => step.id !== id));
       if (selectedId === id) onSelect(null);
     },
-    [onUpdateDataSteps, selectedId, onSelect],
+    [onSelect, onUpdateDataSteps, selectedId],
   );
 
   const updateDataStep = useCallback(
     (id: string, updates: Partial<DataStep>) => {
       onUpdateDataSteps((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+        prev.map((step) => (step.id === id ? { ...step, ...updates } : step)),
       );
     },
     [onUpdateDataSteps],
@@ -55,25 +54,26 @@ export function DataStepsPanel({
 
   const addTransform = useCallback(() => {
     const newId = `transform_${Date.now().toString(36)}`;
-    onUpdateTransforms((prev) => [
-      ...prev,
-      { id: newId, script: "" },
-    ]);
+    onUpdateTransforms((prev) => [...prev, { id: newId, script: "" }]);
     onSelect(newId);
-  }, [onUpdateTransforms, onSelect]);
+  }, [onSelect, onUpdateTransforms]);
 
   const removeTransform = useCallback(
     (id: string) => {
-      onUpdateTransforms((prev) => prev.filter((t) => t.id !== id));
+      onUpdateTransforms((prev) =>
+        prev.filter((transform) => transform.id !== id),
+      );
       if (selectedId === id) onSelect(null);
     },
-    [onUpdateTransforms, selectedId, onSelect],
+    [onSelect, onUpdateTransforms, selectedId],
   );
 
   const updateTransform = useCallback(
     (id: string, updates: Partial<Transform>) => {
       onUpdateTransforms((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, ...updates } : t)),
+        prev.map((transform) =>
+          transform.id === id ? { ...transform, ...updates } : transform,
+        ),
       );
     },
     [onUpdateTransforms],
@@ -81,22 +81,21 @@ export function DataStepsPanel({
 
   return (
     <div className="space-y-6">
-      {/* Data Steps */}
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Database className="h-4 w-4" />
-            Data Steps
+            {t.editor.dataSteps}
           </h3>
           <Button variant="outline" size="sm" onClick={addDataStep}>
             <Plus className="mr-1 h-3 w-3" />
-            Add
+            {t.editor.addDataStep}
           </Button>
         </div>
 
         {dataSteps.length === 0 ? (
           <p className="py-4 text-center text-xs text-muted-foreground">
-            No data steps. Add scripts that fetch data.
+            {t.editor.noDataSteps}
           </p>
         ) : (
           <div className="space-y-2">
@@ -109,11 +108,13 @@ export function DataStepsPanel({
                   <Database className="h-3.5 w-3.5 text-muted-foreground" />
                   <Input
                     value={step.id}
-                    onChange={(e) => {
+                    onChange={(event) => {
                       const oldId = step.id;
                       onUpdateDataSteps((prev) =>
-                        prev.map((s) =>
-                          s.id === oldId ? { ...s, id: e.target.value } : s,
+                        prev.map((item) =>
+                          item.id === oldId
+                            ? { ...item, id: event.target.value }
+                            : item,
                         ),
                       );
                     }}
@@ -131,32 +132,32 @@ export function DataStepsPanel({
                 </CardHeader>
                 <CardContent className="space-y-2 p-3 pt-1">
                   <div>
-                    <Label className="text-xs">Script</Label>
+                    <Label className="text-xs">{t.editor.script}</Label>
                     <Input
                       value={step.script}
-                      onChange={(e) =>
-                        updateDataStep(step.id, { script: e.target.value })
+                      onChange={(event) =>
+                        updateDataStep(step.id, { script: event.target.value })
                       }
                       className="h-7 text-xs font-mono"
-                      placeholder="skill_name/script_name"
+                      placeholder={t.editor.scriptPlaceholder}
                     />
                   </div>
                   <div>
-                    <Label className="text-xs">Args (JSON)</Label>
+                    <Label className="text-xs">{t.editor.argsJson}</Label>
                     <Input
                       value={step.args ? JSON.stringify(step.args) : ""}
-                      onChange={(e) => {
+                      onChange={(event) => {
                         try {
-                          const args = e.target.value
-                            ? JSON.parse(e.target.value)
+                          const args = event.target.value
+                            ? JSON.parse(event.target.value)
                             : undefined;
                           updateDataStep(step.id, { args });
                         } catch {
-                          // ignore invalid JSON while typing
+                          // Ignore invalid JSON while typing.
                         }
                       }}
                       className="h-7 text-xs font-mono"
-                      placeholder='{"key": "value"}'
+                      placeholder={t.editor.argsPlaceholder}
                     />
                   </div>
                 </CardContent>
@@ -166,22 +167,21 @@ export function DataStepsPanel({
         )}
       </div>
 
-      {/* Transforms */}
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <GitBranch className="h-4 w-4" />
-            Transforms
+            {t.editor.transforms}
           </h3>
           <Button variant="outline" size="sm" onClick={addTransform}>
             <Plus className="mr-1 h-3 w-3" />
-            Add
+            {t.editor.addTransform}
           </Button>
         </div>
 
         {transforms.length === 0 ? (
           <p className="py-4 text-center text-xs text-muted-foreground">
-            No transforms. Add data transformation steps.
+            {t.editor.noTransforms}
           </p>
         ) : (
           <div className="space-y-2">
@@ -194,11 +194,13 @@ export function DataStepsPanel({
                   <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
                   <Input
                     value={transform.id}
-                    onChange={(e) => {
+                    onChange={(event) => {
                       const oldId = transform.id;
                       onUpdateTransforms((prev) =>
-                        prev.map((t) =>
-                          t.id === oldId ? { ...t, id: e.target.value } : t,
+                        prev.map((item) =>
+                          item.id === oldId
+                            ? { ...item, id: event.target.value }
+                            : item,
                         ),
                       );
                     }}
@@ -216,27 +218,29 @@ export function DataStepsPanel({
                 </CardHeader>
                 <CardContent className="space-y-2 p-3 pt-1">
                   <div>
-                    <Label className="text-xs">Script</Label>
+                    <Label className="text-xs">{t.editor.script}</Label>
                     <Input
                       value={transform.script}
-                      onChange={(e) =>
-                        updateTransform(transform.id, { script: e.target.value })
-                      }
-                      className="h-7 text-xs font-mono"
-                      placeholder="skill_name/transform_name"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Input Source</Label>
-                    <Input
-                      value={transform.input ?? ""}
-                      onChange={(e) =>
+                      onChange={(event) =>
                         updateTransform(transform.id, {
-                          input: e.target.value || undefined,
+                          script: event.target.value,
                         })
                       }
                       className="h-7 text-xs font-mono"
-                      placeholder="$.data.step_id"
+                      placeholder={t.editor.transformScriptPlaceholder}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">{t.editor.inputSource}</Label>
+                    <Input
+                      value={transform.input ?? ""}
+                      onChange={(event) =>
+                        updateTransform(transform.id, {
+                          input: event.target.value || undefined,
+                        })
+                      }
+                      className="h-7 text-xs font-mono"
+                      placeholder={t.editor.transformInputPlaceholder}
                     />
                   </div>
                 </CardContent>

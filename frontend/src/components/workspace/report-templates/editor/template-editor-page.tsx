@@ -1,8 +1,5 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { toast } from "sonner";
 import {
   ArrowLeft,
   Code,
@@ -13,20 +10,10 @@ import {
   Send,
   ShoppingBag,
 } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
-import { useReportTemplate, useReportTemplateVersion } from "@/core/report-templates/hooks";
-import {
-  updateReportTemplate,
-  publishReportTemplate,
-} from "@/core/report-templates/api";
-import {
-  useTemplateDSL,
-  type ReportTemplateDSL,
-} from "@/core/report-templates/use-template-dsl";
-import {
-  applyResolvedAuthError,
-  resolveAuthError,
-} from "@/core/auth/api-error";
 import { Button } from "@/components/ui/button";
 import {
   Tabs,
@@ -34,19 +21,34 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
+import {
+  applyResolvedAuthError,
+  resolveAuthError,
+} from "@/core/auth/api-error";
+import { useI18n } from "@/core/i18n/hooks";
+import {
+  publishReportTemplate,
+  updateReportTemplate,
+} from "@/core/report-templates/api";
+import { useReportTemplate, useReportTemplateVersion } from "@/core/report-templates/hooks";
+import {
+  type ReportTemplateDSL,
+  useTemplateDSL,
+} from "@/core/report-templates/use-template-dsl";
 
+import { DataStepsPanel } from "./data-steps-panel";
+import { EditorActionsDialog } from "./editor-actions-dialog";
 import { EditorPalette } from "./editor-palette";
+import { EditorPropertyPanel } from "./editor-property-panel";
 import { FormStepsPanel } from "./form-steps-panel";
 import { SectionsPanel } from "./sections-panel";
-import { DataStepsPanel } from "./data-steps-panel";
-import { EditorPropertyPanel } from "./editor-property-panel";
-import { YamlEditor } from "./yaml-editor";
 import { ValidationPanel } from "./validation-panel";
-import { EditorActionsDialog } from "./editor-actions-dialog";
+import { YamlEditor } from "./yaml-editor";
 
 export function TemplateEditorPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { t } = useI18n();
   const templateId = params.id;
 
   const { detail, isLoading } = useReportTemplate(templateId);
@@ -72,20 +74,21 @@ export function TemplateEditorPage() {
 
   const dslHook = useTemplateDSL(initialDSL);
 
-  // Unsaved changes warning
   useEffect(() => {
     if (!dslHook.isDirty) return;
 
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
     };
+
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [dslHook.isDirty]);
 
   const handleSave = useCallback(async () => {
     if (!detail?.template) return;
+
     setIsSaving(true);
     try {
       await updateReportTemplate(templateId, {
@@ -94,25 +97,25 @@ export function TemplateEditorPage() {
         expected_etag: detail.template.etag,
       });
       dslHook.markClean();
-      toast.success("Template saved");
+      toast.success(t.editor.saveSuccess);
     } catch (err) {
-      const authError = resolveAuthError(err, "保存");
+      const authError = resolveAuthError(err, t.editor.save);
       if (authError) {
         toast.error(authError.message);
         applyResolvedAuthError(authError, window.location.pathname);
         return;
       }
-      toast.error((err as Error).message || "Failed to save");
+      toast.error((err as Error).message || t.editor.saveFailed);
     } finally {
       setIsSaving(false);
     }
-  }, [detail, templateId, dslHook]);
+  }, [detail, dslHook, t.editor.save, t.editor.saveFailed, t.editor.saveSuccess, templateId]);
 
   const handlePublish = useCallback(async () => {
     if (!detail?.template) return;
+
     setIsPublishing(true);
     try {
-      // Save first
       await updateReportTemplate(templateId, {
         dsl: dslHook.dsl as unknown as Record<string, unknown>,
         dsl_yaml: dslHook.dslYaml,
@@ -123,19 +126,26 @@ export function TemplateEditorPage() {
       await publishReportTemplate(templateId, {
         expected_current_version: detail.template.current_version,
       });
-      toast.success("Template published");
+      toast.success(t.editor.publishSuccess);
     } catch (err) {
-      const authError = resolveAuthError(err, "发布");
+      const authError = resolveAuthError(err, t.editor.publish);
       if (authError) {
         toast.error(authError.message);
         applyResolvedAuthError(authError, window.location.pathname);
         return;
       }
-      toast.error((err as Error).message || "Failed to publish");
+      toast.error((err as Error).message || t.editor.publishFailed);
     } finally {
       setIsPublishing(false);
     }
-  }, [detail, templateId, dslHook]);
+  }, [
+    detail,
+    dslHook,
+    t.editor.publish,
+    t.editor.publishFailed,
+    t.editor.publishSuccess,
+    templateId,
+  ]);
 
   if (isLoading || !detail) {
     return (
@@ -147,7 +157,6 @@ export function TemplateEditorPage() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
       <header className="flex items-center justify-between border-b px-4 py-2">
         <div className="flex items-center gap-3">
           <Button
@@ -159,11 +168,12 @@ export function TemplateEditorPage() {
           </Button>
           <div>
             <h1 className="text-sm font-semibold">
-              {detail.template.display_name || "Template Editor"}
+              {detail.template.display_name || t.editor.templateEditorFallbackTitle}
             </h1>
             <p className="text-xs text-muted-foreground">
-              {dslHook.isDirty ? "Unsaved changes" : "All changes saved"}
-              {detail.template.status === "published" && ` | v${detail.template.current_version}`}
+              {dslHook.isDirty ? t.editor.unsavedChanges : t.editor.allSaved}
+              {detail.template.status === "published" &&
+                ` | v${detail.template.current_version}`}
             </p>
           </div>
         </div>
@@ -172,10 +182,14 @@ export function TemplateEditorPage() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setShowYaml(!showYaml)}
+            onClick={() => setShowYaml((prev) => !prev)}
           >
-            {showYaml ? <Eye className="mr-1 h-4 w-4" /> : <Code className="mr-1 h-4 w-4" />}
-            {showYaml ? "Preview" : "YAML"}
+            {showYaml ? (
+              <Eye className="mr-1 h-4 w-4" />
+            ) : (
+              <Code className="mr-1 h-4 w-4" />
+            )}
+            {showYaml ? t.editor.preview : t.editor.yaml}
           </Button>
 
           <Button
@@ -189,7 +203,7 @@ export function TemplateEditorPage() {
             ) : (
               <Save className="mr-1 h-4 w-4" />
             )}
-            Save
+            {t.editor.save}
           </Button>
 
           <Button
@@ -198,20 +212,16 @@ export function TemplateEditorPage() {
             onClick={() => setShowExportDialog(true)}
           >
             <FileDown className="mr-1 h-4 w-4" />
-            Export
+            {t.editor.export}
           </Button>
 
-          <Button
-            size="sm"
-            onClick={handlePublish}
-            disabled={isPublishing}
-          >
+          <Button size="sm" onClick={handlePublish} disabled={isPublishing}>
             {isPublishing ? (
               <Loader2 className="mr-1 h-4 w-4 animate-spin" />
             ) : (
               <Send className="mr-1 h-4 w-4" />
             )}
-            Publish
+            {t.editor.publish}
           </Button>
 
           <Button
@@ -220,35 +230,32 @@ export function TemplateEditorPage() {
             onClick={() => setShowPublishDialog(true)}
           >
             <ShoppingBag className="mr-1 h-4 w-4" />
-            Marketplace
+            {t.editor.marketplace}
           </Button>
         </div>
       </header>
 
-      {/* Main editor area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: Palette */}
-        <div className="w-56 shrink-0 border-r overflow-y-auto">
+        <div className="w-56 shrink-0 overflow-y-auto border-r">
           <EditorPalette />
         </div>
 
-        {/* Center: Canvas */}
         <div className="flex flex-1 flex-col overflow-hidden">
           <Tabs
             value={activeTab}
-            onValueChange={(v) => setActiveTab(v as typeof activeTab)}
+            onValueChange={(value) => setActiveTab(value as typeof activeTab)}
             className="flex flex-1 flex-col"
           >
             <div className="border-b px-4">
               <TabsList variant="line">
                 <TabsTrigger value="form">
-                  Form Steps ({dslHook.dsl.form_steps?.length ?? 0})
+                  {t.editor.formSteps} ({dslHook.dsl.form_steps?.length ?? 0})
                 </TabsTrigger>
                 <TabsTrigger value="data">
-                  Data Steps ({dslHook.dsl.data_steps?.length ?? 0})
+                  {t.editor.dataSteps} ({dslHook.dsl.data_steps?.length ?? 0})
                 </TabsTrigger>
                 <TabsTrigger value="sections">
-                  Sections ({dslHook.dsl.sections?.length ?? 0})
+                  {t.editor.sections} ({dslHook.dsl.sections?.length ?? 0})
                 </TabsTrigger>
               </TabsList>
             </div>
@@ -284,7 +291,6 @@ export function TemplateEditorPage() {
             </TabsContent>
           </Tabs>
 
-          {/* YAML view */}
           {showYaml && (
             <div className="border-t" style={{ height: "40%" }}>
               <YamlEditor
@@ -294,20 +300,14 @@ export function TemplateEditorPage() {
             </div>
           )}
 
-          {/* Validation */}
           <ValidationPanel templateId={templateId} dsl={dslHook.dsl} />
         </div>
 
-        {/* Right: Property panel */}
-        <div className="w-72 shrink-0 border-l overflow-y-auto">
-          <EditorPropertyPanel
-            dsl={dslHook.dsl}
-            onUpdate={dslHook.updateDSL}
-          />
+        <div className="w-72 shrink-0 overflow-y-auto border-l">
+          <EditorPropertyPanel dsl={dslHook.dsl} onUpdate={dslHook.updateDSL} />
         </div>
       </div>
 
-      {/* Dialogs */}
       {showPublishDialog && (
         <EditorActionsDialog
           open={showPublishDialog}

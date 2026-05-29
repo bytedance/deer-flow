@@ -16,6 +16,7 @@ from deerflow.report_templates.runtime.payload_builder import (
     PayloadBuildError,
     assemble_payload,
 )
+from deerflow.report_templates.runtime.step_renderer import build_form_props
 from deerflow.report_templates.runtime.state import (
     RuntimeState,
     StateNotFoundError,
@@ -290,6 +291,102 @@ class TestPayloadBuilder:
             "report_date": "2026-05-18",
             "kpi_keys": ["a", "b"],
         }
+
+
+# ---------------------------------------------------------------------------
+# step_renderer.py
+# ---------------------------------------------------------------------------
+
+
+class TestStepRenderer:
+    def test_build_form_props_supports_nested_output_id_path(self):
+        st = _state(
+            step_outputs={
+                "kpi_catalog": {
+                    "list_equipment": {
+                        "available_kpis": [
+                            {
+                                "key": "runtime_rate",
+                                "label": "Runtime Rate",
+                                "description": "Equipment runtime rate",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        step = {
+            "id": "kpis",
+            "title": "Select KPI",
+            "fields": [
+                {
+                    "name": "kpi_keys",
+                    "label": "KPI",
+                    "type": "multi-select",
+                    "options_source": {
+                        "step": "kpi_catalog",
+                        "path": "list_equipment.available_kpis",
+                        "label": "label",
+                        "value": "key",
+                        "description": "description",
+                    },
+                }
+            ],
+            "next": "generate",
+        }
+
+        props = build_form_props(step=step, state=st, callback_id="cb-1")
+
+        assert props["fields"][0]["options"] == [
+            {
+                "label": "Runtime Rate",
+                "value": "runtime_rate",
+                "description": "Equipment runtime rate",
+            }
+        ]
+
+    def test_build_form_props_allows_single_output_shorthand_path(self):
+        st = _state(
+            step_outputs={
+                "kpi_catalog": {
+                    "list_equipment": {
+                        "available_kpis": [
+                            {
+                                "key": "alarm_count",
+                                "label": "Alarm Count",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        step = {
+            "id": "kpis",
+            "title": "Select KPI",
+            "fields": [
+                {
+                    "name": "kpi_keys",
+                    "label": "KPI",
+                    "type": "multi-select",
+                    "options_source": {
+                        "step": "kpi_catalog",
+                        "path": "available_kpis",
+                        "label": "label",
+                        "value": "key",
+                    },
+                }
+            ],
+            "next": "generate",
+        }
+
+        props = build_form_props(step=step, state=st, callback_id="cb-2")
+
+        assert props["fields"][0]["options"] == [
+            {
+                "label": "Alarm Count",
+                "value": "alarm_count",
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------

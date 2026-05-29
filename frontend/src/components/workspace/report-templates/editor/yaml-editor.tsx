@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
+
+import { useI18n } from "@/core/i18n/hooks";
 
 interface YamlEditorProps {
   value: string;
@@ -8,6 +10,7 @@ interface YamlEditorProps {
 }
 
 export function YamlEditor({ value, onChange }: YamlEditorProps) {
+  const { t } = useI18n();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -18,8 +21,8 @@ export function YamlEditor({ value, onChange }: YamlEditorProps) {
   }, [value]);
 
   const handleChange = useCallback(
-    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      onChange(e.target.value);
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      onChange(event.target.value);
     },
     [onChange],
   );
@@ -28,10 +31,10 @@ export function YamlEditor({ value, onChange }: YamlEditorProps) {
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b px-3 py-1">
         <span className="text-xs font-medium text-muted-foreground">
-          YAML Source
+          {t.editor.yamlSource}
         </span>
         <span className="text-[10px] text-muted-foreground">
-          {value.split("\n").length} lines
+          {value.split("\n").length} {t.editor.lineCountLabel}
         </span>
       </div>
       <div className="flex-1 overflow-auto">

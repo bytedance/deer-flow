@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
+import { useCallback, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -23,12 +22,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
+import { Textarea } from "@/components/ui/textarea";
 import {
   applyResolvedAuthError,
   resolveAuthError,
 } from "@/core/auth/api-error";
-import { publishToMarketplace, exportTemplatePackage } from "@/core/marketplace/api";
+import { useI18n } from "@/core/i18n/hooks";
+import { exportTemplatePackage, publishToMarketplace } from "@/core/marketplace/api";
 
 interface EditorActionsDialogProps {
   open: boolean;
@@ -52,6 +52,7 @@ export function EditorActionsDialog({
       />
     );
   }
+
   return (
     <ExportTemplateDialog
       open={open}
@@ -70,6 +71,7 @@ function PublishToMarketplaceDialog({
   onOpenChange: (open: boolean) => void;
   templateId: string;
 }) {
+  const { t } = useI18n();
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState("tenant");
@@ -79,9 +81,10 @@ function PublishToMarketplaceDialog({
 
   const handleSubmit = useCallback(async () => {
     if (!displayName.trim()) {
-      toast.error("Display name is required");
+      toast.error(t.editor.displayNameRequired);
       return;
     }
+
     setIsSubmitting(true);
     try {
       const result = await publishToMarketplace(templateId, {
@@ -91,99 +94,115 @@ function PublishToMarketplaceDialog({
         category: category || undefined,
         tags: tags
           .split(",")
-          .map((t) => t.trim())
+          .map((tag) => tag.trim())
           .filter(Boolean),
       });
-      toast.success(result.message || "Published to marketplace");
+      toast.success(result.message || t.editor.publishSuccessMsg);
       onOpenChange(false);
     } catch (err) {
-      const authError = resolveAuthError(err, "发布");
+      const authError = resolveAuthError(err, t.editor.publish);
       if (authError) {
         toast.error(authError.message);
         applyResolvedAuthError(authError, window.location.pathname);
         return;
       }
-      toast.error((err as Error).message || "Failed to publish");
+      toast.error((err as Error).message || t.editor.publishFailedMsg);
     } finally {
       setIsSubmitting(false);
     }
-  }, [templateId, displayName, description, visibility, category, tags, onOpenChange]);
+  }, [
+    category,
+    description,
+    displayName,
+    onOpenChange,
+    t.editor.displayNameRequired,
+    t.editor.publish,
+    t.editor.publishFailedMsg,
+    t.editor.publishSuccessMsg,
+    tags,
+    templateId,
+    visibility,
+  ]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Publish to Marketplace</DialogTitle>
+          <DialogTitle>{t.editor.publishToMarketplace}</DialogTitle>
           <DialogDescription>
-            Share this template with others through the template marketplace.
+            {t.editor.publishToMarketplaceDescription}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div>
-            <Label>Display Name *</Label>
+            <Label>{t.editor.displayNameLabel} *</Label>
             <Input
               value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Equipment Daily Report"
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder={t.editor.templateDisplayNamePlaceholder}
             />
           </div>
 
           <div>
-            <Label>Description</Label>
+            <Label>{t.editor.descriptionLabel}</Label>
             <Textarea
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Describe what this template does..."
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder={t.editor.templateDescriptionPlaceholder}
               rows={3}
             />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label>Visibility</Label>
+              <Label>{t.editor.visibilityLabel}</Label>
               <Select value={visibility} onValueChange={setVisibility}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="tenant">Tenant</SelectItem>
-                  <SelectItem value="builtin">Builtin</SelectItem>
+                  <SelectItem value="tenant">
+                    {t.marketplace.visibilityTenant}
+                  </SelectItem>
+                  <SelectItem value="builtin">
+                    {t.marketplace.visibilityBuiltin}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div>
-              <Label>Category</Label>
+              <Label>{t.editor.categoryLabel}</Label>
               <Input
                 value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="daily"
+                onChange={(event) => setCategory(event.target.value)}
+                placeholder=""
               />
             </div>
           </div>
 
           <div>
-            <Label>Tags</Label>
+            <Label>{t.editor.tagsLabel}</Label>
             <Input
               value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="equipment, daily, monitoring"
+              onChange={(event) => setTags(event.target.value)}
+              placeholder=""
             />
             <p className="mt-0.5 text-[10px] text-muted-foreground">
-              Comma-separated
+              {t.editor.tagsHint}
             </p>
           </div>
         </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t.common.cancel}
           </Button>
           <Button onClick={handleSubmit} disabled={isSubmitting}>
             {isSubmitting ? (
               <Loader2 className="mr-1 h-4 w-4 animate-spin" />
             ) : null}
-            Publish
+            {t.editor.publish}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -200,6 +219,7 @@ function ExportTemplateDialog({
   onOpenChange: (open: boolean) => void;
   templateId: string;
 }) {
+  const { t } = useI18n();
   const [isExporting, setIsExporting] = useState(false);
 
   const handleExport = useCallback(async () => {
@@ -207,46 +227,51 @@ function ExportTemplateDialog({
     try {
       const blob = await exportTemplatePackage(templateId);
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${templateId}.template`;
-      a.click();
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${templateId}.template`;
+      anchor.click();
       URL.revokeObjectURL(url);
-      toast.success("Template exported");
+      toast.success(t.editor.exportSuccess);
       onOpenChange(false);
     } catch (err) {
-      const authError = resolveAuthError(err, "导出");
+      const authError = resolveAuthError(err, t.common.export);
       if (authError) {
         toast.error(authError.message);
         applyResolvedAuthError(authError, window.location.pathname);
         return;
       }
-      toast.error((err as Error).message || "Failed to export");
+      toast.error((err as Error).message || t.editor.exportFailed);
     } finally {
       setIsExporting(false);
     }
-  }, [templateId, onOpenChange]);
+  }, [
+    onOpenChange,
+    t.common.export,
+    t.editor.exportFailed,
+    t.editor.exportSuccess,
+    templateId,
+  ]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Export Template</DialogTitle>
+          <DialogTitle>{t.editor.exportTemplateTitle}</DialogTitle>
           <DialogDescription>
-            Download this template as a .template file that can be imported
-            into another workspace.
+            {t.editor.exportTemplateDescription}
           </DialogDescription>
         </DialogHeader>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t.common.cancel}
           </Button>
           <Button onClick={handleExport} disabled={isExporting}>
             {isExporting ? (
               <Loader2 className="mr-1 h-4 w-4 animate-spin" />
             ) : null}
-            Download .template
+            {t.editor.downloadTemplatePackage}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -29,7 +29,7 @@ from deerflow.report_templates.runtime.data_runner import (
 )
 from deerflow.report_templates.runtime.state import RuntimeState
 from deerflow.report_templates.script_registry import ScriptRegistry
-from deerflow.report_templates.source_resolver import evaluate, parse
+from deerflow.report_templates.source_resolver import parse
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +244,39 @@ def _resolve_options_path(base: Any, raw_path: str) -> Any:
     ``"groups.equipment"``). For full JSONPath syntax callers should use the
     ``source_resolver`` directly via ``$.steps...`` placeholders elsewhere.
     """
+    path = raw_path.strip()
+    if not path:
+        raise StepRenderError("options_source.path must not be empty")
+    if path.startswith("$"):
+        raise StepRenderError(
+            f"options_source.path {raw_path!r} must be relative to the producing step output"
+        )
+    if "[" in path or "]" in path:
+        raise StepRenderError(
+            f"options_source.path {raw_path!r}: array access not supported here"
+        )
+
+    parts = path.split(".")
+    if any(not part for part in parts):
+        raise StepRenderError(f"options_source.path {raw_path!r} is not a valid dotted path")
+
+    resolved = _walk_options_path(base, parts)
+    if resolved is not None:
+        return resolved
+
+    # Allow the common single-output before_step shorthand:
+    # {"list_equipment": {...}} can be addressed as "available_kpis".
+    if isinstance(base, dict) and len(base) == 1:
+        sole_value = next(iter(base.values()))
+        if isinstance(sole_value, dict):
+            resolved = _walk_options_path(sole_value, parts)
+            if resolved is not None:
+                return resolved
+
+    raise StepRenderError(
+        f"options_source.path {raw_path!r} not found in step output"
+    )
+
     if "." in raw_path:
         # Dotted path — wrap in a synthetic context so we can reuse the parser.
         ast = parse(f"$.{raw_path}")
@@ -269,3 +302,12 @@ def _resolve_options_path(base: Any, raw_path: str) -> Any:
             f"options_source.path {raw_path!r} not found in step output"
         )
     return base[raw_path]
+
+
+def _walk_options_path(base: Any, parts: list[str]) -> Any | None:
+    out = base
+    for part in parts:
+        if not isinstance(out, dict) or part not in out:
+            return None
+        out = out[part]
+    return out

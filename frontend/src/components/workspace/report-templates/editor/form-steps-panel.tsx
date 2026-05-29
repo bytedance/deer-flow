@@ -2,16 +2,16 @@
 
 import {
   DndContext,
-  closestCenter,
   KeyboardSensor,
   PointerSensor,
+  closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  arrayMove,
   SortableContext,
+  arrayMove,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
@@ -23,7 +23,8 @@ import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import type { FormStep, FormField } from "@/core/report-templates/use-template-dsl";
+import { useI18n } from "@/core/i18n/hooks";
+import type { FormField, FormStep } from "@/core/report-templates/use-template-dsl";
 import { cn } from "@/lib/utils";
 
 const FORM_FIELD_TYPES = new Set([
@@ -32,45 +33,67 @@ const FORM_FIELD_TYPES = new Set([
   "multi-select",
   "date",
   "device-selector",
+  "device-selector-multi",
 ]);
 
-function createDefaultField(type: string): FormField {
+function createDefaultField(
+  type: string,
+  labels: {
+    selectInput: string;
+    multiSelectInput: string;
+    deviceSelector: string;
+    deviceMultiSelect: string;
+    datePicker: string;
+    textInput: string;
+    optionOne: string;
+    optionTwo: string;
+  },
+): FormField {
   const name = `field_${Date.now().toString(36)}`;
+
   switch (type) {
     case "select":
       return {
         name,
         type,
-        label: "Select",
+        label: labels.selectInput,
         required: false,
         options: [
-          { label: "Option 1", value: "option_1" },
-          { label: "Option 2", value: "option_2" },
+          { label: labels.optionOne, value: "option_1" },
+          { label: labels.optionTwo, value: "option_2" },
         ],
       };
     case "multi-select":
       return {
         name,
         type,
-        label: "Multi-Select",
+        label: labels.multiSelectInput,
         required: false,
         options: [
-          { label: "Option 1", value: "option_1" },
-          { label: "Option 2", value: "option_2" },
+          { label: labels.optionOne, value: "option_1" },
+          { label: labels.optionTwo, value: "option_2" },
         ],
       };
     case "device-selector":
       return {
         name,
         type,
-        label: "Device Selector",
+        label: labels.deviceSelector,
+        required: false,
+        searchable: true,
+      };
+    case "device-selector-multi":
+      return {
+        name,
+        type,
+        label: labels.deviceMultiSelect,
         required: false,
         searchable: true,
       };
     case "date":
-      return { name, type, label: "Date", required: false };
+      return { name, type, label: labels.datePicker, required: false };
     default:
-      return { name, type, label: "Text Input", required: false };
+      return { name, type, label: labels.textInput, required: false };
   }
 }
 
@@ -87,6 +110,7 @@ export function FormStepsPanel({
   selectedId,
   onSelect,
 }: FormStepsPanelProps) {
+  const { t } = useI18n();
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -95,51 +119,54 @@ export function FormStepsPanel({
   const [dragOverStepId, setDragOverStepId] = useState<string | null>(null);
   const [isDragOverCanvas, setIsDragOverCanvas] = useState(false);
 
-  const handleFieldDragOver = useCallback((e: React.DragEvent) => {
-    const types = Array.from(e.dataTransfer.types);
+  const handleFieldDragOver = useCallback((event: React.DragEvent) => {
+    const types = Array.from(event.dataTransfer.types);
     if (types.includes("application/template-component")) {
-      e.preventDefault();
+      event.preventDefault();
     }
   }, []);
 
   const handleCanvasDrop = useCallback(
-    (e: React.DragEvent, targetStepId?: string) => {
-      e.preventDefault();
-      e.stopPropagation();
+    (event: React.DragEvent, targetStepId?: string) => {
+      event.preventDefault();
+      event.stopPropagation();
       setIsDragOverCanvas(false);
       setDragOverStepId(null);
-      const type = e.dataTransfer.getData("application/template-component");
+
+      const type = event.dataTransfer.getData("application/template-component");
       if (!type || !FORM_FIELD_TYPES.has(type)) return;
 
-      const newField = createDefaultField(type);
+      const newField = createDefaultField(type, t.editor);
 
       if (targetStepId) {
         onUpdate((prev) =>
-          prev.map((s) =>
-            s.id === targetStepId
-              ? { ...s, fields: [...s.fields, newField] }
-              : s,
+          prev.map((step) =>
+            step.id === targetStepId
+              ? { ...step, fields: [...step.fields, newField] }
+              : step,
           ),
         );
         onSelect(targetStepId);
-      } else {
-        const newId = `step_${Date.now().toString(36)}`;
-        const newStep: FormStep = {
-          id: newId,
-          title: `Step ${(steps.length ?? 0) + 1}`,
-          fields: [newField],
-        };
-        onUpdate((prev) => {
-          const updated = [...prev, newStep];
-          return updated.map((s, i) => ({
-            ...s,
-            next: i < updated.length - 1 ? updated[i + 1]!.id : undefined,
-          }));
-        });
-        onSelect(newId);
+        return;
       }
+
+      const newId = `step_${Date.now().toString(36)}`;
+      const newStep: FormStep = {
+        id: newId,
+        title: `${t.editor.stepDefaultTitle} ${(steps.length ?? 0) + 1}`,
+        fields: [newField],
+      };
+
+      onUpdate((prev) => {
+        const updated = [...prev, newStep];
+        return updated.map((step, index) => ({
+          ...step,
+          next: index < updated.length - 1 ? updated[index + 1]!.id : undefined,
+        }));
+      });
+      onSelect(newId);
     },
-    [steps.length, onUpdate, onSelect],
+    [onSelect, onUpdate, steps.length, t.editor],
   );
 
   const handleDragEnd = useCallback(
@@ -147,57 +174,57 @@ export function FormStepsPanel({
       const { active, over } = event;
       if (!over || active.id === over.id) return;
 
-      const oldIndex = steps.findIndex((s) => s.id === active.id);
-      const newIndex = steps.findIndex((s) => s.id === over.id);
+      const oldIndex = steps.findIndex((step) => step.id === active.id);
+      const newIndex = steps.findIndex((step) => step.id === over.id);
       if (oldIndex === -1 || newIndex === -1) return;
 
       const reordered = arrayMove(steps, oldIndex, newIndex);
-      // Auto-update next chain
-      const updated = reordered.map((step, i) => ({
+      const updated = reordered.map((step, index) => ({
         ...step,
-        next: i < reordered.length - 1 ? reordered[i + 1]!.id : undefined,
+        next: index < reordered.length - 1 ? reordered[index + 1]!.id : undefined,
       }));
+
       onUpdate(() => updated);
     },
-    [steps, onUpdate],
+    [onUpdate, steps],
   );
 
   const addStep = useCallback(() => {
     const newId = `step_${Date.now().toString(36)}`;
     const newStep: FormStep = {
       id: newId,
-      title: `Step ${(steps.length ?? 0) + 1}`,
+      title: `${t.editor.stepDefaultTitle} ${(steps.length ?? 0) + 1}`,
       fields: [],
     };
+
     onUpdate((prev) => {
       const updated = [...prev, newStep];
-      // Update next chain
-      return updated.map((s, i) => ({
-        ...s,
-        next: i < updated.length - 1 ? updated[i + 1]!.id : undefined,
+      return updated.map((step, index) => ({
+        ...step,
+        next: index < updated.length - 1 ? updated[index + 1]!.id : undefined,
       }));
     });
     onSelect(newId);
-  }, [steps.length, onUpdate, onSelect]);
+  }, [onSelect, onUpdate, steps.length, t.editor.stepDefaultTitle]);
 
   const removeStep = useCallback(
     (id: string) => {
       onUpdate((prev) => {
-        const filtered = prev.filter((s) => s.id !== id);
-        return filtered.map((s, i) => ({
-          ...s,
-          next: i < filtered.length - 1 ? filtered[i + 1]!.id : undefined,
+        const filtered = prev.filter((step) => step.id !== id);
+        return filtered.map((step, index) => ({
+          ...step,
+          next: index < filtered.length - 1 ? filtered[index + 1]!.id : undefined,
         }));
       });
       if (selectedId === id) onSelect(null);
     },
-    [onUpdate, selectedId, onSelect],
+    [onSelect, onUpdate, selectedId],
   );
 
   const updateStepTitle = useCallback(
     (id: string, title: string) => {
       onUpdate((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, title } : s)),
+        prev.map((step) => (step.id === id ? { ...step, title } : step)),
       );
     },
     [onUpdate],
@@ -212,21 +239,21 @@ export function FormStepsPanel({
             ? "border-primary bg-primary/5"
             : "border-transparent",
         )}
-        onDragOver={(e) => {
-          handleFieldDragOver(e);
+        onDragOver={(event) => {
+          handleFieldDragOver(event);
           setIsDragOverCanvas(true);
         }}
         onDragLeave={() => setIsDragOverCanvas(false)}
-        onDrop={(e) => handleCanvasDrop(e)}
+        onDrop={(event) => handleCanvasDrop(event)}
       >
         <p className="mb-3 text-sm">
           {isDragOverCanvas
-            ? "Drop to create a new step"
-            : "No form steps yet"}
+            ? t.editor.dropToCreateStep
+            : t.editor.noFormSteps}
         </p>
         <Button variant="outline" size="sm" onClick={addStep}>
           <Plus className="mr-1 h-4 w-4" />
-          Add First Step
+          {t.editor.addFirstStep}
         </Button>
       </div>
     );
@@ -235,19 +262,22 @@ export function FormStepsPanel({
   return (
     <div
       className="space-y-3"
-      onDragOver={(e) => {
-        handleFieldDragOver(e);
+      onDragOver={(event) => {
+        handleFieldDragOver(event);
         setIsDragOverCanvas(true);
       }}
       onDragLeave={() => setIsDragOverCanvas(false)}
-      onDrop={(e) => handleCanvasDrop(e)}
+      onDrop={(event) => handleCanvasDrop(event)}
     >
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragEnd={handleDragEnd}
       >
-        <SortableContext items={steps.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+        <SortableContext
+          items={steps.map((step) => step.id)}
+          strategy={verticalListSortingStrategy}
+        >
           {steps.map((step, index) => (
             <SortableStepCard
               key={step.id}
@@ -255,17 +285,18 @@ export function FormStepsPanel({
               index={index}
               isSelected={selectedId === step.id}
               isDragOver={dragOverStepId === step.id}
+              fieldsLabel={t.editor.fields}
               onSelect={() => onSelect(step.id)}
               onRemove={() => removeStep(step.id)}
               onTitleChange={(title) => updateStepTitle(step.id, title)}
-              onFieldDragOver={(e) => {
-                handleFieldDragOver(e);
+              onFieldDragOver={(event) => {
+                handleFieldDragOver(event);
                 setDragOverStepId(step.id);
               }}
               onFieldDragLeave={() => setDragOverStepId(null)}
-              onFieldDrop={(e) => {
-                e.stopPropagation();
-                handleCanvasDrop(e, step.id);
+              onFieldDrop={(event) => {
+                event.stopPropagation();
+                handleCanvasDrop(event, step.id);
               }}
             />
           ))}
@@ -274,7 +305,7 @@ export function FormStepsPanel({
 
       <Button variant="outline" size="sm" className="w-full" onClick={addStep}>
         <Plus className="mr-1 h-4 w-4" />
-        Add Step
+        {t.editor.addStep}
       </Button>
     </div>
   );
@@ -285,12 +316,13 @@ interface SortableStepCardProps {
   index: number;
   isSelected: boolean;
   isDragOver: boolean;
+  fieldsLabel: string;
   onSelect: () => void;
   onRemove: () => void;
   onTitleChange: (title: string) => void;
-  onFieldDragOver: (e: React.DragEvent) => void;
+  onFieldDragOver: (event: React.DragEvent) => void;
   onFieldDragLeave: () => void;
-  onFieldDrop: (e: React.DragEvent) => void;
+  onFieldDrop: (event: React.DragEvent) => void;
 }
 
 function SortableStepCard({
@@ -298,6 +330,7 @@ function SortableStepCard({
   index,
   isSelected,
   isDragOver,
+  fieldsLabel,
   onSelect,
   onRemove,
   onTitleChange,
@@ -328,14 +361,14 @@ function SortableStepCard({
         isSelected && "border-primary",
         isDragOver && "border-primary/50 ring-2 ring-primary/20",
       )}
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onFieldDragOver(e);
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onFieldDragOver(event);
       }}
-      onDragLeave={(e) => {
-        const relatedTarget = e.relatedTarget as Node | null;
-        if (relatedTarget && e.currentTarget.contains(relatedTarget)) return;
+      onDragLeave={(event) => {
+        const relatedTarget = event.relatedTarget as Node | null;
+        if (relatedTarget && event.currentTarget.contains(relatedTarget)) return;
         onFieldDragLeave();
       }}
       onDrop={onFieldDrop}
@@ -353,19 +386,19 @@ function SortableStepCard({
         </span>
         <Input
           value={step.title}
-          onChange={(e) => onTitleChange(e.target.value)}
+          onChange={(event) => onTitleChange(event.target.value)}
           onClick={onSelect}
           className="h-7 flex-1 border-0 p-0 text-sm font-medium shadow-none focus-visible:ring-1"
         />
         <span className="text-xs text-muted-foreground">
-          {step.fields.length} field{step.fields.length !== 1 ? "s" : ""}
+          {step.fields.length} {fieldsLabel}
         </span>
         <Button
           variant="ghost"
           size="icon"
           className="h-6 w-6 text-muted-foreground hover:text-destructive"
-          onClick={(e) => {
-            e.stopPropagation();
+          onClick={(event) => {
+            event.stopPropagation();
             onRemove();
           }}
         >
@@ -381,7 +414,7 @@ function SortableStepCard({
                 className="flex items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground"
               >
                 <span className="font-mono">{field.name}</span>
-                <span className="text-muted-foreground/50">·</span>
+                <span className="text-muted-foreground/50">/</span>
                 <span>{field.label || field.name}</span>
                 <span className="ml-auto text-[10px]">{field.type}</span>
               </div>

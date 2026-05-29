@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
 import { AlertCircle, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
+import { useI18n } from "@/core/i18n/hooks";
 import { validateReportTemplate } from "@/core/report-templates/api";
 import type { ValidationIssue } from "@/core/report-templates/types";
 import type { ReportTemplateDSL } from "@/core/report-templates/use-template-dsl";
-import { cn } from "@/lib/utils";
 
 interface ValidationPanelProps {
   templateId: string;
@@ -14,6 +14,7 @@ interface ValidationPanelProps {
 }
 
 export function ValidationPanel({ templateId, dsl }: ValidationPanelProps) {
+  const { t } = useI18n();
   const [errors, setErrors] = useState<ValidationIssue[]>([]);
   const [warnings, setWarnings] = useState<ValidationIssue[]>([]);
   const [isValidating, setIsValidating] = useState(false);
@@ -30,13 +31,12 @@ export function ValidationPanel({ templateId, dsl }: ValidationPanelProps) {
       setWarnings(result.warnings);
       setLastValidated(new Date());
     } catch {
-      // Validation endpoint unavailable — ignore
+      // Ignore when the validation endpoint is unavailable.
     } finally {
       setIsValidating(false);
     }
-  }, [templateId, dsl]);
+  }, [dsl, templateId]);
 
-  // Auto-validate on DSL change with debounce
   useEffect(() => {
     const timer = setTimeout(() => {
       void validate();
@@ -48,7 +48,7 @@ export function ValidationPanel({ templateId, dsl }: ValidationPanelProps) {
     return (
       <div className="flex items-center gap-2 border-t px-3 py-1.5 text-xs text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
-        Validating...
+        {t.editor.validating}
       </div>
     );
   }
@@ -59,7 +59,7 @@ export function ValidationPanel({ templateId, dsl }: ValidationPanelProps) {
     return (
       <div className="flex items-center gap-2 border-t px-3 py-1.5 text-xs text-green-600">
         <CheckCircle2 className="h-3 w-3" />
-        DSL is valid
+        {t.editor.dslValid}
       </div>
     );
   }
@@ -70,36 +70,40 @@ export function ValidationPanel({ templateId, dsl }: ValidationPanelProps) {
         {errors.length > 0 && (
           <span className="flex items-center gap-1 text-xs text-destructive">
             <AlertCircle className="h-3 w-3" />
-            {errors.length} error{errors.length !== 1 ? "s" : ""}
+            {errors.length} {t.editor.errorCountLabel}
           </span>
         )}
         {warnings.length > 0 && (
           <span className="flex items-center gap-1 text-xs text-yellow-600">
             <AlertTriangle className="h-3 w-3" />
-            {warnings.length} warning{warnings.length !== 1 ? "s" : ""}
+            {warnings.length} {t.editor.warningCountLabel}
           </span>
         )}
       </div>
       {hasIssues && (
         <div className="max-h-24 overflow-y-auto border-t px-3 py-1">
-          {errors.map((err, i) => (
+          {errors.map((error, index) => (
             <div
-              key={`err-${i}`}
+              key={`err-${index}`}
               className="flex items-start gap-1.5 py-0.5 text-xs"
             >
               <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />
-              <span className="font-mono text-muted-foreground">{err.path}</span>
-              <span>{err.message}</span>
+              <span className="font-mono text-muted-foreground">
+                {error.path}
+              </span>
+              <span>{error.message}</span>
             </div>
           ))}
-          {warnings.map((warn, i) => (
+          {warnings.map((warning, index) => (
             <div
-              key={`warn-${i}`}
+              key={`warn-${index}`}
               className="flex items-start gap-1.5 py-0.5 text-xs"
             >
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-yellow-600" />
-              <span className="font-mono text-muted-foreground">{warn.path}</span>
-              <span>{warn.message}</span>
+              <span className="font-mono text-muted-foreground">
+                {warning.path}
+              </span>
+              <span>{warning.message}</span>
             </div>
           ))}
         </div>

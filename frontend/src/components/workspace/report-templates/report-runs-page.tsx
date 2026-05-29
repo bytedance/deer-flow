@@ -6,10 +6,10 @@ import { useCallback } from "react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
+import { buildCrossPageURL, logCrossPageNavigation } from "@/core/models/navigation";
 import { useReportRuns, useReportThreads } from "@/core/report-templates";
 import type { RunStatus } from "@/core/report-templates/types";
-import { buildCrossPageURL, logCrossPageNavigation } from "@/core/models/navigation";
-import { titleOfThread, pathOfThread } from "@/core/threads/utils";
+import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { ThreadActionMenu } from "./thread-action-menu";
@@ -26,7 +26,7 @@ function RunsTab() {
   const { t } = useI18n();
   const { runs, isLoading, error } = useReportRuns({ limit: 100 });
 
-  const STATUS_LABEL: Record<RunStatus, string> = {
+  const statusLabel: Record<RunStatus, string> = {
     pending: t.reportRuns.statusPending,
     running: t.reportRuns.statusRunning,
     success: t.reportRuns.statusSuccess,
@@ -35,15 +35,19 @@ function RunsTab() {
   };
 
   if (isLoading) {
-    return <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>;
+    return (
+      <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>
+    );
   }
+
   if (error) {
     return (
       <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
-        {t.reportRuns.loadingFailed}：{String(error)}
+        {t.reportRuns.loadingFailed}: {String(error)}
       </div>
     );
   }
+
   if (runs.length === 0) {
     return (
       <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
@@ -57,13 +61,27 @@ function RunsTab() {
       <table className="min-w-full text-sm">
         <thead className="bg-muted/50 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerRunId}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerTemplate}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerVersion}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerStatus}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerCreatedAt}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerParams}</th>
-            <th className="px-3 py-2 text-left font-medium">{t.reportRuns.headerSourceChat}</th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerRunId}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerTemplate}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerVersion}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerStatus}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerCreatedAt}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerParams}
+            </th>
+            <th className="px-3 py-2 text-left font-medium">
+              {t.reportRuns.headerSourceChat}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -77,7 +95,7 @@ function RunsTab() {
                   href={`/workspace/report-runs/${run.id}`}
                   className="font-mono text-xs text-foreground underline-offset-2 hover:underline"
                 >
-                  {run.id.slice(0, 12)}…
+                  {run.id.slice(0, 12)}...
                 </Link>
               </td>
               <td className="px-3 py-2">
@@ -85,13 +103,13 @@ function RunsTab() {
                   href={`/workspace/report-templates/${run.template_id}`}
                   className="text-xs text-muted-foreground hover:text-foreground"
                 >
-                  {run.template_version_ref ?? `v${run.template_version}`}
+                  {run.template_id}
                 </Link>
               </td>
               <td className="px-3 py-2 text-xs text-muted-foreground">
                 {run.template_version != null
                   ? `v${run.template_version}`
-                  : run.template_version_ref ?? "—"}
+                  : run.template_version_ref ?? "-"}
               </td>
               <td className="px-3 py-2">
                 <span
@@ -100,7 +118,7 @@ function RunsTab() {
                     STATUS_COLOR[run.status],
                   )}
                 >
-                  {STATUS_LABEL[run.status] ?? run.status}
+                  {statusLabel[run.status] ?? run.status}
                 </span>
                 {run.error_code && (
                   <div className="text-muted-foreground mt-0.5 text-xs">
@@ -114,7 +132,7 @@ function RunsTab() {
               <td className="px-3 py-2">
                 <div className="text-muted-foreground line-clamp-1 max-w-[24rem] text-xs">
                   {Object.entries(run.parameters_summary)
-                    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
                     .join("  ")}
                 </div>
               </td>
@@ -140,10 +158,10 @@ function RunsTab() {
                     }
                     className="font-mono text-xs text-muted-foreground underline-offset-2 hover:underline"
                   >
-                    {run.thread_id.slice(0, 12)}…
+                    {run.thread_id.slice(0, 12)}...
                   </Link>
                 ) : (
-                  <span className="text-muted-foreground text-xs">—</span>
+                  <span className="text-muted-foreground text-xs">-</span>
                 )}
               </td>
             </tr>
@@ -159,15 +177,19 @@ function ChatsTab() {
   const { threads, isLoading, error } = useReportThreads();
 
   if (isLoading) {
-    return <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>;
+    return (
+      <div className="text-muted-foreground text-sm">{t.reportRuns.loading}</div>
+    );
   }
+
   if (error) {
     return (
       <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
-        {t.reportRuns.loadingFailed}：{String(error)}
+        {t.reportRuns.loadingFailed}: {String(error)}
       </div>
     );
   }
+
   if (threads.length === 0) {
     return (
       <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
@@ -181,13 +203,13 @@ function ChatsTab() {
       {threads.map((thread) => (
         <div
           key={thread.thread_id}
-          className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent group"
+          className="group flex items-center gap-1 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent"
         >
           <Link
             href={pathOfThread(thread)}
-            className="flex-1 flex items-center gap-3 min-w-0"
+            className="flex min-w-0 flex-1 items-center gap-3"
           >
-            <span className="text-foreground truncate">
+            <span className="truncate text-foreground">
               {titleOfThread(thread)}
             </span>
             <span className="text-muted-foreground shrink-0 text-xs">
@@ -208,14 +230,11 @@ export function ReportRunsPage() {
   const searchParams = useSearchParams();
   const tab = searchParams.get("tab") === "chats" ? "chats" : "runs";
 
-  const handleTabChange = useCallback(
-    (value: string) => {
-      const url = new URL(window.location.href);
-      url.searchParams.set("tab", value);
-      window.history.replaceState({}, "", url.toString());
-    },
-    [],
-  );
+  const handleTabChange = useCallback((value: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", value);
+    window.history.replaceState({}, "", url.toString());
+  }, []);
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">

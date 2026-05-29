@@ -1,5 +1,5 @@
 /**
- * ISSUE-03 regression: report-runs page thread column and navigation links.
+ * Regression coverage for report-runs page navigation and i18n labels.
  */
 
 import React from "react";
@@ -35,20 +35,49 @@ vi.mock("@/components/ui/tabs", () => ({
     React.createElement("button", null, children),
 }));
 
+vi.mock("@/core/i18n/hooks", () => ({
+  useI18n: () => ({
+    t: {
+      reportRuns: {
+        pageTitle: "report-history-test",
+        pageDescription: "report-history-description-test",
+        statusPending: "pending-test",
+        statusRunning: "running-test",
+        statusSuccess: "success-test",
+        statusFailed: "failed-test",
+        statusCancelled: "cancelled-test",
+        loading: "loading-test",
+        loadingFailed: "loading-failed-test",
+        emptyRuns: "empty-runs-test",
+        emptyChats: "empty-chats-test",
+        headerRunId: "run-id-test",
+        headerTemplate: "template-test",
+        headerVersion: "version-test",
+        headerStatus: "status-test",
+        headerCreatedAt: "created-at-test",
+        headerParams: "params-test",
+        headerSourceChat: "source-chat-test",
+        tabRuns: "runs-tab-test",
+        tabChats: "chats-tab-test",
+      },
+    },
+  }),
+}));
+
 vi.mock("@/core/report-templates", () => ({
   useReportRuns: mocks.useReportRuns,
   useReportThreads: mocks.useReportThreads,
 }));
 
 vi.mock("@/core/models/navigation", () => ({
-  buildCrossPageURL: (path: string) => path + "?from=mock",
+  buildCrossPageURL: (path: string) => `${path}?from=mock`,
   logCrossPageNavigation: vi.fn(),
 }));
 
 vi.mock("@/core/threads/utils", () => ({
-  titleOfThread: (t: { thread_id: string }) => t.thread_id,
-  pathOfThread: (t: { thread_id: string } | string) =>
-    `/workspace/chats/${typeof t === "string" ? t : t.thread_id}`,
+  titleOfThread: (thread: { thread_id: string }) => thread.thread_id,
+  pathOfThread: (thread: { thread_id: string } | string) =>
+    `/workspace/chats/${typeof thread === "string" ? thread : thread.thread_id}`,
 }));
 
 vi.mock("@/lib/utils", () => ({
@@ -102,17 +131,12 @@ describe("ReportRunsPage", () => {
       error: null,
     });
 
-    const html = renderToStaticMarkup(
-      React.createElement(ReportRunsPage),
-    );
+    const html = renderToStaticMarkup(React.createElement(ReportRunsPage));
 
-    // Thread column header present
-    expect(html).toContain("来源对话");
-    // Thread link for r1
+    expect(html).toContain("source-chat-test");
     expect(html).toContain("/workspace/chats/thread-abc-123");
     expect(html).toContain("thread-abc-12");
-    // Dash for r2 (no thread_id)
-    expect(html).toContain("—");
+    expect(html).toContain(">-<");
   });
 
   it("shows empty state when no runs exist", () => {
@@ -128,15 +152,13 @@ describe("ReportRunsPage", () => {
       error: null,
     });
 
-    const html = renderToStaticMarkup(
-      React.createElement(ReportRunsPage),
-    );
+    const html = renderToStaticMarkup(React.createElement(ReportRunsPage));
 
-    expect(html).toContain("暂无报告运行记录");
-    expect(html).toContain("暂无报告对话");
+    expect(html).toContain("empty-runs-test");
+    expect(html).toContain("empty-chats-test");
   });
 
-  it("renders Tab triggers for runs and chats", () => {
+  it("renders tab triggers for runs and chats", () => {
     mocks.useSearchParams.mockReturnValue(new URLSearchParams(""));
     mocks.useReportRuns.mockReturnValue({
       runs: [],
@@ -149,12 +171,10 @@ describe("ReportRunsPage", () => {
       error: null,
     });
 
-    const html = renderToStaticMarkup(
-      React.createElement(ReportRunsPage),
-    );
+    const html = renderToStaticMarkup(React.createElement(ReportRunsPage));
 
-    expect(html).toContain("运行记录");
-    expect(html).toContain("对话");
+    expect(html).toContain("runs-tab-test");
+    expect(html).toContain("chats-tab-test");
   });
 
   it("shows chats tab when tab=chats search param is set", () => {
@@ -176,9 +196,7 @@ describe("ReportRunsPage", () => {
       error: null,
     });
 
-    const html = renderToStaticMarkup(
-      React.createElement(ReportRunsPage),
-    );
+    const html = renderToStaticMarkup(React.createElement(ReportRunsPage));
 
     expect(html).toContain("thread-report-1");
     expect(html).toContain("/workspace/chats/thread-report-1");
@@ -197,10 +215,8 @@ describe("ReportRunsPage", () => {
       error: null,
     });
 
-    const html = renderToStaticMarkup(
-      React.createElement(ReportRunsPage),
-    );
+    const html = renderToStaticMarkup(React.createElement(ReportRunsPage));
 
-    expect(html).toContain("暂无报告对话");
+    expect(html).toContain("empty-chats-test");
   });
 });

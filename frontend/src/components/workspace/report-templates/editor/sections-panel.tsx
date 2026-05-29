@@ -1,24 +1,24 @@
 "use client";
 
-import { useCallback } from "react";
 import {
   DndContext,
-  closestCenter,
   KeyboardSensor,
   PointerSensor,
+  closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  arrayMove,
   SortableContext,
+  arrayMove,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { useCallback } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -30,7 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
+import { useI18n } from "@/core/i18n/hooks";
 import type { Section } from "@/core/report-templates/use-template-dsl";
 
 const COMPONENT_TYPES = [
@@ -40,7 +40,7 @@ const COMPONENT_TYPES = [
   "table",
   "echart",
   "image",
-];
+] as const;
 
 interface SectionsPanelProps {
   sections: Section[];
@@ -56,44 +56,62 @@ export function SectionsPanel({
   selectedId,
   onSelect,
 }: SectionsPanelProps) {
+  const { t } = useI18n();
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  const componentLabels: Record<(typeof COMPONENT_TYPES)[number], string> = {
+    markdown: t.editor.markdown,
+    card: t.editor.card,
+    card_group: t.editor.cardGroup,
+    table: t.editor.table,
+    echart: t.editor.chart,
+    image: t.editor.image,
+  };
+
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       const { active, over } = event;
       if (!over || active.id === over.id) return;
-      const oldIndex = sections.findIndex((s) => s.id === active.id);
-      const newIndex = sections.findIndex((s) => s.id === over.id);
+
+      const oldIndex = sections.findIndex((section) => section.id === active.id);
+      const newIndex = sections.findIndex((section) => section.id === over.id);
       if (oldIndex === -1 || newIndex === -1) return;
+
       onUpdate(() => arrayMove(sections, oldIndex, newIndex));
     },
-    [sections, onUpdate],
+    [onUpdate, sections],
   );
 
   const addSection = useCallback(() => {
     const newId = `section_${Date.now().toString(36)}`;
     onUpdate((prev) => [
       ...prev,
-      { id: newId, title: "New Section", component: "markdown" },
+      {
+        id: newId,
+        title: t.editor.newSection,
+        component: "markdown",
+      },
     ]);
     onSelect(newId);
-  }, [onUpdate, onSelect]);
+  }, [onSelect, onUpdate, t.editor.newSection]);
 
   const removeSection = useCallback(
     (id: string) => {
-      onUpdate((prev) => prev.filter((s) => s.id !== id));
+      onUpdate((prev) => prev.filter((section) => section.id !== id));
       if (selectedId === id) onSelect(null);
     },
-    [onUpdate, selectedId, onSelect],
+    [onSelect, onUpdate, selectedId],
   );
 
   const updateSection = useCallback(
     (id: string, updates: Partial<Section>) => {
       onUpdate((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+        prev.map((section) =>
+          section.id === id ? { ...section, ...updates } : section,
+        ),
       );
     },
     [onUpdate],
@@ -102,10 +120,10 @@ export function SectionsPanel({
   if (sections.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-        <p className="mb-3 text-sm">No sections yet</p>
+        <p className="mb-3 text-sm">{t.editor.noSections}</p>
         <Button variant="outline" size="sm" onClick={addSection}>
           <Plus className="mr-1 h-4 w-4" />
-          Add Section
+          {t.editor.addSection}
         </Button>
       </div>
     );
@@ -118,12 +136,16 @@ export function SectionsPanel({
         collisionDetection={closestCenter}
         onDragEnd={handleDragEnd}
       >
-        <SortableContext items={sections.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+        <SortableContext
+          items={sections.map((section) => section.id)}
+          strategy={verticalListSortingStrategy}
+        >
           {sections.map((section) => (
             <SortableSectionCard
               key={section.id}
               section={section}
               isSelected={selectedId === section.id}
+              componentLabels={componentLabels}
               onSelect={() => onSelect(section.id)}
               onRemove={() => removeSection(section.id)}
               onUpdate={(updates) => updateSection(section.id, updates)}
@@ -132,9 +154,14 @@ export function SectionsPanel({
         </SortableContext>
       </DndContext>
 
-      <Button variant="outline" size="sm" className="w-full" onClick={addSection}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="w-full"
+        onClick={addSection}
+      >
         <Plus className="mr-1 h-4 w-4" />
-        Add Section
+        {t.editor.addSection}
       </Button>
     </div>
   );
@@ -143,6 +170,7 @@ export function SectionsPanel({
 interface SortableSectionCardProps {
   section: Section;
   isSelected: boolean;
+  componentLabels: Record<(typeof COMPONENT_TYPES)[number], string>;
   onSelect: () => void;
   onRemove: () => void;
   onUpdate: (updates: Partial<Section>) => void;
@@ -151,10 +179,12 @@ interface SortableSectionCardProps {
 function SortableSectionCard({
   section,
   isSelected,
+  componentLabels,
   onSelect,
   onRemove,
   onUpdate,
 }: SortableSectionCardProps) {
+  const { t } = useI18n();
   const {
     attributes,
     listeners,
@@ -187,15 +217,15 @@ function SortableSectionCard({
 
         <Input
           value={section.title}
-          onChange={(e) => onUpdate({ title: e.target.value })}
+          onChange={(event) => onUpdate({ title: event.target.value })}
           onClick={onSelect}
           className="h-7 flex-1 border-0 p-0 text-sm font-medium shadow-none focus-visible:ring-1"
-          placeholder="Section title"
+          placeholder={t.editor.sectionTitlePlaceholder}
         />
 
         <Select
           value={section.component}
-          onValueChange={(v) => onUpdate({ component: v })}
+          onValueChange={(value) => onUpdate({ component: value })}
         >
           <SelectTrigger className="h-7 w-32 text-xs">
             <SelectValue />
@@ -203,7 +233,7 @@ function SortableSectionCard({
           <SelectContent>
             {COMPONENT_TYPES.map((type) => (
               <SelectItem key={type} value={type}>
-                {type}
+                {componentLabels[type]}
               </SelectItem>
             ))}
           </SelectContent>
@@ -211,18 +241,20 @@ function SortableSectionCard({
 
         <Input
           value={section.source ?? ""}
-          onChange={(e) => onUpdate({ source: e.target.value || undefined })}
+          onChange={(event) =>
+            onUpdate({ source: event.target.value || undefined })
+          }
           onClick={onSelect}
           className="h-7 w-40 text-xs font-mono"
-          placeholder="$.data.path"
+          placeholder={t.editor.sectionSourcePlaceholder}
         />
 
         <Button
           variant="ghost"
           size="icon"
           className="h-6 w-6 text-muted-foreground hover:text-destructive"
-          onClick={(e) => {
-            e.stopPropagation();
+          onClick={(event) => {
+            event.stopPropagation();
             onRemove();
           }}
         >
