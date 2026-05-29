@@ -133,11 +133,11 @@ def build_service_event_query(
 
     if query.start_time:
         ts = datetime_to_xsy_timestamp(query.start_time)
-        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']} >= {ts}")
+        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']}.id >= {ts}")
 
     if query.end_time:
         ts = datetime_to_xsy_timestamp(query.end_time)
-        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']} <= {ts}")
+        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']}.id <= {ts}")
 
     # Cursor pagination
     if last_id:

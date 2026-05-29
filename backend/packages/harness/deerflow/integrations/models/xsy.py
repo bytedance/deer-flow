@@ -43,7 +43,7 @@ class ServiceEventDetail:
     id: str
     unit_name: str | None = None            # customItem4__c
     event_name: str | None = None           # customItem6__c
-    event_time: datetime | None = None      # customItem8__c
+    event_time: datetime | None = None      # createdAt (customItem8__c is a lookup field, unusable in SQL WHERE)
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 

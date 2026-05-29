@@ -149,10 +149,10 @@ class XsyClient:
             conditions.append(f"customItem6__c like '{event_name}%'")
         if start_date:
             ts = int(datetime.fromisoformat(start_date).timestamp() * 1000)
-            conditions.append(f"customItem8__c >= {ts}")
+            conditions.append(f"customItem8__c.id >= {ts}")
         if end_date:
             ts = int(datetime.fromisoformat(end_date).timestamp() * 1000)
-            conditions.append(f"customItem8__c <= {ts}")
+            conditions.append(f"customItem8__c.id <= {ts}")
 
         where = " and ".join(conditions) if conditions else ""
         sql = f"select id, customItem4__c, customItem6__c, customItem8__c from customEntity35__c"
