@@ -93,6 +93,7 @@ async def refresh(request: Request, response: Response):
         )
 
     new_token = await provider.refresh_token(refresh_token)
+    if new_token is None:
         response.delete_cookie(key="access_token", secure=True, samesite="none")
         response.delete_cookie(key="refresh_token", secure=True, samesite="none")
         raise HTTPException(
