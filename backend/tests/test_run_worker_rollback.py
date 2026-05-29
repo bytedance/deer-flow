@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -93,6 +94,52 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_marks_llm_error_fallback_as_error_status():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                        additional_kwargs={
+                            "deerflow_error_fallback": True,
+                            "error_type": "APIConnectionError",
+                            "error_reason": "transient",
+                            "error_detail": "Connection error.",
+                        },
+                    )
+                ]
+            }
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.error == "Connection error."
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio
