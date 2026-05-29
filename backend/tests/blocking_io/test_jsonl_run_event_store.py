@@ -48,9 +48,12 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
     )
     assert len(batch) == 2
 
-    # reads: list_messages / list_events / list_messages_by_run / count_messages
+    # reads: list_messages / list_events / list_messages_by_run / count_messages.
+    # list_events is exercised both without and with the event_types filter so
+    # the filter branch runs after _read_run_events' filesystem IO.
     assert isinstance(await store.list_messages("t1"), list)
     assert isinstance(await store.list_events("t1", "r1"), list)
+    assert isinstance(await store.list_events("t1", "r1", event_types=["message"]), list)
     assert isinstance(await store.list_messages_by_run("t1", "r2"), list)
     assert await store.count_messages("t1") >= 1
 
