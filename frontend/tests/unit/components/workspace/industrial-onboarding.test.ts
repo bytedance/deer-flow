@@ -61,6 +61,12 @@ vi.mock("lucide-react", () => ({
   X: () => React.createElement("span", null, "X"),
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+  }),
+}));
+
 vi.mock("@/components/ui/button", () => ({
   Button: ({
     children,

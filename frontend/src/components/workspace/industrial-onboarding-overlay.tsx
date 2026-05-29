@@ -21,6 +21,7 @@ export function IndustrialOnboardingOverlay() {
   const { shouldShowOnboarding, completeOnboarding, recordOperation } =
     useIndustrialOnboarding();
   const router = useRouter();
+  const [isVisible, setIsVisible] = useState(shouldShowOnboarding);
   const [currentStep, setCurrentStep] = useState<OnboardingStep>(0);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -32,11 +33,18 @@ export function IndustrialOnboardingOverlay() {
     }
   }, [shouldShowOnboarding]);
 
-  if (!shouldShowOnboarding) {
+  useEffect(() => {
+    if (shouldShowOnboarding) {
+      setIsVisible(true);
+    }
+  }, [shouldShowOnboarding]);
+
+  if (!isVisible) {
     return null;
   }
 
   const handleSkip = () => {
+    setIsVisible(false);
     trackOnboardingSkip();
     completeOnboarding();
   };
@@ -70,6 +78,7 @@ export function IndustrialOnboardingOverlay() {
   };
 
   const handleFinish = () => {
+    setIsVisible(false);
     trackOnboardingComplete();
     recordOperation("trend_report");
     completeOnboarding();
