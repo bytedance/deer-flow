@@ -33,4 +33,8 @@ def load_data_analyst_module(filename: str, module_name: str) -> ModuleType:
             raise RuntimeError(f"failed to load module spec for {target}")
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
+
+    natural_name = filename.removesuffix(".py")
+    sys.modules.setdefault(natural_name, module)
+
     return module

@@ -178,8 +178,16 @@ summarization:
   - view
   - cat
 memory:
-  enabled: false
+  enabled: true
   storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: true
+  max_injection_tokens: 2000
+session_memory:
+  enabled: true
   debounce_seconds: 30
   model_name: null
   max_facts: 100
@@ -205,7 +213,7 @@ cost:
     default_daily_limit_usd: 50.0
     default_monthly_limit_usd: 1000.0
     alert_threshold_pct: 0.8
-    action_on_exceed: warn
+    action_on_exceed: block
 content_safety:
   enabled: true
   input_guard:

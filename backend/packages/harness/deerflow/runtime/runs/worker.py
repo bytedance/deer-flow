@@ -227,9 +227,15 @@ async def run_agent(
 
         runnable_config = RunnableConfig(**config)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
+            agent_result = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:
-            agent = agent_factory(config=runnable_config)
+            agent_result = agent_factory(config=runnable_config)
+
+        # Support both sync and async agent factories
+        if inspect.iscoroutine(agent_result):
+            agent = await agent_result
+        else:
+            agent = agent_result
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:

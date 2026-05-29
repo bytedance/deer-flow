@@ -101,7 +101,7 @@ async def main():
     runtime = Runtime(context={"thread_id": config["configurable"]["thread_id"]})
     config["configurable"]["__pregel_runtime"] = runtime
 
-    agent = make_lead_agent(config)
+    agent = await make_lead_agent(config)
 
     session = PromptSession(history=InMemoryHistory()) if _HAS_PROMPT_TOOLKIT else None
 

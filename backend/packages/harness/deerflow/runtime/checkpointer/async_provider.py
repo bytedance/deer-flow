@@ -160,6 +160,13 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
     3. Default InMemorySaver
     """
 
+    # Ensure sandbox env vars referenced by config.yaml have a value so
+    # that ``get_app_config()`` does not raise during LangGraph Server
+    # startup (the Gateway sets the real value later in ``create_app``).
+    import os as _os
+
+    _os.environ.setdefault("DEER_FLOW_INTERNAL_AUTH_VALUE", "")
+
     if app_config is None:
         app_config = get_app_config()
 
