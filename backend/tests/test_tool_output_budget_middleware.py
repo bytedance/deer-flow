@@ -21,12 +21,14 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     ToolOutputBudgetMiddleware,
     _build_fallback,
     _build_preview,
+    _effective_trigger,
     _externalize,
     _message_text,
     _needs_budget,
     _patch_model_messages,
     _sanitize_tool_name,
     _snap_to_line_boundary,
+    _tool_message_over_budget,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -786,6 +788,54 @@ class TestPatchModelMessages:
         assert result is not None
         assert len(result) == 1
         assert "omitted" in result[0].content
+
+
+# ===========================================================================
+# Pre-scan helpers (_effective_trigger / _tool_message_over_budget / _needs_budget)
+# These guard the fast-path optimization — a false negative here is a real bug
+# (budgeting silently skipped), so per-tool overrides must be honored.
+# ===========================================================================
+
+
+class TestPreScanHelpers:
+    def test_effective_trigger_uses_global_externalize(self):
+        config = ToolOutputConfig(externalize_min_chars=12000, fallback_max_chars=30000)
+        # smallest of the two thresholds wins
+        assert _effective_trigger("any_tool", config) == 12000
+
+    def test_effective_trigger_respects_per_tool_override(self):
+        config = ToolOutputConfig(externalize_min_chars=50000, fallback_max_chars=0, tool_overrides={"sensitive": 100})
+        assert _effective_trigger("sensitive", config) == 100
+        # other tools fall back to the (high) global
+        assert _effective_trigger("other", config) == 50000
+
+    def test_effective_trigger_per_tool_zero_falls_to_fallback(self):
+        config = ToolOutputConfig(externalize_min_chars=50, tool_overrides={"bash": 0}, fallback_max_chars=200)
+        # externalize disabled for bash → only fallback can trigger
+        assert _effective_trigger("bash", config) == 200
+
+    def test_effective_trigger_returns_negative_when_fully_disabled(self):
+        config = ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=0)
+        assert _effective_trigger("any", config) == -1
+
+    def test_pre_scan_does_not_short_circuit_per_tool_override(self):
+        """Regression: pre-scan must honor per-tool overrides, not just global threshold."""
+        config = ToolOutputConfig(externalize_min_chars=50000, fallback_max_chars=0, tool_overrides={"sensitive": 100})
+        msg = _tm("x" * 500, name="sensitive")
+        # 500 < global 50000 but > per-tool 100 → must still be flagged
+        assert _tool_message_over_budget(msg, config) is True
+        assert _needs_budget(msg, config) is True
+
+    def test_exempt_tool_never_over_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=10, fallback_max_chars=20, exempt_tools=["read_file"])
+        msg = _tm("x" * 1000, name="read_file")
+        assert _tool_message_over_budget(msg, config) is False
+
+    def test_model_call_pre_scan_skips_when_nothing_oversized(self):
+        """_patch_model_messages returns None (no list rebuild) when all messages are small."""
+        config = ToolOutputConfig(externalize_min_chars=12000, fallback_max_chars=30000)
+        messages = [_tm("small", name="tool"), HumanMessage(content="hi"), _tm("also small", name="bash")]
+        assert _patch_model_messages(messages, config) is None
 
 
 # ===========================================================================

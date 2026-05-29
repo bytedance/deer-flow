@@ -8,10 +8,12 @@ model context is never blown by a single large tool return.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace as dc_replace
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -314,25 +316,41 @@ def _patch_tool_message(msg: ToolMessage, config: ToolOutputConfig, outputs_path
     return msg.model_copy(update=update)
 
 
+def _effective_trigger(tool_name: str, config: ToolOutputConfig) -> int:
+    """Smallest content length that could trigger budgeting for *tool_name*.
+
+    Mirrors the trigger conditions in :func:`_budget_content` (per-tool
+    externalize threshold OR global fallback), so the pre-scan never produces
+    a false negative. Returns ``-1`` when nothing could ever trigger.
+    """
+    candidates: list[int] = []
+    externalize = config.tool_overrides.get(tool_name, config.externalize_min_chars)
+    if externalize > 0:
+        candidates.append(externalize)
+    if config.fallback_max_chars > 0:
+        candidates.append(config.fallback_max_chars)
+    return min(candidates) if candidates else -1
+
+
+def _tool_message_over_budget(msg: ToolMessage, config: ToolOutputConfig) -> bool:
+    """Cheap, per-tool-aware check: is this ToolMessage non-exempt and over its trigger?"""
+    if (msg.name or "") in config.exempt_tools:
+        return False
+    trigger = _effective_trigger(msg.name or "", config)
+    if trigger < 0:
+        return False
+    text = _message_text(msg.content)
+    return text is not None and len(text) > trigger
+
+
 def _needs_budget(result: ToolMessage | Command, config: ToolOutputConfig) -> bool:
     """Fast check whether *result* could need budgeting (avoids thread offload for small outputs)."""
-    threshold = min(config.externalize_min_chars, config.fallback_max_chars) if config.fallback_max_chars > 0 else config.externalize_min_chars
-    if threshold <= 0:
-        return False
-
-    def _check_msg(msg: ToolMessage) -> bool:
-        name = msg.name or ""
-        if name in config.exempt_tools:
-            return False
-        text = _message_text(msg.content)
-        return text is not None and len(text) > threshold
-
     if isinstance(result, ToolMessage):
-        return _check_msg(result)
+        return _tool_message_over_budget(result, config)
     update = getattr(result, "update", None)
     if isinstance(update, dict):
         for msg in update.get("messages", []):
-            if isinstance(msg, ToolMessage) and _check_msg(msg):
+            if isinstance(msg, ToolMessage) and _tool_message_over_budget(msg, config):
                 return True
     return False
 
@@ -364,13 +382,20 @@ def _patch_result(result: ToolMessage | Command, config: ToolOutputConfig, outpu
     if not changed:
         return result
 
-    from dataclasses import replace as dc_replace
-
     return dc_replace(result, update={**update, "messages": new_messages})
 
 
 def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list[Any] | None:
-    """Apply budget to historical ToolMessages in a model request. Returns ``None`` if unchanged."""
+    """Apply budget to historical ToolMessages in a model request. Returns ``None`` if unchanged.
+
+    A cheap pre-scan bails out before allocating a new list when no historical
+    ToolMessage exceeds the budget — the common case once every result has
+    already been budgeted at tool-call time, so a long history is not rebuilt
+    on every model call.
+    """
+    if not any(isinstance(msg, ToolMessage) and _tool_message_over_budget(msg, config) for msg in messages):
+        return None
+
     updated: list[Any] = []
     changed = False
     for msg in messages:
@@ -414,6 +439,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         result = handler(request)
         if not self._config.enabled:
             return result
+        if not _needs_budget(result, self._config):
+            return result
         outputs_path = _resolve_outputs_path(request)
         return _patch_result(result, self._config, outputs_path)
 
@@ -429,8 +456,6 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         if not _needs_budget(result, self._config):
             return result
         outputs_path = _resolve_outputs_path(request)
-        import asyncio
-
         return await asyncio.to_thread(_patch_result, result, self._config, outputs_path)
 
     # -- model call hooks (historical message truncation) ------------------
