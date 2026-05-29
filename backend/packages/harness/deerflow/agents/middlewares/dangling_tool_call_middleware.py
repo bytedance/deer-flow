@@ -112,10 +112,12 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 details = f" Parser error: {error_text}" if error_text else ""
                 return (
                     "[write_file failed before execution: the tool-call arguments were not valid JSON, "
-                    "so no file was written. This commonly happens when a large Markdown `content` payload "
-                    "contains unescaped quotes, inline JSON, backslashes, or code fences. Do not call "
-                    "`write_file` again for this artifact; provide the report/content directly as normal "
-                    f"assistant text in your next response.{details}]"
+                    "so no file was written. This often happens when the model tries to write a very "
+                    "large Markdown file in a single tool call, especially when `content` contains "
+                    "unescaped quotes, inline JSON, backslashes, or code fences. Do not retry the same "
+                    "large `write_file` payload for this artifact; provide the report/content directly "
+                    "as normal assistant text in your next response. If a file write is still needed "
+                    f"later, split the file into smaller sections instead of one large payload.{details}]"
                 )
             if error_text:
                 return f"[Tool call could not be executed because its arguments were invalid: {error_text}]"
