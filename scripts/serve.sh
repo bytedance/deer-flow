@@ -62,27 +62,129 @@ done
 
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
-_kill_port() {
+_is_repo_pid() {
+    local pid=$1
+    lsof -p "$pid" 2>/dev/null | grep -F "$REPO_ROOT" >/dev/null
+}
+
+_kill_repo_processes() {
+    local pattern=$1
+    local pid
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f "$pattern" 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+    fi
+}
+
+_kill_repo_port() {
     local port=$1
     local pid
-    pid=$(lsof -ti :"$port" 2>/dev/null) || true
-    if [ -n "$pid" ]; then
-        kill -9 $pid 2>/dev/null || true
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
+    fi
+}
+
+_is_port_listening() {
+    local port=$1
+
+    if command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+_is_repo_nginx_pid() {
+    local pid=$1
+    local command
+    local args
+
+    command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    case "$command" in
+        nginx|*/nginx) ;;
+        *) return 1 ;;
+    esac
+
+    args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
+    case "$args" in
+        *"$REPO_ROOT/docker/nginx/nginx.local.conf"*|*"$REPO_ROOT"*) return 0 ;;
+    esac
+
+    _is_repo_pid "$pid"
+}
+
+_kill_repo_nginx() {
+    local pid
+    local pids=""
+
+    if [ -f "$REPO_ROOT/logs/nginx.pid" ]; then
+        read -r pid < "$REPO_ROOT/logs/nginx.pid" || true
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            pids="$pids $pid"
+        fi
+    fi
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f nginx 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
     fi
 }
 
 stop_all() {
     echo "Stopping all services..."
-    pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-    pkill -f "next dev" 2>/dev/null || true
-    pkill -f "next start" 2>/dev/null || true
-    pkill -f "next-server" 2>/dev/null || true
+    _kill_repo_processes "uvicorn app.gateway.app:app"
+    _kill_repo_processes "next dev"
+    _kill_repo_processes "next start"
+    _kill_repo_processes "next-server"
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
-    pkill -9 nginx 2>/dev/null || true
+    _kill_repo_nginx
     # Force-kill any survivors still holding the service ports
-    _kill_port 8001
-    _kill_port 3000
+    _kill_repo_port 8001
+    _kill_repo_port 3000
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -216,13 +318,15 @@ echo ""
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
 cleanup() {
+    local status="${1:-0}"
     trap - INT TERM
     echo ""
     stop_all
-    exit 0
+    exit "$status"
 }
 
-trap cleanup INT TERM
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 # ── Helper: start a service ──────────────────────────────────────────────────
 
@@ -230,6 +334,12 @@ trap cleanup INT TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+
+    if _is_port_listening "$port"; then
+        echo "✗ $name cannot start because port $port is already in use."
+        echo "  If it belongs to this worktree, run 'make stop'; otherwise free the port manually."
+        cleanup 1
+    fi
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
@@ -242,7 +352,7 @@ run_service() {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup
+        cleanup 1
     }
     echo "✓ $name started on localhost:$port"
 }
