@@ -168,11 +168,17 @@ def create_auth_middleware():
             error = await _check_tenant_active(tenant_id, request)
             if error is not None:
                 return error
-            token = set_current_tenant_id(tenant_id)
+            ctx_token = set_current_tenant_id(tenant_id)
+            request.state.user = _UserState({
+                "id": "default",
+                "username": "default",
+                "tenant_id": tenant_id,
+                "role": "superadmin",
+            })
             try:
                 return await call_next(request)
             finally:
-                reset_tenant_id(token)
+                reset_tenant_id(ctx_token)
 
         # InsBase provider: verify token via ins-base-rpc /auth/authentication
         if config.provider == "ins_base":
@@ -188,6 +194,46 @@ def create_auth_middleware():
                     ins_provider = get_ins_base_provider()
                     if ins_provider is not None:
                         user = await ins_provider.get_user(access_token)
+
+                        # Auto-refresh: if Java RPC rejected the access token,
+                        # try using the refresh_token cookie to obtain a new one.
+                        if user is None:
+                            refresh_token = request.cookies.get("refresh_token")
+                            if not refresh_token:
+                                logger.warning(
+                                    "create_auth_middleware (ins_base): access_token rejected "
+                                    "and NO refresh_token cookie for path=%s",
+                                    request.url.path,
+                                )
+                            else:
+                                logger.info(
+                                    "create_auth_middleware (ins_base): access_token rejected, "
+                                    "attempting auto-refresh for path=%s (refresh_token=%s…)",
+                                    request.url.path, refresh_token[:16],
+                                )
+                                new_token = await ins_provider.refresh_token(refresh_token)
+                                if not new_token:
+                                    logger.warning(
+                                        "create_auth_middleware (ins_base): auto-refresh FAILED "
+                                        "(refresh_token rejected by Java RPC) for path=%s",
+                                        request.url.path,
+                                    )
+                                else:
+                                    user = await ins_provider.get_user(new_token)
+                                    if user is not None:
+                                        access_token = new_token
+                                        logger.info(
+                                            "create_auth_middleware (ins_base): auto-refresh "
+                                            "succeeded for path=%s",
+                                            request.url.path,
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "create_auth_middleware (ins_base): refresh returned "
+                                            "new token but get_user still failed for path=%s",
+                                            request.url.path,
+                                        )
+
                         if user is not None:
                             tenant_id = getattr(user, "tenant_id", "default")
                             try:
@@ -207,7 +253,19 @@ def create_auth_middleware():
                                 "ins_base_token": access_token,
                             })
                             try:
-                                return await call_next(request)
+                                response = await call_next(request)
+                                # If we refreshed the token, update the cookie
+                                # so subsequent requests use the new token.
+                                if access_token != request.cookies.get("access_token"):
+                                    response.set_cookie(
+                                        key="access_token",
+                                        value=access_token,
+                                        path="/",
+                                        httponly=True,
+                                        secure=True,
+                                        samesite="none",
+                                    )
+                                return response
                             finally:
                                 reset_tenant_id(ctx_token)
                 except AuthProviderUnavailableError as exc:

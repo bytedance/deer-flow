@@ -65,6 +65,10 @@ def _principal_from_request(request: Request) -> Principal:
     Falls back to context-vars when the request has no attached user (no-auth mode).
     """
     user = getattr(request.state, "user", None)
+    # Fallback to auth context user (set by @require_permission decorator)
+    if user is None:
+        auth = getattr(request.state, "auth", None)
+        user = getattr(auth, "user", None) if auth is not None else None
     role = getattr(user, "system_role", "") if user is not None else ""
     user_id = (
         getattr(user, "id", None) if user is not None else None

@@ -45,6 +45,10 @@ def _principal_from_request(request: Request):
     from deerflow.persistence.agent.auth import is_tenant_admin
 
     user = getattr(request.state, "user", None)
+    # Fallback to auth context user (set by @require_permission decorator)
+    if user is None:
+        auth = getattr(request.state, "auth", None)
+        user = getattr(auth, "user", None) if auth is not None else None
     role = getattr(user, "system_role", "") if user is not None else ""
     user_id = (
         getattr(user, "id", None) if user is not None else None
@@ -353,9 +357,9 @@ async def publish_to_marketplace(
     needs_approval = body.requires_approval and not (principal.is_tenant_admin or principal.is_superadmin)
 
     # Get latest version
-    if not record.versions:
+    if record.current_version == 0:
         raise HTTPException(status_code=400, detail="template has no published versions")
-    latest_version = max(record.versions)
+    latest_version = record.current_version
 
     # Check if already published
     existing = await marketplace_repo.get_listing_by_template(template_id)

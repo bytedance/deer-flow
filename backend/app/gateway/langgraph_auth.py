@@ -20,6 +20,7 @@ import secrets
 
 from langgraph_sdk import Auth
 
+from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME  # noqa: F401  # ensure env var set before checkpointer
 from deerflow.config.auth_config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 

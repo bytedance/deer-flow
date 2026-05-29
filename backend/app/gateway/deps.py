@@ -491,7 +491,7 @@ async def get_current_user_from_request(request: Request):
             def __init__(self) -> None:
                 self.id = get_effective_user_id()
                 self.tenant_id = "default"
-                self.system_role = "admin"
+                self.system_role = "superadmin"
 
         return _DefaultUser()
 

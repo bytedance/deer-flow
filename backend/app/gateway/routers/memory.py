@@ -10,13 +10,13 @@ from pydantic import BaseModel, Field
 from deerflow.agents.memory.domain_storage import DomainFact, get_domain_storage
 from deerflow.agents.memory.session_storage import get_session_storage
 from deerflow.agents.memory.updater import (
-    clear_memory_data,
-    create_memory_fact,
-    delete_memory_fact,
-    get_memory_data,
-    import_memory_data,
-    reload_memory_data,
-    update_memory_fact,
+    aclear_memory_data,
+    acreate_memory_fact,
+    adelete_memory_fact,
+    aget_memory_data,
+    aimport_memory_data,
+    areload_memory_data,
+    aupdate_memory_fact,
 )
 from deerflow.config.domain_memory_config import get_domain_memory_config
 from deerflow.config.memory_api_config import get_memory_api_config
@@ -166,7 +166,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = await aget_memory_data(user_id=get_effective_user_id())
     return MemoryResponse(**memory_data)
 
 
@@ -186,7 +186,7 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data(user_id=get_effective_user_id())
+    memory_data = await areload_memory_data(user_id=get_effective_user_id())
     return MemoryResponse(**memory_data)
 
 
@@ -200,7 +200,7 @@ async def reload_memory() -> MemoryResponse:
 async def clear_memory() -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
-        memory_data = clear_memory_data(user_id=get_effective_user_id())
+        memory_data = await aclear_memory_data(user_id=get_effective_user_id())
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -218,7 +218,7 @@ async def clear_memory() -> MemoryResponse:
 async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
     """Create a single fact manually."""
     try:
-        memory_data = create_memory_fact(
+        memory_data = await acreate_memory_fact(
             content=request.content,
             category=request.category,
             confidence=request.confidence,
@@ -243,7 +243,7 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
 async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
-        memory_data = delete_memory_fact(fact_id, user_id=get_effective_user_id())
+        memory_data = await adelete_memory_fact(fact_id, user_id=get_effective_user_id())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
@@ -263,7 +263,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
-        memory_data = update_memory_fact(
+        memory_data = await aupdate_memory_fact(
             fact_id=fact_id,
             content=request.content,
             category=request.category,
@@ -290,7 +290,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
 )
 async def get_memory_fact_endpoint(fact_id: str) -> Fact:
     """Get a single fact from memory by fact id."""
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = await aget_memory_data(user_id=get_effective_user_id())
     facts = memory_data.get("facts", [])
 
     for fact in facts:
@@ -309,7 +309,7 @@ async def get_memory_fact_endpoint(fact_id: str) -> Fact:
 )
 async def export_memory() -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = await aget_memory_data(user_id=get_effective_user_id())
     return MemoryResponse(**memory_data)
 
 
@@ -323,7 +323,7 @@ async def export_memory() -> MemoryResponse:
 async def import_memory(request: MemoryResponse) -> MemoryResponse:
     """Import and persist memory data."""
     try:
-        memory_data = import_memory_data(request.model_dump(), user_id=get_effective_user_id())
+        memory_data = await aimport_memory_data(request.model_dump(), user_id=get_effective_user_id())
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -382,7 +382,7 @@ async def get_memory_status() -> MemoryStatusResponse:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = await aget_memory_data(user_id=get_effective_user_id())
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
@@ -441,7 +441,7 @@ async def get_session_memory_endpoint(
         raise HTTPException(status_code=500, detail="Session storage unavailable")
 
     user_id = get_effective_user_id()
-    data = storage.load(thread_id, user_id=user_id)
+    data = await storage.aload(thread_id, user_id=user_id)
 
     facts = []
     for fact in data.get("facts", []):
@@ -518,7 +518,7 @@ async def import_session_memory_endpoint(
         ],
         "session_context": {},
     }
-    storage.save(data, request.thread_id, user_id=user_id)
+    await storage.asave(data, request.thread_id, user_id=user_id)
 
     await log_memory_audit(
         tenant_id=tenant_id,

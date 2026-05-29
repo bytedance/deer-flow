@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.dependencies import get_current_user, require_admin
+from app.gateway.deps import get_tenant_store
 from deerflow.config.cost_config import BudgetConfigModel, get_cost_config
 from deerflow.cost.budget import BudgetChecker, BudgetStatus
 from deerflow.cost.calculator import CostCalculator
@@ -58,6 +59,23 @@ def _get_storage() -> UsageStorage:
 def _get_checker() -> BudgetChecker:
     config = get_cost_config()
     return BudgetChecker(_get_storage(), config.budget)
+
+
+async def _resolve_tenant_limits(request: Request, tenant_id: str) -> tuple[float | None, float | None]:
+    """Look up tenant-specific daily/monthly quotas.
+
+    Returns ``(daily_limit, monthly_limit)`` — each ``None`` when the tenant
+    has no custom quota or the store is unavailable, so callers can fall back
+    to the global defaults.
+    """
+    try:
+        store = get_tenant_store(request)
+    except HTTPException:
+        return None, None
+    tenant_cfg = await store.get(tenant_id)
+    if tenant_cfg is None:
+        return None, None
+    return tenant_cfg.daily_quota_usd, tenant_cfg.monthly_quota_usd
 
 
 @router.get("/summary", response_model=CostSummaryResponse)
@@ -113,14 +131,19 @@ def get_cost_breakdown(
 
 
 @router.get("/budget", response_model=BudgetStatusResponse)
-def get_budget_status(user=Depends(get_current_user)) -> BudgetStatusResponse:
+async def get_budget_status(request: Request, user=Depends(get_current_user)) -> BudgetStatusResponse:
     """Get current budget status."""
     config = get_cost_config()
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Cost management is not enabled")
 
     checker = _get_checker()
-    status = checker.check_budget(user.tenant_id)
+    daily_limit, monthly_limit = await _resolve_tenant_limits(request, user.tenant_id)
+    status = checker.check_budget(
+        user.tenant_id,
+        daily_limit=daily_limit,
+        monthly_limit=monthly_limit,
+    )
 
     if status.alert_triggered:
         notifier = BudgetNotifier(config.budget)
@@ -141,7 +164,7 @@ def get_budget_status(user=Depends(get_current_user)) -> BudgetStatusResponse:
 
 
 @router.put("/budget", response_model=BudgetStatusResponse)
-def update_budget(req: UpdateBudgetRequest, user=Depends(require_admin)) -> BudgetStatusResponse:
+async def update_budget(req: UpdateBudgetRequest, request: Request, user=Depends(require_admin)) -> BudgetStatusResponse:
     """Update budget limits (admin only)."""
     config = get_cost_config()
     if not config.enabled:
@@ -157,7 +180,12 @@ def update_budget(req: UpdateBudgetRequest, user=Depends(require_admin)) -> Budg
         config.budget.action_on_exceed = req.action_on_exceed
 
     checker = _get_checker()
-    status = checker.check_budget(user.tenant_id)
+    daily_limit, monthly_limit = await _resolve_tenant_limits(request, user.tenant_id)
+    status = checker.check_budget(
+        user.tenant_id,
+        daily_limit=daily_limit,
+        monthly_limit=monthly_limit,
+    )
 
     if status.alert_triggered:
         notifier = BudgetNotifier(config.budget)

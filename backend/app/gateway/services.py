@@ -317,7 +317,12 @@ async def start_run(
                     )
                     raise HTTPException(
                         status_code=429,
-                        detail=f"Daily quota exceeded. Used: ${daily_cost:.2f}, Limit: ${tenant_config.daily_quota_usd:.2f}",
+                        detail={
+                            "code": "quota_daily_exceeded",
+                            "used": round(daily_cost, 2),
+                            "limit": round(tenant_config.daily_quota_usd, 2),
+                            "period": "daily",
+                        },
                     )
 
                 # Check monthly quota
@@ -330,7 +335,12 @@ async def start_run(
                     )
                     raise HTTPException(
                         status_code=429,
-                        detail=f"Monthly quota exceeded. Used: ${monthly_cost:.2f}, Limit: ${tenant_config.monthly_quota_usd:.2f}",
+                        detail={
+                            "code": "quota_monthly_exceeded",
+                            "used": round(monthly_cost, 2),
+                            "limit": round(tenant_config.monthly_quota_usd, 2),
+                            "period": "monthly",
+                        },
                     )
         except HTTPException:
             raise

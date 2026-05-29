@@ -30,9 +30,16 @@ class _DefaultUser:
 
     Satisfies the ``CurrentUser`` protocol so that repository-layer
     ``resolve_user_id(AUTO)`` works without a real authenticated user.
+    Includes ``system_role`` and ``tenant_id`` so downstream permission
+    checks (``_principal_from_request``) see a superadmin principal.
     """
 
-    id: str = "default"
+    __slots__ = ("id", "tenant_id", "system_role")
+
+    def __init__(self, tenant_id: str = "default") -> None:
+        self.id = "default"
+        self.tenant_id = tenant_id
+        self.system_role = "superadmin"
 
 
 class _DictUser:
@@ -112,7 +119,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         from deerflow.config.auth_config import get_auth_config
 
         if not get_auth_config().enabled:
-            user = _DefaultUser()
+            from deerflow.config.tenant import get_current_tenant_id
+
+            tenant_id = get_current_tenant_id() or "default"
+            user = _DefaultUser(tenant_id=tenant_id)
+            request.state.user = user
+            request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
             token = set_current_user(user)
             try:
                 return await call_next(request)

@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.auth.models import UserResponse
 from app.gateway.auth.ins_base_provider import InsBaseAuthProvider
-from app.gateway.csrf_middleware import is_secure_request
 
 logger = logging.getLogger(__name__)
 
@@ -32,37 +31,35 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
     from deerflow.config.auth_config import get_auth_config
 
     config = get_auth_config()
-    is_https = is_secure_request(request)
     response.set_cookie(
         key="access_token",
         value=token_value,
         path="/",
         httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
+        secure=True,
+        samesite="none",
+        max_age=config.token_expiry_days * 24 * 3600,
     )
 
 
 def _set_refresh_cookie(response: Response, refresh_value: str, request: Request) -> None:
     """Set the refresh_token HttpOnly cookie on the response."""
-    is_https = is_secure_request(request)
     response.set_cookie(
         key="refresh_token",
         value=refresh_value,
         path="/",
         httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=7 * 24 * 3600 if is_https else None,
+        secure=True,
+        samesite="none",
+        max_age=7 * 24 * 3600,
     )
 
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
     """Logout current user by clearing the cookie."""
-    response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
-    response.delete_cookie(key="refresh_token", secure=is_secure_request(request), samesite="lax")
+    response.delete_cookie(key="access_token", secure=True, samesite="none")
+    response.delete_cookie(key="refresh_token", secure=True, samesite="none")
     return MessageResponse(message="Successfully logged out")
 
 
@@ -96,9 +93,8 @@ async def refresh(request: Request, response: Response):
         )
 
     new_token = await provider.refresh_token(refresh_token)
-    if new_token is None:
-        response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
-        response.delete_cookie(key="refresh_token", secure=is_secure_request(request), samesite="lax")
+        response.delete_cookie(key="access_token", secure=True, samesite="none")
+        response.delete_cookie(key="refresh_token", secure=True, samesite="none")
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(
