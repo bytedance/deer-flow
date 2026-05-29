@@ -266,8 +266,8 @@ run_events:
   max_trace_content: 10240
   track_token_usage: true
 audio_input:
-  enabled: true
-  microphone_enabled: true
+  enabled: false
+  microphone_enabled: false
   file_transcription_enabled: false
   default_locale: zh-CN
   supported_locales:
