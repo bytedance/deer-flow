@@ -221,6 +221,24 @@ export function mergeMessages(
   ]);
 }
 
+export function mergeThreadValues(
+  previousValues: Partial<AgentThreadState> | undefined,
+  nextValues: Partial<AgentThreadState> | undefined,
+): Partial<AgentThreadState> | undefined {
+  if (!previousValues) {
+    return nextValues;
+  }
+  if (!nextValues) {
+    return previousValues;
+  }
+
+  return {
+    ...previousValues,
+    ...nextValues,
+    todos: nextValues.todos ?? previousValues.todos,
+  };
+}
+
 function getMessagesAfterBaseline(
   messages: Message[],
   baselineMessageIds: ReadonlySet<string>,
@@ -559,6 +577,8 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  const valuesRef = useRef<Partial<AgentThreadState> | undefined>(thread.values);
+  const valuesThreadIdRef = useRef<string | null>(threadId ?? null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
@@ -838,9 +858,17 @@ export function useThreadStream({
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
+  const activeThreadId = onStreamThreadId ?? threadId ?? null;
+  if (valuesThreadIdRef.current !== activeThreadId) {
+    valuesThreadIdRef.current = activeThreadId;
+    valuesRef.current = thread.values;
+  }
+  const mergedValues = mergeThreadValues(valuesRef.current, thread.values);
+  valuesRef.current = mergedValues;
   const mergedThread = {
     ...thread,
     messages: mergedMessages,
+    values: mergedValues,
   } as typeof thread;
 
   return {
