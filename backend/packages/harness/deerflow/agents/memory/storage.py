@@ -1,7 +1,6 @@
 """Memory storage providers."""
 
 import abc
-import asyncio
 import json
 import logging
 import threading
@@ -224,10 +223,10 @@ class StoreMemoryStorage(MemoryStorage):
         return store
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        """Load memory data from the Store."""
+        """Load memory data from the Store (sync path)."""
         try:
             store = self._get_store()
-            item = _run_async(store.aget(self._ns(agent_name, user_id=user_id), "data"))
+            item = store.get(self._ns(agent_name, user_id=user_id), "data")
         except Exception:
             logger.warning("StoreMemoryStorage.load failed, returning empty memory", exc_info=True)
             return create_empty_memory()
@@ -241,32 +240,45 @@ class StoreMemoryStorage(MemoryStorage):
         return self.load(agent_name, user_id=user_id)
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
-        """Save memory data to the Store."""
+        """Save memory data to the Store (sync path)."""
         try:
             store = self._get_store()
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
-            _run_async(store.aput(self._ns(agent_name, user_id=user_id), "data", memory_data))
+            store.put(self._ns(agent_name, user_id=user_id), "data", memory_data)
             logger.info("Memory saved to Store for tenant=%s user=%s agent=%s", get_current_tenant_id(), user_id or "", agent_name or "default")
             return True
         except Exception:
             logger.error("StoreMemoryStorage.save failed", exc_info=True)
             return False
 
+    async def aload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Async load memory data from the Store (avoids _run_async event loop issues on Windows)."""
+        try:
+            store = self._get_store()
+            item = await store.aget(self._ns(agent_name, user_id=user_id), "data")
+        except Exception:
+            logger.warning("StoreMemoryStorage.aload failed, returning empty memory", exc_info=True)
+            return create_empty_memory()
 
-def _run_async(coro):
-    """Run an async operation from sync code, handling nested event loops."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
+        if item is None or item.value is None:
+            return create_empty_memory()
+        return item.value
 
-    if loop.is_running():
-        import concurrent.futures
+    async def areload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Async reload memory data from the Store (same as aload for Store backend)."""
+        return await self.aload(agent_name, user_id=user_id)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-
-    return asyncio.run(coro)
+    async def asave(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
+        """Async save memory data to the Store (avoids _run_async event loop issues on Windows)."""
+        try:
+            store = self._get_store()
+            memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
+            await store.aput(self._ns(agent_name, user_id=user_id), "data", memory_data)
+            logger.info("Memory saved to Store for tenant=%s user=%s agent=%s", get_current_tenant_id(), user_id or "", agent_name or "default")
+            return True
+        except Exception:
+            logger.error("StoreMemoryStorage.asave failed", exc_info=True)
+            return False
 
 
 _storage_instance: MemoryStorage | None = None

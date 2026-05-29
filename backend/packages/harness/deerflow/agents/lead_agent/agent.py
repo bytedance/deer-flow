@@ -422,14 +422,14 @@ def _load_tenant_mcp_configs(tenant_id: str) -> dict[str, dict] | None:
         return None
 
 
-def make_lead_agent(config: RunnableConfig):
+async def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
-    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
+    return await _amake_lead_agent(config, app_config=runtime_app_config or get_app_config())
 
 
-def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
+def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_context: str | None = None):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -562,6 +562,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 available_skills=set(["bootstrap"]),
                 app_config=resolved_app_config,
                 thread_id=thread_id,
+                memory_context=memory_context,
             ),
             state_schema=ThreadState,
         )
@@ -621,6 +622,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             exclude_tools=agent_config.exclude_tools if agent_config else None,
             app_config=resolved_app_config,
             thread_id=thread_id,
+            memory_context=memory_context,
         ),
         state_schema=ThreadState,
     )
+
+
+async def _amake_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
+    """Async wrapper: pre-compute memory context then delegate to sync _make_lead_agent."""
+    from deerflow.agents.lead_agent.prompt import _aget_memory_context
+
+    memory_context = await _aget_memory_context(
+        agent_name=config.get("configurable", {}).get("agent_name"),
+        app_config=app_config,
+    )
+    return _make_lead_agent(config, app_config=app_config, memory_context=memory_context)

@@ -14,7 +14,7 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
-from deerflow.agents.memory.storage import MemoryStorage, _run_async, create_empty_memory
+from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory
 from deerflow.config.tenant import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class SessionStorage(MemoryStorage):
         return store
 
     def load(self, thread_id: str, *, user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
-        """Load session memory from the Store.
+        """Load session memory from the Store (sync path).
 
         Args:
             thread_id: Thread identifier.
@@ -84,7 +84,7 @@ class SessionStorage(MemoryStorage):
         """
         try:
             store = self._get_store()
-            item = _run_async(store.aget(self._ns(thread_id, user_id), "data"))
+            item = store.get(self._ns(thread_id, user_id), "data")
         except Exception:
             logger.warning("SessionStorage.load failed, returning empty session memory", exc_info=True)
             return create_empty_session_memory()
@@ -114,7 +114,7 @@ class SessionStorage(MemoryStorage):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> bool:
-        """Save session memory to the Store.
+        """Save session memory to the Store (sync path).
 
         Args:
             memory_data: Session memory data to persist.
@@ -131,7 +131,7 @@ class SessionStorage(MemoryStorage):
             store = self._get_store()
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
             start = time.monotonic()
-            _run_async(store.aput(self._ns(thread_id, user_id), "data", memory_data))
+            store.put(self._ns(thread_id, user_id), "data", memory_data)
             latency_ms = (time.monotonic() - start) * 1000
             facts_count = len(memory_data.get("facts", []))
             logger.info(
@@ -147,6 +147,56 @@ class SessionStorage(MemoryStorage):
             return True
         except Exception:
             logger.error("SessionStorage.save failed", exc_info=True)
+            return False
+
+    async def aload(self, thread_id: str, *, user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
+        """Async load session memory from the Store."""
+        try:
+            store = self._get_store()
+            item = await store.aget(self._ns(thread_id, user_id), "data")
+        except Exception:
+            logger.warning("SessionStorage.aload failed, returning empty session memory", exc_info=True)
+            return create_empty_session_memory()
+
+        if item is None or item.value is None:
+            return create_empty_session_memory()
+        return item.value
+
+    async def areload(self, thread_id: str, *, user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
+        """Async reload session memory (same as aload for Store backend)."""
+        return await self.aload(thread_id, user_id=user_id)
+
+    async def asave(
+        self,
+        memory_data: dict[str, Any],
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> bool:
+        """Async save session memory to the Store."""
+        from deerflow.agents.memory.storage import utc_now_iso_z
+
+        try:
+            store = self._get_store()
+            memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
+            start = time.monotonic()
+            await store.aput(self._ns(thread_id, user_id), "data", memory_data)
+            latency_ms = (time.monotonic() - start) * 1000
+            facts_count = len(memory_data.get("facts", []))
+            logger.info(
+                "Session memory saved: tenant=%s user=%s thread=%s facts=%d latency=%.1fms",
+                get_current_tenant_id(),
+                user_id or "",
+                thread_id,
+                facts_count,
+                latency_ms,
+            )
+            from deerflow.agents.memory.retrieval import invalidate_session_cache
+            invalidate_session_cache(thread_id, user_id)
+            return True
+        except Exception:
+            logger.error("SessionStorage.asave failed", exc_info=True)
             return False
 
 

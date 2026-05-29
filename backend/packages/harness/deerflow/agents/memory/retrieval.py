@@ -179,7 +179,67 @@ def get_session_context(
     return f"Session context:\n{formatted}"
 
 
-def compose_memory_for_prompt(
+async def aget_session_context(
+    thread_id: str,
+    user_id: str | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Async version: Retrieve and format session memory for prompt injection.
+
+    Loads session memory from SessionStorage (with in-memory cache),
+    formats it, and returns a string suitable for system prompt injection.
+
+    Args:
+        thread_id: Thread identifier.
+        user_id: Optional user identifier.
+        max_tokens: Maximum tokens to use. Defaults to config value.
+
+    Returns:
+        Formatted session context string with "Session context:" header,
+        or empty string if session memory is disabled or empty.
+    """
+    config = get_session_memory_config()
+    if not config.enabled or not config.injection_enabled:
+        return ""
+
+    if max_tokens is None:
+        max_tokens = config.max_injection_tokens
+
+    tenant = get_current_tenant_id()
+    cached = _cache_get(tenant, user_id, thread_id)
+
+    if cached is not None:
+        session_data = cached
+    else:
+        from deerflow.agents.memory.session_storage import get_session_storage
+
+        storage = get_session_storage()
+        if storage is None:
+            return ""
+
+        start = time.monotonic()
+        session_data = await storage.aload(thread_id, user_id=user_id)
+        latency_ms = (time.monotonic() - start) * 1000
+        _cache_put(tenant, user_id, thread_id, session_data)
+
+        facts_count = len(session_data.get("facts", []))
+        logger.info(
+            "Session memory retrieved: tenant=%s user=%s thread=%s facts=%d latency=%.1fms",
+            tenant,
+            user_id or "",
+            thread_id,
+            facts_count,
+            latency_ms,
+        )
+
+    formatted = _format_session_context(session_data, max_tokens)
+    if not formatted.strip():
+        return ""
+
+    return f"Session context:\n{formatted}"
+
+
+async def acompose_memory_for_prompt(
     thread_id: str,
     user_id: str | None = None,
     agent_name: str | None = None,
@@ -189,7 +249,7 @@ def compose_memory_for_prompt(
     memory_config: Any = None,
     domain_query: str | None = None,
 ) -> str:
-    """Merge User Memory, Session Memory, and Domain Memory into a prompt context string.
+    """Async version: Merge User Memory, Session Memory, and Domain Memory into a prompt context string.
 
     Allocates separate token budgets for each memory layer, formats each,
     and returns the combined result with clear section headers.
@@ -210,17 +270,18 @@ def compose_memory_for_prompt(
     """
     parts: list[str] = []
 
-    from deerflow.agents.memory import format_memory_for_injection, get_memory_data
+    from deerflow.agents.memory import format_memory_for_injection
+    from deerflow.agents.memory.updater import aget_memory_data
     from deerflow.config.memory_config import get_memory_config
 
     user_config = memory_config if memory_config is not None else get_memory_config()
     if user_config.enabled and user_config.injection_enabled:
-        user_data = get_memory_data(agent_name, user_id=user_id)
+        user_data = await aget_memory_data(agent_name, user_id=user_id)
         user_content = format_memory_for_injection(user_data, max_tokens=user_memory_tokens)
         if user_content.strip():
             parts.append(f"User context:\n{user_content}")
 
-    session_content = get_session_context(
+    session_content = await aget_session_context(
         thread_id=thread_id,
         user_id=user_id,
         max_tokens=session_memory_tokens,

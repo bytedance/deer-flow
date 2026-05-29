@@ -542,7 +542,11 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 
 
 def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
-    """Get memory context for injection into system prompt.
+    """Get memory context for injection into system prompt (sync version).
+
+    WARNING: This sync version calls store.get() which will fail on the main
+    event loop with AsyncPostgresStore. Use _aget_memory_context() instead
+    when called from async code.
 
     Merges User Memory and Session Memory into a single context block.
 
@@ -583,6 +587,67 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 
         user_id = get_effective_user_id()
         memory_content = compose_memory_for_prompt(
+            thread_id=thread_id or "",
+            user_id=user_id,
+            agent_name=agent_name,
+            user_memory_tokens=config.max_injection_tokens,
+            memory_config=config,
+        )
+
+        if not memory_content.strip():
+            return ""
+
+        return f"""<memory>
+{memory_content}
+</memory>
+"""
+    except Exception:
+        logger.exception("Failed to load memory context")
+        return ""
+
+
+async def _aget_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+    """Async version: Get memory context for injection into system prompt.
+
+    Uses await store.aget() to safely load memory on the main event loop.
+
+    Args:
+        agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        app_config: Explicit application config. When provided, memory options
+            are read from this value instead of the global config singleton.
+
+    Returns:
+        Formatted memory context string wrapped in XML tags, or empty string if disabled.
+    """
+    try:
+        from deerflow.agents.memory.retrieval import acompose_memory_for_prompt
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            config = get_memory_config()
+        else:
+            config = app_config.memory
+
+        if not config.enabled or not config.injection_enabled:
+            from deerflow.config.session_memory_config import get_session_memory_config
+
+            session_cfg = get_session_memory_config()
+            if not session_cfg.enabled or not session_cfg.injection_enabled:
+                return ""
+
+        thread_id = None
+        try:
+            from langgraph.config import get_config
+
+            cfg = get_config()
+            thread_id = cfg.get("configurable", {}).get("thread_id")
+        except Exception:
+            pass
+
+        user_id = get_effective_user_id()
+        memory_content = await acompose_memory_for_prompt(
             thread_id=thread_id or "",
             user_id=user_id,
             agent_name=agent_name,
@@ -785,9 +850,11 @@ def apply_prompt_template(
     exclude_tools: list[str] | None = None,
     app_config: AppConfig | None = None,
     thread_id: str = "",
+    memory_context: str | None = None,
 ) -> str:
-    # Get memory context
-    memory_context = _get_memory_context(agent_name, app_config=app_config)
+    # Get memory context (use pre-computed if provided, else sync fallback)
+    if memory_context is None:
+        memory_context = _get_memory_context(agent_name, app_config=app_config)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
