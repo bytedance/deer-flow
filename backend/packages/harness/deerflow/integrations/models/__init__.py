@@ -1,0 +1,85 @@
+"""Canonical models for integration data."""
+
+from deerflow.integrations.models.assessment import (
+    AnomalyStats,
+    EquipmentRisk,
+    HealthAssessment,
+    RiskItem,
+    RiskRanking,
+)
+from deerflow.integrations.models.asset import Asset, AssetContext, MeasurementPoint
+from deerflow.integrations.models.crm import Contract, CustomerProfile, ServiceObject
+from deerflow.integrations.models.erp import InventoryItem, SparePart, SparePartUsage, WorkOrder
+from deerflow.integrations.models.monitoring import (
+    AlarmEvent,
+    OrbitPayload,
+    TimeRange,
+    TrendPoint,
+    TrendSeries,
+    TrendStatistics,
+    WaveformPayload,
+)
+from deerflow.integrations.models.overview import AssetOverview
+from deerflow.integrations.models.provenance import PartialFailure, Provenance
+from deerflow.integrations.models.queries import (
+    AlarmHistoryQuery,
+    AnomalyStatsQuery,
+    AssetCatalogQuery,
+    AssetContextQuery,
+    AssetOverviewQuery,
+    ContractQuery,
+    CustomerProfileQuery,
+    HealthAssessmentQuery,
+    InventoryQuery,
+    OrbitQuery,
+    RiskRankingQuery,
+    ServiceObjectQuery,
+    SparePartQuery,
+    TrendQuery,
+    WaveformQuery,
+    WorkOrderQuery,
+)
+
+__all__ = [
+    "AlarmEvent",
+    "AlarmHistoryQuery",
+    "AnomalyStats",
+    "AnomalyStatsQuery",
+    "Asset",
+    "AssetCatalogQuery",
+    "AssetContext",
+    "AssetContextQuery",
+    "AssetOverview",
+    "AssetOverviewQuery",
+    "Contract",
+    "ContractQuery",
+    "CustomerProfile",
+    "CustomerProfileQuery",
+    "EquipmentRisk",
+    "HealthAssessment",
+    "HealthAssessmentQuery",
+    "InventoryItem",
+    "InventoryQuery",
+    "MeasurementPoint",
+    "OrbitPayload",
+    "OrbitQuery",
+    "PartialFailure",
+    "Provenance",
+    "RiskItem",
+    "RiskRanking",
+    "RiskRankingQuery",
+    "ServiceObject",
+    "ServiceObjectQuery",
+    "SparePart",
+    "SparePartQuery",
+    "SparePartUsage",
+    "TimeRange",
+    "TrendPoint",
+    "TrendQuery",
+    "TrendSeries",
+    "TrendStatistics",
+    "WaveformPayload",
+    "WaveformQuery",
+    "WorkOrder",
+    "WorkOrderQuery",
+]
