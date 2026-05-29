@@ -47,7 +47,9 @@ COPY backend ./backend
 RUN --mount=type=cache,target=/root/.cache/uv,uid=0 \
     UV_LINK_MODE=copy \
     UV_NO_CACHE=1 \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --all-packages ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    _extras="${UV_EXTRAS:-postgres,pymupdf}" && \
+    _flags=$(echo "$_extras" | tr ',' '\n' | xargs -I{} printf '%s ' --extra {}) && \
+    cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --all-packages $_flags
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
@@ -74,6 +76,12 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
+
+# libpq5 required by asyncpg + psycopg[binary] (PostgreSQL C client library)
+# transitively pulls in: libgssapi-krb5-2, libldap-2.5-0, libssl3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy Node.js runtime from builder (provides npx for MCP servers)
 COPY --from=builder /usr/local/bin/node /usr/local/bin/node
