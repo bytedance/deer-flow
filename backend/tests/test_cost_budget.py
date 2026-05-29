@@ -108,3 +108,51 @@ class TestBudgetChecker:
         status = checker.check_budget("test-tenant")
         assert status.daily_pct == 0.0
         assert status.monthly_pct == 0.0
+
+    def test_check_budget_with_tenant_specific_daily_limit(self, storage, budget_config):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        storage.add_record(UsageRecord(
+            timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
+            model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=45.0,
+        ))
+        checker = BudgetChecker(storage, budget_config)
+        # Global default is 50.0, but tenant has daily limit of 40.0
+        status = checker.check_budget("test-tenant", daily_limit=40.0)
+        assert status.daily_cost == 45.0
+        assert status.daily_limit == 40.0
+        assert status.daily_remaining == 0.0
+        assert status.is_exceeded is True
+
+    def test_check_budget_with_tenant_specific_monthly_limit(self, storage, budget_config):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        storage.add_record(UsageRecord(
+            timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
+            model_name="gpt-4", input_tokens=100000, output_tokens=50000, total_tokens=150000, cost_usd=500.0,
+        ))
+        checker = BudgetChecker(storage, budget_config)
+        # Global default is 1000.0, but tenant has monthly limit of 400.0
+        status = checker.check_budget("test-tenant", monthly_limit=400.0)
+        assert status.monthly_cost == 500.0
+        assert status.monthly_limit == 400.0
+        assert status.is_exceeded is True
+
+    def test_check_budget_tenant_limit_overrides_global(self, storage, budget_config):
+        """Tenant-specific limits take precedence over global defaults."""
+        checker = BudgetChecker(storage, budget_config)
+        status = checker.check_budget("test-tenant", daily_limit=200.0, monthly_limit=5000.0)
+        assert status.daily_limit == 200.0
+        assert status.daily_remaining == 200.0
+        assert status.monthly_limit == 5000.0
+        assert status.monthly_remaining == 5000.0
+
+    def test_would_exceed_budget_with_tenant_limit(self, storage, budget_config):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        storage.add_record(UsageRecord(
+            timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
+            model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=18.0,
+        ))
+        checker = BudgetChecker(storage, budget_config)
+        # Global daily limit is 50.0, remaining = 32.0. Cost 5.0 is fine.
+        assert checker.would_exceed_budget("test-tenant", estimated_cost=5.0) is False
+        # Tenant daily limit is 20.0, remaining = 2.0. Cost 5.0 exceeds.
+        assert checker.would_exceed_budget("test-tenant", estimated_cost=5.0, daily_limit=20.0) is True

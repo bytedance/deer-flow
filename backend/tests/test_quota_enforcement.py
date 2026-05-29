@@ -99,9 +99,11 @@ class TestQuotaEnforcement:
                 await start_run(mock_body, "test-thread", mock_request)
 
             assert exc_info.value.status_code == 429
-            assert "Daily quota exceeded" in exc_info.value.detail
-            assert "$15.00" in exc_info.value.detail
-            assert "$10.00" in exc_info.value.detail
+            detail = exc_info.value.detail
+            assert detail["code"] == "quota_daily_exceeded"
+            assert detail["used"] == 15.0
+            assert detail["limit"] == 10.0
+            assert detail["period"] == "daily"
 
     @pytest.mark.asyncio
     async def test_run_blocked_when_monthly_quota_exceeded(
@@ -124,9 +126,11 @@ class TestQuotaEnforcement:
                 await start_run(mock_body, "test-thread", mock_request)
 
             assert exc_info.value.status_code == 429
-            assert "Monthly quota exceeded" in exc_info.value.detail
-            assert "$150.00" in exc_info.value.detail
-            assert "$100.00" in exc_info.value.detail
+            detail = exc_info.value.detail
+            assert detail["code"] == "quota_monthly_exceeded"
+            assert detail["used"] == 150.0
+            assert detail["limit"] == 100.0
+            assert detail["period"] == "monthly"
 
     @pytest.mark.asyncio
     async def test_run_allowed_when_within_quota(

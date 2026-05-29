@@ -35,13 +35,31 @@ class BudgetChecker:
         self.storage = storage
         self.config = budget_config
 
-    def check_budget(self, tenant_id: str) -> BudgetStatus:
-        """Check current budget status for a tenant."""
+    def check_budget(
+        self,
+        tenant_id: str,
+        *,
+        daily_limit: float | None = None,
+        monthly_limit: float | None = None,
+    ) -> BudgetStatus:
+        """Check current budget status for a tenant.
+
+        Parameters
+        ----------
+        tenant_id
+            Tenant identifier.
+        daily_limit
+            Override daily limit (e.g. from tenant-specific quota).
+            Falls back to ``budget.default_daily_limit_usd`` when ``None``.
+        monthly_limit
+            Override monthly limit (e.g. from tenant-specific quota).
+            Falls back to ``budget.default_monthly_limit_usd`` when ``None``.
+        """
         daily_cost = self.storage.get_today_total()
         monthly_cost = self.storage.get_current_month_total()
 
-        daily_limit = self.config.default_daily_limit_usd
-        monthly_limit = self.config.default_monthly_limit_usd
+        daily_limit = daily_limit if daily_limit is not None else self.config.default_daily_limit_usd
+        monthly_limit = monthly_limit if monthly_limit is not None else self.config.default_monthly_limit_usd
 
         daily_remaining = max(0.0, daily_limit - daily_cost)
         monthly_remaining = max(0.0, monthly_limit - monthly_cost)
@@ -84,9 +102,20 @@ class BudgetChecker:
             alert_triggered=alert_triggered,
         )
 
-    def would_exceed_budget(self, tenant_id: str, estimated_cost: float) -> bool:
+    def would_exceed_budget(
+        self,
+        tenant_id: str,
+        estimated_cost: float,
+        *,
+        daily_limit: float | None = None,
+        monthly_limit: float | None = None,
+    ) -> bool:
         """Check if an estimated cost would exceed remaining budget."""
-        status = self.check_budget(tenant_id)
+        status = self.check_budget(
+            tenant_id,
+            daily_limit=daily_limit,
+            monthly_limit=monthly_limit,
+        )
         if self.config.action_on_exceed == "block":
             return estimated_cost > status.daily_remaining or estimated_cost > status.monthly_remaining
         return False
