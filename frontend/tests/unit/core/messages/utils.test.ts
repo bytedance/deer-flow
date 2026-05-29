@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import {
   getAssistantTurnUsageMessages,
@@ -62,4 +62,41 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+test("creates synthetic processing group for orphaned tool messages", () => {
+  const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  // Scenario: tool message arrives without a preceding AI message with tool_calls
+  // (e.g., out-of-order streaming, or AI message was classified as terminal group)
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Search for something",
+    },
+    {
+      id: "tool-orphan",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "search results",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  // Should create a synthetic processing group instead of logging an error
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+
+  expect(groups[1]?.messages).toHaveLength(1);
+  expect(groups[1]?.messages[0]?.id).toBe("tool-orphan");
+
+  // Should NOT log an error
+  expect(consoleSpy).not.toHaveBeenCalled();
+
+  consoleSpy.mockRestore();
 });

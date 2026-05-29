@@ -1,7 +1,27 @@
 import { z } from "zod";
 
+const DIRECTION_SYNONYMS: Record<string, "up" | "down" | "flat"> = {
+  neutral: "flat",
+  stable: "flat",
+  unchanged: "flat",
+  none: "flat",
+  same: "flat",
+  rising: "up",
+  increasing: "up",
+  falling: "down",
+  decreasing: "down",
+};
+
+const directionSchema = z.preprocess(
+  (val) => {
+    if (typeof val !== "string") return val;
+    return DIRECTION_SYNONYMS[val.toLowerCase()] ?? val;
+  },
+  z.enum(["up", "down", "flat"]),
+);
+
 const trendSchema = z.object({
-  direction: z.enum(["up", "down", "flat"]),
+  direction: directionSchema,
   value: z.string(),
 });
 
@@ -205,7 +225,7 @@ const metricRangeSchema = z.object({
 
 const metricDeltaSchema = z.object({
   value: z.union([z.number(), z.string().max(50)]),
-  direction: z.enum(["up", "down", "flat"]).optional(),
+  direction: directionSchema.optional(),
   vs: z.string().max(50).optional(),
 });
 
@@ -225,6 +245,41 @@ const statusPropsSchema = z.object({
   status: statusKindSchema,
   tag: z.string().max(100).optional(),
   label: z.string().max(200).optional(),
+});
+
+// ─── Industrial dashboard schema ──────────────────────────────────────
+
+const industrialMetricSchema = z.object({
+  label: z.string(),
+  value: z.union([z.number(), z.string()]),
+  unit: z.string().optional(),
+  status: z.enum(["normal", "warning", "alarm"]).optional(),
+  icon: z.string().optional(),
+});
+
+const industrialAlarmSchema = z.object({
+  level: z.enum(["info", "warning", "alarm", "critical"]),
+  message: z.string(),
+  timestamp: z.string().optional(),
+});
+
+const industrialTrendPointSchema = z.object({
+  time: z.string(),
+  value: z.number(),
+});
+
+const industrialDashboardPropsSchema = z.object({
+  healthScore: z.number().min(0).max(100),
+  healthScoreThresholds: z.object({
+    warn: z.number().optional(),
+    error: z.number().optional(),
+    critical: z.number().optional(),
+  }).optional(),
+  metrics: z.array(industrialMetricSchema).optional(),
+  alarms: z.array(industrialAlarmSchema).optional(),
+  trend: z.array(industrialTrendPointSchema).optional(),
+  deviceName: z.string().optional(),
+  lastUpdated: z.string().optional(),
 });
 
 // ─── Device selector schemas ──────────────────────────────────────
@@ -270,6 +325,7 @@ const propsSchemas: Record<string, z.ZodType> = {
   alarm: alarmPropsSchema,
   metric: metricPropsSchema,
   status: statusPropsSchema,
+  "industrial-dashboard": industrialDashboardPropsSchema,
   "device-selector": deviceSelectorPropsSchema,
   "device-selector-multi": deviceSelectorMultiPropsSchema,
   "sub-device-selector": subDeviceSelectorPropsSchema,

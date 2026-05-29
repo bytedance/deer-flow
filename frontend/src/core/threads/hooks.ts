@@ -116,6 +116,29 @@ function extractFailureMeta(
   return { category: null, layer: null };
 }
 
+interface QuotaErrorDetail {
+  code: "quota_daily_exceeded" | "quota_monthly_exceeded";
+  used: number;
+  limit: number;
+  period: "daily" | "monthly";
+}
+
+function extractQuotaError(error: unknown): QuotaErrorDetail | null {
+  if (typeof error !== "object" || error === null) return null;
+  const detail = Reflect.get(error, "detail");
+  if (typeof detail !== "object" || detail === null) return null;
+  const code = Reflect.get(detail, "code");
+  if (code === "quota_daily_exceeded" || code === "quota_monthly_exceeded") {
+    return {
+      code,
+      used: Number(Reflect.get(detail, "used")) || 0,
+      limit: Number(Reflect.get(detail, "limit")) || 0,
+      period: Reflect.get(detail, "period") as "daily" | "monthly",
+    };
+  }
+  return null;
+}
+
 export function useThreadStream({
   threadId,
   context,
@@ -323,12 +346,21 @@ export function useThreadStream({
     },
     onError(error) {
       setOptimisticMessages([]);
-      const message = getStreamErrorMessage(error);
-      const { category, layer } = extractFailureMeta(error);
-      if (category === "external_dependency_unavailable") {
-        toast.error(message, { description: "外部服务暂不可用，请稍后重试" });
-      } else {
+      const quotaError = extractQuotaError(error);
+      if (quotaError) {
+        const message =
+          quotaError.code === "quota_daily_exceeded"
+            ? t.errors.quota_daily_exceeded(quotaError.used, quotaError.limit)
+            : t.errors.quota_monthly_exceeded(quotaError.used, quotaError.limit);
         toast.error(message);
+      } else {
+        const message = getStreamErrorMessage(error);
+        const { category, layer } = extractFailureMeta(error);
+        if (category === "external_dependency_unavailable") {
+          toast.error(message, { description: "外部服务暂不可用，请稍后重试" });
+        } else {
+          toast.error(message);
+        }
       }
       sseManagerRef.current?.scheduleReconnect();
     },

@@ -79,10 +79,14 @@ export function getMessageGroups(messages: Message[], isLoading?: boolean): Mess
         if (open) {
           open.messages.push(message);
         } else if (message.name || message.tool_call_id) {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          // Tool message arrived without an open processing group — likely due to
+          // out-of-order streaming or the preceding AI message being classified as
+          // a terminal group. Create a synthetic processing group to preserve it.
+          groups.push({
+            id: message.id,
+            type: "assistant:processing",
+            messages: [message],
+          });
         }
       }
       continue;

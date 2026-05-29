@@ -34,6 +34,9 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   markdown: new Set([
     "content", "title",
   ]),
+  image: new Set([
+    "src", "alt", "width", "height", "caption", "fallback",
+  ]),
   // EHM industrial primitives.
   gauge: new Set([
     "value", "min", "max", "unit", "label", "thresholds", "precision",
@@ -47,6 +50,10 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   ]),
   status: new Set([
     "status", "tag", "label",
+  ]),
+  "industrial-dashboard": new Set([
+    "healthScore", "healthScoreThresholds", "metrics", "alarms", "trend",
+    "deviceName", "lastUpdated",
   ]),
   "device-selector": new Set([
     "title", "queryParams", "filterDeviceType",
@@ -106,6 +113,23 @@ function sanitizeFormFields(fields: unknown): unknown {
     });
 }
 
+const DIRECTION_SYNONYMS: Record<string, "up" | "down" | "flat"> = {
+  neutral: "flat",
+  stable: "flat",
+  unchanged: "flat",
+  none: "flat",
+  same: "flat",
+  rising: "up",
+  increasing: "up",
+  falling: "down",
+  decreasing: "down",
+};
+
+function normalizeDirection(val: unknown): "up" | "down" | "flat" | undefined {
+  if (typeof val !== "string") return val as undefined;
+  return DIRECTION_SYNONYMS[val.toLowerCase()] ?? (val as "up" | "down" | "flat");
+}
+
 export function sanitizeProps(
   component: string,
   props: Record<string, unknown>,
@@ -124,6 +148,20 @@ export function sanitizeProps(
 
   if (component === "form" && Array.isArray(sanitized.fields)) {
     sanitized.fields = sanitizeFormFields(sanitized.fields);
+  }
+
+  if (component === "card" && typeof sanitized.trend === "object" && sanitized.trend !== null) {
+    const trend = sanitized.trend as Record<string, unknown>;
+    if ("direction" in trend) {
+      trend.direction = normalizeDirection(trend.direction);
+    }
+  }
+
+  if (component === "metric" && typeof sanitized.delta === "object" && sanitized.delta !== null) {
+    const delta = sanitized.delta as Record<string, unknown>;
+    if ("direction" in delta) {
+      delta.direction = normalizeDirection(delta.direction);
+    }
   }
 
   return sanitized;

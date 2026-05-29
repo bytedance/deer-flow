@@ -408,8 +408,7 @@ test.describe("GenUI - Block Update and Delete", () => {
       props: {
         title: "Total Users",
         value: "1,234",
-        trend: "up",
-        change: "+12%",
+        trend: { direction: "up", value: "+12%" },
       },
     });
 
@@ -419,7 +418,7 @@ test.describe("GenUI - Block Update and Delete", () => {
       component: "card",
       props: {
         value: "1,567",
-        change: "+27%",
+        trend: { direction: "up", value: "+27%" },
       },
     });
 

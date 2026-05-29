@@ -52,7 +52,7 @@ const DEFAULT_PROPS: Record<string, string> = {
     2,
   ),
   card: JSON.stringify(
-    { title: "示例卡片", value: "1,234", subtitle: "较昨日 +12%", trend: "up" },
+    { title: "示例卡片", value: "1,234", subtitle: "较昨日 +12%", trend: { direction: "up", value: "+12%" } },
     null,
     2,
   ),
@@ -82,8 +82,8 @@ const DEFAULT_PROPS: Record<string, string> = {
     {
       title: "时间线",
       events: [
-        { time: "09:00", content: "开始" },
-        { time: "12:00", content: "进行中" },
+        { title: "开始", description: "任务已创建", timestamp: "09:00", status: "completed" },
+        { title: "进行中", description: "当前正在处理", timestamp: "12:00", status: "active" },
       ],
     },
     null,
@@ -95,7 +95,11 @@ const DEFAULT_PROPS: Record<string, string> = {
     null,
     2,
   ),
-  image: JSON.stringify({}, null, 2),
+  image: JSON.stringify(
+    { src: "https://placehold.co/640x360/png?text=A2UI+Image", alt: "示例图片", caption: "示例图片" },
+    null,
+    2,
+  ),
   gauge: JSON.stringify(
     { value: 65, min: 0, max: 100, unit: "%", label: "示例仪表盘" },
     null,
@@ -105,8 +109,8 @@ const DEFAULT_PROPS: Record<string, string> = {
     {
       title: "告警列表",
       items: [
-        { level: "error", message: "CPU 使用率过高" },
-        { level: "warning", message: "磁盘空间不足" },
+        { level: "critical", message: "CPU 使用率过高" },
+        { level: "medium", message: "磁盘空间不足" },
       ],
     },
     null,
@@ -117,11 +121,32 @@ const DEFAULT_PROPS: Record<string, string> = {
     null,
     2,
   ),
-  status: JSON.stringify({ status: "normal", tag: "系统", label: "运行中" }, null, 2),
+  status: JSON.stringify({ status: "running", tag: "系统", label: "运行中" }, null, 2),
+  "industrial-dashboard": JSON.stringify(
+    {
+      deviceName: "压缩机 K-301",
+      lastUpdated: "2026-05-28 14:30",
+      healthScore: 82,
+      healthScoreThresholds: { warn: 70, error: 50, critical: 30 },
+      metrics: [
+        { label: "振动", value: 4.8, unit: "mm/s", status: "warning" },
+        { label: "轴承温度", value: 78.6, unit: "°C", status: "normal" },
+        { label: "出口压力", value: 1.25, unit: "MPa", status: "normal" },
+      ],
+      alarms: [{ level: "warning", message: "振动接近预警阈值", timestamp: "14:12" }],
+      trend: [
+        { time: "10:00", value: 88 },
+        { time: "12:00", value: 85 },
+        { time: "14:00", value: 82 },
+      ],
+    },
+    null,
+    2,
+  ),
   "device-selector": JSON.stringify(
     {
       title: "选择设备",
-      queryParams: { userId: 1, orgId: 0, treeType: 1 },
+      queryParams: { userId: "1", orgId: 0, treeType: 1 },
       filterDeviceType: 4,
     },
     null,
@@ -131,7 +156,7 @@ const DEFAULT_PROPS: Record<string, string> = {
     {
       title: "选择设备（可多选）",
       maxSelect: 5,
-      queryParams: { userId: 1, orgId: 0, treeType: 1 },
+      queryParams: { userId: "1", orgId: 0, treeType: 1 },
       filterDeviceType: 1,
     },
     null,

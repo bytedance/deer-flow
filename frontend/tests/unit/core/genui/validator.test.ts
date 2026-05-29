@@ -142,3 +142,58 @@ describe("validateProps form existing types unchanged", () => {
     expect(result.success).toBe(true);
   });
 });
+
+describe("validateProps direction normalization", () => {
+  it.each(["neutral", "stable", "unchanged", "none", "same"])(
+    "card: normalizes '%s' → 'flat' in trend.direction",
+    (synonym) => {
+      const result = validateProps("card", {
+        title: "KPI",
+        value: "92%",
+        trend: { direction: synonym, value: "0%" },
+      });
+      expect(result.success).toBe(true);
+    },
+  );
+
+  it.each(["rising", "increasing"])(
+    "card: normalizes '%s' → 'up' in trend.direction",
+    (synonym) => {
+      const result = validateProps("card", {
+        title: "KPI",
+        value: "92%",
+        trend: { direction: synonym, value: "+5%" },
+      });
+      expect(result.success).toBe(true);
+    },
+  );
+
+  it.each(["falling", "decreasing"])(
+    "card: normalizes '%s' → 'down' in trend.direction",
+    (synonym) => {
+      const result = validateProps("card", {
+        title: "KPI",
+        value: "88%",
+        trend: { direction: synonym, value: "-3%" },
+      });
+      expect(result.success).toBe(true);
+    },
+  );
+
+  it("metric: normalizes 'neutral' → 'flat' in delta.direction", () => {
+    const result = validateProps("metric", {
+      value: 128.4,
+      delta: { value: "0", direction: "neutral" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects genuinely invalid direction values", () => {
+    const result = validateProps("card", {
+      title: "KPI",
+      value: "92%",
+      trend: { direction: "sideways", value: "0%" },
+    });
+    expect(result.success).toBe(false);
+  });
+});

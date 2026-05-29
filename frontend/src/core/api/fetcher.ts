@@ -142,8 +142,24 @@ export async function fetch(
       }
     }
 
-    window.location.href = buildLoginUrl(window.location.pathname);
-    throw new Error("Unauthorized");
+    // Delay redirect so callers (e.g. publish dialog) can catch the error
+    // and show a toast before the page navigates away.
+    window.setTimeout(() => {
+      window.location.href = buildLoginUrl(window.location.pathname);
+    }, 2000);
+
+    // Preserve the original server response body so callers can inspect
+    // the real error code/message (e.g. token_expired vs not_authenticated).
+    let detail: unknown = { code: "not_authenticated", message: "Session expired" };
+    try {
+      detail = await res.clone().json();
+    } catch {
+      // Response body is not JSON — keep the fallback detail.
+    }
+    const err = new Error("Unauthorized") as Error & { status: number; detail: unknown };
+    err.status = 401;
+    err.detail = detail;
+    throw err;
   }
 
   return res;
