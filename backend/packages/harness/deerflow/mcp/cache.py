@@ -87,8 +87,7 @@ def get_cached_mcp_tools() -> list[BaseTool]:
 
     Also checks if the config file has been modified since last initialization,
     and re-initializes if needed. This ensures that changes made through the
-    Gateway API (which runs in a separate process) are reflected in the
-    LangGraph Server.
+    Gateway API are reflected in the Gateway-embedded LangGraph runtime.
 
     Returns:
         List of cached MCP tools.

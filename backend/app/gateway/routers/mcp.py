@@ -276,10 +276,9 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
 
-        # NOTE: No need to reload/reset cache here - LangGraph Server (separate process)
-        # will detect config file changes via mtime and reinitialize MCP tools automatically
-
-        # Reload the configuration and update the global cache
+        # Reload the Gateway configuration and update the global cache. The
+        # agent runtime lives in Gateway, so this keeps API reads and tool
+        # execution aligned after extensions_config.json changes.
         reloaded_config = reload_extensions_config()
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
         return McpConfigResponse(mcp_servers=servers)
