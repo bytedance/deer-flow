@@ -61,11 +61,18 @@ _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS: float = 240.0
 def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from_config: dict) -> None:
     """Inject a generous ``stream_chunk_timeout`` for OpenAI-compatible clients.
 
-    Only applied to ``langchain_openai:ChatOpenAI`` because the parameter is
-    specific to that client. Users who explicitly set ``stream_chunk_timeout``
-    (including ``None`` falling out via ``exclude_none=True``) keep their value.
+    The ``stream_chunk_timeout`` kwarg is specific to ``langchain_openai:ChatOpenAI``
+    and is rejected by other providers' constructors as an unexpected keyword
+    argument. Behaviour:
+
+    * OpenAI-compatible path: an explicit value in ``config.yaml`` is preserved.
+      An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
+      and therefore treated as "unset", so the default is injected.
+    * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
+      constructor (which would raise ``TypeError: unexpected keyword argument``).
     """
     if model_use_path != "langchain_openai:ChatOpenAI":
+        model_settings_from_config.pop("stream_chunk_timeout", None)
         return
     if "stream_chunk_timeout" in model_settings_from_config:
         return

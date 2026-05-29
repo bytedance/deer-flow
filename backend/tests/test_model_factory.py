@@ -1116,3 +1116,34 @@ def test_stream_chunk_timeout_default_constant_is_documented():
     forces a paired review of the rationale comment block above the constant.
     """
     assert factory_module._DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS == 240.0
+
+
+def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
+    """Regression for CR feedback on issue #3189: if a user accidentally sets
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop
+    the kwarg before forwarding it to the model constructor. Otherwise the
+    third-party client raises ``TypeError: unexpected keyword argument
+    'stream_chunk_timeout'`` because the parameter is specific to
+    ``langchain_openai:ChatOpenAI``.
+    """
+    model = ModelConfig(
+        name="anthropic-with-stray-timeout",
+        display_name="Anthropic With Stray Timeout",
+        description=None,
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4",
+        stream_chunk_timeout=60.0,  # user-set on a non-OpenAI provider — must be dropped
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="anthropic-with-stray-timeout")
+
+    assert "stream_chunk_timeout" not in captured
