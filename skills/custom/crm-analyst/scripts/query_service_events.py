@@ -34,9 +34,16 @@ def main():
         for r in records:
             transformed.append({
                 "id": str(r.get("id", "")),
-                "unit_name": r.get("customItem4__c"),
-                "event_name": r.get("customItem6__c"),
-                "event_time": r.get("customItem8__c"),
+                "name": r.get("name"),
+                "created_at": r.get("createdAt"),
+                "device_path": r.get("customItem5__c"),
+                "device_name": r.get("customItem6__c"),
+                "fault_location": r.get("customItem7__c"),
+                "fault_time": r.get("customItem8__c"),
+                "resolution_status": r.get("customItem10__c"),
+                "problem_description": r.get("customItem13__c"),
+                "work_order_type": r.get("customItem20__c"),
+                "event_category": r.get("customItem29__c"),
             })
 
         result = {

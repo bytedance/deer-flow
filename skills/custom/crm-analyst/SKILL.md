@@ -52,7 +52,7 @@ python /mnt/skills/custom/crm-analyst/scripts/outbound_statistics.py \
 ```bash
 python /mnt/skills/custom/crm-analyst/scripts/event_statistics.py \
   --input /mnt/user-data/outputs/service_events.json \
-  --group-by unit_name
+  --group-by device_name
 ```
 
 ### 3. 异常检测
