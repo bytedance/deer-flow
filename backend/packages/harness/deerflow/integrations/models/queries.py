@@ -235,3 +235,39 @@ class InventoryQuery:
     limit: int = 50
     offset: int = 0
     extra_filters: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# XSY (销售易) queries
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OutboundDetailQuery:
+    """Query for product outbound details (产品出库明细)."""
+
+    tenant_id: str
+    spec_model: str | None = None
+    min_quantity: float | None = None
+    max_quantity: float | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    limit: int = 500
+    offset: int = 0
+    group_by: str | None = None             # spec_model / day / week / month
+    extra_filters: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ServiceEventQuery:
+    """Query for service event details (服务事件明细)."""
+
+    tenant_id: str
+    unit_name: str | None = None
+    event_name: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    limit: int = 500
+    offset: int = 0
+    group_by: str | None = None             # unit_name / event_name / day / week / month
+    extra_filters: dict[str, Any] = field(default_factory=dict)

@@ -83,6 +83,44 @@ class RiskRankingInput(BaseModel):
     min_risk_score: float = Field(default=0.0, description="最小风险分数")
 
 
+class OutboundQueryInput(BaseModel):
+    spec_model: str | None = Field(default=None, description="规格型号过滤")
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+    limit: int = Field(default=500, description="返回条数")
+
+
+class OutboundStatsInput(BaseModel):
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+    group_by: str | None = Field(default=None, description="分组方式 (spec_model/day/week/month)")
+
+
+class ServiceEventQueryInput(BaseModel):
+    unit_name: str | None = Field(default=None, description="机组名称过滤")
+    event_name: str | None = Field(default=None, description="事件名称过滤")
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+    limit: int = Field(default=500, description="返回条数")
+
+
+class ServiceEventStatsInput(BaseModel):
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+    group_by: str | None = Field(default=None, description="分组方式 (unit_name/event_name/day/week/month)")
+
+
+class EventAnomalyInput(BaseModel):
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+    threshold: float = Field(default=2.0, description="异常检测阈值（标准差倍数）")
+
+
+class XsyReportInput(BaseModel):
+    start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
+    end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
+
+
 def build_integration_tools(
     auth_context: AuthContext,
     data_tools: list[str],
@@ -117,6 +155,7 @@ def build_integration_tools(
     asset_tools = registry.get_tool("asset")
     monitoring_tools = registry.get_tool("monitoring")
     assessment_tools = registry.get_tool("assessment")
+    xsy_tools = registry.get_tool("xsy")
 
     if _should_include(data_tools, "asset_get_catalog", "asset"):
         if asset_tools:
@@ -238,6 +277,79 @@ def build_integration_tools(
                 ),
             ))
 
+    # XSY (销售易) CRM tools
+    if _should_include(data_tools, "crm_query_outbound", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_query_outbound",
+                description="查询产品出库明细（销售易 CRM）",
+                args_schema=OutboundQueryInput,
+                coroutine=_make_coro(
+                    xsy_tools.query_outbound, tenant_id, user_id,
+                    _transform_outbound_query_args, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "crm_get_outbound_stats", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_get_outbound_stats",
+                description="获取出库统计数据（销售易 CRM）",
+                args_schema=OutboundStatsInput,
+                coroutine=_make_coro(
+                    xsy_tools.get_outbound_statistics, tenant_id, user_id,
+                    _transform_outbound_stats_args, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "crm_query_service_events", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_query_service_events",
+                description="查询服务事件明细（销售易 CRM）",
+                args_schema=ServiceEventQueryInput,
+                coroutine=_make_coro(
+                    xsy_tools.query_service_events, tenant_id, user_id,
+                    _transform_service_event_query_args, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "crm_get_event_stats", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_get_event_stats",
+                description="获取服务事件统计数据（销售易 CRM）",
+                args_schema=ServiceEventStatsInput,
+                coroutine=_make_coro(
+                    xsy_tools.get_service_event_statistics, tenant_id, user_id,
+                    _transform_service_event_stats_args, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "crm_detect_event_anomalies", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_detect_event_anomalies",
+                description="检测服务事件异常（销售易 CRM）",
+                args_schema=EventAnomalyInput,
+                coroutine=_make_coro(
+                    xsy_tools.detect_event_anomalies, tenant_id, user_id,
+                    _transform_event_anomaly_args, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "crm_generate_report", "crm"):
+        if xsy_tools:
+            tools.append(StructuredTool(
+                name="crm_generate_report",
+                description="生成综合报告（销售易 CRM）",
+                args_schema=XsyReportInput,
+                coroutine=_make_coro(
+                    xsy_tools.generate_report, tenant_id, user_id,
+                    _transform_xsy_report_args, token,
+                ),
+            ))
+
     logger.info("Built %d integration tools for data_tools=%s", len(tools), data_tools)
     return tools
 
@@ -339,4 +451,54 @@ def _transform_risk_args(kwargs: dict) -> dict:
         "scope": kwargs.get("scope", ""),
         "limit": kwargs.get("limit", 50),
         "min_risk_score": kwargs.get("min_risk_score", 0.0),
+    }
+
+
+def _transform_outbound_query_args(kwargs: dict) -> dict:
+    return {
+        "spec_model": kwargs.get("spec_model"),
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
+        "limit": kwargs.get("limit", 500),
+    }
+
+
+def _transform_outbound_stats_args(kwargs: dict) -> dict:
+    return {
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
+        "group_by": kwargs.get("group_by"),
+    }
+
+
+def _transform_service_event_query_args(kwargs: dict) -> dict:
+    return {
+        "unit_name": kwargs.get("unit_name"),
+        "event_name": kwargs.get("event_name"),
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
+        "limit": kwargs.get("limit", 500),
+    }
+
+
+def _transform_service_event_stats_args(kwargs: dict) -> dict:
+    return {
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
+        "group_by": kwargs.get("group_by"),
+    }
+
+
+def _transform_event_anomaly_args(kwargs: dict) -> dict:
+    return {
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
+        "threshold": kwargs.get("threshold", 2.0),
+    }
+
+
+def _transform_xsy_report_args(kwargs: dict) -> dict:
+    return {
+        "start_date": kwargs.get("start_date"),
+        "end_date": kwargs.get("end_date"),
     }

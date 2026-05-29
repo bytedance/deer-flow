@@ -1,0 +1,124 @@
+schema_version: "1"
+
+scripts:
+  query_outbound:
+    entry: scripts/query_outbound.py
+    kind: [data_step]
+    description: "查询产品出库明细"
+    args_schema:
+      start_date:
+        type: date
+        required: false
+      end_date:
+        type: date
+        required: false
+      spec_model:
+        type: string
+        required: false
+      limit:
+        type: integer
+        default: 500
+    output_files:
+      - id: outbound_data
+        path: "{run_output_dir}/data/outbound_data.json"
+    timeout_seconds: 120
+
+  query_service_events:
+    entry: scripts/query_service_events.py
+    kind: [data_step]
+    description: "查询服务事件明细"
+    args_schema:
+      start_date:
+        type: date
+        required: false
+      end_date:
+        type: date
+        required: false
+      unit_name:
+        type: string
+        required: false
+      event_name:
+        type: string
+        required: false
+      limit:
+        type: integer
+        default: 500
+    output_files:
+      - id: service_events
+        path: "{run_output_dir}/data/service_events.json"
+    timeout_seconds: 120
+
+  outbound_statistics:
+    entry: scripts/outbound_statistics.py
+    kind: [transform]
+    description: "出库数据统计分析"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+      group_by:
+        type: enum
+        values: [spec_model, day, week, month]
+        required: false
+    output_files:
+      - id: outbound_stats
+        path: "{run_output_dir}/data/outbound_stats.json"
+    timeout_seconds: 60
+
+  event_statistics:
+    entry: scripts/event_statistics.py
+    kind: [transform]
+    description: "服务事件统计分析"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+      group_by:
+        type: enum
+        values: [unit_name, event_name, day, week, month]
+        required: false
+    output_files:
+      - id: event_stats
+        path: "{run_output_dir}/data/event_stats.json"
+    timeout_seconds: 60
+
+  event_anomaly:
+    entry: scripts/event_anomaly.py
+    kind: [transform]
+    description: "服务事件异常检测"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+      threshold:
+        type: string
+        default: "2.0"
+    output_files:
+      - id: anomalies
+        path: "{run_output_dir}/data/anomalies.json"
+    timeout_seconds: 60
+
+  crm_report:
+    entry: scripts/crm_report.py
+    kind: [transform]
+    description: "生成综合报告"
+    args_schema:
+      outbound_data:
+        type: file_path
+        required: false
+      event_data:
+        type: file_path
+        required: false
+      outbound_stats:
+        type: file_path
+        required: false
+      event_stats:
+        type: file_path
+        required: false
+      anomalies:
+        type: file_path
+        required: false
+    output_files:
+      - id: crm_report
+        path: "{run_output_dir}/exports/crm_report.md"
+    timeout_seconds: 60

@@ -9,6 +9,7 @@ from deerflow.integrations.services.assessment_service import AssessmentService
 from deerflow.integrations.services.crm_service import CrmService
 from deerflow.integrations.services.erp_service import ErpService
 from deerflow.integrations.services.monitoring_service import MonitoringService
+from deerflow.integrations.services.xsy_service import XsyService
 
 __all__ = [
     "AssetService",
@@ -16,4 +17,5 @@ __all__ = [
     "CrmService",
     "ErpService",
     "MonitoringService",
+    "XsyService",
 ]

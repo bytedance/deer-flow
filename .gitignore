@@ -24,7 +24,6 @@ venv/
 .env
 
 # Configuration files
-config.yaml
 !agents/builtin/**/config.yaml
 mcp_config.json
 extensions_config.json

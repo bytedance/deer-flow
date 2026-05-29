@@ -26,7 +26,7 @@ class IntegrationSystemConfig(BaseModel):
     """Configuration for an external system connection."""
 
     system_key: str = Field(description="Unique identifier, e.g. 'ins_prod', 'sms_prod'")
-    system_type: Literal["ins", "sms", "crm", "erp", "custom"] = Field(
+    system_type: Literal["ins", "sms", "crm", "erp", "xsy", "custom"] = Field(
         description="Adapter type discriminator"
     )
     display_name: str = Field(description="Human-readable name")
@@ -38,7 +38,7 @@ class IntegrationSystemConfig(BaseModel):
     transport_type: Literal["http", "rpc", "db", "file", "sdk"] = "http"
     base_url: str = Field(description="System base URL")
     base_path: str = ""
-    auth_type: Literal["bearer", "api_key", "ins_base"] = Field(
+    auth_type: Literal["bearer", "api_key", "ins_base", "xsy_oauth2"] = Field(
         description="Authentication method"
     )
     auth_mode: Literal["static", "user_token"] = Field(

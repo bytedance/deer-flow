@@ -1,0 +1,39 @@
+name: crm-analyst
+display_name: "CRM 分析师"
+description: "销售易 CRM 数据分析——产品出库查询与统计、服务事件查询与异常检测、综合报告生成"
+icon: "📊"
+order: 7
+model: null
+tool_groups:
+  - bash
+  - integration
+exclude_tools: []
+skills:
+  - crm-analyst
+mcp_servers: null
+data_tools:
+  - "crm.*"
+tags:
+  - crm
+  - 销售易
+  - 出库
+  - 服务事件
+  - 报告
+starters:
+  - label: "查询产品出库明细"
+    prompt: "查询近期的产品出库明细"
+    auto_start: false
+  - label: "查询服务事件"
+    prompt: "查询近期的服务事件记录"
+    auto_start: false
+  - label: "出库统计分析"
+    prompt: "统计产品出库数据，按规格型号分组"
+    auto_start: false
+  - label: "服务事件异常检测"
+    prompt: "检测服务事件中的异常模式"
+    auto_start: false
+  - label: "生成 CRM 综合报告"
+    prompt: "生成一份 CRM 综合分析报告，覆盖出库和服务事件"
+    auto_start: false
+advanced:
+  subagent_enabled: false

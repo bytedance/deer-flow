@@ -147,6 +147,11 @@ sandbox:
     DEER_FLOW_GATEWAY_URL: http://host.docker.internal:8001
     # Internal auth token so sandbox scripts can call Gateway APIs
     DEER_FLOW_INTERNAL_AUTH_VALUE: $DEER_FLOW_INTERNAL_AUTH_VALUE
+    # 销售易 CRM 凭证（供 crm-analyst Skill 脚本使用）
+    XSY_CLIENT_ID: $XSY_CLIENT_ID
+    XSY_CLIENT_SECRET: $XSY_CLIENT_SECRET
+    XSY_USERNAME: $XSY_USERNAME
+    XSY_PASSWORD: $XSY_PASSWORD
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
@@ -261,9 +266,9 @@ run_events:
   max_trace_content: 10240
   track_token_usage: true
 audio_input:
-  enabled: true
-  microphone_enabled: true
-  file_transcription_enabled: true
+  enabled: false
+  microphone_enabled: false
+  file_transcription_enabled: false
   default_locale: zh-CN
   supported_locales:
     - zh-CN
@@ -284,9 +289,9 @@ audio_input:
   provider:
     use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
     config:
-      model: Qwen3-ASR-1.7B
-      api_key: $OPENAI_API_KEY
-      base_url: https://aiapi.shenguyun.com/v1
+      model: qwen3-asr-flash
+      api_key: ''
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 http_connectors:
   default:
     - name: list_datasets
@@ -351,3 +356,46 @@ rpc:
     - name: ins-base-rpc
 #      discovery: ins-base-rpc    # Nacos 服务发现名称（与 base_url 二选一）
       base_url: "http://182.92.187.198:8601"  # 直连模式（与 discovery 二选一）
+
+# ============================================================================
+# 外部系统集成 (CRM/ERP/InS/SMS)
+# ============================================================================
+integrations:
+  enabled: true
+  systems:
+    xsy_prod:
+      system_type: xsy
+      display_name: "销售易 CRM"
+      description: "销售易 CRM 系统集成，提供产品出库、服务事件查询与统计"
+      transport_type: http
+      base_url: "https://api.xiaoshouyi.com"
+      auth_type: xsy_oauth2
+      auth_mode: static
+      timeout_seconds: 30.0
+      enabled: true
+      capabilities:
+        - outbound.query
+        - outbound.statistics
+        - service_event.query
+        - service_event.statistics
+        - service_event.anomaly
+        - xsy.report
+      extra_config:
+        auth_url: "https://login.xiaoshouyi.com/auc/oauth2/token"
+        client_id_env: "$XSY_CLIENT_ID"
+        client_secret_env: "$XSY_CLIENT_SECRET"
+        username_env: "$XSY_USERNAME"
+        password_env: "$XSY_PASSWORD"
+  routes:
+    outbound.query:
+      primary_system_key: xsy_prod
+    outbound.statistics:
+      primary_system_key: xsy_prod
+    service_event.query:
+      primary_system_key: xsy_prod
+    service_event.statistics:
+      primary_system_key: xsy_prod
+    service_event.anomaly:
+      primary_system_key: xsy_prod
+    xsy.report:
+      primary_system_key: xsy_prod
