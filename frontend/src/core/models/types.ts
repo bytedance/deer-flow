@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from "../threads";
+
 export interface Model {
   id: string;
   name: string;
@@ -6,6 +8,7 @@ export interface Model {
   description?: string | null;
   supports_thinking?: boolean;
   supports_reasoning_effort?: boolean;
+  reasoning_efforts?: ReasoningEffort[] | null;
 }
 
 export interface TokenUsageSettings {

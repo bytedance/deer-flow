@@ -50,6 +50,9 @@ models:
   #   supports_thinking: true
   #   supports_vision: true
   #   supports_reasoning_effort: true
+  #   # Optional: restrict UI/backend reasoning_effort values to those this provider accepts.
+  #   # For providers such as DeepSeek, omit "minimal" if their API rejects it.
+  #   reasoning_efforts: [low, medium, high, max, xhigh]
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:

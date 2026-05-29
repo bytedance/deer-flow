@@ -29,6 +29,7 @@ def _make_model(
     use: str = "langchain_openai:ChatOpenAI",
     supports_thinking: bool = False,
     supports_reasoning_effort: bool = False,
+    reasoning_efforts: list[str] | None = None,
     when_thinking_enabled: dict | None = None,
     when_thinking_disabled: dict | None = None,
     thinking: dict | None = None,
@@ -43,6 +44,7 @@ def _make_model(
         max_tokens=max_tokens,
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
+        reasoning_efforts=reasoning_efforts,
         when_thinking_enabled=when_thinking_enabled,
         when_thinking_disabled=when_thinking_disabled,
         thinking=thinking,
@@ -427,6 +429,69 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     # When supports_reasoning_effort=True, it should NOT be cleared to None
     # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
     assert captured.get("reasoning_effort") == "minimal"
+
+
+def test_runtime_reasoning_effort_removed_when_not_in_model_allowlist(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                reasoning_efforts=["low", "medium", "high", "max", "xhigh"],
+                when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(
+        name="deepseek",
+        thinking_enabled=False,
+        reasoning_effort="minimal",
+    )
+
+    assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
+    assert captured.get("reasoning_effort") is None
+
+
+def test_runtime_reasoning_effort_preserved_when_in_model_allowlist(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek",
+                supports_reasoning_effort=True,
+                reasoning_efforts=["low", "medium", "high", "max", "xhigh"],
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(
+        name="deepseek",
+        thinking_enabled=True,
+        reasoning_effort="xhigh",
+    )
+
+    assert captured.get("reasoning_effort") == "xhigh"
 
 
 # ---------------------------------------------------------------------------

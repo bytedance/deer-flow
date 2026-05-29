@@ -182,18 +182,24 @@ GET /api/models
       "name": "gpt-4",
       "display_name": "GPT-4",
       "supports_thinking": false,
+      "supports_reasoning_effort": false,
+      "reasoning_efforts": null,
       "supports_vision": true
     },
     {
       "name": "claude-3-opus",
       "display_name": "Claude 3 Opus",
       "supports_thinking": false,
+      "supports_reasoning_effort": false,
+      "reasoning_efforts": null,
       "supports_vision": true
     },
     {
       "name": "deepseek-v3",
       "display_name": "DeepSeek V3",
       "supports_thinking": true,
+      "supports_reasoning_effort": true,
+      "reasoning_efforts": ["low", "medium", "high", "max", "xhigh"],
       "supports_vision": false
     }
   ]
@@ -214,6 +220,8 @@ GET /api/models/{model_name}
   "model": "gpt-4",
   "max_tokens": 4096,
   "supports_thinking": false,
+  "supports_reasoning_effort": false,
+  "reasoning_efforts": null,
   "supports_vision": true
 }
 ```

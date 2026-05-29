@@ -47,6 +47,18 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
         model_settings_from_config["stream_usage"] = True
 
 
+def _configured_reasoning_efforts(model_config) -> set[str] | None:
+    if not model_config.reasoning_efforts:
+        return None
+    return {str(effort) for effort in model_config.reasoning_efforts}
+
+
+def _remove_unsupported_reasoning_effort(settings: dict, allowed_efforts: set[str]) -> None:
+    effort = settings.get("reasoning_effort")
+    if effort is not None and str(effort) not in allowed_efforts:
+        settings.pop("reasoning_effort", None)
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -85,6 +97,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "description",
             "supports_thinking",
             "supports_reasoning_effort",
+            "reasoning_efforts",
             "when_thinking_enabled",
             "when_thinking_disabled",
             "thinking",
@@ -126,6 +139,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    elif allowed_efforts := _configured_reasoning_efforts(model_config):
+        _remove_unsupported_reasoning_effort(kwargs, allowed_efforts)
+        _remove_unsupported_reasoning_effort(model_settings_from_config, allowed_efforts)
 
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
 

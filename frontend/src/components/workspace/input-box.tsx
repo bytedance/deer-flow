@@ -59,7 +59,12 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
-import type { AgentThreadContext } from "@/core/threads";
+import {
+  getDefaultReasoningEffort,
+  getModelReasoningEfforts,
+  normalizeReasoningEffort,
+} from "@/core/models/reasoning-effort";
+import type { AgentThreadContext, ReasoningEffort } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
@@ -86,6 +91,14 @@ import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
 
+type InputBoxContext = Omit<
+  AgentThreadContext,
+  "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+> & {
+  mode: InputMode | undefined;
+  reasoning_effort?: ReasoningEffort;
+};
+
 function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
@@ -97,6 +110,52 @@ function getResolvedMode(
     return mode;
   }
   return supportsThinking ? "pro" : "flash";
+}
+
+type InputBoxTranslations = ReturnType<typeof useI18n>["t"]["inputBox"];
+
+function getReasoningEffortLabel(
+  inputBox: InputBoxTranslations,
+  effort: ReasoningEffort | undefined,
+): string {
+  switch (effort) {
+    case "minimal":
+      return inputBox.reasoningEffortMinimal;
+    case "low":
+      return inputBox.reasoningEffortLow;
+    case "medium":
+      return inputBox.reasoningEffortMedium;
+    case "high":
+      return inputBox.reasoningEffortHigh;
+    case "max":
+      return inputBox.reasoningEffortMax;
+    case "xhigh":
+      return inputBox.reasoningEffortXHigh;
+    default:
+      return inputBox.reasoningEffortMedium;
+  }
+}
+
+function getReasoningEffortDescription(
+  inputBox: InputBoxTranslations,
+  effort: ReasoningEffort | undefined,
+): string {
+  switch (effort) {
+    case "minimal":
+      return inputBox.reasoningEffortMinimalDescription;
+    case "low":
+      return inputBox.reasoningEffortLowDescription;
+    case "medium":
+      return inputBox.reasoningEffortMediumDescription;
+    case "high":
+      return inputBox.reasoningEffortHighDescription;
+    case "max":
+      return inputBox.reasoningEffortMaxDescription;
+    case "xhigh":
+      return inputBox.reasoningEffortXHighDescription;
+    default:
+      return inputBox.reasoningEffortMediumDescription;
+  }
 }
 
 export function InputBox({
@@ -118,13 +177,7 @@ export function InputBox({
   assistantId?: string | null;
   status?: ChatStatus;
   disabled?: boolean;
-  context: Omit<
-    AgentThreadContext,
-    "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
-  > & {
-    mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-    reasoning_effort?: "minimal" | "low" | "medium" | "high";
-  };
+  context: InputBoxContext;
   extraHeader?: React.ReactNode;
   /**
    * Whether to render the input in welcome layout (vertically centered,
@@ -134,15 +187,7 @@ export function InputBox({
   isWelcomeMode?: boolean;
   threadId: string;
   initialValue?: string;
-  onContextChange?: (
-    context: Omit<
-      AgentThreadContext,
-      "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
-    > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-      reasoning_effort?: "minimal" | "low" | "medium" | "high";
-    },
-  ) => void;
+  onContextChange?: (context: InputBoxContext) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
@@ -176,8 +221,17 @@ export function InputBox({
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
+    const nextReasoningEffort = normalizeReasoningEffort(
+      context.reasoning_effort,
+      nextMode,
+      getModelReasoningEfforts(fallbackModel),
+    );
 
-    if (context.model_name === nextModelName && context.mode === nextMode) {
+    if (
+      context.model_name === nextModelName &&
+      context.mode === nextMode &&
+      context.reasoning_effort === nextReasoningEffort
+    ) {
       return;
     }
 
@@ -185,6 +239,7 @@ export function InputBox({
       ...context,
       model_name: nextModelName,
       mode: nextMode,
+      reasoning_effort: nextReasoningEffort,
     });
   }, [context, models, onContextChange]);
 
@@ -207,17 +262,31 @@ export function InputBox({
     [selectedModel],
   );
 
+  const availableReasoningEfforts = useMemo(
+    () => getModelReasoningEfforts(selectedModel),
+    [selectedModel],
+  );
+
   const handleModelSelect = useCallback(
     (model_name: string) => {
       const model = models.find((m) => m.name === model_name);
       if (!model) {
         return;
       }
+      const mode = getResolvedMode(
+        context.mode,
+        model.supports_thinking ?? false,
+      );
+      const reasoningEfforts = getModelReasoningEfforts(model);
       onContextChange?.({
         ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        mode,
+        reasoning_effort: normalizeReasoningEffort(
+          context.reasoning_effort,
+          mode,
+          reasoningEfforts,
+        ),
       });
       setModelDialogOpen(false);
     },
@@ -226,24 +295,21 @@ export function InputBox({
 
   const handleModeSelect = useCallback(
     (mode: InputMode) => {
+      const resolvedMode = getResolvedMode(mode, supportThinking);
       onContextChange?.({
         ...context,
-        mode: getResolvedMode(mode, supportThinking),
-        reasoning_effort:
-          mode === "ultra"
-            ? "high"
-            : mode === "pro"
-              ? "medium"
-              : mode === "thinking"
-                ? "low"
-                : "minimal",
+        mode: resolvedMode,
+        reasoning_effort: getDefaultReasoningEffort(
+          resolvedMode,
+          availableReasoningEfforts,
+        ),
       });
     },
-    [onContextChange, context, supportThinking],
+    [onContextChange, context, supportThinking, availableReasoningEfforts],
   );
 
   const handleReasoningEffortSelect = useCallback(
-    (effort: "minimal" | "low" | "medium" | "high") => {
+    (effort: ReasoningEffort) => {
       onContextChange?.({
         ...context,
         reasoning_effort: effort,
@@ -268,12 +334,18 @@ export function InputBox({
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
+        const nextMode = getResolvedMode(
+          context.mode,
+          selectedModel?.supports_thinking ?? false,
+        );
         onContextChange?.({
           ...context,
           model_name: resolvedModelName,
-          mode: getResolvedMode(
-            context.mode,
-            selectedModel?.supports_thinking ?? false,
+          mode: nextMode,
+          reasoning_effort: normalizeReasoningEffort(
+            context.reasoning_effort,
+            nextMode,
+            getModelReasoningEfforts(selectedModel),
           ),
         });
         return new Promise<void>((resolve, reject) => {
@@ -291,7 +363,7 @@ export function InputBox({
       onSubmit,
       onStop,
       resolvedModelName,
-      selectedModel?.supports_thinking,
+      selectedModel,
       status,
     ],
   );
@@ -437,6 +509,13 @@ export function InputBox({
 
     return () => controller.abort();
   }, [context.model_name, disabled, isMock, status, threadId]);
+
+  const currentMode = getResolvedMode(context.mode, supportThinking);
+  const selectedReasoningEffort = normalizeReasoningEffort(
+    context.reasoning_effort,
+    currentMode,
+    availableReasoningEfforts,
+  );
 
   return (
     <div
@@ -691,122 +770,58 @@ export function InputBox({
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
-            {supportReasoningEffort && context.mode !== "flash" && (
-              <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
-                  <div className="text-xs font-normal">
-                    {t.inputBox.reasoningEffort}:
-                    {context.reasoning_effort === "minimal" &&
-                      " " + t.inputBox.reasoningEffortMinimal}
-                    {context.reasoning_effort === "low" &&
-                      " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
-                      " " + t.inputBox.reasoningEffortMedium}
-                    {context.reasoning_effort === "high" &&
-                      " " + t.inputBox.reasoningEffortHigh}
-                  </div>
-                </PromptInputActionMenuTrigger>
-                <PromptInputActionMenuContent className="w-70">
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel className="text-muted-foreground text-xs">
-                      {t.inputBox.reasoningEffort}
-                    </DropdownMenuLabel>
-                    <PromptInputActionMenu>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "minimal"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("minimal")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortMinimal}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortMinimalDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "minimal" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "low"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("low")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortLow}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortLowDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "low" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "medium" ||
-                            !context.reasoning_effort
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("medium")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortMedium}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortMediumDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "medium" ||
-                        !context.reasoning_effort ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "high"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("high")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortHigh}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortHighDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "high" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                    </PromptInputActionMenu>
-                  </DropdownMenuGroup>
-                </PromptInputActionMenuContent>
-              </PromptInputActionMenu>
-            )}
+            {supportReasoningEffort &&
+              currentMode !== "flash" &&
+              availableReasoningEfforts.length > 0 && (
+                <PromptInputActionMenu>
+                  <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                    <div className="text-xs font-normal">
+                      {t.inputBox.reasoningEffort}:{" "}
+                      {getReasoningEffortLabel(
+                        t.inputBox,
+                        selectedReasoningEffort,
+                      )}
+                    </div>
+                  </PromptInputActionMenuTrigger>
+                  <PromptInputActionMenuContent className="w-70">
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel className="text-muted-foreground text-xs">
+                        {t.inputBox.reasoningEffort}
+                      </DropdownMenuLabel>
+                      <PromptInputActionMenu>
+                        {availableReasoningEfforts.map((effort) => (
+                          <PromptInputActionMenuItem
+                            key={effort}
+                            className={cn(
+                              selectedReasoningEffort === effort
+                                ? "text-accent-foreground"
+                                : "text-muted-foreground/65",
+                            )}
+                            onSelect={() => handleReasoningEffortSelect(effort)}
+                          >
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-1 font-bold">
+                                {getReasoningEffortLabel(t.inputBox, effort)}
+                              </div>
+                              <div className="pl-2 text-xs">
+                                {getReasoningEffortDescription(
+                                  t.inputBox,
+                                  effort,
+                                )}
+                              </div>
+                            </div>
+                            {selectedReasoningEffort === effort ? (
+                              <CheckIcon className="ml-auto size-4" />
+                            ) : (
+                              <div className="ml-auto size-4" />
+                            )}
+                          </PromptInputActionMenuItem>
+                        ))}
+                      </PromptInputActionMenu>
+                    </DropdownMenuGroup>
+                  </PromptInputActionMenuContent>
+                </PromptInputActionMenu>
+              )}
           </PromptInputTools>
           <PromptInputTools>
             <ModelSelector

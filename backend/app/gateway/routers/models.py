@@ -16,6 +16,10 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+    reasoning_efforts: list[str] | None = Field(
+        default=None,
+        description="Provider-specific reasoning_effort values accepted by this model",
+    )
 
 
 class TokenUsageResponse(BaseModel):
@@ -56,7 +60,8 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
                     "display_name": "GPT-4",
                     "description": "OpenAI GPT-4 model",
                     "supports_thinking": false,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning_efforts": null
                 },
                 {
                     "name": "claude-3-opus",
@@ -64,7 +69,8 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
                     "display_name": "Claude 3 Opus",
                     "description": "Anthropic Claude 3 Opus model",
                     "supports_thinking": true,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning_efforts": null
                 }
             ],
             "token_usage": {
@@ -81,6 +87,7 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
             description=model.description,
             supports_thinking=model.supports_thinking,
             supports_reasoning_effort=model.supports_reasoning_effort,
+            reasoning_efforts=model.reasoning_efforts,
         )
         for model in config.models
     ]
@@ -129,4 +136,5 @@ async def get_model(model_name: str, config: AppConfig = Depends(get_config)) ->
         description=model.description,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
+        reasoning_efforts=model.reasoning_efforts,
     )

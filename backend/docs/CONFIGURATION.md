@@ -131,11 +131,17 @@ Some models support "thinking" mode for complex reasoning:
 models:
   - name: deepseek-v3
     supports_thinking: true
+    supports_reasoning_effort: true
+    reasoning_efforts: [low, medium, high, max, xhigh]
     when_thinking_enabled:
       extra_body:
         thinking:
           type: enabled
 ```
+
+Use `reasoning_efforts` when a provider supports reasoning effort but only accepts
+a subset of DeerFlow's UI values. For example, omit `minimal` for providers that
+reject it.
 
 **Gemini with thinking via OpenAI-compatible gateway**:
 

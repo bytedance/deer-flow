@@ -58,6 +58,13 @@ from deerflow.uploads.manager import (
 logger = logging.getLogger(__name__)
 
 
+def _get_reasoning_efforts(model: Any) -> list[str] | None:
+    efforts = getattr(model, "reasoning_efforts", None)
+    if not isinstance(efforts, (list, tuple)):
+        return None
+    return [str(effort) for effort in efforts]
+
+
 StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
 
 
@@ -851,6 +858,7 @@ class DeerFlowClient:
                     "description": getattr(model, "description", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+                    "reasoning_efforts": _get_reasoning_efforts(model),
                 }
                 for model in self._app_config.models
             ],
@@ -922,6 +930,7 @@ class DeerFlowClient:
             "description": getattr(model, "description", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+            "reasoning_efforts": _get_reasoning_efforts(model),
         }
 
     # ------------------------------------------------------------------
