@@ -372,6 +372,25 @@ class TestExtractResponseText:
         # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
         assert _extract_response_text(result) == ""
 
+    def test_ignores_hidden_human_control_messages(self):
+        """Hidden control messages should not terminate current-turn response extraction."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "plan this"},
+                {"type": "ai", "content": "Here is the plan."},
+                {
+                    "type": "human",
+                    "name": "todo_reminder",
+                    "content": "keep todos updated",
+                    "additional_kwargs": {"hide_from_ui": True},
+                },
+            ]
+        }
+
+        assert _extract_response_text(result) == "Here is the plan."
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
@@ -1678,6 +1697,31 @@ class TestExtractArtifacts:
         }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]
 
+    def test_ignores_hidden_human_control_messages(self):
+        """Hidden control messages should not hide current-turn present_files artifacts."""
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "export"},
+                {
+                    "type": "ai",
+                    "content": "Done.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/plan.md"]}},
+                    ],
+                },
+                {
+                    "type": "human",
+                    "name": "todo_completion_reminder",
+                    "content": "mark tasks complete",
+                    "additional_kwargs": {"hide_from_ui": True},
+                },
+            ]
+        }
+
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/plan.md"]
+
 
 class TestFormatArtifactText:
     def test_single_artifact(self):
@@ -1787,6 +1831,50 @@ class TestHandleChatWithArtifacts:
             assert outbound_received[0].text != "(No response from agent)"
             assert "output.csv" in outbound_received[0].text
             assert outbound_received[0].artifacts == ["/mnt/user-data/outputs/output.csv"]
+
+        _run(go())
+
+    def test_hidden_human_control_message_does_not_trigger_no_response_fallback(self):
+        """Plan-mode hidden control messages should not mask the final AI response."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "make a plan"},
+                    {"type": "ai", "content": "Here is a concrete plan."},
+                    {
+                        "type": "human",
+                        "name": "todo_reminder",
+                        "content": "sync todos",
+                        "additional_kwargs": {"hide_from_ui": True},
+                    },
+                ]
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text="make a plan",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == "Here is a concrete plan."
 
         _run(go())
 

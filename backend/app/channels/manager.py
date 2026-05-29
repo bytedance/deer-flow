@@ -173,6 +173,8 @@ def _extract_response_text(result: dict | list) -> str:
 
         # Stop at the last human message — anything before it is a previous turn
         if msg_type == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
 
         # Check for tool messages from ask_clarification (interrupt case)
@@ -313,6 +315,8 @@ def _extract_artifacts(result: dict | list) -> list[str]:
             continue
         # Stop at the last human message — anything before it is a previous turn
         if msg.get("type") == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
         # Look for AI messages with present_files tool calls
         if msg.get("type") == "ai":
@@ -323,6 +327,18 @@ def _extract_artifacts(result: dict | list) -> list[str]:
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
     return artifacts
+
+
+def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
+    """Return whether a human message is an internal control message hidden from UI."""
+    if msg.get("type") != "human":
+        return False
+
+    additional_kwargs = msg.get("additional_kwargs")
+    if not isinstance(additional_kwargs, Mapping):
+        return False
+
+    return additional_kwargs.get("hide_from_ui") is True
 
 
 def _format_artifact_text(artifacts: list[str]) -> str:
