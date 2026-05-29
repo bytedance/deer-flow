@@ -374,6 +374,52 @@ class TestAsyncCheckpointer:
         mock_saver.setup.assert_awaited_once()
 
     @pytest.mark.anyio
+    async def test_database_postgres_uses_connection_pool(self):
+        """Unified database postgres path should use AsyncConnectionPool with keepalive."""
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        db_config = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db")
+        mock_config = MagicMock()
+        mock_config.checkpointer = None
+        mock_config.database = db_config
+
+        mock_saver = AsyncMock()
+
+        mock_saver_cls = MagicMock(return_value=mock_saver)
+
+        mock_pool_instance = AsyncMock()
+        mock_pool_instance.__aenter__.return_value = mock_pool_instance
+        mock_pool_instance.__aexit__.return_value = False
+
+        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
+        mock_pool_cls.check_connection = AsyncMock()
+        mock_dict_row = MagicMock()
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresSaver = mock_saver_cls
+
+        mock_psycopg_rows = MagicMock()
+        mock_psycopg_rows.dict_row = mock_dict_row
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg.rows": mock_psycopg_rows}),
+            patch.dict(sys.modules, {"psycopg_pool": MagicMock(AsyncConnectionPool=mock_pool_cls)}),
+        ):
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        mock_pool_cls.assert_called_once()
+        call_kwargs = mock_pool_cls.call_args
+        assert call_kwargs[0][0] == "postgresql://localhost/db"
+        assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+
+        mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
+        mock_saver.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
     async def test_database_sqlite_creates_parent_dir_via_to_thread(self):
         """Unified database SQLite setup should also move path IO off the event loop."""
         from deerflow.config.database_config import DatabaseConfig
