@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.updater import get_memory_data
+from deerflow.agents.memory.updater import aget_memory_data
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.rpc.machine_service import MachineServiceClient
 
@@ -199,7 +199,7 @@ def _build_suggestions(memory: dict[str, Any], lang: str) -> list[str]:
 
 async def _generate_greeting(thread_id: str) -> dict[str, Any]:
     user_id = get_effective_user_id()
-    memory = get_memory_data(user_id=user_id)
+    memory = await aget_memory_data(user_id=user_id)
 
     last_message_lang = _detect_language(None)
 

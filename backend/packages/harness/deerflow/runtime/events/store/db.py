@@ -170,7 +170,7 @@ class DbRunEventStore(RunEventStore):
                 await conn.execute(text(
                     "SELECT setval("
                     "  pg_get_serial_sequence('run_events', 'id'),"
-                    "  COALESCE((SELECT MAX(id) FROM run_events), 0)"
+                    "  COALESCE((SELECT MAX(id) FROM run_events), 1)"
                     ")"
                 ))
         except Exception:

@@ -14,13 +14,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.authz import require_permission
-from app.gateway.deps import get_db_session
+from app.gateway.authz import require_auth, require_permission
 from deerflow.config.tenant import get_current_tenant_id
+from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.marketplace.repository import MarketplaceRepository
 from deerflow.report_templates.permissions import Principal, check_permission
 from deerflow.report_templates.repository import (
@@ -160,7 +159,6 @@ class ApprovalRequest(BaseModel):
 @require_permission("marketplace", "read")
 async def list_listings(
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
     search: str | None = Query(None, description="Search in display_name and description"),
     category: str | None = Query(None, description="Filter by category"),
     visibility: str | None = Query(None, description="Filter by visibility (tenant/builtin)"),
@@ -171,7 +169,7 @@ async def list_listings(
 ) -> list[ListingResponse]:
     """List marketplace listings with search, filter, and sort."""
     principal = _principal_from_request(request)
-    repo = MarketplaceRepository(db)
+    repo = MarketplaceRepository(get_session_factory())
 
     # Only show tenant or builtin listings (not other tenants' private ones)
     listings, _ = await repo.list_listings(
@@ -194,10 +192,9 @@ async def list_listings(
 async def get_listing(
     listing_id: str,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
 ) -> ListingResponse:
     """Get listing detail."""
-    repo = MarketplaceRepository(db)
+    repo = MarketplaceRepository(get_session_factory())
     listing = await repo.get_listing(listing_id)
     if listing is None:
         raise HTTPException(status_code=404, detail=f"listing {listing_id!r} not found")
@@ -209,12 +206,11 @@ async def get_listing(
 async def list_reviews(
     listing_id: str,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> list[ReviewResponse]:
     """List reviews for a listing."""
-    repo = MarketplaceRepository(db)
+    repo = MarketplaceRepository(get_session_factory())
     reviews, _ = await repo.list_reviews(listing_id, limit=limit, offset=offset)
     return [ReviewResponse(**review) for review in reviews]
 
@@ -225,11 +221,10 @@ async def create_review(
     listing_id: str,
     body: CreateReviewRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
 ) -> ReviewResponse:
     """Submit a rating and review for a listing."""
     principal = _principal_from_request(request)
-    repo = MarketplaceRepository(db)
+    repo = MarketplaceRepository(get_session_factory())
 
     # Check if listing exists
     listing = await repo.get_listing(listing_id)
@@ -258,14 +253,13 @@ async def install_template(
     listing_id: str,
     body: InstallRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
 ) -> InstallResponse:
     """Install a marketplace template to private/tenant space.
 
     Forks the template and records the installation.
     """
     principal = _principal_from_request(request)
-    marketplace_repo = MarketplaceRepository(db)
+    marketplace_repo = MarketplaceRepository(get_session_factory())
     template_repo = get_repository()
 
     # Get listing
@@ -324,12 +318,12 @@ publish_router = APIRouter(tags=["report-templates"])
 
 
 @publish_router.post("/api/report-templates/{template_id}/publish-to-marketplace")
+@require_auth
 @require_permission("marketplace", "publish")
 async def publish_to_marketplace(
     template_id: str,
     body: PublishToMarketplaceRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Publish a template to the marketplace.
 
@@ -338,7 +332,7 @@ async def publish_to_marketplace(
     """
     principal = _principal_from_request(request)
     template_repo = get_repository()
-    marketplace_repo = MarketplaceRepository(db)
+    marketplace_repo = MarketplaceRepository(get_session_factory())
 
     # Resolve template
     try:
@@ -393,12 +387,12 @@ async def publish_to_marketplace(
 
 
 @publish_router.post("/api/template-marketplace/{listing_id}/approve")
+@require_auth
 @require_permission("marketplace", "publish")
 async def approve_listing(
     listing_id: str,
     body: ApprovalRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     """Approve or reject a pending marketplace listing (tenant_admin/superadmin only)."""
     principal = _principal_from_request(request)
@@ -406,7 +400,7 @@ async def approve_listing(
     if not (principal.is_tenant_admin or principal.is_superadmin):
         raise HTTPException(status_code=403, detail="approval requires tenant_admin or superadmin")
 
-    marketplace_repo = MarketplaceRepository(db)
+    marketplace_repo = MarketplaceRepository(get_session_factory())
     listing = await marketplace_repo.get_listing(listing_id)
     if listing is None:
         raise HTTPException(status_code=404, detail=f"listing {listing_id!r} not found")

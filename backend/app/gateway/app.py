@@ -383,7 +383,7 @@ async def _sync_postgres_sequences() -> None:
                 await conn.execute(text(
                     f"SELECT setval("
                     f"  pg_get_serial_sequence('{table}', 'id'),"
-                    f"  COALESCE((SELECT MAX(id) FROM {table}), 0)"
+                    f"  COALESCE((SELECT MAX(id) FROM {table}), 1)"
                     f")"
                 ))
             logger.info("PostgreSQL sequences synced for %s", ", ".join(tables))
