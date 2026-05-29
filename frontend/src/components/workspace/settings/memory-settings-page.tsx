@@ -25,7 +25,6 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { env } from "@/env";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -42,9 +41,11 @@ import type {
   UserMemory,
 } from "@/core/memory/types";
 import { useMemoryEventSubscription } from "@/core/memory/use-memory-events";
+import { truncateFactPreview } from "@/core/memory/utils";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
+import { env } from "@/env";
 
 import { DomainMemoryPanel } from "./domain-memory-panel";
 import { SessionMemoryPanel } from "./session-memory-panel";
@@ -262,38 +263,12 @@ function isMemorySummaryEmpty(memory: UserMemory) {
   );
 }
 
-function truncateFactPreview(content: string, maxLength = 140) {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  const ellipsis = "...";
-  if (maxLength <= ellipsis.length) {
-    return normalized.slice(0, maxLength);
-  }
-  return `${normalized.slice(0, maxLength - ellipsis.length)}${ellipsis}`;
-}
-
 function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 export function MemorySettingsPage() {
   const { t } = useI18n();
-
-  if (env.NEXT_PUBLIC_MEMORY_UI_ENABLED === "false") {
-    return (
-      <SettingsSection
-        title={t.settings.memory.title}
-        description={t.settings.memory.description}
-      >
-        <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-          Memory UI is disabled.
-        </div>
-      </SettingsSection>
-    );
-  }
-
   const { memory, isLoading, error } = useMemory();
   useMemoryEventSubscription();
   const clearMemory = useClearMemory();
@@ -322,11 +297,25 @@ export function MemorySettingsPage() {
   );
   const [isExporting, setIsExporting] = useState(false);
   const deferredQuery = useDeferredValue(query);
-  const normalizedQuery = deferredQuery.trim().toLowerCase();
   const factContentInputId = useId();
   const factCategoryInputId = useId();
   const factConfidenceInputId = useId();
   const factConfidenceHintId = useId();
+
+  if (env.NEXT_PUBLIC_MEMORY_UI_ENABLED === "false") {
+    return (
+      <SettingsSection
+        title={t.settings.memory.title}
+        description={t.settings.memory.description}
+      >
+        <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+          {t.settings.memory.memoryUiDisabled}
+        </div>
+      </SettingsSection>
+    );
+  }
+
+  const normalizedQuery = deferredQuery.trim().toLowerCase();
 
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
   const clearAllConfirmTitle =
@@ -567,13 +556,13 @@ export function MemorySettingsPage() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <TabsList>
               {visibleLayers.includes("user") && (
-                <TabsTrigger value="user">User Memory</TabsTrigger>
+                <TabsTrigger value="user">{t.settings.memory.tabs.user}</TabsTrigger>
               )}
               {visibleLayers.includes("session") && (
-                <TabsTrigger value="session">Session Memory</TabsTrigger>
+                <TabsTrigger value="session">{t.settings.memory.tabs.session}</TabsTrigger>
               )}
               {visibleLayers.includes("domain") && (
-                <TabsTrigger value="domain">Domain Memory</TabsTrigger>
+                <TabsTrigger value="domain">{t.settings.memory.tabs.domain}</TabsTrigger>
               )}
             </TabsList>
             <ToggleGroup
@@ -588,9 +577,9 @@ export function MemorySettingsPage() {
               }}
               variant="outline"
             >
-              <ToggleGroupItem value="user">User</ToggleGroupItem>
-              <ToggleGroupItem value="session">Session</ToggleGroupItem>
-              <ToggleGroupItem value="domain">Domain</ToggleGroupItem>
+              <ToggleGroupItem value="user">{t.settings.memory.toggles.user}</ToggleGroupItem>
+              <ToggleGroupItem value="session">{t.settings.memory.toggles.session}</ToggleGroupItem>
+              <ToggleGroupItem value="domain">{t.settings.memory.toggles.domain}</ToggleGroupItem>
             </ToggleGroup>
           </div>
 
@@ -600,7 +589,7 @@ export function MemorySettingsPage() {
             {t.common.loading}
           </div>
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <div>{t.settings.memory.errorPrefix}: {error.message}</div>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}

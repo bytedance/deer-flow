@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateDomainFact,
   useDomainMemory,
@@ -26,6 +27,9 @@ import { truncateFactPreview } from "@/core/memory/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 export function DomainMemoryPanel() {
+  const { t } = useI18n();
+  const d = t.settings.memory.domain;
+
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [domainFilter, setDomainFilter] = useState("");
@@ -39,20 +43,17 @@ export function DomainMemoryPanel() {
     confidence: 0.9,
   });
 
-  const { domainFacts, isLoading, error } = useDomainMemory(
-    activeQuery,
-    {
-      domain: domainFilter || undefined,
-      entityId: entityFilter || undefined,
-    },
-  );
+  const { domainFacts, isLoading, error } = useDomainMemory(activeQuery, {
+    domain: domainFilter || undefined,
+    entityId: entityFilter || undefined,
+  });
   const createMutation = useCreateDomainFact();
   const exportMutation = useExportDomainMemory();
 
   function handleSearch() {
     const trimmed = query.trim();
     if (!trimmed) {
-      toast.error("Enter a search query");
+      toast.error(d.searchRequired);
       return;
     }
     setActiveQuery(trimmed);
@@ -75,20 +76,24 @@ export function DomainMemoryPanel() {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      toast.success(`Exported ${data.length} domain fact(s)`);
+      toast.success(d.exportSuccess.replace("{count}", String(data.length)));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function handleCreate() {
-    if (!createForm.content.trim() || !createForm.domain.trim() || !createForm.entity_id.trim()) {
-      toast.error("Content, domain, and entity are required");
+    if (
+      !createForm.content.trim() ||
+      !createForm.domain.trim() ||
+      !createForm.entity_id.trim()
+    ) {
+      toast.error(d.createRequired);
       return;
     }
     try {
       await createMutation.mutateAsync(createForm);
-      toast.success("Domain fact created");
+      toast.success(d.createSuccess);
       setCreateOpen(false);
       setCreateForm({ content: "", domain: "", entity_id: "", confidence: 0.9 });
     } catch (err) {
@@ -102,7 +107,7 @@ export function DomainMemoryPanel() {
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search domain facts..."
+          placeholder={d.searchPlaceholder}
           className="sm:max-w-xs"
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSearch();
@@ -111,24 +116,24 @@ export function DomainMemoryPanel() {
         <Input
           value={domainFilter}
           onChange={(e) => setDomainFilter(e.target.value)}
-          placeholder="Domain filter"
+          placeholder={d.domainFilterPlaceholder}
           className="sm:max-w-[140px]"
         />
         <Input
           value={entityFilter}
           onChange={(e) => setEntityFilter(e.target.value)}
-          placeholder="Entity filter"
+          placeholder={d.entityFilterPlaceholder}
           className="sm:max-w-[140px]"
         />
         <Button variant="outline" onClick={handleSearch}>
-          Search
+          {d.searchButton}
         </Button>
       </div>
 
       <div className="flex gap-2">
         <Button variant="outline" onClick={() => setCreateOpen(true)}>
           <PlusIcon className="mr-2 h-4 w-4" />
-          Create Fact
+          {d.createFact}
         </Button>
         <Button
           variant="outline"
@@ -136,26 +141,28 @@ export function DomainMemoryPanel() {
           disabled={exportMutation.isPending}
         >
           <DownloadIcon className="mr-2 h-4 w-4" />
-          Export
+          {d.exportButton}
         </Button>
       </div>
 
       {!activeQuery ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-          Enter a search query to find domain facts.
+          {d.emptyState}
         </div>
       ) : isLoading ? (
-        <div className="text-muted-foreground text-sm">Searching...</div>
+        <div className="text-muted-foreground text-sm">{d.searching}</div>
       ) : error ? (
-        <div className="text-destructive text-sm">Error: {error.message}</div>
+        <div className="text-destructive text-sm">
+          {t.settings.memory.errorPrefix}: {error.message}
+        </div>
       ) : domainFacts.length === 0 ? (
         <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-          No domain facts match &quot;{activeQuery}&quot;.
+          {d.noMatches.replace("{query}", activeQuery)}
         </div>
       ) : (
         <div className="space-y-3">
           <div className="text-muted-foreground text-sm">
-            {domainFacts.length} result(s)
+            {d.resultCount.replace("{count}", String(domainFacts.length))}
           </div>
           {domainFacts.map((fact) => (
             <div
@@ -166,12 +173,16 @@ export function DomainMemoryPanel() {
                 <Badge variant="secondary">{fact.domain}</Badge>
                 <span className="text-muted-foreground">{fact.entity_id}</span>
                 <span>
-                  <span className="text-muted-foreground">Confidence:</span>{" "}
+                  <span className="text-muted-foreground">
+                    {d.confidenceLabel}:
+                  </span>{" "}
                   {fact.confidence.toFixed(2)}
                 </span>
                 {fact.created_at && (
                   <span>
-                    <span className="text-muted-foreground">Created:</span>{" "}
+                    <span className="text-muted-foreground">
+                      {d.createdLabel}:
+                    </span>{" "}
                     {formatTimeAgo(fact.created_at)}
                   </span>
                 )}
@@ -180,7 +191,7 @@ export function DomainMemoryPanel() {
                 {truncateFactPreview(fact.content)}
               </p>
               <div className="text-muted-foreground text-xs">
-                Score: {fact.similarity_score.toFixed(2)} → Adjusted:{" "}
+                {d.scoreLabel}: {fact.similarity_score.toFixed(2)} → Adjusted:{" "}
                 {fact.adjusted_score.toFixed(2)}
               </div>
             </div>
@@ -191,33 +202,33 @@ export function DomainMemoryPanel() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create Domain Fact</DialogTitle>
+            <DialogTitle>{d.createDialogTitle}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Content</label>
+              <label className="text-sm font-medium">{d.contentLabel}</label>
               <Textarea
                 value={createForm.content}
                 onChange={(e) =>
                   setCreateForm((prev) => ({ ...prev, content: e.target.value }))
                 }
-                placeholder="Fact content"
+                placeholder={d.contentPlaceholder}
                 rows={3}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Domain</label>
+                <label className="text-sm font-medium">{d.domainLabel}</label>
                 <Input
                   value={createForm.domain}
                   onChange={(e) =>
                     setCreateForm((prev) => ({ ...prev, domain: e.target.value }))
                   }
-                  placeholder="e.g., equipment"
+                  placeholder={d.domainPlaceholder}
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Entity ID</label>
+                <label className="text-sm font-medium">{d.entityIdLabel}</label>
                 <Input
                   value={createForm.entity_id}
                   onChange={(e) =>
@@ -226,12 +237,14 @@ export function DomainMemoryPanel() {
                       entity_id: e.target.value,
                     }))
                   }
-                  placeholder="e.g., pump_a"
+                  placeholder={d.entityIdPlaceholder}
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Confidence</label>
+              <label className="text-sm font-medium">
+                {d.confidenceFieldLabel}
+              </label>
               <Input
                 type="number"
                 min="0"
@@ -249,13 +262,13 @@ export function DomainMemoryPanel() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
-              Cancel
+              {d.cancelButton}
             </Button>
             <Button
               onClick={() => void handleCreate()}
               disabled={createMutation.isPending}
             >
-              {createMutation.isPending ? "Creating..." : "Create"}
+              {createMutation.isPending ? d.creatingButton : d.createButton}
             </Button>
           </DialogFooter>
         </DialogContent>

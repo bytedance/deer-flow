@@ -60,6 +60,22 @@ function TierBadge({ tier, locale }: { tier: SkillTier; locale: string }) {
   );
 }
 
+function CategoryBadge({
+  category,
+  locale,
+}: {
+  category: string;
+  locale: string;
+}) {
+  if (category !== "custom") return null;
+  const label = locale.startsWith("zh") ? "自定义" : "Custom";
+  return (
+    <span className="inline-flex items-center rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+      {label}
+    </span>
+  );
+}
+
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
@@ -88,25 +104,24 @@ function SkillSettingsList({
 }) {
   const { t, locale } = useI18n();
   const router = useRouter();
-  const [categoryFilter, setCategoryFilter] = useState<string>("public");
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const { mutate: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(() => {
-    let result = skills.filter((skill) => skill.category === categoryFilter);
-    if (tierFilter !== "all") {
-      result = result.filter((skill) => skill.tier === tierFilter);
-    }
+    let result =
+      tierFilter === "all"
+        ? skills
+        : skills.filter((skill) => skill.tier === tierFilter);
     if (searchQuery.trim()) {
       const query = searchQuery.trim().toLowerCase();
-      result = skills.filter(
+      result = result.filter(
         (skill) =>
           skill.name.toLowerCase().includes(query) ||
           skill.description.toLowerCase().includes(query),
       );
     }
     return result;
-  }, [skills, categoryFilter, tierFilter, searchQuery]);
+  }, [skills, tierFilter, searchQuery]);
 
   const handleCreateSkill = () => {
     onClose?.();
@@ -116,32 +131,21 @@ function SkillSettingsList({
   return (
     <div className="flex w-full flex-col gap-4">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap gap-2">
-          <Tabs
-            defaultValue="public"
-            onValueChange={setCategoryFilter}
-          >
-            <TabsList variant="line">
-              <TabsTrigger value="public">{t.common.public}</TabsTrigger>
-              <TabsTrigger value="custom">{t.common.custom}</TabsTrigger>
-            </TabsList>
-          </Tabs>
-          <Tabs defaultValue="all" onValueChange={setTierFilter}>
-            <TabsList variant="line">
-              <TabsTrigger value="all">
-                {locale.startsWith("zh") ? "全部" : "All"}
-              </TabsTrigger>
-              <TabsTrigger value="core-industrial">
-                <FactoryIcon className="mr-1 size-3" />
-                {locale.startsWith("zh") ? "工业智能" : "Industrial"}
-              </TabsTrigger>
-              <TabsTrigger value="foundation">
-                <WrenchIcon className="mr-1 size-3" />
-                {locale.startsWith("zh") ? "基础工具" : "Foundation"}
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </div>
+        <Tabs value={tierFilter} onValueChange={setTierFilter}>
+          <TabsList variant="line">
+            <TabsTrigger value="all">
+              {locale.startsWith("zh") ? "全部" : "All"}
+            </TabsTrigger>
+            <TabsTrigger value="core-industrial">
+              <FactoryIcon className="mr-1 size-3" />
+              {locale.startsWith("zh") ? "工业智能" : "Industrial"}
+            </TabsTrigger>
+            <TabsTrigger value="foundation">
+              <WrenchIcon className="mr-1 size-3" />
+              {locale.startsWith("zh") ? "基础工具" : "Foundation"}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
         <div className="flex items-center gap-2">
           <input
             type="text"
@@ -169,6 +173,7 @@ function SkillSettingsList({
                 <div className="flex items-center gap-2">
                   {skill.name}
                   <TierBadge tier={skill.tier} locale={locale} />
+                  <CategoryBadge category={skill.category} locale={locale} />
                 </div>
               </ItemTitle>
               <ItemDescription className="line-clamp-4">
