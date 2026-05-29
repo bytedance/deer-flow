@@ -83,9 +83,20 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        with PostgresSaver.from_conn_string(config.connection_string) as saver:
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        with ConnectionPool(
+            config.connection_string,
+            min_size=2,
+            max_size=10,
+            max_lifetime=1800.0,
+            max_idle=300.0,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        ) as pool:
+            saver = PostgresSaver(conn=pool)
             saver.setup()
-            logger.info("Checkpointer: using PostgresSaver")
+            logger.info("Checkpointer: using PostgresSaver (connection pool)")
             yield saver
         return
 

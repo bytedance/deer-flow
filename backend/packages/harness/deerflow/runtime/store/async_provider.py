@@ -71,9 +71,12 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresStore.from_conn_string(config.connection_string) as store:
+        async with AsyncPostgresStore.from_conn_string(
+            config.connection_string,
+            pool_config={"min_size": 2, "max_size": 10},
+        ) as store:
             await store.setup()
-            logger.info("Store: using AsyncPostgresStore")
+            logger.info("Store: using AsyncPostgresStore (connection pool)")
             yield store
         return
 
@@ -144,9 +147,12 @@ async def _async_store_from_database(db_config) -> AsyncIterator[BaseStore]:
         if not db_config.postgres_url:
             raise ValueError("database.postgres_url is required for the postgres backend")
 
-        async with AsyncPostgresStore.from_conn_string(db_config.postgres_url) as store:
+        async with AsyncPostgresStore.from_conn_string(
+            db_config.postgres_url,
+            pool_config={"min_size": 2, "max_size": 10},
+        ) as store:
             await store.setup()
-            logger.info("Store: using AsyncPostgresStore")
+            logger.info("Store: using AsyncPostgresStore (connection pool)")
             yield store
         return
 

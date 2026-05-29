@@ -83,9 +83,12 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        with PostgresStore.from_conn_string(config.connection_string) as store:
+        with PostgresStore.from_conn_string(
+            config.connection_string,
+            pool_config={"min_size": 2, "max_size": 10},
+        ) as store:
             store.setup()
-            logger.info("Store: using PostgresStore")
+            logger.info("Store: using PostgresStore (connection pool)")
             yield store
         return
 

@@ -228,22 +228,34 @@ class TestGetCheckpointer:
         load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
 
         mock_saver_instance = MagicMock()
-        mock_cm = MagicMock()
-        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
-        mock_cm.__exit__ = MagicMock(return_value=False)
+        mock_saver_cls = MagicMock(return_value=mock_saver_instance)
 
-        mock_saver_cls = MagicMock()
-        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+        mock_pool_instance = MagicMock()
+        mock_pool_instance.__enter__ = MagicMock(return_value=mock_pool_instance)
+        mock_pool_instance.__exit__ = MagicMock(return_value=False)
+        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
 
         mock_pg_module = MagicMock()
         mock_pg_module.PostgresSaver = mock_saver_cls
 
-        with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_pg_module}):
+        mock_psycopg_rows = MagicMock()
+        mock_psycopg_rows.dict_row = "dict_row_factory"
+
+        mock_psycopg_pool_module = MagicMock()
+        mock_psycopg_pool_module.ConnectionPool = mock_pool_cls
+
+        with patch.dict(sys.modules, {
+            "langgraph.checkpoint.postgres": mock_pg_module,
+            "psycopg": MagicMock(),
+            "psycopg.rows": mock_psycopg_rows,
+            "psycopg_pool": mock_psycopg_pool_module,
+        }):
             reset_checkpointer()
             cp = get_checkpointer()
 
         assert cp is mock_saver_instance
-        mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
+        mock_pool_cls.assert_called_once()
+        mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
         mock_saver_instance.setup.assert_called_once()
 
 

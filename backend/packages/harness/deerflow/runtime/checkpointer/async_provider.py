@@ -70,7 +70,18 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresSaver.from_conn_string(config.connection_string) as saver:
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
+
+        async with AsyncConnectionPool(
+            config.connection_string,
+            min_size=2,
+            max_size=10,
+            max_lifetime=1800.0,
+            max_idle=300.0,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        ) as pool:
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
@@ -114,7 +125,18 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
         if not db_config.postgres_url:
             raise ValueError("database.postgres_url is required for the postgres backend")
 
-        async with AsyncPostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
+
+        async with AsyncConnectionPool(
+            db_config.postgres_url,
+            min_size=2,
+            max_size=10,
+            max_lifetime=1800.0,
+            max_idle=300.0,
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        ) as pool:
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
