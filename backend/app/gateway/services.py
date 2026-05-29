@@ -140,7 +140,14 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
-    see issue #2677)."""
+    see issue #2677).
+
+    ``user_id`` is intentionally propagated into ``config['context']`` in addition to
+    the whitelisted keys, so non-web callers (e.g. IM channels) that supply identity in
+    ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
+    ``setdefault`` so a server-authenticated id stamped by
+    :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+    """
     if not context:
         return
     configurable = config.setdefault("configurable", {})
