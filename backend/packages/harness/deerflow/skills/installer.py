@@ -13,6 +13,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
         reserved = True
         for child in staging_target.iterdir():
             shutil.move(str(child), target / child.name)
+        make_skill_tree_sandbox_readable(target)
         installed = True
     except FileExistsError as e:
         raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e
