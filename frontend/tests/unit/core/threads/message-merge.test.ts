@@ -50,6 +50,154 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
   ]);
 });
 
+test("mergeMessages keeps persisted AI prefix when reconnect stream resumes with only new text", () => {
+  const human = {
+    id: "human-1",
+    type: "human",
+    content: "write a report",
+  } as Message;
+  const persistedAiPrefix = {
+    id: "ai-1",
+    type: "ai",
+    content: "The first section is already persisted. ",
+  } as Message;
+  const reconnectedAiDelta = {
+    id: "ai-1",
+    type: "ai",
+    content: "The second section arrives after navigation.",
+  } as Message;
+
+  expect(
+    mergeMessages([human, persistedAiPrefix], [reconnectedAiDelta], [], true),
+  ).toEqual([
+    human,
+    {
+      ...reconnectedAiDelta,
+      content:
+        "The first section is already persisted. The second section arrives after navigation.",
+    },
+  ]);
+});
+
+test("mergeMessages keeps persisted AI prefix for stream-metadata deltas without text overlap", () => {
+  const persistedAiPrefix = {
+    id: "ai-1",
+    type: "ai",
+    content: "已经输出的一百个字",
+  } as Message;
+  const reconnectedAiDelta = {
+    id: "ai-1",
+    type: "ai",
+    content: "继续输出后续内容",
+  } as Message;
+
+  expect(
+    mergeMessages([persistedAiPrefix], [reconnectedAiDelta], [], () => true),
+  ).toEqual([
+    {
+      ...reconnectedAiDelta,
+      content: "已经输出的一百个字继续输出后续内容",
+    },
+  ]);
+});
+
+test("mergeMessages does not duplicate overlapping AI text when reconnect stream repeats the tail", () => {
+  const persistedAiPrefix = {
+    id: "ai-1",
+    type: "ai",
+    content: "The answer starts here and ",
+  } as Message;
+  const reconnectedAiDelta = {
+    id: "ai-1",
+    type: "ai",
+    content: "and continues here.",
+  } as Message;
+
+  expect(
+    mergeMessages([persistedAiPrefix], [reconnectedAiDelta], [], true),
+  ).toEqual([
+    {
+      ...reconnectedAiDelta,
+      content: "The answer starts here and continues here.",
+    },
+  ]);
+});
+
+test("mergeMessages leaves full live AI text unchanged when it already contains history", () => {
+  const persistedAiPrefix = {
+    id: "ai-1",
+    type: "ai",
+    content: "partial",
+  } as Message;
+  const liveFullAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "partial response",
+  } as Message;
+
+  expect(mergeMessages([persistedAiPrefix], [liveFullAi], [], true)).toEqual([
+    liveFullAi,
+  ]);
+});
+
+test("mergeMessages does not stitch unrelated live AI replacement text while streaming", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "old answer",
+  } as Message;
+  const liveReplacementAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "new answer",
+    response_metadata: { model: "test-model" },
+  } as Message;
+
+  expect(mergeMessages([persistedAi], [liveReplacementAi], [], true)).toEqual([
+    liveReplacementAi,
+  ]);
+});
+
+test("mergeMessages does not stitch same-id live AI text without stream metadata", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "已经保存的旧文本",
+  } as Message;
+  const liveReplacementAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "新的完整替换文本",
+  } as Message;
+
+  expect(
+    mergeMessages([persistedAi], [liveReplacementAi], [], () => false),
+  ).toEqual([liveReplacementAi]);
+});
+
+test("mergeMessages keeps live AI metadata when reconnect stream repeats the persisted suffix", () => {
+  const persistedAiPrefix = {
+    id: "ai-1",
+    type: "ai",
+    content: "The answer starts here.",
+  } as Message;
+  const reconnectedAiSuffix = {
+    id: "ai-1",
+    type: "ai",
+    content: "starts here.",
+    response_metadata: { model: "test-model" },
+  } as Message;
+
+  expect(
+    mergeMessages([persistedAiPrefix], [reconnectedAiSuffix], [], true),
+  ).toEqual([
+    {
+      ...reconnectedAiSuffix,
+      content: "The answer starts here.",
+    },
+  ]);
+});
+
 test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   const oldTool = {
     id: "tool-message-old",
