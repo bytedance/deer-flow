@@ -143,6 +143,10 @@ sandbox:
     FEATURES_TOOL_ROOT: /opt/features-tool
     # 设备日/周/月报数据源开关（未设置 = demo）；切真数据时取消下一行注释
     DEER_FLOW_DATA_PROVIDER: ins
+    # Gateway API URL for scripts running inside sandbox containers
+    DEER_FLOW_GATEWAY_URL: http://host.docker.internal:8001
+    # Internal auth token so sandbox scripts can call Gateway APIs
+    DEER_FLOW_INTERNAL_AUTH_VALUE: $DEER_FLOW_INTERNAL_AUTH_VALUE
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000

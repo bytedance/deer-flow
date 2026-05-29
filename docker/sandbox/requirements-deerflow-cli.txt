@@ -1,0 +1,9 @@
+# Minimal dependencies for deerflow.integrations.cli in sandbox.
+# This is NOT the full deerflow-harness dep set — only what the
+# integration CLI bridge needs (httpx for RPC, pydantic for models,
+# pyyaml for config, python-dotenv for env var resolution).
+httpx>=0.28.0
+pydantic>=2.12.5
+pyyaml>=6.0.3
+python-dotenv>=0.9.9
+tenacity>=9.0.0

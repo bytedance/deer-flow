@@ -604,6 +604,9 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#   #   # For Docker sandbox: Gateway API URL reachable from inside containers
+#   #   # Use host.docker.internal on Windows/macOS, or host IP on Linux
+#   #   DEER_FLOW_GATEWAY_URL: http://host.docker.internal:8001
 
 # Option 3: Provisioner-managed AIO Sandbox (docker-compose-dev)
 # Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
