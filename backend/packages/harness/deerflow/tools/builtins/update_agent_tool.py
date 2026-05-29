@@ -102,7 +102,8 @@ def update_agent(
 
     Pass ``skills=[]`` to disable all skills for this agent. Omit ``skills``
     entirely to keep the existing whitelist. Do not pass literal strings like
-    ``"null"`` / ``"none"`` for unchanged fields; omit those fields instead.
+    ``"null"`` / ``"none"`` / ``"undefined"`` for unchanged fields; omit those
+    fields instead.
 
     Args:
         soul: Optional full replacement SOUL.md content.
@@ -123,7 +124,7 @@ def update_agent(
         return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id, status="error")]})
 
     if soul is None and description is None and skills is None and tool_groups is None and model is None:
-        return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null" or "none".')
+        return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
     try:
         agent_name = validate_agent_name(agent_name_raw)
