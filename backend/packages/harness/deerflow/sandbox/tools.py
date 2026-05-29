@@ -1203,7 +1203,14 @@ def _runtime_shell_env(runtime: ToolRuntime[ContextT, ThreadState]) -> dict[str,
     Rotating diagnosis uses the authenticated Deer Flow bearer token directly
     for InS data access; inject it as ``INS_ACCESS_TOKEN`` so shell-launched
     Python entrypoints see the same request context without re-login.
+
+    Scripts like ``list_equipment.py`` also need ``DEER_FLOW_EFFECTIVE_USER_ID``
+    and ``DEER_FLOW_TENANT_ID`` to query auth-aware Gateway endpoints, plus
+    ``DEER_FLOW_INTERNAL_AUTH_VALUE`` (set by Gateway at startup) so the
+    Gateway's auth middleware accepts the request.
     """
+    import os as _os
+
     context = getattr(runtime, "context", None)
     if not isinstance(context, dict):
         return {}
@@ -1212,6 +1219,15 @@ def _runtime_shell_env(runtime: ToolRuntime[ContextT, ThreadState]) -> dict[str,
     access_token = context.get("access_token")
     if isinstance(access_token, str) and access_token.strip():
         env["INS_ACCESS_TOKEN"] = access_token.strip()
+    user_id = context.get("user_id")
+    if user_id is not None:
+        env["DEER_FLOW_EFFECTIVE_USER_ID"] = str(user_id)
+    tenant_id = context.get("tenant_id")
+    if tenant_id is not None:
+        env["DEER_FLOW_TENANT_ID"] = str(tenant_id)
+    internal_token = _os.environ.get("DEER_FLOW_INTERNAL_AUTH_VALUE")
+    if internal_token:
+        env["DEER_FLOW_INTERNAL_AUTH_VALUE"] = internal_token
     return env
 
 

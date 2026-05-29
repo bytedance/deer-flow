@@ -142,6 +142,23 @@ def create_auth_middleware():
             finally:
                 reset_tenant_id(token)
 
+        from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, is_valid_internal_auth_token
+
+        if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
+            tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
+            try:
+                validate_tenant_id(tenant_id)
+            except ValueError as e:
+                return _json_error(400, str(e))
+            error = await _check_tenant_active(tenant_id, request)
+            if error is not None:
+                return error
+            token = set_current_tenant_id(tenant_id)
+            try:
+                return await call_next(request)
+            finally:
+                reset_tenant_id(token)
+
         if not config.enabled:
             tenant_id = request.headers.get("X-DeerFlow-Tenant", "default")
             try:

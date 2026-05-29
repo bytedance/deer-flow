@@ -4,9 +4,8 @@
 Returns matched equipment list and available KPIs by equipment type,
 scope (all/area/specific), and optional filter.
 
-Data source priority:
-  1. Organize tree API (when DEER_FLOW_EFFECTIVE_USER_ID is set)
-  2. Demo fallback (deterministic synthetic data, always available)
+Data source: Organize tree API (requires DEER_FLOW_EFFECTIVE_USER_ID).
+Returns an error when the API is unreachable or user context is missing.
 """
 
 from __future__ import annotations
@@ -31,22 +30,6 @@ TYPE_DISPLAY = {
     "pump": "机泵",
     "reciprocating_machinery": "往复机组",
 }
-
-TYPE_PREFIX = {
-    "static_equipment": "SE",
-    "rotating_machinery": "RM",
-    "pump": "PP",
-    "reciprocating_machinery": "RC",
-}
-
-TYPE_COUNT = {
-    "static_equipment": 1000,
-    "rotating_machinery": 100,
-    "pump": 1000,
-    "reciprocating_machinery": 100,
-}
-
-AREAS = ["A区", "B区", "C区", "D区"]
 
 # Map organize tree device type numbers → equipment type keys
 _ORG_TYPE_MAP: dict[int, str] = {
@@ -104,14 +87,6 @@ KPI_DEFINITIONS: dict[str, dict[str, str]] = {
 KPI_NAME_OVERRIDES: dict[str, dict[str, str]] = {
     "pump": {"bearing_temp": "温度"},
 }
-
-SUB_TYPES: dict[str, list[str]] = {
-    "static_equipment": ["换热器", "冷却器", "塔器", "容器", "反应器"],
-    "rotating_machinery": ["压缩机", "汽轮机", "发电机", "风机"],
-    "pump": ["离心泵", "柱塞泵", "螺杆泵", "齿轮泵"],
-    "reciprocating_machinery": ["往复压缩机", "往复泵", "柴油机", "气缸"],
-}
-
 
 # ---------------------------------------------------------------------------
 # Organize API data fetch (real data path)
@@ -196,7 +171,7 @@ def _query_from_org_tree(
 ) -> dict | None:
     """Query equipment from the organize tree API.
 
-    Returns None when the API is unreachable (caller falls back to demo).
+    Returns None when the API is unreachable (caller surfaces the error).
     """
     tree = _fetch_org_tree(user_id)
     if tree is None:
@@ -254,54 +229,8 @@ def _query_from_org_tree(
 
 
 # ---------------------------------------------------------------------------
-# Demo data generators (fallback)
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-def _demo_equipment_for_type(eq_type: str) -> list[dict]:
-    """Generate deterministic demo equipment list for a single type."""
-    prefix = TYPE_PREFIX[eq_type]
-    total = TYPE_COUNT[eq_type]
-    per_area = total // len(AREAS)
-    sub_types = SUB_TYPES[eq_type]
-    equipment: list[dict] = []
-    for area_idx, area in enumerate(AREAS):
-        for i in range(per_area):
-            seq = area_idx * per_area + i + 1
-            sub_type = sub_types[seq % len(sub_types)]
-            equipment.append({
-                "id": f"{prefix}-{seq:03d}",
-                "name": f"{sub_type}-{seq:03d}",
-                "area": area,
-                "sub_type": sub_type,
-            })
-    return equipment
-
-
-def _get_all_demo_equipment(eq_type: str) -> list[dict]:
-    """Return demo equipment, optionally filtered by type."""
-    if eq_type == "all":
-        result: list[dict] = []
-        for t in TYPE_PREFIX:
-            result.extend(_demo_equipment_for_type(t))
-        return result
-    return _demo_equipment_for_type(eq_type)
-
-
-def _filter_by_scope(
-    equipment: list[dict],
-    scope: str,
-    filter_values: list[str],
-) -> list[dict]:
-    if scope == "all":
-        return equipment
-    if scope == "area":
-        area_set = set(filter_values)
-        return [e for e in equipment if e["area"] in area_set]
-    if scope == "specific":
-        id_set = set(filter_values)
-        return [e for e in equipment if e["id"] in id_set]
-    return equipment
 
 
 def _build_available_kpis(eq_type: str) -> list[dict]:
@@ -360,66 +289,25 @@ def query_equipment(
 ) -> dict:
     """Query equipment catalog. Returns result dict matching design doc §4.1.
 
-    Data source priority: organize API (real) → demo fallback.
+    Returns an error dict when the Organize API is unreachable or user
+    context is missing.
     """
-    # Try real organize API when user context is available.
     user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
-    if user_id:
-        result = _query_from_org_tree(
-            user_id=user_id,
-            eq_type=eq_type,
-            scope=scope,
-            filter_str=filter_str,
-            limit=limit,
-        )
-        if result is not None:
-            return result
+    if not user_id:
+        return {"error": "DEER_FLOW_EFFECTIVE_USER_ID 未设置，无法查询设备列表"}
 
-    # Demo fallback.
-    all_equipment = _get_all_demo_equipment(eq_type)
-    filter_values = _parse_csv(filter_str)
-    matched = _filter_by_scope(all_equipment, scope, filter_values)
-    total_matched = len(matched)
+    result = _query_from_org_tree(
+        user_id=user_id,
+        eq_type=eq_type,
+        scope=scope,
+        filter_str=filter_str,
+        limit=limit,
+    )
+    if result is not None:
+        return result
 
-    total_in_type = sum(TYPE_COUNT.values()) if eq_type == "all" else TYPE_COUNT.get(eq_type, 0)
-
-    truncated = total_matched > limit
-    display_equipment = matched[:limit]
-
-    filter_display = filter_str if filter_str else ("全部" if scope == "all" else "")
-
-    area_counts: dict[str, int] = {}
-    for e in matched:
-        area = e.get("area", "")
-        area_counts[area] = area_counts.get(area, 0) + 1
-
-    # Build informative warning.
-    reasons: list[str] = []
-    if not os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID"):
-        reasons.append("DEER_FLOW_EFFECTIVE_USER_ID 未设置")
-    elif not os.environ.get("DEER_FLOW_INTERNAL_AUTH_VALUE"):
-        reasons.append("DEER_FLOW_INTERNAL_AUTH_VALUE 未设置（Gateway 未重启？）")
-    elif _last_org_api_error:
-        reasons.append(_last_org_api_error)
-    else:
-        reasons.append("组织树 API 不可达")
-    warning = "使用演示数据 → " + "；".join(reasons) if reasons else "使用演示数据"
-
-    return {
-        "equipment_type": eq_type,
-        "type_display": TYPE_DISPLAY.get(eq_type, eq_type),
-        "scope": scope,
-        "filter_display": filter_display,
-        "total_matched": total_matched,
-        "total_in_type": total_in_type,
-        "areas": list(AREAS),
-        "area_counts": area_counts,
-        "equipment": display_equipment,
-        "equipment_truncated": truncated,
-        "available_kpis": _build_available_kpis(eq_type),
-        "data_source": "demo_fallback",
-        "warning": warning,
-    }
+    reason = _last_org_api_error or "组织树 API 不可达"
+    return {"error": f"设备列表查询失败: {reason}"}
 
 
 def _error(message: str) -> int:
@@ -433,6 +321,7 @@ def main() -> int:
     parser.add_argument("--scope", default="all", help="Scope: all/area/specific")
     parser.add_argument("--filter", default="", help="Area names or equipment IDs (CSV)")
     parser.add_argument("--limit", type=int, default=50, help="Max equipment to return")
+    parser.add_argument("--output-dir", default="", help="Write list_equipment.json here")
     args = parser.parse_args()
 
     try:
@@ -452,6 +341,15 @@ def main() -> int:
                 return _error(filter_error)
 
         result = query_equipment(eq_type, args.scope, args.filter, args.limit)
+
+        output_dir = args.output_dir
+        if output_dir:
+            import os
+            out_path = os.path.join(output_dir, "data", "list_equipment.json")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:  # noqa: BLE001

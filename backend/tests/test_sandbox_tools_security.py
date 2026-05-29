@@ -489,9 +489,48 @@ def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) 
     assert "path traversal" in result
 
 
-def test_runtime_shell_env_exports_access_token() -> None:
+def test_runtime_shell_env_exports_access_token(monkeypatch) -> None:
+    monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_VALUE", raising=False)
     runtime = SimpleNamespace(context={"thread_id": "thread-1", "access_token": "secret-token"})
     assert _runtime_shell_env(runtime) == {"INS_ACCESS_TOKEN": "secret-token"}
+
+
+def test_runtime_shell_env_exports_user_and_tenant(monkeypatch) -> None:
+    monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_VALUE", raising=False)
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": "thread-1",
+            "user_id": "user-42",
+            "tenant_id": "tenant-7",
+            "access_token": "tok",
+        }
+    )
+    env = _runtime_shell_env(runtime)
+    assert env == {
+        "INS_ACCESS_TOKEN": "tok",
+        "DEER_FLOW_EFFECTIVE_USER_ID": "user-42",
+        "DEER_FLOW_TENANT_ID": "tenant-7",
+    }
+
+
+def test_runtime_shell_env_exports_internal_auth_token(monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_INTERNAL_AUTH_VALUE", "internal-tok-123")
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": "thread-1",
+            "user_id": "user-42",
+            "tenant_id": "tenant-7",
+        }
+    )
+    env = _runtime_shell_env(runtime)
+    assert env["DEER_FLOW_INTERNAL_AUTH_VALUE"] == "internal-tok-123"
+    assert env["DEER_FLOW_EFFECTIVE_USER_ID"] == "user-42"
+
+
+def test_runtime_shell_env_handles_missing_user_context(monkeypatch) -> None:
+    monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_VALUE", raising=False)
+    runtime = SimpleNamespace(context={"thread_id": "thread-1"})
+    assert _runtime_shell_env(runtime) == {}
 
 
 def test_prefix_bash_env_prepends_export_statement() -> None:
