@@ -1,6 +1,9 @@
 """Memory storage providers."""
 
 import abc
+import asyncio
+import atexit
+import concurrent.futures
 import json
 import logging
 import threading
@@ -17,6 +20,45 @@ from deerflow.config.paths import get_paths
 from deerflow.config.tenant import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for dispatching async store calls when sync methods are invoked
+# from a running event loop.  AsyncPostgresStore forbids sync get/put from the
+# main loop thread; this executor runs the async variant on a worker thread that
+# schedules the coroutine back onto the main loop via run_coroutine_threadsafe.
+_STORE_DISPATCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="store-dispatch",
+)
+atexit.register(lambda: _STORE_DISPATCH_EXECUTOR.shutdown(wait=False))
+
+
+async def _run_on_main_loop(coro):
+    """Run a coroutine on the main event loop from a worker thread.
+
+    Used by sync Store methods that need to call async store operations
+    (e.g. ``store.aget``) when invoked from within a running event loop.
+    """
+    loop = asyncio.get_running_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return await asyncio.wrap_future(future)
+
+
+def _dispatch_aget(store, ns, key):
+    """Run ``store.aget(ns, key)`` from a worker thread, scheduling on the main loop."""
+    return _STORE_DISPATCH_EXECUTOR.submit(
+        asyncio.run_coroutine_threadsafe,
+        store.aget(ns, key),
+        asyncio.get_running_loop(),
+    ).result()
+
+
+def _dispatch_aput(store, ns, key, value):
+    """Run ``store.aput(ns, key, value)`` from a worker thread, scheduling on the main loop."""
+    return _STORE_DISPATCH_EXECUTOR.submit(
+        asyncio.run_coroutine_threadsafe,
+        store.aput(ns, key, value),
+        asyncio.get_running_loop(),
+    ).result()
 
 
 def utc_now_iso_z() -> str:
@@ -223,10 +265,20 @@ class StoreMemoryStorage(MemoryStorage):
         return store
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        """Load memory data from the Store (sync path)."""
+        """Load memory data from the Store (sync path).
+
+        When called from a running event loop (e.g. an async request handler),
+        dispatches the async ``store.aget`` via a worker thread to avoid the
+        ``AsyncPostgresStore`` sync-in-loop deadlock guard.
+        """
         try:
             store = self._get_store()
-            item = store.get(self._ns(agent_name, user_id=user_id), "data")
+            ns = self._ns(agent_name, user_id=user_id)
+            try:
+                asyncio.get_running_loop()
+                item = _dispatch_aget(store, ns, "data")
+            except RuntimeError:
+                item = store.get(ns, "data")
         except Exception:
             logger.warning("StoreMemoryStorage.load failed, returning empty memory", exc_info=True)
             return create_empty_memory()
@@ -240,11 +292,21 @@ class StoreMemoryStorage(MemoryStorage):
         return self.load(agent_name, user_id=user_id)
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
-        """Save memory data to the Store (sync path)."""
+        """Save memory data to the Store (sync path).
+
+        When called from a running event loop, dispatches the async
+        ``store.aput`` via a worker thread to avoid the ``AsyncPostgresStore``
+        sync-in-loop deadlock guard.
+        """
         try:
             store = self._get_store()
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
-            store.put(self._ns(agent_name, user_id=user_id), "data", memory_data)
+            ns = self._ns(agent_name, user_id=user_id)
+            try:
+                asyncio.get_running_loop()
+                _dispatch_aput(store, ns, "data", memory_data)
+            except RuntimeError:
+                store.put(ns, "data", memory_data)
             logger.info("Memory saved to Store for tenant=%s user=%s agent=%s", get_current_tenant_id(), user_id or "", agent_name or "default")
             return True
         except Exception:

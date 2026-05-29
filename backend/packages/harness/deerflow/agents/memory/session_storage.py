@@ -7,6 +7,7 @@ Session memory persists facts and context for the lifetime of a thread,
 surviving message summarization to maintain continuity in long conversations.
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -14,7 +15,7 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
-from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory
+from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory, _dispatch_aget, _dispatch_aput
 from deerflow.config.tenant import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,12 @@ class SessionStorage(MemoryStorage):
         """
         try:
             store = self._get_store()
-            item = store.get(self._ns(thread_id, user_id), "data")
+            ns = self._ns(thread_id, user_id)
+            try:
+                asyncio.get_running_loop()
+                item = _dispatch_aget(store, ns, "data")
+            except RuntimeError:
+                item = store.get(ns, "data")
         except Exception:
             logger.warning("SessionStorage.load failed, returning empty session memory", exc_info=True)
             return create_empty_session_memory()
@@ -130,8 +136,13 @@ class SessionStorage(MemoryStorage):
         try:
             store = self._get_store()
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
+            ns = self._ns(thread_id, user_id)
             start = time.monotonic()
-            store.put(self._ns(thread_id, user_id), "data", memory_data)
+            try:
+                asyncio.get_running_loop()
+                _dispatch_aput(store, ns, "data", memory_data)
+            except RuntimeError:
+                store.put(ns, "data", memory_data)
             latency_ms = (time.monotonic() - start) * 1000
             facts_count = len(memory_data.get("facts", []))
             logger.info(
