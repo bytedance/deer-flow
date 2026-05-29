@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
-from deerflow.models.assistant_payload_replay import restore_additional_kwargs_field, restore_assistant_payloads
+from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
 
 _MISSING = object()
 
@@ -80,7 +80,7 @@ class PatchedChatMiMo(ChatOpenAI):
         restore_assistant_payloads(
             payload.get("messages", []),
             original_messages,
-            lambda payload_msg, orig_msg: restore_additional_kwargs_field(payload_msg, orig_msg, "reasoning_content"),
+            restore_reasoning_content,
         )
 
         return payload

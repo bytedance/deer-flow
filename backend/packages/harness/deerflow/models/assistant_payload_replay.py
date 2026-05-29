@@ -46,6 +46,11 @@ def restore_additional_kwargs_field(payload_msg: dict[str, Any], orig_msg: AIMes
         payload_msg[field_name] = value
 
 
+def restore_reasoning_content(payload_msg: dict[str, Any], orig_msg: AIMessage) -> None:
+    """Copy provider reasoning content onto a serialized assistant payload."""
+    restore_additional_kwargs_field(payload_msg, orig_msg, "reasoning_content")
+
+
 def _match_ai_message(
     payload_msg: dict[str, Any],
     ai_messages: Sequence[AIMessage],
@@ -59,7 +64,7 @@ def _match_ai_message(
             used_ai_indexes.add(matches[0])
             return ai_messages[matches[0]]
 
-    fallback_index = _next_unused_index(len(ai_messages), used_ai_indexes, fallback_ordinal)
+    fallback_index = _next_unused_index_at_or_after(len(ai_messages), used_ai_indexes, fallback_ordinal)
     if fallback_index is not None:
         used_ai_indexes.add(fallback_index)
         return ai_messages[fallback_index]
@@ -67,17 +72,18 @@ def _match_ai_message(
     return None
 
 
-def _next_unused_index(count: int, used_ai_indexes: set[int], start: int) -> int | None:
-    """Return the next unused AI index, scanning forward from ``start`` and wrapping.
+def _next_unused_index_at_or_after(count: int, used_ai_indexes: set[int], start: int) -> int | None:
+    """Return the next unused AI index at or after ``start``.
 
     Scanning forward from the payload's ordinal preserves the positional bias of
     the previous behaviour while still recovering when serialization drops or
-    reorders messages so the exact ordinal index is already taken.
+    reorders messages so the exact ordinal index is already taken. It does not
+    wrap to earlier indexes because those messages may be represented by payload
+    entries that were already dropped.
     """
-    if count == 0:
+    if count == 0 or start >= count:
         return None
-    for offset in range(count):
-        index = (start + offset) % count
+    for index in range(start, count):
         if index not in used_ai_indexes:
             return index
     return None

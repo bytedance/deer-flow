@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_deepseek import ChatDeepSeek
 
-from deerflow.models.assistant_payload_replay import restore_additional_kwargs_field, restore_assistant_payloads
+from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
 
 
 class PatchedChatDeepSeek(ChatDeepSeek):
@@ -53,7 +53,7 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         restore_assistant_payloads(
             payload.get("messages", []),
             original_messages,
-            lambda payload_msg, orig_msg: restore_additional_kwargs_field(payload_msg, orig_msg, "reasoning_content"),
+            restore_reasoning_content,
         )
 
         return payload
