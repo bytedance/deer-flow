@@ -41,9 +41,9 @@ class ServiceEventDetail:
     """服务事件明细记录."""
 
     id: str
-    unit_name: str | None = None            # customItem4__c
-    event_name: str | None = None           # customItem6__c
-    event_time: datetime | None = None      # customItem8__c
+    unit_name: str | None = None            # customItem6__c (设备名称)
+    event_name: str | None = None           # name (工单名称)
+    event_time: datetime | None = None      # createdAt (customItem8__c 故障时间 is lookup, unusable in WHERE)
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 

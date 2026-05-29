@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import requests
+
+# XSY timestamps are in Beijing time (UTC+8)
+_BJ_TZ = timezone(timedelta(hours=8))
 
 
 class XsyClient:
@@ -112,16 +116,17 @@ class XsyClient:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Query outbound details."""
-        from datetime import datetime
 
         conditions = []
         if spec_model:
             conditions.append(f"customItem5__c like '{spec_model}%'")
         if start_date:
-            ts = int(datetime.fromisoformat(start_date).timestamp() * 1000)
+            dt = datetime.fromisoformat(start_date).replace(tzinfo=_BJ_TZ)
+            ts = int(dt.timestamp() * 1000)
             conditions.append(f"createdAt >= {ts}")
         if end_date:
-            ts = int(datetime.fromisoformat(end_date).timestamp() * 1000)
+            dt = datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, tzinfo=_BJ_TZ)
+            ts = int(dt.timestamp() * 1000)
             conditions.append(f"createdAt <= {ts}")
 
         where = " and ".join(conditions) if conditions else ""
@@ -139,23 +144,37 @@ class XsyClient:
         event_name: str | None = None,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
-        """Query service events."""
-        from datetime import datetime
+        """Query service events from serviceCase table.
+
+        Uses createdAt for SQL-side time filtering (standard system field, UTC+8).
+        customItem8__c (故障时间) is returned in SELECT but cannot be
+        used in WHERE (lookup field).
+        """
+
+        select_fields = (
+            "id, name, createdAt, updatedAt, "
+            "customItem5__c, customItem6__c, customItem7__c, customItem8__c, "
+            "customItem10__c, customItem13__c, customItem20__c, customItem29__c"
+        )
 
         conditions = []
         if unit_name:
-            conditions.append(f"customItem4__c like '{unit_name}%'")
+            escaped = unit_name.replace("'", "''")
+            conditions.append(f"(name like '%{escaped}%' or customItem6__c like '%{escaped}%')")
         if event_name:
-            conditions.append(f"customItem6__c like '{event_name}%'")
+            escaped = event_name.replace("'", "''")
+            conditions.append(f"(name like '%{escaped}%' or customItem6__c like '%{escaped}%')")
         if start_date:
-            ts = int(datetime.fromisoformat(start_date).timestamp() * 1000)
-            conditions.append(f"customItem8__c >= {ts}")
+            dt = datetime.fromisoformat(start_date).replace(tzinfo=_BJ_TZ)
+            ts = int(dt.timestamp() * 1000)
+            conditions.append(f"createdAt >= {ts}")
         if end_date:
-            ts = int(datetime.fromisoformat(end_date).timestamp() * 1000)
-            conditions.append(f"customItem8__c <= {ts}")
+            dt = datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, tzinfo=_BJ_TZ)
+            ts = int(dt.timestamp() * 1000)
+            conditions.append(f"createdAt <= {ts}")
 
         where = " and ".join(conditions) if conditions else ""
-        sql = f"select id, customItem4__c, customItem6__c, customItem8__c from customEntity35__c"
+        sql = f"select {select_fields} from serviceCase"
         if where:
             sql += f" where {where}"
 

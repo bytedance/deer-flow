@@ -29,7 +29,7 @@ def main():
             # Group by day
             events_by_day = defaultdict(int)
             for r in records:
-                event_time = r.get("event_time")
+                event_time = r.get("fault_time") or r.get("created_at")
                 if event_time:
                     dt = datetime.fromtimestamp(event_time / 1000.0)
                     day_key = dt.strftime("%Y-%m-%d")
@@ -48,8 +48,8 @@ def main():
                         severity = "high" if deviation > 3.0 else "medium" if deviation > 2.0 else "low"
                         anomalies.append({
                             "anomaly_type": "frequency_spike",
-                            "unit_name": None,
-                            "event_name": None,
+                            "device_name": None,
+                            "name": None,
                             "description": f"事件频率突增: {day} 发生 {count} 次 (均值 {avg_count:.1f})",
                             "severity": severity,
                             "event_count": count,
@@ -63,15 +63,15 @@ def main():
                 baseline_events = records[:baseline_size]
                 recent_events = records[baseline_size:]
 
-                baseline_types = {r.get("event_name") for r in baseline_events if r.get("event_name")}
+                baseline_types = {r.get("event_category") or r.get("name") for r in baseline_events if r.get("event_category") or r.get("name")}
                 seen_new = set()
                 for r in recent_events:
-                    event_name = r.get("event_name")
+                    event_name = r.get("event_category") or r.get("name")
                     if event_name and event_name not in baseline_types and event_name not in seen_new:
                         anomalies.append({
                             "anomaly_type": "new_event_type",
-                            "unit_name": r.get("unit_name"),
-                            "event_name": event_name,
+                            "device_name": r.get("device_name"),
+                            "name": event_name,
                             "description": f"新事件类型: '{event_name}' 在基线期内未出现",
                             "severity": "medium",
                             "event_count": 1,
@@ -81,7 +81,7 @@ def main():
             # 3. High frequency unit
             unit_counts = defaultdict(int)
             for r in records:
-                unit_name = r.get("unit_name")
+                unit_name = r.get("device_name")
                 if unit_name:
                     unit_counts[unit_name] += 1
 
@@ -96,8 +96,8 @@ def main():
                         severity = "high" if ratio > 3.0 else "medium"
                         anomalies.append({
                             "anomaly_type": "high_frequency_unit",
-                            "unit_name": unit,
-                            "event_name": None,
+                            "device_name": unit,
+                            "name": None,
                             "description": f"高频机组: '{unit}' 事件数 {count} 次 (中位数 {median_count:.1f})",
                             "severity": severity,
                             "event_count": count,

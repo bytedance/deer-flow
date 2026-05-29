@@ -18,7 +18,7 @@
 |--------|------|----------|
 | `crm_query_outbound` | 查询产品出库明细 | start_date, end_date, spec_model, customer_name, limit |
 | `crm_get_outbound_stats` | 出库统计（按规格/客户/月份） | start_date, end_date, group_by |
-| `crm_query_service_events` | 查询服务事件明细 | start_date, end_date, unit_name, event_type, limit |
+| `crm_query_service_events` | 查询服务事件明细 | start_date, end_date, device_name, event_category, limit |
 | `crm_get_event_stats` | 服务事件统计（按机组/类型/月份） | start_date, end_date, group_by |
 | `crm_detect_event_anomalies` | 服务事件异常检测 | start_date, end_date, threshold |
 | `crm_generate_report` | 生成综合分析报告 | start_date, end_date, report_type |
@@ -46,7 +46,7 @@ python /mnt/skills/custom/crm-analyst/scripts/outbound_statistics.py \
 # 事件统计
 python /mnt/skills/custom/crm-analyst/scripts/event_statistics.py \
   --input /mnt/user-data/outputs/service_events.json \
-  --group-by unit_name
+  --group-by device_name
 
 # 异常检测
 python /mnt/skills/custom/crm-analyst/scripts/event_anomaly.py \
@@ -140,5 +140,5 @@ present_files(["/mnt/user-data/outputs/crm_report.md"])
 
 - 单次查询默认最多返回 500 条记录，数据量大时建议分批或缩小时间范围
 - 异常检测的 threshold 参数控制敏感度：越高越不敏感（只检测极端异常），默认 2.0
-- 统计分析的 `group_by` 支持：`spec_model`（规格型号）、`customer_name`（客户）、`month`（月份）、`unit_name`（机组）、`event_type`（事件类型）
+- 统计分析的 `group_by` 支持：`spec_model`（规格型号）、`customer_name`（客户）、`month`（月份）、`device_name`（设备名称）、`event_category`（事件分类）、`work_order_type`（工单类型）
 - 报告生成需要先完成数据查询和统计分析，确保所有输入文件齐全

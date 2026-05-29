@@ -13,14 +13,17 @@ Xiaoshouyi SQL limitationsations:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from deerflow.integrations.models.queries import OutboundDetailQuery, ServiceEventQuery
 
+# XSY timestamps are in Beijing time (UTC+8)
+_BJ_TZ = timezone(timedelta(hours=8))
+
 # Table names
 OUTBOUND_TABLE = "customEntity93__c"
-SERVICE_EVENT_TABLE = "customEntity35__c"
+SERVICE_EVENT_TABLE = "serviceCase"
 
 # Field mappings: canonical name → Xiaoshouyi field name
 OUTBOUND_FIELDS = {
@@ -32,14 +35,31 @@ OUTBOUND_FIELDS = {
 
 SERVICE_EVENT_FIELDS = {
     "id": "id",
-    "unit_name": "customItem4__c",
-    "event_name": "customItem6__c",
-    "event_time": "customItem8__c",
+    "name": "name",
+    "created_at": "createdAt",
+    "device_path": "customItem5__c",
+    "device_name": "customItem6__c",
+    "fault_location": "customItem7__c",
+    "fault_time": "customItem8__c",
+    "resolution_status": "customItem10__c",
+    "problem_description": "customItem13__c",
+    "work_order_type": "customItem20__c",
+    "event_category": "customItem29__c",
 }
+
+# customItem8__c (故障时间) is a lookup field in serviceCase — cannot be
+# used in WHERE clauses.  Use createdAt (system field) for time filtering.
+SERVICE_EVENT_TIME_FIELD = "createdAt"
 
 
 def datetime_to_xsy_timestamp(dt: datetime) -> int:
-    """Convert Python datetime to 13-digit millisecond timestamp."""
+    """Convert Python datetime to 13-digit millisecond timestamp (Beijing time, UTC+8).
+
+    If the input datetime is naive (no timezone info), it is assumed to be
+    in Beijing time (UTC+8) to match XSY data timestamps.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_BJ_TZ)
     return int(dt.timestamp() * 1000)
 
 
@@ -111,6 +131,9 @@ def build_service_event_query(
 ) -> str:
     """Build SQL query for service event details (服务事件明细).
 
+    Uses serviceCase table. Time filtering via createdAt (system field);
+    customItem8__c (故障时间) is a lookup field and cannot be used in WHERE.
+
     Args:
         query: Structured query object
         last_id: Last record ID from previous page (for cursor pagination)
@@ -126,18 +149,20 @@ def build_service_event_query(
     conditions = []
 
     if query.unit_name:
-        conditions.append(f"{SERVICE_EVENT_FIELDS['unit_name']} like '{_escape_sql(query.unit_name)}%'")
+        escaped = _escape_sql(query.unit_name)
+        conditions.append(f"(name like '%{escaped}%' or {SERVICE_EVENT_FIELDS['device_name']} like '%{escaped}%')")
 
     if query.event_name:
-        conditions.append(f"{SERVICE_EVENT_FIELDS['event_name']} like '{_escape_sql(query.event_name)}%'")
+        escaped = _escape_sql(query.event_name)
+        conditions.append(f"(name like '%{escaped}%' or {SERVICE_EVENT_FIELDS['device_name']} like '%{escaped}%')")
 
     if query.start_time:
         ts = datetime_to_xsy_timestamp(query.start_time)
-        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']} >= {ts}")
+        conditions.append(f"{SERVICE_EVENT_TIME_FIELD} >= {ts}")
 
     if query.end_time:
         ts = datetime_to_xsy_timestamp(query.end_time)
-        conditions.append(f"{SERVICE_EVENT_FIELDS['event_time']} <= {ts}")
+        conditions.append(f"{SERVICE_EVENT_TIME_FIELD} <= {ts}")
 
     # Cursor pagination
     if last_id:

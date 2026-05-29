@@ -62,7 +62,8 @@ def transform_service_event_records(
     results: list[ServiceEventDetail] = []
 
     for record in records:
-        event_time_raw = record.get(SERVICE_EVENT_FIELDS["event_time"])
+        # fault_time (customItem8__c) is a lookup field; use createdAt as event_time
+        event_time_raw = record.get(SERVICE_EVENT_FIELDS.get("created_at", "createdAt"))
         event_time = None
         if event_time_raw is not None:
             try:
@@ -72,8 +73,8 @@ def transform_service_event_records(
 
         detail = ServiceEventDetail(
             id=str(record.get("id", "")),
-            unit_name=record.get(SERVICE_EVENT_FIELDS["unit_name"]),
-            event_name=record.get(SERVICE_EVENT_FIELDS["event_name"]),
+            unit_name=record.get(SERVICE_EVENT_FIELDS["device_name"]),
+            event_name=record.get(SERVICE_EVENT_FIELDS["name"]),
             event_time=event_time,
             source_metadata={"raw": record},
             provenance=provenance,

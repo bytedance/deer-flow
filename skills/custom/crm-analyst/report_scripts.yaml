@@ -75,7 +75,7 @@ scripts:
         required: true
       group_by:
         type: enum
-        values: [unit_name, event_name, day, week, month]
+        values: [device_name, name, event_category, work_order_type, day, week, month]
         required: false
     output_files:
       - id: event_stats
