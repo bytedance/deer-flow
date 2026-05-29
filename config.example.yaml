@@ -177,6 +177,38 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: Xiaomi MiMo model (with thinking support)
+  # MiMo thinking mode returns reasoning_content and requires that field to be
+  # replayed on historical assistant messages in multi-turn agent/tool-call
+  # conversations. Use PatchedChatMiMo instead of plain ChatOpenAI.
+  # Use https://api.xiaomimimo.com/v1 with pay-as-you-go `sk-...` keys.
+  # Use your Token Plan regional URL (for example
+  # https://token-plan-cn.xiaomimimo.com/v1) with Token Plan `tp-...` keys.
+  # PatchedChatMiMo is model-id agnostic; use it for every MiMo thinking model
+  # entry you configure (for example mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro,
+  # mimo-v2-omni, or mimo-v2-flash), including models referenced by subagent
+  # model overrides.
+  # See: https://platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
+  # - name: mimo-v2.5-pro
+  #   display_name: MiMo V2.5 Pro
+  #   use: deerflow.models.patched_mimo:PatchedChatMiMo
+  #   model: mimo-v2.5-pro
+  #   api_key: $MIMO_API_KEY
+  #   base_url: https://api.xiaomimimo.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
   #   display_name: DeepSeek V3 (Thinking)

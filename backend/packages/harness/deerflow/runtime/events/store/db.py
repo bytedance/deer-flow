@@ -144,10 +144,13 @@ class DbRunEventStore(RunEventStore):
     async def put_batch(self, events):
         if not events:
             return []
+        thread_ids = {e["thread_id"] for e in events}
+        if len(thread_ids) > 1:
+            raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Get max seq for the thread (assume all events in batch belong to same thread).
+                # All events belong to the same thread (validated above).
                 thread_id = events[0]["thread_id"]
                 max_seq = await self._max_seq_for_thread(session, thread_id)
                 seq = max_seq or 0
