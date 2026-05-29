@@ -9,6 +9,11 @@ import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
+import {
+  CHAT_COMPOSER_INPUT_BOX_CLASSNAME,
+  getChatComposerDockClassName,
+  getChatComposerFrameClassName,
+} from "@/components/workspace/chat-composer-layout";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
@@ -204,16 +209,8 @@ export default function AgentChatPage() {
               />
             </div>
 
-            <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
-              <div
-                className={cn(
-                  "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
-                    ? "max-w-(--container-width-sm)"
-                    : "max-w-(--container-width-md)",
-                )}
-              >
+            <div className={getChatComposerDockClassName()}>
+              <div className={getChatComposerFrameClassName(isNewThread)}>
                 <div className="absolute -top-4 right-0 left-0 z-0">
                   <div className="absolute right-0 bottom-0 left-0">
                     <TodoList
@@ -227,7 +224,7 @@ export default function AgentChatPage() {
                 </div>
 
                 <InputBox
-                  className={cn("bg-background/5 w-full -translate-y-4")}
+                  className={CHAT_COMPOSER_INPUT_BOX_CLASSNAME}
                   isNewThread={isNewThread}
                   threadId={threadId}
                   autoFocus={isNewThread}

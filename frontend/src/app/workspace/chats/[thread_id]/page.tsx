@@ -13,6 +13,11 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import { GreetingCard } from "@/components/workspace/chats/greeting-card";
+import {
+  CHAT_COMPOSER_INPUT_BOX_CLASSNAME,
+  getChatComposerDockClassName,
+  getChatComposerFrameClassName,
+} from "@/components/workspace/chat-composer-layout";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { IndustrialOnboardingOverlay } from "@/components/workspace/industrial-onboarding-overlay";
 import { InputBox } from "@/components/workspace/input-box";
@@ -179,16 +184,8 @@ export default function ChatPage() {
                 agentName={settings.context.agent_name as string | undefined}
               />
             </div>
-            <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
-              <div
-                className={cn(
-                  "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
-                    ? "max-w-(--container-width-sm)"
-                    : "max-w-(--container-width-md)",
-                )}
-              >
+            <div className={getChatComposerDockClassName()}>
+              <div className={getChatComposerFrameClassName(isNewThread)}>
                 <div className="absolute -top-4 right-0 left-0 z-0">
                   <div className="absolute right-0 bottom-0 left-0">
                     <TodoList
@@ -202,7 +199,7 @@ export default function ChatPage() {
                 </div>
                 {mountedRef.current ? (
                   <InputBox
-                    className={cn("bg-background/5 w-full -translate-y-4")}
+                    className={CHAT_COMPOSER_INPUT_BOX_CLASSNAME}
                     isNewThread={isNewThread}
                     threadId={threadId}
                     autoFocus={isNewThread}
