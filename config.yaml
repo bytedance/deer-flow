@@ -266,8 +266,8 @@ run_events:
   max_trace_content: 10240
   track_token_usage: true
 audio_input:
-  enabled: false
-  microphone_enabled: false
+  enabled: true
+  microphone_enabled: true
   file_transcription_enabled: false
   default_locale: zh-CN
   supported_locales:
@@ -289,7 +289,7 @@ audio_input:
   provider:
     use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
     config:
-      model: qwen3-asr-flash
+      model: openai/whisper-1
       api_key: $OPENAI_API_KEY
       base_url: https://aiapi.shenguyun.com/v1
 http_connectors:
