@@ -69,3 +69,5 @@ node_modules/
 package-lock.json
 # Skills zip
 skills.zip
+# Root package.json (EARENDIL project, not DeerFlow)
+package.json
