@@ -123,7 +123,13 @@ describe("regression: tool-call messages must not swallow text/reasoning content
           id: "ai-1",
           type: "ai",
           content: "Launching a subagent to help",
-          tool_calls: [{ id: "tc-1", name: "task", args: { subagent_type: "general-purpose" } }],
+          tool_calls: [
+            {
+              id: "tc-1",
+              name: "task",
+              args: { subagent_type: "general-purpose" },
+            },
+          ],
         },
       ] as Message[];
 
@@ -154,7 +160,13 @@ describe("regression: tool-call messages must not swallow text/reasoning content
           id: "ai-1",
           type: "ai",
           content: "Launching a subagent to help",
-          tool_calls: [{ id: "tc-1", name: "task", args: { subagent_type: "general-purpose" } }],
+          tool_calls: [
+            {
+              id: "tc-1",
+              name: "task",
+              args: { subagent_type: "general-purpose" },
+            },
+          ],
         },
         {
           id: "tool-1",
@@ -192,16 +204,36 @@ describe("regression: tool-call messages must not swallow text/reasoning content
           id: "ai-2",
           type: "ai",
           content: "Launching subagent",
-          tool_calls: [{ id: "tc-1", name: "task", args: { subagent_type: "general-purpose" } }],
+          tool_calls: [
+            {
+              id: "tc-1",
+              name: "task",
+              args: { subagent_type: "general-purpose" },
+            },
+          ],
         },
-        { id: "tool-1", type: "tool", name: "task", tool_call_id: "tc-1", content: "Subagent done" },
+        {
+          id: "tool-1",
+          type: "tool",
+          name: "task",
+          tool_call_id: "tc-1",
+          content: "Subagent done",
+        },
         {
           id: "ai-3",
           type: "ai",
           content: "Now let me search the web",
-          tool_calls: [{ id: "tc-2", name: "web_search", args: { query: "test" } }],
+          tool_calls: [
+            { id: "tc-2", name: "web_search", args: { query: "test" } },
+          ],
         },
-        { id: "tool-2", type: "tool", name: "web_search", tool_call_id: "tc-2", content: "Results found" },
+        {
+          id: "tool-2",
+          type: "tool",
+          name: "web_search",
+          tool_call_id: "tc-2",
+          content: "Results found",
+        },
         { id: "ai-4", type: "ai", content: "Here is the combined result" },
       ] as Message[];
 
@@ -225,13 +257,18 @@ describe("regression: tool-call messages must not swallow text/reasoning content
       expect(groups.find((g) => g.id === "ai-1")!.messages[0]!.id).toBe("ai-1");
 
       // Subagent assistant bubble: ai-2's visible content is shown.
-      const subagentBubble = groups.find((g) => g.id === "ai-2" && g.type === "assistant");
+      const subagentBubble = groups.find(
+        (g) => g.id === "ai-2" && g.type === "assistant",
+      );
       expect(subagentBubble).toBeDefined();
       expect(subagentBubble!.messages[0]!.content).toBe("Launching subagent");
 
       // Subagent group: ai-2 + tool-1 (tool result goes to subagent via lastOpenGroup)
       const subagentGroup = groups.find((g) => g.type === "assistant:subagent");
-      expect(subagentGroup!.messages.map((m) => m.id)).toEqual(["ai-2", "tool-1"]);
+      expect(subagentGroup!.messages.map((m) => m.id)).toEqual([
+        "ai-2",
+        "tool-1",
+      ]);
 
       // The only processing group is for the web_search turn (ai-3 + tool-2).
       // Subagent messages skip the generic needsProcessing path entirely.
