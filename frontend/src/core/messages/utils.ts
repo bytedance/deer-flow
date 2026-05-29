@@ -90,19 +90,30 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
     }
 
     if (message.type === "ai") {
+      const messageHasContent = hasContent(message);
+      const messageHasToolCalls = hasToolCalls(message);
+      const messageHasReasoning = hasReasoning(message);
+      const needsProcessing = messageHasReasoning || messageHasToolCalls;
+
       if (hasPresentFiles(message)) {
         groups.push({
           id: message.id,
           type: "assistant:present-files",
           messages: [message],
         });
-      } else if (hasSubagent(message)) {
+        continue;
+      }
+
+      if (hasSubagent(message)) {
         groups.push({
           id: message.id,
           type: "assistant:subagent",
           messages: [message],
         });
-      } else if (hasReasoning(message) || hasToolCalls(message)) {
+        continue;
+      }
+
+      if (needsProcessing) {
         const lastGroup = groups[groups.length - 1];
         // Accumulate consecutive intermediate AI messages into one processing group.
         if (lastGroup?.type !== "assistant:processing") {
@@ -116,10 +127,29 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
-      if (hasContent(message) && !hasToolCalls(message)) {
-        groups.push({ id: message.id, type: "assistant", messages: [message] });
+      // Not an else-if: a message with reasoning + content goes into the
+      // processing group above AND gets its own assistant bubble. This
+      // includes messages with tool calls — their text content was previously
+      // hidden behind the Chain of Thought panel.
+      //
+      // When *this message* triggered a processing group, insert the
+      // assistant bubble BEFORE it so lastOpenGroup() still finds the
+      // processing group for subsequent tool messages. Otherwise push
+      // normally at the end (plain final answer).
+      if (messageHasContent) {
+        const authorGroup = {
+          id: message.id,
+          type: "assistant" as const,
+          messages: [message],
+        };
+        if (
+          messageHasToolCalls &&
+          groups[groups.length - 1]?.type === "assistant:processing"
+        ) {
+          groups.splice(groups.length - 1, 0, authorGroup);
+        } else {
+          groups.push(authorGroup);
+        }
       }
     }
   }
