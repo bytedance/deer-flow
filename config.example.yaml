@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -543,6 +543,34 @@ tools:
 
 tool_search:
   enabled: false
+
+# ============================================================================
+# Tool Output Budget Protection
+# ============================================================================
+# Prevents oversized tool results from blowing the model context window.
+# Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
+# with a compact preview + file reference. The model can read the full output
+# via read_file.  When disk persistence is unavailable, outputs exceeding
+# `fallback_max_chars` are head+tail truncated instead.
+#
+# `exempt_tools` prevents persist→read→persist infinite loops for read tools.
+# `tool_overrides` allows per-tool threshold customization.
+
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: ".tool-results"
+  exempt_tools:
+    - read_file
+    - read_file_tool
+  # tool_overrides:
+  #   web_search: 8000
+  #   bash: 20000
 
 # ============================================================================
 # Loop Detection Configuration
