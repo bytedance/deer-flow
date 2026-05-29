@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import case, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.marketplace.model import (
@@ -137,16 +137,14 @@ class MarketplaceRepository:
 
         # Sort: boost featured/industrial templates first, then apply user sort
         sort_col = getattr(MarketplaceListingRow, sort_by, MarketplaceListingRow.created_at)
+        featured_expr = case(
+            (MarketplaceListingRow.category == "industrial", 1),
+            else_=0,
+        ).desc()
         if sort_order == "desc":
-            stmt = stmt.order_by(
-                MarketplaceListingRow.is_featured.desc(),
-                sort_col.desc(),
-            )
+            stmt = stmt.order_by(featured_expr, sort_col.desc())
         else:
-            stmt = stmt.order_by(
-                MarketplaceListingRow.is_featured.desc(),
-                sort_col.asc(),
-            )
+            stmt = stmt.order_by(featured_expr, sort_col.asc())
 
         stmt = stmt.offset(offset).limit(limit)
 
