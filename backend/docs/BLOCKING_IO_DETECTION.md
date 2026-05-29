@@ -134,11 +134,14 @@ that production actually executes.
 
 ## Current runtime coverage
 
-The initial runtime anchors protect confirmed blocking-IO bug shapes:
+The runtime anchors protect confirmed blocking-IO bug shapes:
 
 - SQLite checkpointer setup, including path resolution and parent-directory
   creation.
 - Subagent skill metadata loading through `SubagentExecutor._load_skills()`.
+- `UploadsMiddleware.before_agent` uploads-directory scan: a sync-only middleware
+  hook runs on the event loop under async graph execution, so the scan is
+  offloaded via `abefore_agent` + `run_in_executor`.
 - Gate health checks: Blockbuster catches unoffloaded calls, opt-out works, and
   patches are restored after exceptions.
 
