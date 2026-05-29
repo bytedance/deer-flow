@@ -96,20 +96,42 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       const needsProcessing = messageHasReasoning || messageHasToolCalls;
 
       if (hasPresentFiles(message)) {
+        // Show visible text in a regular assistant bubble so "Here are
+        // the files…" renders before the file-list panel.
+        if (messageHasContent) {
+          groups.push({
+            id: message.id,
+            type: "assistant",
+            messages: [message],
+          });
+        }
+
         groups.push({
           id: message.id,
           type: "assistant:present-files",
           messages: [message],
         });
+
         continue;
       }
 
       if (hasSubagent(message)) {
+        // Render visible text in a regular assistant bubble so the user
+        // sees "Launching a subagent…" before the subagent panel unfolds.
+        if (messageHasContent) {
+          groups.push({
+            id: message.id,
+            type: "assistant",
+            messages: [message],
+          });
+        }
+
         groups.push({
           id: message.id,
           type: "assistant:subagent",
           messages: [message],
         });
+
         continue;
       }
 
