@@ -76,7 +76,7 @@ test.describe("Industrial Onboarding - New User Flow", () => {
 
     // Verify local storage was updated
     const settings = await page.evaluate(() => {
-      const stored = localStorage.getItem("local-settings");
+      const stored = localStorage.getItem("deerflow.local-settings");
       return stored ? JSON.parse(stored) : null;
     });
 
@@ -106,7 +106,7 @@ test.describe("Industrial Onboarding - New User Flow", () => {
 
     // Verify onboarding was marked as completed
     const settings = await page.evaluate(() => {
-      const stored = localStorage.getItem("local-settings");
+      const stored = localStorage.getItem("deerflow.local-settings");
       return stored ? JSON.parse(stored) : null;
     });
 
@@ -129,7 +129,7 @@ test.describe("Industrial Onboarding - New User Flow", () => {
 
     // Verify onboarding was marked as completed
     const settings = await page.evaluate(() => {
-      const stored = localStorage.getItem("local-settings");
+      const stored = localStorage.getItem("deerflow.local-settings");
       return stored ? JSON.parse(stored) : null;
     });
 
@@ -275,7 +275,7 @@ test.describe("Industrial Onboarding - Existing User", () => {
           industrialOperations: ["device_diagnosis", "monitoring_analysis"],
         },
       };
-      localStorage.setItem("local-settings", JSON.stringify(settings));
+      localStorage.setItem("deerflow.local-settings", JSON.stringify(settings));
     });
 
     await page.goto("/workspace/chats/new");
@@ -301,7 +301,7 @@ test.describe("Industrial Onboarding - Existing User", () => {
           industrialOperations: [],
         },
       };
-      localStorage.setItem("local-settings", JSON.stringify(settings));
+      localStorage.setItem("deerflow.local-settings", JSON.stringify(settings));
     });
 
     await page.goto("/workspace/chats/new");

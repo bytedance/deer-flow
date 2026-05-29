@@ -1,11 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  trackOnboardingComplete,
+  trackOnboardingSkip,
+  trackOnboardingStarted,
+} from "@/core/industrial-skills/telemetry";
 import { useIndustrialOnboarding } from "@/core/settings";
 import { cn } from "@/lib/utils";
 
@@ -21,11 +26,18 @@ export function IndustrialOnboardingOverlay() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisComplete, setAnalysisComplete] = useState(false);
 
+  useEffect(() => {
+    if (shouldShowOnboarding) {
+      trackOnboardingStarted();
+    }
+  }, [shouldShowOnboarding]);
+
   if (!shouldShowOnboarding) {
     return null;
   }
 
   const handleSkip = () => {
+    trackOnboardingSkip();
     completeOnboarding();
   };
 
@@ -58,6 +70,7 @@ export function IndustrialOnboardingOverlay() {
   };
 
   const handleFinish = () => {
+    trackOnboardingComplete();
     recordOperation("trend_report");
     completeOnboarding();
     router.push("/workspace/chats/new");
@@ -68,7 +81,6 @@ export function IndustrialOnboardingOverlay() {
       {/* Semi-transparent backdrop - workspace visible behind */}
       <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={handleSkip}
       />
 
       {/* Overlay content */}

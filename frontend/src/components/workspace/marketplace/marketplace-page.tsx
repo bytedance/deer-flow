@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
 import { Search, Star, Download, Filter, Factory } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState, useMemo } from "react";
 
-import { useMarketplaceListings } from "@/core/marketplace/hooks";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -14,12 +14,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { MarketplaceListing } from "@/core/marketplace/api";
+import { useMarketplaceListings } from "@/core/marketplace/hooks";
 
 export function MarketplacePage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<string>("");
   const [sortBy, setSortBy] = useState("created_at");
@@ -50,9 +52,9 @@ export function MarketplacePage() {
     <div className="flex h-full flex-col">
       {/* Header */}
       <header className="border-b px-6 py-4">
-        <h1 className="text-lg font-semibold">Template Marketplace</h1>
+        <h1 className="text-lg font-semibold">{t.marketplace.title}</h1>
         <p className="text-sm text-muted-foreground">
-          Discover, install, and share report templates
+          {t.marketplace.subtitle}
         </p>
       </header>
 
@@ -61,7 +63,9 @@ export function MarketplacePage() {
         <div className="border-b bg-accent/30 px-6 py-4">
           <div className="mb-3 flex items-center gap-2">
             <Factory className="h-5 w-5 text-primary" />
-            <h2 className="text-sm font-semibold">Industrial Intelligence</h2>
+            <h2 className="text-sm font-semibold">
+              {t.marketplace.industrialIntelligence}
+            </h2>
             <Button
               variant="link"
               size="sm"
@@ -70,7 +74,7 @@ export function MarketplacePage() {
                 router.push("/workspace/template-marketplace/industrial")
               }
             >
-              View all
+              {t.marketplace.browseAllTemplates}
             </Button>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -81,6 +85,7 @@ export function MarketplacePage() {
                 onClick={() =>
                   router.push(`/workspace/template-marketplace/${listing.id}`)
                 }
+                t={t}
                 featured
               />
             ))}
@@ -95,17 +100,17 @@ export function MarketplacePage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search templates..."
+            placeholder={t.marketplace.searchPlaceholder}
             className="pl-9"
           />
         </div>
 
         <Select value={category} onValueChange={setCategory}>
           <SelectTrigger className="w-36">
-            <SelectValue placeholder="Category" />
+            <SelectValue placeholder={t.marketplace.category} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All Categories</SelectItem>
+            <SelectItem value="all">{t.marketplace.allCategories}</SelectItem>
             {categories.map((cat) => (
               <SelectItem key={cat} value={cat}>
                 {cat}
@@ -116,12 +121,12 @@ export function MarketplacePage() {
 
         <Select value={sortBy} onValueChange={setSortBy}>
           <SelectTrigger className="w-36">
-            <SelectValue placeholder="Sort by" />
+            <SelectValue placeholder={t.marketplace.sortBy} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="created_at">Newest</SelectItem>
-            <SelectItem value="avg_rating">Rating</SelectItem>
-            <SelectItem value="install_count">Installs</SelectItem>
+            <SelectItem value="created_at">{t.marketplace.sortByNewest}</SelectItem>
+            <SelectItem value="avg_rating">{t.marketplace.sortByRating}</SelectItem>
+            <SelectItem value="install_count">{t.marketplace.sortByInstalls}</SelectItem>
           </SelectContent>
         </Select>
 
@@ -140,11 +145,11 @@ export function MarketplacePage() {
       <div className="flex-1 overflow-y-auto p-6">
         {isLoading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
-            Loading templates...
+            {t.marketplace.loading}
           </div>
         ) : listings.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
-            <p className="text-sm">No templates found</p>
+            <p className="text-sm">{t.marketplace.noTemplates}</p>
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -155,6 +160,7 @@ export function MarketplacePage() {
                 onClick={() =>
                   router.push(`/workspace/template-marketplace/${listing.id}`)
                 }
+                t={t}
               />
             ))}
           </div>
@@ -168,10 +174,12 @@ function ListingCard({
   listing,
   onClick,
   featured = false,
+  t,
 }: {
   listing: MarketplaceListing;
   onClick: () => void;
   featured?: boolean;
+  t: Translations;
 }) {
   return (
     <Card
@@ -186,7 +194,7 @@ function ListingCard({
           <div className="flex items-center gap-1">
             {featured && (
               <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                Featured
+                {t.marketplace.featured}
               </span>
             )}
             {listing.category && (
@@ -199,7 +207,7 @@ function ListingCard({
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="line-clamp-2 text-xs text-muted-foreground">
-          {listing.description || "No description"}
+          {listing.description || t.marketplace.noDescription}
         </p>
 
         {/* Stats */}

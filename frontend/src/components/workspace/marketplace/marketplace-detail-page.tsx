@@ -1,8 +1,5 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { toast } from "sonner";
 import {
   ArrowLeft,
   Download,
@@ -11,28 +8,33 @@ import {
   Calendar,
   Tag,
 } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import { useState, useCallback } from "react";
+import { toast } from "sonner";
 
-import {
-  useMarketplaceListing,
-  useMarketplaceReviews,
-  useInstallMarketplaceTemplate,
-  useCreateMarketplaceReview,
-} from "@/core/marketplace/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
+import {
+  useMarketplaceListing,
+  useMarketplaceReviews,
+  useInstallMarketplaceTemplate,
+  useCreateMarketplaceReview,
+} from "@/core/marketplace/hooks";
 
 export function MarketplaceDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const { t } = useI18n();
   const listingId = params.id;
 
   const { listing, isLoading } = useMarketplaceListing(listingId);
@@ -51,26 +53,26 @@ export function MarketplaceDetailPage() {
         target_visibility: installTarget,
         target_name: installName || undefined,
       });
-      toast.success("Template installed");
+      toast.success(t.marketplace.installSuccess);
       router.push(`/workspace/report-templates/editor/${result.target_template_id}`);
     } catch (err) {
-      toast.error((err as Error).message || "Install failed");
+      toast.error((err as Error).message || t.marketplace.installFailed);
     }
-  }, [installMutation, installTarget, installName, router]);
+  }, [installMutation, installTarget, installName, router, t]);
 
   const handleReview = useCallback(async () => {
     if (!comment.trim()) {
-      toast.error("Please write a comment");
+      toast.error(t.marketplace.commentPlaceholder);
       return;
     }
     try {
       await reviewMutation.mutateAsync({ rating, comment });
-      toast.success("Review submitted");
+      toast.success(t.marketplace.reviewSuccess);
       setComment("");
     } catch (err) {
-      toast.error((err as Error).message || "Review failed");
+      toast.error((err as Error).message || t.marketplace.reviewFailed);
     }
-  }, [reviewMutation, rating, comment]);
+  }, [reviewMutation, rating, comment, t]);
 
   if (isLoading || !listing) {
     return (
@@ -96,11 +98,11 @@ export function MarketplaceDetailPage() {
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <span className="flex items-center gap-1">
               <Star className="h-3.5 w-3.5" />
-              {listing.avg_rating.toFixed(1)} ({listing.review_count} reviews)
+              {listing.avg_rating.toFixed(1)} ({listing.review_count} {t.marketplace.reviews})
             </span>
             <span className="flex items-center gap-1">
               <Download className="h-3.5 w-3.5" />
-              {listing.install_count} installs
+              {listing.install_count} {t.marketplace.install}
             </span>
             {listing.category && (
               <span className="flex items-center gap-1">
@@ -118,20 +120,20 @@ export function MarketplaceDetailPage() {
         <div className="flex-1 overflow-y-auto p-6">
           <Tabs defaultValue="description">
             <TabsList variant="line">
-              <TabsTrigger value="description">Description</TabsTrigger>
+              <TabsTrigger value="description">{t.marketplace.description}</TabsTrigger>
               <TabsTrigger value="reviews">
-                Reviews ({listing.review_count})
+                {t.marketplace.reviews} ({listing.review_count})
               </TabsTrigger>
             </TabsList>
 
             <TabsContent value="description" className="mt-4 space-y-4">
               <p className="text-sm leading-relaxed">
-                {listing.description || "No description available."}
+                {listing.description || t.marketplace.noDescription}
               </p>
 
               {listing.tags && listing.tags.length > 0 && (
                 <div>
-                  <h3 className="mb-2 text-sm font-medium">Tags</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t.marketplace.tags}</h3>
                   <div className="flex flex-wrap gap-2">
                     {listing.tags.map((tag) => (
                       <span
@@ -148,7 +150,7 @@ export function MarketplaceDetailPage() {
               <div className="text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
                   <Calendar className="h-3 w-3" />
-                  Published {new Date(listing.created_at).toLocaleDateString()}
+                  {t.marketplace.published} {new Date(listing.created_at).toLocaleDateString()}
                 </span>
               </div>
             </TabsContent>
@@ -157,11 +159,11 @@ export function MarketplaceDetailPage() {
               {/* Review form */}
               <Card>
                 <CardHeader>
-                  <h3 className="text-sm font-medium">Write a Review</h3>
+                  <h3 className="text-sm font-medium">{t.marketplace.writeReview}</h3>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div>
-                    <Label className="text-xs">Rating</Label>
+                    <Label className="text-xs">{t.marketplace.rating}</Label>
                     <div className="flex gap-1">
                       {[1, 2, 3, 4, 5].map((r) => (
                         <button
@@ -177,11 +179,11 @@ export function MarketplaceDetailPage() {
                     </div>
                   </div>
                   <div>
-                    <Label className="text-xs">Comment</Label>
+                    <Label className="text-xs">{t.marketplace.comment}</Label>
                     <Textarea
                       value={comment}
                       onChange={(e) => setComment(e.target.value)}
-                      placeholder="Share your experience..."
+                      placeholder={t.marketplace.commentPlaceholder}
                       rows={3}
                     />
                   </div>
@@ -193,7 +195,7 @@ export function MarketplaceDetailPage() {
                     {reviewMutation.isPending ? (
                       <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                     ) : null}
-                    Submit Review
+                    {t.marketplace.submitReview}
                   </Button>
                 </CardContent>
               </Card>
@@ -201,7 +203,7 @@ export function MarketplaceDetailPage() {
               {/* Reviews list */}
               {reviews.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
-                  No reviews yet. Be the first!
+                  {t.marketplace.noReviews}
                 </p>
               ) : (
                 reviews.map((review) => (
@@ -236,10 +238,10 @@ export function MarketplaceDetailPage() {
 
         {/* Sidebar — Install panel */}
         <div className="w-72 shrink-0 border-l p-4">
-          <h3 className="mb-3 text-sm font-semibold">Install Template</h3>
+          <h3 className="mb-3 text-sm font-semibold">{t.marketplace.install}</h3>
           <div className="space-y-3">
             <div>
-              <Label className="text-xs">Install to</Label>
+              <Label className="text-xs">{t.marketplace.installTo}</Label>
               <select
                 value={installTarget}
                 onChange={(e) =>
@@ -247,13 +249,13 @@ export function MarketplaceDetailPage() {
                 }
                 className="mt-1 w-full rounded-md border bg-background px-3 py-1.5 text-sm"
               >
-                <option value="private">My Workspace (Private)</option>
-                <option value="tenant">Tenant (Shared)</option>
+                <option value="private">{t.marketplace.installPrivate}</option>
+                <option value="tenant">{t.marketplace.installTenant}</option>
               </select>
             </div>
 
             <div>
-              <Label className="text-xs">Name (optional)</Label>
+              <Label className="text-xs">{t.marketplace.installNamePlaceholder}</Label>
               <Input
                 value={installName}
                 onChange={(e) => setInstallName(e.target.value)}
@@ -272,11 +274,11 @@ export function MarketplaceDetailPage() {
               ) : (
                 <Download className="mr-1 h-4 w-4" />
               )}
-              Install
+              {t.marketplace.install}
             </Button>
 
             <p className="text-[10px] text-muted-foreground">
-              v{listing.template_version} · {listing.visibility}
+              {t.marketplace.version} {listing.template_version} · {listing.visibility}
             </p>
           </div>
         </div>

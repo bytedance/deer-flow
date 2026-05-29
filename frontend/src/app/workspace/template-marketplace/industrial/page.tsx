@@ -1,16 +1,18 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { Factory, Star, Download, ArrowLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
 
-import { useMarketplaceListings } from "@/core/marketplace/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { MarketplaceListing } from "@/core/marketplace/api";
+import { useMarketplaceListings } from "@/core/marketplace/hooks";
 
 export default function IndustrialTemplatesPage() {
   const router = useRouter();
+  const { t } = useI18n();
   const { listings, isLoading } = useMarketplaceListings({
     category: "industrial",
     sort_by: "install_count",
@@ -32,9 +34,11 @@ export default function IndustrialTemplatesPage() {
           <div className="flex items-center gap-2">
             <Factory className="h-6 w-6 text-primary" />
             <div>
-              <h1 className="text-lg font-semibold">Industrial Intelligence</h1>
+              <h1 className="text-lg font-semibold">
+                {t.marketplace.industrialIntelligence}
+              </h1>
               <p className="text-sm text-muted-foreground">
-                Templates for equipment monitoring, fault diagnosis, and trend analysis
+                {t.marketplace.industrialSubtitle}
               </p>
             </div>
           </div>
@@ -45,18 +49,18 @@ export default function IndustrialTemplatesPage() {
       <div className="flex-1 overflow-y-auto p-6">
         {isLoading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
-            Loading industrial templates...
+            {t.marketplace.loadingIndustrial}
           </div>
         ) : listings.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
             <Factory className="mb-4 h-12 w-12 opacity-20" />
-            <p className="text-sm">No industrial templates found</p>
+            <p className="text-sm">{t.marketplace.noIndustrialTemplates}</p>
             <Button
               variant="link"
               className="mt-2"
               onClick={() => router.push("/workspace/template-marketplace")}
             >
-              Browse all templates
+              {t.marketplace.browseAllTemplates}
             </Button>
           </div>
         ) : (
@@ -68,6 +72,7 @@ export default function IndustrialTemplatesPage() {
                 onClick={() =>
                   router.push(`/workspace/template-marketplace/${listing.id}`)
                 }
+                t={t}
               />
             ))}
           </div>
@@ -80,9 +85,11 @@ export default function IndustrialTemplatesPage() {
 function ListingCard({
   listing,
   onClick,
+  t,
 }: {
   listing: MarketplaceListing;
   onClick: () => void;
+  t: Translations;
 }) {
   return (
     <Card
@@ -96,14 +103,14 @@ function ListingCard({
           </h3>
           {listing.is_featured && (
             <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-              Featured
+              {t.marketplace.featured}
             </span>
           )}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="line-clamp-2 text-xs text-muted-foreground">
-          {listing.description || "No description"}
+          {listing.description || t.marketplace.noDescription}
         </p>
 
         {/* Stats */}

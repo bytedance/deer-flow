@@ -1,13 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import { toast } from "sonner";
 import {
   ArrowLeft,
   FileText,
   Loader2,
-  BarChart3,
   ClipboardList,
   Wrench,
   TrendingUp,
@@ -15,15 +11,12 @@ import {
   CalendarDays,
   Package,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState, useCallback } from "react";
+import { toast } from "sonner";
 
-import {
-  useBlueprints,
-  useCreateTemplateFromBlueprint,
-} from "@/core/blueprints/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -32,8 +25,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import type { BlueprintSummary } from "@/core/blueprints/api";
+import {
+  useBlueprints,
+  useCreateTemplateFromBlueprint,
+} from "@/core/blueprints/hooks";
+import { useI18n } from "@/core/i18n/hooks";
 
 const CATEGORY_ICONS: Record<string, typeof FileText> = {
   daily: CalendarDays,
@@ -48,6 +47,7 @@ const CATEGORY_ICONS: Record<string, typeof FileText> = {
 
 export function BlueprintCatalogPage() {
   const router = useRouter();
+  const { t } = useI18n();
   const { blueprints, isLoading } = useBlueprints();
   const [selectedBlueprint, setSelectedBlueprint] =
     useState<BlueprintSummary | null>(null);
@@ -64,12 +64,12 @@ export function BlueprintCatalogPage() {
         name: templateName.toLowerCase().replace(/\s+/g, "-"),
         visibility: "private",
       });
-      toast.success("Template created from blueprint");
+      toast.success(t.editor.templateCreated);
       router.push(`/workspace/report-templates/editor/${result.template_id}`);
     } catch (err) {
-      toast.error((err as Error).message || "Failed to create template");
+      toast.error((err as Error).message || t.editor.createFailed);
     }
-  }, [selectedBlueprint, templateName, createMutation, router]);
+  }, [selectedBlueprint, templateName, createMutation, router, t]);
 
   return (
     <div className="flex h-full flex-col">
@@ -83,9 +83,9 @@ export function BlueprintCatalogPage() {
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div>
-          <h1 className="text-lg font-semibold">Create from Blueprint</h1>
+          <h1 className="text-lg font-semibold">{t.editor.createFromBlueprint}</h1>
           <p className="text-sm text-muted-foreground">
-            Choose a pre-configured template to get started quickly
+            {t.editor.chooseBlueprint}
           </p>
         </div>
       </header>
@@ -95,11 +95,11 @@ export function BlueprintCatalogPage() {
         {isLoading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-            Loading blueprints...
+            {t.editor.loadingBlueprints}
           </div>
         ) : blueprints.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
-            <p className="text-sm">No blueprints available</p>
+            <p className="text-sm">{t.editor.noBlueprints}</p>
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -127,7 +127,7 @@ export function BlueprintCatalogPage() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
-              Create from: {selectedBlueprint?.name}
+              {t.editor.createFrom} {selectedBlueprint?.name}
             </DialogTitle>
             <DialogDescription>
               {selectedBlueprint?.description}
@@ -136,15 +136,15 @@ export function BlueprintCatalogPage() {
 
           <div className="space-y-3">
             <div>
-              <Label>Template Name</Label>
+              <Label>{t.editor.blueprintTemplateNameLabel}</Label>
               <Input
                 value={templateName}
                 onChange={(e) => setTemplateName(e.target.value)}
-                placeholder="My Custom Report"
+                placeholder={t.editor.blueprintTemplateNamePlaceholder}
                 autoFocus
               />
               <p className="mt-1 text-[10px] text-muted-foreground">
-                A unique name for your new template
+                {t.editor.blueprintTemplateNameHint}
               </p>
             </div>
           </div>
@@ -154,7 +154,7 @@ export function BlueprintCatalogPage() {
               variant="outline"
               onClick={() => setSelectedBlueprint(null)}
             >
-              Cancel
+              {t.common.cancel}
             </Button>
             <Button
               onClick={handleCreate}
@@ -163,7 +163,7 @@ export function BlueprintCatalogPage() {
               {createMutation.isPending ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />
               ) : null}
-              Create Template
+              {t.marketplace.createTemplate}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -179,6 +179,7 @@ function BlueprintCard({
   blueprint: BlueprintSummary;
   onUse: () => void;
 }) {
+  const { t } = useI18n();
   const Icon = CATEGORY_ICONS[blueprint.category] ?? FileText;
 
   return (
@@ -215,7 +216,7 @@ function BlueprintCard({
         )}
 
         <Button variant="outline" size="sm" onClick={onUse}>
-          Use Blueprint
+          {t.editor.useBlueprint}
         </Button>
       </CardContent>
     </Card>
