@@ -59,10 +59,27 @@ def _match_ai_message(
             used_ai_indexes.add(matches[0])
             return ai_messages[matches[0]]
 
-    if fallback_ordinal < len(ai_messages) and fallback_ordinal not in used_ai_indexes:
-        used_ai_indexes.add(fallback_ordinal)
-        return ai_messages[fallback_ordinal]
+    fallback_index = _next_unused_index(len(ai_messages), used_ai_indexes, fallback_ordinal)
+    if fallback_index is not None:
+        used_ai_indexes.add(fallback_index)
+        return ai_messages[fallback_index]
 
+    return None
+
+
+def _next_unused_index(count: int, used_ai_indexes: set[int], start: int) -> int | None:
+    """Return the next unused AI index, scanning forward from ``start`` and wrapping.
+
+    Scanning forward from the payload's ordinal preserves the positional bias of
+    the previous behaviour while still recovering when serialization drops or
+    reorders messages so the exact ordinal index is already taken.
+    """
+    if count == 0:
+        return None
+    for offset in range(count):
+        index = (start + offset) % count
+        if index not in used_ai_indexes:
+            return index
     return None
 
 

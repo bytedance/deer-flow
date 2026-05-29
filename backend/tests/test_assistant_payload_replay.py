@@ -74,3 +74,28 @@ def test_restore_assistant_payloads_fallback_uses_order_when_signature_is_ambigu
     restore_assistant_payloads(payload_messages, original_messages, _restore_reasoning)
 
     assert payload_messages[0]["reasoning_content"] == "first-thought"
+
+
+def test_restore_assistant_payloads_fallback_uses_next_unused_when_ordinal_taken():
+    # Serialization dropped a leading empty assistant message, so payload ordinals
+    # no longer line up with the original AIMessage indices. The first payload
+    # uniquely matches a non-ordinal index by signature, which leaves the later
+    # ambiguous payload's exact ordinal index already used. It must still fall
+    # back to the remaining unused AIMessage (scanning forward from the ordinal)
+    # instead of silently dropping the field.
+    original_messages = [
+        AIMessage(content="", additional_kwargs={"reasoning_content": "dropped-thought"}),
+        AIMessage(content="unique", additional_kwargs={"reasoning_content": "unique-thought"}),
+        AIMessage(content="", additional_kwargs={"reasoning_content": "trailing-thought"}),
+    ]
+    payload_messages = [
+        {"role": "assistant", "content": "unique"},
+        {"role": "assistant", "content": ""},
+    ]
+
+    restore_assistant_payloads(payload_messages, original_messages, _restore_reasoning)
+
+    assert payload_messages[0]["reasoning_content"] == "unique-thought"
+    # Forward scan from the taken ordinal picks the trailing message, not the
+    # dropped leading one (which a naive min-unused scan would wrongly select).
+    assert payload_messages[1]["reasoning_content"] == "trailing-thought"
