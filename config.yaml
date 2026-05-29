@@ -289,9 +289,9 @@ audio_input:
   provider:
     use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
     config:
-      model: qwen3-asr-flash
-      api_key: ''
-      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: openai/whisper-1
+      api_key: $OPENAI_API_KEY
+      base_url: https://aiapi.shenguyun.com/v1
 http_connectors:
   default:
     - name: list_datasets

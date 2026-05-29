@@ -114,13 +114,15 @@ export async function fetch(
     if (hasEhmTokenCookie()) {
       const authRes = await reauthenticateEhmSession(url, merged);
       if (authRes?.ok) {
-        return globalThis.fetch(input, {
+        const retryRes = await globalThis.fetch(input, {
           ...init,
           headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
           credentials: "include",
         });
+        if (retryRes.status !== 401) {
+          return retryRes;
+        }
       }
-      return authRes ?? res;
     }
 
     if (!url.includes(REFRESH_PATH)) {
@@ -131,11 +133,14 @@ export async function fetch(
           credentials: "include",
         });
         if (refreshRes.ok) {
-          return globalThis.fetch(input, {
+          const retryRes = await globalThis.fetch(input, {
             ...init,
             headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
             credentials: "include",
           });
+          if (retryRes.status !== 401) {
+            return retryRes;
+          }
         }
       } catch {
         // Refresh failed, fall through to redirect.
