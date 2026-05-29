@@ -16,6 +16,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
@@ -54,6 +55,11 @@ function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
+  "SummarizationMiddleware.before_model",
+  "DeerFlowSummarizationMiddleware.before_model",
+]);
+
 function messageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
@@ -70,17 +76,33 @@ function messageIdentity(message: Message): string | undefined {
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const lastIndexByIdentity = new Map<string, number>();
+  const lastVisibleIndexByIdentity = new Map<string, number>();
 
+  // This is a UI-display dedupe rule, not a general LangChain message-stream
+  // contract. Hidden messages that share an identity with a visible message are
+  // treated as control messages for this merged view; hidden messages carrying
+  // independent tracing/task semantics should use a distinct id or a custom
+  // stream/state channel instead of relying on message dedupe preservation.
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
       lastIndexByIdentity.set(identity, index);
+      if (!isHiddenFromUIMessage(message)) {
+        lastVisibleIndexByIdentity.set(identity, index);
+      }
     }
   });
 
   return messages.filter((message, index) => {
     const identity = messageIdentity(message);
-    return !identity || lastIndexByIdentity.get(identity) === index;
+    if (!identity) {
+      return true;
+    }
+    const visibleIndex = lastVisibleIndexByIdentity.get(identity);
+    if (visibleIndex !== undefined) {
+      return visibleIndex === index;
+    }
+    return lastIndexByIdentity.get(identity) === index;
   });
 }
 
@@ -102,8 +124,15 @@ export function mergeMessages(
   threadMessages: Message[],
   optimisticMessages: Message[],
 ): Message[] {
+  // Only visible live messages should trim overlapping history. Hidden messages
+  // are UI control messages in this path, not observability records; any hidden
+  // message that must survive as task/tracing data should use custom events or a
+  // separate state channel instead of participating in this overlap heuristic.
   const threadMessageIds = new Set(
-    threadMessages.map(messageIdentity).filter(isNonEmptyString),
+    threadMessages
+      .filter((message) => !isHiddenFromUIMessage(message))
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
   );
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
@@ -152,6 +181,30 @@ export function getVisibleOptimisticMessages(
     return [];
   }
   return optimisticMessages;
+}
+
+export function getSummarizationMiddlewareMessages(
+  data: unknown,
+): Message[] | undefined {
+  if (typeof data !== "object" || data === null) {
+    return undefined;
+  }
+
+  for (const [key, update] of Object.entries(data)) {
+    if (!SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof update !== "object" || update === null) {
+      continue;
+    }
+
+    const messages = Reflect.get(update, "messages");
+    if (Array.isArray(messages)) {
+      return [...messages] as Message[];
+    }
+  }
+
+  return undefined;
 }
 
 export function upsertThreadInSearchCache(
@@ -319,24 +372,25 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
-      if (data["SummarizationMiddleware.before_model"]) {
-        const _messages = [
-          ...(data["SummarizationMiddleware.before_model"].messages ?? []),
-        ];
-
-        if (_messages.length < 2) {
-          return;
-        }
+      const _messages = getSummarizationMiddlewareMessages(data);
+      if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
           if (m.name === "summary" && m.type === "human") {
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const _lastKeepMessage = _messages[2];
+        const firstRetainedVisibleIdentity = _messages
+          .filter((message) => message.type !== "remove")
+          .filter((message) => !isHiddenFromUIMessage(message))
+          .map(messageIdentity)
+          .find(isNonEmptyString);
         const _currentMessages = [...messagesRef.current];
         const _movedMessages: Message[] = [];
         for (const m of _currentMessages) {
-          if (m.id !== undefined && m.id === _lastKeepMessage?.id) {
+          if (
+            firstRetainedVisibleIdentity &&
+            messageIdentity(m) === firstRetainedVisibleIdentity
+          ) {
             break;
           }
           if (!summarizedRef.current?.has(m.id ?? "")) {
