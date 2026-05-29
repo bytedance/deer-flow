@@ -44,6 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
+import re
+
+import yaml
+
 from deerflow.report_templates.records import (
     IndexEntry,
     ReportRunRecord,
@@ -59,6 +63,14 @@ from deerflow.report_templates.records import (
     validate_template_id,
     validate_user_tenant_id,
 )
+
+# Builtin templates use directory names (e.g. "daily-equipment") not ULID IDs.
+_BUILTIN_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+
+
+def is_builtin_template_name(name: str) -> bool:
+    """Return True when *name* looks like a builtin template directory name."""
+    return bool(_BUILTIN_NAME_RE.match(name))
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -170,7 +182,8 @@ class FileSystemReportTemplateRepository:
         raise ValueError(f"unknown visibility {scope.visibility!r}")
 
     def _template_dir(self, scope: Scope, template_id: str) -> Path:
-        validate_template_id(template_id)
+        if not (scope.visibility == "builtin" and _BUILTIN_NAME_RE.match(template_id)):
+            validate_template_id(template_id)
         root = self._scope_root(scope)
         candidate = (root / template_id).resolve()
         # Path traversal: ensure resolved path is inside the scope root.
@@ -515,10 +528,45 @@ class FileSystemReportTemplateRepository:
     def get_version(
         self, scope: Scope, template_id: str, version: int
     ) -> ReportTemplateVersionRecord:
+        if scope.visibility == "builtin" and _BUILTIN_NAME_RE.match(template_id):
+            return self._get_builtin_version(template_id, version)
         raw = self._read_json(self._version_json(scope, template_id, version))
         if raw is None:
             raise VersionNotFoundError(template_id, version)
         return ReportTemplateVersionRecord.model_validate(raw)
+
+    def _get_builtin_version(
+        self, name: str, version: int
+    ) -> ReportTemplateVersionRecord:
+        """Construct a version record from a builtin template's default.yaml."""
+        if self._builtin_root is None:
+            raise VersionNotFoundError(name, version)
+        yaml_path = (self._builtin_root / name / "default.yaml").resolve()
+        try:
+            yaml_path.relative_to(self._builtin_root)
+        except ValueError:
+            raise VersionNotFoundError(name, version)
+        if not yaml_path.exists():
+            raise VersionNotFoundError(name, version)
+        try:
+            dsl_yaml = yaml_path.read_text(encoding="utf-8")
+            dsl = yaml.safe_load(dsl_yaml)
+        except Exception:
+            raise VersionNotFoundError(name, version)
+        if not isinstance(dsl, dict):
+            raise VersionNotFoundError(name, version)
+        return ReportTemplateVersionRecord.model_construct(
+            template_id=name,
+            version=1,
+            dsl=dsl,
+            dsl_yaml=dsl_yaml,
+            checksum=_sha256(dsl_yaml),
+            source_template_id=None,
+            source_template_version=None,
+            created_by="builtin",
+            created_at="1970-01-01T00:00:00+00:00",
+            changelog="builtin",
+        )
 
     def list_versions(self, scope: Scope, template_id: str) -> list[int]:
         versions_dir = self._versions_dir(scope, template_id)
@@ -617,8 +665,52 @@ class FileSystemReportTemplateRepository:
     def _read_template_record(
         self, scope: Scope, template_id: str
     ) -> ReportTemplateRecord | None:
+        if scope.visibility == "builtin" and _BUILTIN_NAME_RE.match(template_id):
+            return self._read_builtin_record(template_id)
         raw = self._read_json(self._template_json(scope, template_id))
         return ReportTemplateRecord.model_validate(raw) if raw else None
+
+    def _read_builtin_record(self, name: str) -> ReportTemplateRecord | None:
+        """Construct a ReportTemplateRecord from builtin metadata.yaml + default.yaml."""
+        if self._builtin_root is None:
+            return None
+        template_dir = (self._builtin_root / name).resolve()
+        try:
+            template_dir.relative_to(self._builtin_root)
+        except ValueError:
+            return None
+        metadata_path = template_dir / "metadata.yaml"
+        if not metadata_path.exists():
+            return None
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                meta = yaml.safe_load(f)
+        except Exception:
+            return None
+        if not isinstance(meta, dict):
+            return None
+        # Use model_construct to bypass Pydantic field validators
+        # (builtin names don't match the ULID tpl_XXXX pattern).
+        return ReportTemplateRecord.model_construct(
+            id=name,
+            name=name,
+            display_name=meta.get("display_name", name),
+            description=meta.get("description", ""),
+            owner_user_id="builtin",
+            tenant_id="builtin",
+            visibility="builtin",
+            status="published",
+            current_version=1,
+            dsl_version=str(meta.get("dsl_version", "1")),
+            tags=meta.get("tags", []),
+            category=None,
+            is_featured=False,
+            install_count=0,
+            run_count=0,
+            created_at="1970-01-01T00:00:00+00:00",
+            updated_at="1970-01-01T00:00:00+00:00",
+            etag="builtin",
+        )
 
     def _must_read_template(
         self, template_json: Path, template_id: str

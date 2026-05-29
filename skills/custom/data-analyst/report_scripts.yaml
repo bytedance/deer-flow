@@ -118,6 +118,10 @@ scripts:
         max: 10000
         default: 50
         description: "返回设备数量上限"
+    output_files:
+      - id: list_equipment
+        path: "{run_output_dir}/data/list_equipment.json"
+        description: "设备列表 + available_kpis（供 options_source 引用）"
     outputs_schema:
       equipment:
         type: array

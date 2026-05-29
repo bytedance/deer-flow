@@ -42,6 +42,7 @@ from deerflow.report_templates.repository import (
     Scope,
     TemplateNotFoundError,
     VersionNotFoundError,
+    is_builtin_template_name,
 )
 from deerflow.report_templates.script_registry import get_registry
 from deerflow.report_templates.service import (
@@ -153,12 +154,20 @@ def report_template_get_tool(template_id: str, version: int | None = None) -> st
         JSON ``{"template": {...}, "version": {...} | null}`` or error envelope.
     """
     try:
-        validate_template_id(template_id)
-        principal = principal_from_runnable_config(get_config())
-        repo = get_repository()
-        scope, record = _resolve_scope_for_template_id(
-            repo, template_id, principal.user_id, principal.tenant_id
-        )
+        if is_builtin_template_name(template_id):
+            # Builtin names (e.g. "daily-equipment") are not ULID IDs;
+            # skip validate_template_id and go straight to builtin scope.
+            principal = principal_from_runnable_config(get_config())
+            repo = get_repository()
+            scope = Scope.builtin()
+            record = repo.get_template(scope, template_id)
+        else:
+            validate_template_id(template_id)
+            principal = principal_from_runnable_config(get_config())
+            repo = get_repository()
+            scope, record = _resolve_scope_for_template_id(
+                repo, template_id, principal.user_id, principal.tenant_id
+            )
         decision = check_permission(principal=principal, operation="view", template=record)
         if not decision.allowed:
             return _err("PERMISSION_DENIED", decision.reason)

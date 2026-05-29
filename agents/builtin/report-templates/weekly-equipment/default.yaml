@@ -63,7 +63,7 @@ form_steps:
         required: true
         options_source:
           step: kpi_catalog
-          path: available_kpis
+          path: list_equipment.available_kpis
           label: label
           value: key
           description: description

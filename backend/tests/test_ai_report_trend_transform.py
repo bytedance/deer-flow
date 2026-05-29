@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -23,7 +24,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts"
 TRANSFORM_PATH = SCRIPTS_DIR / "trend_analysis.py"
-QUERY_PATH = SCRIPTS_DIR / "query_trend.py"
 HELPERS_PATH = SCRIPTS_DIR / "_stub_helpers.py"
 SCRIPT_DIR_STR = str(SCRIPTS_DIR)
 
@@ -44,22 +44,29 @@ def transform(tmp_path):
     return _load("trend_analysis", TRANSFORM_PATH)
 
 
+def _make_series(metric_key: str, name: str, unit: str, n: int, base: float, amplitude: float, better: bool) -> dict:
+    """Build a deterministic sine-wave series for test fixtures."""
+    timestamps = [f"2026-04-{d:02d}" for d in range(1, n + 1)]
+    phase = sum(ord(c) for c in metric_key) * 0.01
+    values = [round(base + amplitude * math.sin(i * 0.3 + phase), 4) for i in range(n)]
+    return {
+        "metric_key": metric_key,
+        "name": name,
+        "unit": unit,
+        "timestamps": timestamps,
+        "values": values,
+        "point_count": n,
+        "better_when_higher": better,
+    }
+
+
 @pytest.fixture()
 def trend_data(tmp_path):
-    """Build a realistic trend_data.json fixture via query_trend."""
-    _load("_stub_helpers", HELPERS_PATH)
-    if SCRIPT_DIR_STR not in sys.path:
-        sys.path.insert(0, SCRIPT_DIR_STR)
-    query = _load("query_trend", QUERY_PATH)
-    timestamps = query._enumerate_steps(
-        query.date.fromisoformat("2026-04-01"),
-        query.date.fromisoformat("2026-04-30"),
-        "daily",
-    )
+    """Build a realistic trend_data.json fixture with inline data."""
     series = [
-        query._build_series("runtime_rate", timestamps),
-        query._build_series("vibration_level", timestamps),
-        query._build_series("alarm_count", timestamps),
+        _make_series("runtime_rate", "运行率", "%", 30, 0.92, 0.05, True),
+        _make_series("vibration_level", "振动水平", "mm/s", 30, 3.0, 0.5, False),
+        _make_series("alarm_count", "告警数量", "条", 30, 4.0, 3.0, False),
     ]
     payload = {
         "schema_version": "1",
@@ -68,10 +75,10 @@ def trend_data(tmp_path):
             "aggregation": "daily",
             "forecast_horizon": 7,
             "requested_metric_keys": ["runtime_rate", "vibration_level", "alarm_count"],
-            "data_source": "demo_fallback",
+            "data_source": "http",
         },
         "time_series": series,
-        "summary": {"metric_count": 3, "total_points": 90, "first_timestamp": timestamps[0], "last_timestamp": timestamps[-1]},
+        "summary": {"metric_count": 3, "total_points": 90},
     }
     path = tmp_path / "trend_data.json"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

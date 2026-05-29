@@ -8,9 +8,75 @@
 
 ### 启动决策（每次新会话开始时执行一次）
 
-1. 调用 `report_template_get` 工具，参数 `template_id="builtin-daily-equipment"`。
-   - **命中** → 进入 **DSL 路径**：依次调用 `report_template_prepare_run`、`report_template_render_step`、`report_template_submit_step`、`report_template_run_data_steps`、`report_template_assemble_payload`、`report_template_render_report`、`report_template_export`，按工具返回值推进。完成后调用 `present_files` 暴露 `.md` / `.pdf`。
+1. 调用 `report_template_get` 工具，参数 `template_id="daily-equipment"`。
+   - **命中** → 进入 **DSL 路径**（见下方详细流程）。
    - **未命中 / 工具不可用 / DSL 路径中途抛 `RUN_NOT_FOUND` 或 `INTERNAL`** → **首先**调用 `report_template_record_fallback(agent_name="ai-report--daily", reason=<原因>)` 记录这次降级（reason 取 `tool_error` / `builtin_missing` / `validator_regression` / `skill_disabled` 之一，按下表选最贴近的一个），**然后**向用户提示一行 `"正在使用兼容模式生成报告"` 并进入下文的 **fallback 路径** 继续。
+
+### DSL 路径详细流程
+
+> 本节是 DSL 路径的完整操作指南。状态机：`pending → awaiting_step（循环）→ ready_for_data → data_complete → payload_ready → rendered → exported`。
+
+#### DSL-1: prepare_run
+
+```text
+report_template_prepare_run(template_id="daily-equipment", template_version=-1)
+```
+
+记录返回的 `report_run_id` 和 `first_step_id`，后续所有调用都要带 `report_run_id`。
+
+#### DSL-2: 循环 — 渲染 + 等用户提交 + submit
+
+对每个 form_step 重复以下步骤：
+
+1. 调 `report_template_render_step(report_run_id, step_id=<当前 step_id>)` → 拿到 `component`、`callback_id`、`props`。
+2. **用 `render_ui` 推 GenUI 表单**，参数全部来自工具返回值：
+
+   ```python
+   render_ui(
+       component=<工具返回的 component>,   # "form" 或 "device-selector-multi"
+       action="create",
+       interactive=True,
+       callback_id=<工具返回的 callback_id>,
+       props=<工具返回的 props>,
+   )
+   ```
+
+3. **只回复一句简短引导**（如"请填写后提交"）并立即停止，等待 `ui_interaction` 消息。
+4. 收到 `ui_interaction` 回调时，**必须**将 `ui_interaction.payload` 作为 `payload` 参数传入：
+
+   ```text
+   report_template_submit_step(
+       report_run_id=<rr_...>,
+       step_id=<当前 step_id>,
+       payload=<ui_interaction.payload>    ← 必填！来自用户表单提交
+   )
+   ```
+
+5. 如果返回值 `next_step_id == "__generate__"` → 进入 DSL-3；否则把 `next_step_id` 作为下一轮 `step_id` 回到步骤 1。
+
+> **严禁**在没有 `ui_interaction` 的轮里调用 `submit_step`——状态机会拒绝。`payload` 参数是必填字段，缺失会报 `Field required`。
+
+#### DSL-3: 跑数据 + 组装 + 渲染 + 导出（连续调用）
+
+```text
+1. report_template_run_data_steps(report_run_id=...)
+2. report_template_assemble_payload(report_run_id=...)
+3. report_template_render_report(report_run_id=...)
+4. report_template_export(report_run_id=..., pdf=True)
+```
+
+PDF 失败时 `pdf_skipped_reason` 会说明原因，降级仅 Markdown。
+
+#### DSL-4: 呈现下载链接
+
+```text
+报告已生成。请通过以下链接下载：
+
+- [Markdown](/api/threads/{thread_id}/artifacts/<md_path 的相对路径>)
+- [PDF](/api/threads/{thread_id}/artifacts/<pdf_path 的相对路径>)   # 如果 pdf_path 存在
+```
+
+`present_files` 只暴露 `.md` / `.pdf`，**严禁**对 `report_payload.json` / `status.json` 调用。
 
 ### Fallback 路径触发场景
 

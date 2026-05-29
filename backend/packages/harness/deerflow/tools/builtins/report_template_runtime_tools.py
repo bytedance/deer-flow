@@ -42,6 +42,7 @@ from deerflow.report_templates.repository import (
     Scope,
     TemplateNotFoundError,
     VersionNotFoundError,
+    is_builtin_template_name,
 )
 from deerflow.report_templates.runtime.data_runner import (
     DataRunnerError,
@@ -259,8 +260,8 @@ def _load_dsl_for(state: RuntimeState) -> dict[str, Any]:
     """Read the version of the DSL bound to this run."""
     repo = get_repository()
     if state.template_version is None:
-        # Builtin templates: use current pointer (no per-version files).
-        return repo.get_template(Scope.builtin(), state.template_id).model_dump() and {}  # placeholder
+        version = repo.get_version(Scope.builtin(), state.template_id, 1)
+        return version.dsl
     # For private/tenant we use the version we recorded.
     principal = principal_from_runnable_config(get_config())
     scope = Scope.private(principal.user_id)
@@ -299,7 +300,8 @@ def report_template_prepare_run_tool(
         JSON ``{"report_run_id", "nonce", "first_step_id", "run_output_dir"}``.
     """
     try:
-        validate_template_id(template_id)
+        if not is_builtin_template_name(template_id):
+            validate_template_id(template_id)
         principal = principal_from_runnable_config(get_config())
         repo = get_repository()
         # Resolve template + version for DSL retrieval.

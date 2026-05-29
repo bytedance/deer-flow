@@ -2,19 +2,17 @@
 
 Two categories of sources live in this module:
 
-* The original 5 (``trend`` / ``fault_context`` / ``failure_data`` /
+* The 4 HTTP-backed sources (``fault_context`` / ``failure_data`` /
   ``closure_items`` / ``inspection``) each register a ``demo`` + ``http``
   pair. They keep deterministic synthetic data so the dev / demo workflows
   run offline; ``fetch_with_fallback`` swaps in the demo path when the HTTP
-  endpoint is unreachable. AI report sources (``daily`` / ``weekly`` /
-  ``monthly``) do **not** participate in this fallback — they register only
-  the InS provider and surface failures verbatim.
+  endpoint is unreachable.
 
-* The AI report sources (``daily`` / ``weekly`` / ``monthly``) register
-  **only** the InS-backed provider. There is no demo fallback — any
-  ``HttpProviderError`` propagates so the failure is visible at the CLI as
-  ``{"error": "HttpProviderError: ..."}`` instead of being masked by
-  synthetic output.
+* ``trend`` and the AI report sources (``daily`` / ``weekly`` / ``monthly``)
+  register **only** their real-backed provider (HTTP or InS). There is no
+  demo fallback — any ``HttpProviderError`` propagates so the failure is
+  visible at the CLI as ``{"error": "HttpProviderError: ..."}`` instead of
+  being masked by synthetic output.
 
 This module **must be imported** for the registry to pick up the providers.
 Query scripts do this implicitly by importing ``_data_providers``.
@@ -25,7 +23,7 @@ need to:
 
   1. Stand up an endpoint matching the contract documented below each
      ``Http*Provider.fetch``.
-  2. Set ``DEER_FLOW_DATA_PROVIDER=http`` (only affects the original 5).
+  2. Set ``DEER_FLOW_DATA_PROVIDER=http`` (only affects the 4 demo sources).
   3. Set the source-specific ``{PREFIX}_URL`` + ``{PREFIX}_TOKEN`` env vars
      (e.g. ``DEERFLOW_TREND_URL``).
 """
@@ -50,117 +48,6 @@ from _data_providers import (
 # ============================================================================
 
 
-class DemoTrendProvider:
-    """Re-uses ``query_trend._build_series`` + ``_enumerate_steps`` to produce
-    the deterministic sine demo data the existing tests rely on.
-
-    When ``include_alarms`` / ``include_events`` is True and ``equipment_ids``
-    is provided, generates deterministic synthetic alarms / events scattered
-    across the date range so the downstream trend_analysis transform can
-    correlate metric movements with contextual events.
-    """
-
-    def fetch(
-        self,
-        *,
-        metric_keys: list[str],
-        date_range: tuple[str, str],
-        aggregation: str,
-        forecast_horizon: int,
-        equipment_ids: list[str] | None = None,
-        include_alarms: bool = False,
-        include_events: bool = False,
-    ) -> ProviderResult:
-        qt = _load_script("query_trend")
-        from datetime import date as _date, datetime, timedelta
-
-        start = _date.fromisoformat(date_range[0])
-        end = _date.fromisoformat(date_range[1])
-        timestamps = qt._enumerate_steps(start, end, aggregation)
-        time_series = [qt._build_series(m, timestamps) for m in metric_keys]
-
-        data: dict = {
-            "time_series": time_series,
-            "timestamps_meta": {
-                "first": timestamps[0] if timestamps else None,
-                "last": timestamps[-1] if timestamps else None,
-                "count_per_series": len(timestamps),
-            },
-        }
-
-        equipment_ids = equipment_ids or []
-        if include_alarms:
-            data["alarms"] = self._demo_alarms(start, end, equipment_ids)
-        if include_events:
-            data["events"] = self._demo_events(start, end, equipment_ids)
-
-        return ProviderResult(data=data, data_source=DEMO_FALLBACK)
-
-    @staticmethod
-    def _demo_alarms(start, end, equipment_ids: list[str]) -> list[dict]:
-        """Deterministic alarms: 1 per 7 days per equipment, phase-shifted."""
-        from datetime import datetime, timedelta
-
-        alarms: list[dict] = []
-        days = (end - start).days + 1
-        levels = ["info", "warning", "critical"]
-        messages = [
-            "振动值超过阈值",
-            "温度偏高",
-            "运行率低于目标",
-            "压力波动异常",
-            "定期巡检正常",
-        ]
-        for idx, eq_id in enumerate(equipment_ids or ["demo-equipment"]):
-            phase = (idx * 3) % 7
-            day_offset = phase
-            while day_offset < days:
-                alarm_date = start + timedelta(days=day_offset)
-                msg_idx = (idx + day_offset) % len(messages)
-                lvl_idx = (idx + day_offset // 3) % len(levels)
-                alarms.append({
-                    "time": datetime.combine(alarm_date, datetime.min.time().replace(hour=8 + (day_offset % 12))).isoformat(timespec="seconds"),
-                    "equipment": eq_id,
-                    "level": levels[lvl_idx],
-                    "message": messages[msg_idx],
-                })
-                day_offset += 7
-        alarms.sort(key=lambda a: a["time"])
-        return alarms
-
-    @staticmethod
-    def _demo_events(start, end, equipment_ids: list[str]) -> list[dict]:
-        """Deterministic events: 1 per 14 days per equipment."""
-        from datetime import datetime, timedelta
-
-        events: list[dict] = []
-        days = (end - start).days + 1
-        types = ["maintenance", "operation", "inspection", "calibration"]
-        descriptions = [
-            "定期保养完成",
-            "更换润滑油",
-            "巡检记录",
-            "传感器校准",
-            "设备启停操作",
-        ]
-        for idx, eq_id in enumerate(equipment_ids or ["demo-equipment"]):
-            phase = (idx * 5) % 14
-            day_offset = phase
-            while day_offset < days:
-                event_date = start + timedelta(days=day_offset)
-                type_idx = (idx + day_offset) % len(types)
-                desc_idx = (idx + day_offset // 2) % len(descriptions)
-                events.append({
-                    "time": datetime.combine(event_date, datetime.min.time().replace(hour=9)).isoformat(timespec="seconds"),
-                    "equipment": eq_id,
-                    "type": types[type_idx],
-                    "description": descriptions[desc_idx],
-                })
-                day_offset += 14
-        events.sort(key=lambda e: e["time"])
-        return events
-
-
 class HttpTrendProvider:
     """POSTs to ``$DEERFLOW_TREND_URL`` with the parameters the script accepts.
 
@@ -176,7 +63,7 @@ class HttpTrendProvider:
           "include_events": true
         }
 
-    Expected response body (must match the shape DemoTrendProvider produces)::
+    Expected response body::
 
         {
           "time_series": [
@@ -229,7 +116,6 @@ class HttpTrendProvider:
         return ProviderResult(data=data, data_source=HTTP_SUCCESS)
 
 
-register_provider("trend", "demo", DemoTrendProvider)
 register_provider("trend", "http", HttpTrendProvider)
 
 
