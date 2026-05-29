@@ -1,13 +1,27 @@
 import asyncio
 from types import SimpleNamespace
+from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.store.memory import InMemoryStore
 
+from app.gateway.auth.models import User
 from app.gateway.routers import shares
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+_USER_ID = UUID("11111111-1111-1111-1111-111111111111")
+_OTHER_USER_ID = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _make_user(user_id: UUID = _USER_ID) -> User:
+    return User(
+        email="share-test@example.com",
+        password_hash="x",
+        system_role="user",
+        id=user_id,
+    )
 
 
 class _ShareTestStore(InMemoryStore):
@@ -19,7 +33,7 @@ class _ShareTestStore(InMemoryStore):
     async def aput(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         if args and args[0] == shares._SHARES_NS:
             self.put_ttls.append(kwargs.get("ttl"))
-        await super().aput(*args, **kwargs)
+        return await super().aput(*args, **kwargs)
 
 
 class _FakeCheckpointer:
@@ -38,19 +52,32 @@ def _build_share_app(
     *,
     owner_check_passes: bool = True,
     store_supports_ttl: bool = True,
+    user_id: UUID = _USER_ID,
 ) -> tuple[TestClient, _ShareTestStore, _FakeCheckpointer]:
-    app = make_authed_test_app(owner_check_passes=owner_check_passes)
     store = _ShareTestStore(supports_ttl=store_supports_ttl)
+    app = make_authed_test_app(user_factory=lambda: _make_user(user_id), owner_check_passes=owner_check_passes)
     checkpointer = _FakeCheckpointer()
     app.state.store = store
     app.state.checkpointer = checkpointer
+    if owner_check_passes:
+        app.state.thread_store = MemoryThreadMetaStore(store)
     app.include_router(shares.router)
     return TestClient(app), store, checkpointer
 
 
-def _seed_thread(store: InMemoryStore, checkpointer: _FakeCheckpointer, thread_id: str) -> None:
+def _seed_thread(
+    store: InMemoryStore,
+    checkpointer: _FakeCheckpointer,
+    thread_id: str,
+    *,
+    owner_user_id: UUID | None = _USER_ID,
+) -> None:
     async def _seed() -> None:
-        await MemoryThreadMetaStore(store).create(thread_id, metadata={})
+        await MemoryThreadMetaStore(store).create(
+            thread_id,
+            metadata={},
+            user_id=str(owner_user_id) if owner_user_id is not None else None,
+        )
         checkpointer.checkpoints[thread_id] = {
             "channel_values": {
                 "title": "Share source",
@@ -87,6 +114,17 @@ def test_create_share_snapshots_selected_messages_and_public_read() -> None:
     assert response.status_code == 200, response.text
     share_id = response.json()["share_id"]
 
+    async def _assert_internal_grant_metadata() -> None:
+        item = await store.aget(shares._SHARES_NS, share_id)
+        assert item is not None
+        assert item.value["source_thread_id"] == "thread-share"
+        assert item.value["created_by_user_id"] == str(_USER_ID)
+        assert item.value["message_ids"] == ["human-1", "ai-1"]
+        assert item.value["visibility"] == "public_link"
+        assert item.value["granted_at"] == item.value["created_at"]
+
+    asyncio.run(_assert_internal_grant_metadata())
+
     public_response = client.get(f"/api/shares/{share_id}")
     assert public_response.status_code == 200, public_response.text
     body = public_response.json()
@@ -96,6 +134,11 @@ def test_create_share_snapshots_selected_messages_and_public_read() -> None:
     assert body["messages"][1] == {"type": "ai", "content": "Answer", "id": "ai-1"}
     assert "response_metadata" not in body["messages"][1]
     assert "additional_kwargs" not in body["messages"][1]
+    assert "source_thread_id" not in body
+    assert "created_by_user_id" not in body
+    assert "message_ids" not in body
+    assert "visibility" not in body
+    assert "granted_at" not in body
     assert store.put_ttls == [shares._SHARE_TTL_MINUTES]
 
 
@@ -159,6 +202,30 @@ def test_create_share_requires_thread_access() -> None:
     assert response.status_code == 404
 
 
+def test_create_share_requires_explicit_thread_owner() -> None:
+    client, store, checkpointer = _build_share_app()
+    _seed_thread(store, checkpointer, "legacy-thread", owner_user_id=None)
+
+    response = client.post(
+        "/api/shares/threads/legacy-thread",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+
+    assert response.status_code == 404
+
+
+def test_create_share_rejects_thread_owned_by_another_user() -> None:
+    client, store, checkpointer = _build_share_app()
+    _seed_thread(store, checkpointer, "other-thread", owner_user_id=_OTHER_USER_ID)
+
+    response = client.post(
+        "/api/shares/threads/other-thread",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+
+    assert response.status_code == 404
+
+
 def test_create_share_returns_503_without_checkpointer() -> None:
     client, store, _checkpointer = _build_share_app()
     _seed_thread(store, _checkpointer, "thread-share")
@@ -199,6 +266,62 @@ def test_get_share_deletes_expired_snapshot_when_ttl_is_unavailable() -> None:
         assert await store.aget(shares._SHARES_NS, share_id) is None
 
     asyncio.run(_assert_deleted())
+
+
+def test_revoke_share_hides_public_snapshot() -> None:
+    client, store, checkpointer = _build_share_app()
+    _seed_thread(store, checkpointer, "thread-share")
+
+    response = client.post(
+        "/api/shares/threads/thread-share",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+    assert response.status_code == 200, response.text
+    share_id = response.json()["share_id"]
+
+    revoke_response = client.delete(f"/api/shares/{share_id}")
+
+    assert revoke_response.status_code == 204, revoke_response.text
+
+    async def _assert_revoked() -> None:
+        item = await store.aget(shares._SHARES_NS, share_id)
+        assert item is not None
+        assert item.value["visibility"] == "revoked"
+        assert item.value["revoked_at"]
+
+    asyncio.run(_assert_revoked())
+
+    public_response = client.get(f"/api/shares/{share_id}")
+    assert public_response.status_code == 404
+
+    async def _assert_revocation_record_kept() -> None:
+        item = await store.aget(shares._SHARES_NS, share_id)
+        assert item is not None
+        assert item.value["visibility"] == "revoked"
+
+    asyncio.run(_assert_revocation_record_kept())
+
+
+def test_revoke_share_requires_creator() -> None:
+    client, store, checkpointer = _build_share_app()
+    _seed_thread(store, checkpointer, "thread-share")
+
+    response = client.post(
+        "/api/shares/threads/thread-share",
+        json={"message_ids": ["human-1", "ai-1"]},
+    )
+    assert response.status_code == 200, response.text
+    share_id = response.json()["share_id"]
+
+    other_client, _store, _checkpointer = _build_share_app(user_id=_OTHER_USER_ID)
+    other_client.app.state.store = store
+    other_client.app.state.checkpointer = checkpointer
+    other_client.app.state.thread_store = MemoryThreadMetaStore(store)
+
+    revoke_response = other_client.delete(f"/api/shares/{share_id}")
+
+    assert revoke_response.status_code == 404
+    assert client.get(f"/api/shares/{share_id}").status_code == 200
 
 
 def test_create_share_cleans_expired_snapshots_beyond_first_batch_without_ttl() -> None:

@@ -7,11 +7,11 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_store
+from app.gateway.authz import get_auth_context, require_permission
+from app.gateway.deps import get_checkpointer, get_store, get_thread_store
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import serialize_channel_values
 from deerflow.utils.time import now_iso
@@ -25,6 +25,8 @@ _SHARE_RETENTION = timedelta(days=30)
 _SHARE_TTL_MINUTES = _SHARE_RETENTION.total_seconds() / 60
 _EXPIRED_SHARE_CLEANUP_BATCH_SIZE = 100
 _EXPIRED_SHARE_CLEANUP_MAX_BATCHES = 10
+_PUBLIC_LINK_VISIBILITY = "public_link"
+_REVOKED_VISIBILITY = "revoked"
 
 
 class ShareCreateRequest(BaseModel):
@@ -67,6 +69,20 @@ def _is_expired_share(value: dict[str, Any], *, now: datetime | None = None) -> 
     if expires_at is None:
         return False
     return expires_at <= (now or datetime.now(UTC))
+
+
+def _get_request_user_id(request: Request) -> str:
+    auth = get_auth_context(request)
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return str(auth.require_user().id)
+
+
+async def _require_explicit_thread_owner(request: Request, thread_id: str, user_id: str) -> None:
+    thread_store = get_thread_store(request)
+    record = await thread_store.get(thread_id, user_id=None)
+    if record is None or record.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
 
 def _extract_message_id(message: dict[str, Any]) -> str | None:
@@ -151,6 +167,9 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
     if store is None:
         raise HTTPException(status_code=503, detail="Store not available")
 
+    user_id = _get_request_user_id(request)
+    await _require_explicit_thread_owner(request, thread_id, user_id)
+
     checkpointer = get_checkpointer(request)
     if checkpointer is None:
         raise HTTPException(status_code=503, detail="Checkpointer not available")
@@ -219,6 +238,11 @@ async def create_thread_share(thread_id: str, body: ShareCreateRequest, request:
         {
             "title": title,
             "messages": [_to_public_message(message) for message in selected_messages],
+            "source_thread_id": thread_id,
+            "created_by_user_id": user_id,
+            "message_ids": requested_ids,
+            "visibility": _PUBLIC_LINK_VISIBILITY,
+            "granted_at": created_at,
             "created_at": created_at,
             "expires_at": expires_at,
         },
@@ -238,6 +262,8 @@ async def get_share(share_id: str, request: Request) -> ShareResponse:
         raise HTTPException(status_code=404, detail="Share not found")
 
     value = item.value or {}
+    if value.get("visibility") == _REVOKED_VISIBILITY or value.get("revoked_at"):
+        raise HTTPException(status_code=404, detail="Share not found")
     if _is_expired_share(value):
         await store.adelete(_SHARES_NS, share_id)
         raise HTTPException(status_code=404, detail="Share not found")
@@ -256,3 +282,30 @@ async def get_share(share_id: str, request: Request) -> ShareResponse:
         messages=public_messages,
         created_at=value.get("created_at", ""),
     )
+
+
+@router.delete("/{share_id}", status_code=204)
+async def revoke_share(share_id: str, request: Request) -> Response:
+    """Revoke a public share link created by the current user."""
+    store = get_store(request)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Store not available")
+
+    user_id = _get_request_user_id(request)
+    item = await store.aget(_SHARES_NS, share_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    value = item.value or {}
+    if value.get("created_by_user_id") != user_id or _is_expired_share(value):
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    value = dict(value)
+    value["visibility"] = _REVOKED_VISIBILITY
+    value["revoked_at"] = now_iso()
+    ttl = _SHARE_TTL_MINUTES if getattr(store, "supports_ttl", False) else None
+    if ttl is None:
+        await store.aput(_SHARES_NS, share_id, value)
+    else:
+        await store.aput(_SHARES_NS, share_id, value, ttl=ttl)
+    return Response(status_code=204)
