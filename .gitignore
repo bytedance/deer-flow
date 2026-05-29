@@ -60,3 +60,12 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+# CodeGraph index
+.codegraph/
+# Cursor IDE
+.cursor/
+# npm packages
+node_modules/
+package-lock.json
+# Skills zip
+skills.zip
