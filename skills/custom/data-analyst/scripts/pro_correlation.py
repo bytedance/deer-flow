@@ -20,7 +20,7 @@ MAX_LAG = 7
 DISPLAY_NAMES = {
     "runtime_rate": "运行率", "alarm_count": "告警数量", "vibration_level": "振动烈度",
     "temperature": "温度", "pressure": "压力", "flow_rate": "流量",
-    "corrosion_rate": "腐蚀速率", "motor_current": "电机电流",
+    "corrosion_rate": "腐蚀速率",
 }
 
 

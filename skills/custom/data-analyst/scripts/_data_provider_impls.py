@@ -93,6 +93,7 @@ class HttpTrendProvider:
         equipment_ids: list[str] | None = None,
         include_alarms: bool = False,
         include_events: bool = False,
+        eq_type: str = "all",
     ) -> ProviderResult:
         endpoint = HttpEndpoint.from_env("DEERFLOW_TREND")
         if endpoint is None:
@@ -117,6 +118,45 @@ class HttpTrendProvider:
 
 
 register_provider("trend", "http", HttpTrendProvider)
+
+
+class InsTrendProvider:
+    """InS-backed trend provider. Reuses the daily/weekly/monthly data path."""
+
+    def fetch(
+        self,
+        *,
+        metric_keys: list[str],
+        date_range: tuple[str, str],
+        aggregation: str,
+        forecast_horizon: int,
+        equipment_ids: list[str] | None = None,
+        include_alarms: bool = False,
+        include_events: bool = False,
+        eq_type: str = "all",
+    ) -> ProviderResult:
+        ins = _load_script("_ins_provider")
+        try:
+            data = ins.fetch_trend_series_payload(
+                start_date=date_range[0],
+                end_date=date_range[1],
+                aggregation=aggregation,
+                equipment_ids=equipment_ids or [],
+                metric_keys=metric_keys,
+                eq_type=eq_type,
+                include_alarms=include_alarms,
+                include_events=include_events,
+            )
+        except ins.HttpProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HttpProviderError(
+                f"InS trend provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+
+register_provider("trend", "ins", InsTrendProvider)
 
 
 # ============================================================================

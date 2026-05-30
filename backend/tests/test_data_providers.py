@@ -2,7 +2,8 @@
 
 Sprint goal: verify the 5 query scripts can be redirected to an HTTP backend
 via the registry, and that fetch_with_fallback() degrades gracefully to demo
-data when the HTTP path fails.
+data when the HTTP path fails. Trend is InS-only (like daily/weekly/monthly)
+— it registers http (escape hatch) + ins (default), with no demo fallback.
 """
 
 from __future__ import annotations
@@ -48,18 +49,23 @@ def providers():
 # ---------------------------------------------------------------------------
 
 
-def test_registry_has_all_5_sources_with_2_modes(providers):
-    """Every source must register both demo + http modes."""
+def test_registry_has_all_4_demo_sources_with_2_modes(providers):
+    """4 demo+http sources must register both demo + http modes."""
     registered = providers.list_registered()
-    for source in ("trend", "fault_context", "failure_data", "closure_items", "inspection"):
+    for source in ("fault_context", "failure_data", "closure_items", "inspection"):
         assert source in registered, f"source {source!r} missing from registry"
         assert "demo" in registered[source], f"source {source!r} missing demo provider"
         assert "http" in registered[source], f"source {source!r} missing http provider"
+    # trend registers http (escape hatch) + ins (default), no demo
+    assert "trend" in registered
+    assert "http" in registered["trend"]
+    assert "ins" in registered["trend"]
+    assert "demo" not in registered["trend"]
 
 
 def test_provider_result_envelope_exposes_data_source(providers):
     """Every demo provider's ProviderResult must carry data_source='demo_fallback'."""
-    for source in ("trend", "fault_context", "failure_data", "closure_items", "inspection"):
+    for source in ("fault_context", "failure_data", "closure_items", "inspection"):
         provider = providers.get_provider(source, mode="demo")
         result = _invoke_demo(provider, source)
         assert isinstance(result, providers.ProviderResult)
@@ -103,9 +109,16 @@ def _invoke_demo(provider, source: str):
 
 def test_default_mode_is_demo(providers, monkeypatch):
     monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
+    for source in ("fault_context", "failure_data", "closure_items", "inspection"):
+        p = providers.get_provider(source)
+        assert "Demo" in type(p).__name__
+
+
+def test_trend_default_mode_is_ins(providers, monkeypatch):
+    """trend defaults to ins, same as daily/weekly/monthly."""
+    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
     p = providers.get_provider("trend")
-    # The demo provider class lives in _data_provider_impls
-    assert "Demo" in type(p).__name__
+    assert "Ins" in type(p).__name__
 
 
 def test_env_var_routes_to_http(providers, monkeypatch):
@@ -115,9 +128,9 @@ def test_env_var_routes_to_http(providers, monkeypatch):
 
 
 def test_env_var_ins_on_non_ins_source_falls_back_to_demo(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=ins on trend/fault_context/etc. must fall back to demo."""
+    """DEER_FLOW_DATA_PROVIDER=ins on fault_context/etc. must fall back to demo."""
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "ins")
-    for source in ("trend", "fault_context", "failure_data", "closure_items", "inspection"):
+    for source in ("fault_context", "failure_data", "closure_items", "inspection"):
         p = providers.get_provider(source)
         assert "Demo" in type(p).__name__, (
             f"get_provider({source!r}) returned {type(p).__name__}, expected Demo*Provider"
@@ -127,7 +140,7 @@ def test_env_var_ins_on_non_ins_source_falls_back_to_demo(providers, monkeypatch
 def test_unknown_mode_raises_key_error(providers, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "nonexistent")
     with pytest.raises(KeyError):
-        providers.get_provider("trend")
+        providers.get_provider("fault_context")
 
 
 def test_unknown_source_raises_value_error(providers):
@@ -149,28 +162,76 @@ def test_daily_weekly_monthly_only_register_ins(providers):
         )
 
 
-def test_daily_weekly_monthly_ignore_env_var_demo(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect daily/weekly/monthly."""
+def test_daily_weekly_monthly_trend_ignore_env_var_demo(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect daily/weekly/monthly/trend."""
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "demo")
-    for source in ("daily", "weekly", "monthly"):
+    for source in ("daily", "weekly", "monthly", "trend"):
         p = providers.get_provider(source)
         assert "Ins" in type(p).__name__, (
             f"get_provider({source!r}) returned {type(p).__name__}, expected Ins*Provider"
         )
 
 
-def test_daily_weekly_monthly_reject_explicit_demo_mode(providers):
-    for source in ("daily", "weekly", "monthly"):
+def test_daily_weekly_monthly_trend_reject_explicit_demo_mode(providers):
+    for source in ("daily", "weekly", "monthly", "trend"):
         with pytest.raises(KeyError, match="demo"):
             providers.get_provider(source, mode="demo")
 
 
-def test_daily_weekly_monthly_ignore_env_var_http(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=http must NOT affect daily/weekly/monthly."""
+def test_daily_weekly_monthly_trend_ignore_env_var_http(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=http must NOT affect daily/weekly/monthly/trend."""
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
-    for source in ("daily", "weekly", "monthly"):
+    for source in ("daily", "weekly", "monthly", "trend"):
         p = providers.get_provider(source)
         assert "Ins" in type(p).__name__
+
+
+# ---------------------------------------------------------------------------
+# Trend is ins-preferred (registers http + ins, defaults to ins)
+# ---------------------------------------------------------------------------
+
+
+def test_trend_registers_http_and_ins(providers):
+    """trend registers http (escape hatch) + ins (default), no demo."""
+    registered = providers.list_registered()
+    assert "trend" in registered
+    assert "http" in registered["trend"]
+    assert "ins" in registered["trend"]
+    assert "demo" not in registered["trend"]
+
+
+def test_trend_default_is_ins(providers, monkeypatch):
+    """get_provider('trend') returns InsTrendProvider by default."""
+    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
+    p = providers.get_provider("trend")
+    assert "Ins" in type(p).__name__
+
+
+def test_trend_ignores_env_demo(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect trend."""
+    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "demo")
+    p = providers.get_provider("trend")
+    assert "Ins" in type(p).__name__
+
+
+def test_trend_ignores_env_http(providers, monkeypatch):
+    """DEER_FLOW_DATA_PROVIDER=http must NOT affect trend."""
+    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
+    p = providers.get_provider("trend")
+    assert "Ins" in type(p).__name__
+
+
+def test_trend_explicit_http_mode(providers, monkeypatch):
+    """Explicit mode='http' still returns HttpTrendProvider (escape hatch)."""
+    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
+    p = providers.get_provider("trend", mode="http")
+    assert "Http" in type(p).__name__
+
+
+def test_trend_rejects_demo_mode(providers):
+    """Explicit mode='demo' raises KeyError — no demo provider for trend."""
+    with pytest.raises(KeyError, match="demo"):
+        providers.get_provider("trend", mode="demo")
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +242,19 @@ def test_daily_weekly_monthly_ignore_env_var_http(providers, monkeypatch):
 def test_fallback_when_http_url_missing(providers, monkeypatch):
     """When DEER_FLOW_DATA_PROVIDER=http but no URL is set, fall back to demo."""
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
-    monkeypatch.delenv("DEERFLOW_TREND_URL", raising=False)
+    monkeypatch.delenv("DEERFLOW_FAULT_CONTEXT_URL", raising=False)
 
     result = providers.fetch_with_fallback(
-        source="trend",
+        source="fault_context",
         fetch_args={
-            "metric_keys": ["runtime_rate"],
-            "date_range": ("2026-04-01", "2026-04-30"),
-            "aggregation": "daily",
-            "forecast_horizon": 7,
+            "fault_time": "2026-05-15",
+            "equipment_id": "P-001",
+            "symptom": "test",
+            "include_related_equipment": False,
         },
     )
     assert result.data_source == providers.DEMO_FALLBACK
     assert any("fell back to demo" in n for n in result.notes)
-    # Demo data still present
-    assert len(result.data["time_series"]) == 1
 
 
 def test_fallback_when_http_call_fails(providers, monkeypatch):
@@ -325,7 +384,7 @@ def test_http_response_missing_required_field_falls_back(providers, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("source", ["trend", "fault_context", "failure_data", "closure_items", "inspection"])
+@pytest.mark.parametrize("source", ["fault_context", "failure_data", "closure_items", "inspection"])
 def test_demo_path_produces_data(providers, monkeypatch, source):
     monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
     provider = providers.get_provider(source)

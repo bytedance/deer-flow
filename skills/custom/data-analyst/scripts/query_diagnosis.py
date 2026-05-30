@@ -95,13 +95,11 @@ PROCESS_CHANNELS_BY_KIND: dict[str, list[tuple[str, str]]] = {
         ("discharge_pressure", "MPa"),
         ("suction_pressure", "MPa"),
         ("flow_rate", "m3/h"),
-        ("motor_current", "A"),
     ],
     "positive_displacement_pump": [
         ("discharge_pressure", "MPa"),
         ("suction_pressure", "MPa"),
         ("flow_rate", "m3/h"),
-        ("motor_current", "A"),
     ],
     "steam_turbine": [
         ("inlet_pressure", "MPa"),
@@ -141,12 +139,10 @@ PROCESS_CHANNELS_BY_KIND: dict[str, list[tuple[str, str]]] = {
         ("cylinder_pressure", "MPa"),
         ("unloader_state", "bool"),
         ("piston_rod_droop", "mm"),
-        ("motor_current", "A"),
     ],
     "reciprocating_pump": [
         ("crank_angle", "deg"),
         ("cylinder_pressure", "MPa"),
-        ("motor_current", "A"),
     ],
 }
 

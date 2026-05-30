@@ -23,7 +23,6 @@ THRESHOLDS = {
     "temperature": {"upper": 85, "warning_ratio": 0.8},
     "pressure": {"upper": 2.5, "lower": 0.5, "warning_ratio": 0.8},
     "flow_rate": {"lower": 50, "warning_ratio": 0.8},
-    "motor_current": {"upper": 150, "warning_ratio": 0.8},
     "corrosion_rate": {"upper": 0.5, "warning_ratio": 0.8},
 }
 

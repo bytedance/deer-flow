@@ -25,7 +25,6 @@ TARGETS = {
     "pressure": {"min": 0.5, "max": 2.5, "unit": "MPa", "better": "in_range", "weight": 0.10},
     "corrosion_rate": {"min": 0, "max": 0.5, "unit": "mm/a", "better": "lower", "weight": 0.10},
     "flow_rate": {"min": 50, "max": 200, "unit": "m³/h", "better": "in_range", "weight": 0.05},
-    "motor_current": {"min": 0, "max": 150, "unit": "A", "better": "lower", "weight": 0.05},
 }
 
 DISPLAY_NAMES = {
@@ -36,7 +35,6 @@ DISPLAY_NAMES = {
     "pressure": "压力",
     "flow_rate": "流量",
     "corrosion_rate": "腐蚀速率",
-    "motor_current": "电机电流",
 }
 
 

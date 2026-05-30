@@ -75,6 +75,17 @@ except Exception:
 # Optional INS_FACTORY_ID — every ``get_trend_data`` call passes it through.
 _INS_FACTORY_ID: str | None = os.environ.get("INS_FACTORY_ID") or None
 
+# ---------------------------------------------------------------------------
+# Shared display constants from _report_common (tolerant of missing module)
+# ---------------------------------------------------------------------------
+
+try:
+    from _report_common import KPI_BETTER_WHEN_HIGHER, KPI_DISPLAY_NAMES, KPI_UNITS
+except Exception:
+    KPI_DISPLAY_NAMES = {}
+    KPI_UNITS = {}
+    KPI_BETTER_WHEN_HIGHER = set()
+
 
 # ---------------------------------------------------------------------------
 # KPI feature map — declares HOW each report KPI is sourced from InS
@@ -1129,5 +1140,333 @@ def fetch_monthly_payload(
             eq_type=eq_type,
             equipment_meta=equipment_meta,
             include_per_equipment=False,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Trend series — time-bucketed sequences for query_trend.py
+# ---------------------------------------------------------------------------
+
+
+def _bucket_labels(aggregation: str, start_date: str, end_date: str) -> list[str]:
+    """Generate ordered bucket labels for the given date range + granularity."""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    if aggregation == "hourly":
+        labels: list[str] = []
+        current = start
+        while current <= end:
+            for h in range(24):
+                labels.append(f"{current.strftime('%Y-%m-%d')} {h:02d}:00")
+            current += timedelta(days=1)
+        return labels
+    if aggregation == "weekly":
+        labels = []
+        current = start
+        while current <= end:
+            iso = current.isocalendar()
+            label = f"{iso[0]}-W{iso[1]:02d}"
+            if not labels or labels[-1] != label:
+                labels.append(label)
+            current += timedelta(days=1)
+        return labels
+    # daily
+    labels = []
+    current = start
+    while current <= end:
+        labels.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    return labels
+
+
+def _bucket_label_for_row(row: dict[str, Any], aggregation: str) -> str | None:
+    """Map a trend row's timestamp to the matching bucket label."""
+    ts_ms = _row_time_ms(row)
+    if ts_ms is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ts_ms / 1000)
+    except (OSError, OverflowError, ValueError):
+        return None
+    if aggregation == "hourly":
+        return dt.strftime("%Y-%m-%d %H:00")
+    if aggregation == "weekly":
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _count_alarms(
+    rows: list[dict[str, Any]],
+    feature: str,
+    alarm_thresholds: dict | None,
+    tier: str = "C",
+) -> int:
+    """Count rows whose ``feature`` value exceeds the given threshold tier."""
+    if not alarm_thresholds:
+        return 0
+    threshold = _resolve_alarm_threshold(
+        {"alarm_thresholds": alarm_thresholds}, feature, tier,
+    )
+    if threshold is None:
+        return 0
+    return sum(
+        1 for r in rows
+        if (v := _row_value(r, feature)) is not None and v > threshold
+    )
+
+
+def _bucket_aggregate(
+    rows: list[dict[str, Any]],
+    metric_key: str,
+    aggregation: str,
+    start_date: str,
+    end_date: str,
+    alarm_thresholds: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Reduce raw trend rows into one value per time bucket.
+
+    Returns a list of ``{"label": ..., "value": ...}`` dicts, one per bucket,
+    ordered chronologically. ``value`` is ``None`` for empty buckets.
+    """
+    spec = _KPI_FEATURE_MAP[metric_key]
+    derivation = spec["derivation"]
+    feature = spec["feature"]
+    feature_candidates = _feature_candidates_for_spec(spec)
+    value_scale = spec.get("value_scale", 1.0)
+
+    labels = _bucket_labels(aggregation, start_date, end_date)
+    bucket_rows: dict[str, list[dict[str, Any]]] = {lbl: [] for lbl in labels}
+    for row in rows:
+        lbl = _bucket_label_for_row(row, aggregation)
+        if lbl is not None and lbl in bucket_rows:
+            bucket_rows[lbl].append(row)
+
+    out: list[dict[str, Any]] = []
+    for lbl in labels:
+        bucket = bucket_rows[lbl]
+        if not bucket:
+            out.append({"label": lbl, "value": None})
+            continue
+        if derivation == "alarm_count":
+            out.append({
+                "label": lbl,
+                "value": _count_alarms(bucket, feature, alarm_thresholds),
+            })
+        elif derivation == "runtime_rate":
+            values = [
+                _row_first_value(r, feature_candidates) for r in bucket
+            ]
+            values = [v for v in values if v is not None]
+            if not values:
+                out.append({"label": lbl, "value": None})
+            else:
+                n_run = sum(1 for v in values if v > 0)
+                out.append({
+                    "label": lbl,
+                    "value": round(n_run / len(values) * 100, 2),
+                })
+        elif derivation == "downtime_count":
+            values = [
+                _row_first_value(r, feature_candidates) for r in bucket
+            ]
+            values = [v for v in values if v is not None]
+            prev: float | None = None
+            falls = 0
+            for v in values:
+                if prev is not None and prev > 0 and v <= 0:
+                    falls += 1
+                prev = v
+            out.append({"label": lbl, "value": falls})
+        elif derivation == "thickness_loss":
+            values = [
+                v * value_scale
+                for r in bucket
+                if (v := _row_first_value(r, feature_candidates)) is not None
+            ]
+            if len(values) < 2:
+                out.append({"label": lbl, "value": 0.0 if values else None})
+            else:
+                out.append({"label": lbl, "value": round(values[0] - values[-1], 4)})
+        else:  # "mean" or "max"
+            values = [
+                v * value_scale
+                for r in bucket
+                if (v := _row_first_value(r, feature_candidates)) is not None
+            ]
+            if not values:
+                out.append({"label": lbl, "value": None})
+            elif derivation == "max":
+                out.append({"label": lbl, "value": round(max(values), 4)})
+            else:
+                out.append({
+                    "label": lbl,
+                    "value": round(sum(values) / len(values), 4),
+                })
+    return out
+
+
+async def _fetch_trend_rows_batched(
+    client: Any,
+    points: list[dict[str, Any]],
+    metric_key: str,
+    start_ms: str,
+    end_ms: str,
+) -> list[dict[str, Any]]:
+    """Fetch trend rows for a list of points using batched ``get_trend_data``.
+
+    Copies the ``(point_id, endpoint_series) → features`` grouping pattern
+    from ``_fetch_kpi_for_equipment`` (lines 660-686) so the InS API is
+    called once per unique (series, features) combination.
+    """
+    spec = _KPI_FEATURE_MAP[metric_key]
+    request_buckets: dict[tuple[str, str], set[str]] = {}
+    for point in points:
+        bucket = (point["id"], point["endpoint_series"])
+        request_buckets.setdefault(bucket, set()).update(
+            _feature_candidates_for_spec(spec)
+        )
+
+    batch_groups: dict[tuple[str, frozenset], list[str]] = {}
+    for (point_id, series), features in request_buckets.items():
+        key = (series, frozenset(features))
+        batch_groups.setdefault(key, []).append(point_id)
+
+    all_rows: list[dict[str, Any]] = []
+    for (series, features_frozen), point_ids in batch_groups.items():
+        kwargs: dict[str, Any] = {"endpoint_series": series}
+        if _INS_FACTORY_ID is not None:
+            kwargs["factory_id"] = _INS_FACTORY_ID
+        combined_id = ",".join(point_ids)
+        rows = await client.get_trend_data(
+            combined_id,
+            start_ms,
+            end_ms,
+            sorted(features_frozen),
+            **kwargs,
+        )
+        all_rows.extend(rows or [])
+    return all_rows
+
+
+async def _async_fetch_trend_series(
+    *,
+    start_date: str,
+    end_date: str,
+    aggregation: str,
+    equipment_ids: list[str],
+    metric_keys: list[str],
+    eq_type: str = "all",
+    include_alarms: bool = False,
+    include_events: bool = False,
+) -> dict[str, Any]:
+    """Build a time-bucketed ``time_series[]`` payload for query_trend.py."""
+    if not _FEATURES_TOOL_AVAILABLE:
+        raise HttpProviderError(
+            f"features-tool not available (root={_FEATURES_TOOL_ROOT}); "
+            f"import error: {_FEATURES_TOOL_IMPORT_ERROR}"
+        )
+
+    start_ms, end_ms = _period_to_ms_range(start_date, end_date)
+    settings = load_ins_settings()
+    client = InsApiClient(settings)
+    components_cache: dict[str, list[dict[str, Any]]] = {}
+
+    try:
+        per_eid_rows: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        alarm_thresholds: dict[str, dict] = {}
+        for eid in equipment_ids:
+            components = await _fetch_components_cached(
+                client, components_cache, eid,
+            )
+            per_eid_rows[eid] = {}
+            for metric_key in metric_keys:
+                if metric_key not in _KPI_FEATURE_MAP:
+                    per_eid_rows[eid][metric_key] = []
+                    continue
+                points = _select_points_for_kpi(
+                    components, metric_key, eq_type=eq_type,
+                )
+                if not points:
+                    per_eid_rows[eid][metric_key] = []
+                    continue
+                if not alarm_thresholds.get(metric_key):
+                    alarm_thresholds[metric_key] = (
+                        points[0].get("alarm_thresholds") or {}
+                    )
+                rows = await _fetch_trend_rows_batched(
+                    client, points, metric_key, start_ms, end_ms,
+                )
+                per_eid_rows[eid][metric_key] = rows
+
+        time_series: list[dict[str, Any]] = []
+        bucket_labels = _bucket_labels(aggregation, start_date, end_date)
+        for metric_key in metric_keys:
+            all_rows = [
+                r
+                for eid in equipment_ids
+                for r in per_eid_rows[eid].get(metric_key) or []
+            ]
+            if metric_key not in _KPI_FEATURE_MAP:
+                bucket_values = [{"label": lbl, "value": None} for lbl in bucket_labels]
+            else:
+                bucket_values = _bucket_aggregate(
+                    all_rows,
+                    metric_key,
+                    aggregation,
+                    start_date,
+                    end_date,
+                    alarm_thresholds=alarm_thresholds.get(metric_key),
+                )
+            time_series.append({
+                "metric_key": metric_key,
+                "name": KPI_DISPLAY_NAMES.get(metric_key, metric_key),
+                "unit": KPI_UNITS.get(metric_key, ""),
+                "timestamps": [b["label"] for b in bucket_values],
+                "values": [b["value"] for b in bucket_values],
+                "point_count": sum(
+                    1 for b in bucket_values if b["value"] is not None
+                ),
+                "better_when_higher": metric_key in KPI_BETTER_WHEN_HIGHER,
+            })
+
+        result: dict[str, Any] = {"time_series": time_series}
+        if include_alarms or include_events:
+            events = await _fetch_equipment_events(
+                client, equipment_ids, start_ms, end_ms, eq_type=eq_type,
+            )
+            if include_alarms:
+                result["alarms"] = [
+                    e for e in events if e.get("level") in ("high", "warning")
+                ]
+            if include_events:
+                result["events"] = events
+        return result
+    finally:
+        await client.close()
+
+
+def fetch_trend_series_payload(
+    start_date: str,
+    end_date: str,
+    aggregation: str,
+    equipment_ids: list[str],
+    metric_keys: list[str],
+    eq_type: str = "all",
+    include_alarms: bool = False,
+    include_events: bool = False,
+) -> dict[str, Any]:
+    """Sync wrapper for ``_async_fetch_trend_series``."""
+    return _run_async(
+        _async_fetch_trend_series(
+            start_date=start_date,
+            end_date=end_date,
+            aggregation=aggregation,
+            equipment_ids=equipment_ids,
+            metric_keys=metric_keys,
+            eq_type=eq_type,
+            include_alarms=include_alarms,
+            include_events=include_events,
         )
     )

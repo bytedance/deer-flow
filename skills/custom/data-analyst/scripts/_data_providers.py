@@ -72,6 +72,7 @@ class TrendDataProvider(Protocol):
         equipment_ids: list[str] | None = None,
         include_alarms: bool = False,
         include_events: bool = False,
+        eq_type: str = "all",
     ) -> ProviderResult: ...
 
 
@@ -273,7 +274,7 @@ _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
     "monthly": {},
 }
 
-INS_ONLY_SOURCES = {"daily", "weekly", "monthly"}
+INS_ONLY_SOURCES = {"daily", "weekly", "monthly", "trend"}
 
 
 def _resolve_mode(source: str, mode: str | None) -> str:

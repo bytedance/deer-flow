@@ -23,7 +23,6 @@ THRESHOLDS = {
     "temperature": {"upper": 85, "warning_ratio": 0.8},
     "pressure": {"upper": 2.5, "lower": 0.5, "warning_ratio": 0.8},
     "flow_rate": {"lower": 50, "warning_ratio": 0.8},
-    "motor_current": {"upper": 150, "warning_ratio": 0.8},
     "corrosion_rate": {"upper": 0.5, "warning_ratio": 0.8},
 }
 
@@ -37,7 +36,7 @@ FAULT_SIGNATURES = {
     ("temperature", "high"): [
         {"cause": "润滑不足", "confidence": 0.80, "evidence": "温度升高且振动同步上升"},
         {"cause": "冷却系统故障", "confidence": 0.70, "evidence": "温度单独快速上升"},
-        {"cause": "过载运行", "confidence": 0.65, "evidence": "温度升高伴随电机电流增大"},
+        {"cause": "过载运行", "confidence": 0.65, "evidence": "温度升高伴随负荷增大"},
     ],
     ("pressure", "high"): [
         {"cause": "管路堵塞", "confidence": 0.80, "evidence": "压力偏高且流量偏低"},
@@ -50,10 +49,6 @@ FAULT_SIGNATURES = {
     ("flow_rate", "low"): [
         {"cause": "过滤器堵塞", "confidence": 0.80, "evidence": "流量下降且压差增大"},
         {"cause": "泵效率下降", "confidence": 0.70, "evidence": "流量下降伴随电流增大"},
-    ],
-    ("motor_current", "high"): [
-        {"cause": "过载", "confidence": 0.85, "evidence": "电流偏高且温度升高"},
-        {"cause": "绕组故障", "confidence": 0.70, "evidence": "电流波动异常"},
     ],
     ("corrosion_rate", "high"): [
         {"cause": "介质腐蚀性增强", "confidence": 0.75, "evidence": "腐蚀速率持续上升"},

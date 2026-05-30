@@ -1,8 +1,8 @@
-"""Synthetic time-series for trend analysis.
+"""Time-series for trend analysis — InS-backed via the DataConnector registry.
 
-Uses the DataConnector abstraction: ``HttpTrendProvider`` calls the
-configured ``$DEERFLOW_TREND_URL`` endpoint. Any failure raises
-``HttpProviderError`` which propagates as
+Uses the DataConnector abstraction: ``InsTrendProvider`` calls the InS
+platform through ``_ins_provider.fetch_trend_series_payload``. Any failure
+raises ``HttpProviderError`` which propagates as
 ``{"error": "HttpProviderError: ..."}`` in the script's JSON output —
 there is no demo fallback for trend data.
 
@@ -24,12 +24,19 @@ import sys
 from datetime import date
 from pathlib import Path
 
-import _data_provider_impls  # noqa: F401 — register-only side-effect import
-from _data_providers import HttpProviderError, get_provider
+from _report_common import detect_equipment_type, load_sibling_module
 from _stub_helpers import base_parser, emit_error, iso_now, parse_csv, write_json
 
 
 SCHEMA_VERSION = "1"
+
+# Agent-friendly aliases that normalise to _KPI_FEATURE_MAP keys before the
+# provider sees them. Keeps the CLI surface tolerant of natural-language input.
+TREND_METRIC_ALIASES: dict[str, str] = {
+    "temperature": "bearing_temp",
+    "pressure": "outlet_pressure",
+    "vibration": "vibration_level",
+}
 
 
 def main() -> int:
@@ -59,7 +66,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    metrics = parse_csv(args.metric_keys)
+    metrics = [TREND_METRIC_ALIASES.get(m, m) for m in parse_csv(args.metric_keys)]
     if not metrics:
         return emit_error("INVALID_METRICS", "--metric-keys must contain at least one key")
 
@@ -76,10 +83,22 @@ def main() -> int:
     if not (0 <= args.forecast_horizon <= 90):
         return emit_error("INVALID_FORECAST_HORIZON", "forecast_horizon must be in [0, 90]")
 
+    # Derive eq_type from the org tree so per-type KPI mappings (e.g. pump →
+    # 2K bearing_temp) apply. Mirrors query_daily.py lines 253-256.
+    eq_type = "all"
+    if equipment_ids:
+        detected = detect_equipment_type(equipment_ids)
+        if detected != "all":
+            eq_type = detected
+
+    dp = load_sibling_module("_data_providers")
+    load_sibling_module("_data_provider_impls")
     try:
-        provider = get_provider("trend", mode="http")
-    except KeyError:
-        return emit_error("PROVIDER_UNAVAILABLE", "HTTP trend provider not registered")
+        provider = dp.get_provider("trend")
+    except KeyError as exc:
+        return emit_error("PROVIDER_UNAVAILABLE", f"trend provider not registered: {exc}")
+
+    from _data_providers import HttpProviderError
 
     try:
         result = provider.fetch(
@@ -90,6 +109,7 @@ def main() -> int:
             equipment_ids=equipment_ids or None,
             include_alarms=args.include_alarms,
             include_events=args.include_events,
+            eq_type=eq_type,
         )
     except HttpProviderError as exc:
         return emit_error("HTTP_PROVIDER_ERROR", str(exc))
@@ -108,6 +128,7 @@ def main() -> int:
             "include_alarms": args.include_alarms,
             "include_events": args.include_events,
             "data_source": result.data_source,
+            "eq_type": eq_type,
         },
         "time_series": time_series,
         "summary": {
