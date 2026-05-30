@@ -1,0 +1,9 @@
+services:
+  app:
+    image: deer-flow-cli
+    build:
+      context: ..
+      dockerfile: cli/Dockerfile
+    volumes:
+      - ..:/deer-flow
+    command: ["tail", "-f", "/dev/null"]
