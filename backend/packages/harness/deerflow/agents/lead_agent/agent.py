@@ -1,3 +1,23 @@
+"""Lead agent factory.
+
+INVARIANT — tracing callback placement
+======================================
+
+Tracing callbacks (Langfuse, LangSmith) are attached at the **graph
+invocation root** in :func:`_make_lead_agent` (see the
+``build_tracing_callbacks()`` block that appends to ``config["callbacks"]``).
+Every ``create_chat_model(...)`` call inside this module — and inside any
+middleware reachable from this graph (e.g. ``TitleMiddleware``) — MUST pass
+``attach_tracing=False``.
+
+Forgetting that flag emits duplicate spans (one rooted at the graph, one at
+the model) AND prevents the Langfuse handler's ``propagate_attributes``
+path from firing, so ``session_id`` / ``user_id`` never reach the trace.
+The four current sites are: bootstrap agent, default agent, summarization
+middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
+``create_chat_model`` call must add to this list and pass the flag.
+"""
+
 import logging
 
 from langchain.agents import create_agent
@@ -9,6 +29,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -22,6 +43,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
+from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +95,14 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # Bind "middleware:summarize" tag so RunJournal identifies these LLM calls
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
+    # attach_tracing=False because the graph-level RunnableConfig (set in
+    # ``_make_lead_agent``) already carries tracing callbacks; binding them
+    # again at the model level would emit duplicate spans and break
+    # ``session_id`` / ``user_id`` propagation.
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -313,6 +339,15 @@ def _build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
+    # SafetyFinishReasonMiddleware — suppress tool execution when the provider
+    # safety-terminated the response. Registered after custom middlewares so
+    # that LangChain's reverse-order after_model dispatch runs Safety first;
+    # cleared tool_calls then flow through Loop/Subagent accounting without
+    # firing extra alarms. See safety_finish_reason_middleware.py docstring.
+    safety_config = resolved_app_config.safety_finish_reason
+    if safety_config.enabled:
+        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
     return middlewares
@@ -408,13 +443,26 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         }
     )
 
+    # Inject tracing callbacks at the graph invocation root so a single LangGraph
+    # run produces one trace with all node / LLM / tool calls as child spans,
+    # AND so the Langfuse handler sees ``on_chain_start(parent_run_id=None)`` and
+    # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
+    # ``config["metadata"]`` onto the trace. Without root-level attachment the
+    # model is a nested observation and the handler strips ``langfuse_*`` keys.
+    tracing_callbacks = build_tracing_callbacks()
+    if tracing_callbacks:
+        existing = config.get("callbacks") or []
+        if not isinstance(existing, list):
+            existing = list(existing)
+        config["callbacks"] = [*existing, *tracing_callbacks]
+
     skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
             middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
             system_prompt=apply_prompt_template(
@@ -432,7 +480,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Default lead agent (unchanged behavior)
     tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
         system_prompt=apply_prompt_template(

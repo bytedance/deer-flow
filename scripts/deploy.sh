@@ -71,7 +71,7 @@ if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then
     export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
 
-if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     # Try to seed from repo (config.example.yaml is the canonical template)
     if [ -f "$REPO_ROOT/config.example.yaml" ]; then
         cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
@@ -120,10 +120,55 @@ if [ -z "$BETTER_AUTH_SECRET" ]; then
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $_secret_file${NC}"
     else
         export BETTER_AUTH_SECRET
-        BETTER_AUTH_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+        if command -v python3 > /dev/null 2>&1 && \
+            BETTER_AUTH_SECRET="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_hex(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            BETTER_AUTH_SECRET="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_hex(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            BETTER_AUTH_SECRET="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate BETTER_AUTH_SECRET: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set BETTER_AUTH_SECRET manually before running make up.${NC}" >&2
+            exit 1
+        fi
         echo "$BETTER_AUTH_SECRET" > "$_secret_file"
         chmod 600 "$_secret_file"
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET generated → $_secret_file${NC}"
+    fi
+fi
+
+# ── DEER_FLOW_INTERNAL_AUTH_TOKEN ────────────────────────────────────────────
+# Shared by all Gateway workers so channel workers can call internal Gateway
+# APIs even when the request is handled by a different Uvicorn worker.
+
+_internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
+if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+    if [ -f "$_internal_auth_token_file" ]; then
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
+    else
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        if command -v python3 > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_INTERNAL_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_INTERNAL_AUTH_TOKEN manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        echo "$DEER_FLOW_INTERNAL_AUTH_TOKEN" > "$_internal_auth_token_file"
+        chmod 600 "$_internal_auth_token_file"
+        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
     fi
 fi
 
@@ -173,6 +218,7 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+    export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
     "${COMPOSE_CMD[@]}" down
     exit 0
 fi

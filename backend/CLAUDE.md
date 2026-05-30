@@ -88,17 +88,54 @@ make stop       # Stop all services
 
 **Backend directory** (for backend development only):
 ```bash
-make install    # Install backend dependencies
-make dev        # Run Gateway API with reload (port 8001)
-make gateway    # Run Gateway API only (port 8001)
-make test       # Run all backend tests
-make lint       # Lint with ruff
-make format     # Format code with ruff
+make install            # Install backend dependencies
+make dev                # Run Gateway API with reload (port 8001)
+make gateway            # Run Gateway API only (port 8001)
+make test               # Run all backend tests
+make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
+make lint               # Lint with ruff
+make format             # Format code with ruff
 ```
+
+The `detect-blocking-io` target parses `app/`, `packages/harness/deerflow/`,
+and `scripts/` with AST. By default it reports only blocking IO candidates that
+are inside async code, reachable from async code in the same file, or reachable
+from sync-only `AgentMiddleware` before/after hooks that LangGraph can execute
+on the async graph path. It prints a concise summary and writes complete JSON
+findings to `.deer-flow/blocking-io-findings.json` at the repository root
+(both `make detect-blocking-io` from the repo root and `cd backend && make
+detect-blocking-io` resolve to the same repo-root path). JSON findings include
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code` for model-assisted or manual review. `priority` is a deterministic
+review ordering from operation type, not proof of a bug. Bare-name same-file
+calls are resolved by function name, so duplicate helper names in one file can
+conservatively over-report async reachability. It is intentionally
+informational and is not run from CI in this round.
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+Blocking-IO runtime gate (`tests/blocking_io/`):
+- Wraps every item under `tests/blocking_io/` with a strict Blockbuster
+  context scoped to `app.*` and `deerflow.*` (see
+  `tests/support/detectors/blocking_io_runtime.py`). Any sync blocking IO
+  call whose stack passes through DeerFlow business code while running on
+  the asyncio event loop raises `BlockingError` and fails the test.
+- Regression anchors live there: `test_skills_load.py` (locks the
+  `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
+  for #1917); `test_sqlite_lifespan.py` (locks the offload around
+  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
+  and `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
+  API offloading its file IO via `asyncio.to_thread`, fix #3084).
+- `test_gate_smoke.py` is a meta-test asserting the gate actually catches
+  unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
+  opt-out works.
+- Coverage boundary: the gate only sees code that test execution actually
+  touches. Static AST coverage is a separate concern (out of scope for
+  this PR).
+- CI: runs on every PR via `.github/workflows/backend-blocking-io-tests.yml`,
+  hard-fail.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
@@ -184,6 +221,18 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path changes or the file's mtime increases. This keeps Gateway and LangGraph reads aligned with `config.yaml` edits without requiring a manual process restart.
 
+**Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work (logging level, channels, `langgraph_runtime` engines) and passes it explicitly to `langgraph_runtime(app, startup_config)`. Infrastructure fields are **restart-required**:
+
+| Field | Why a restart is required |
+|---|---|
+| `database.*` | `init_engine_from_config()` runs once during `langgraph_runtime()` startup; the SQLAlchemy engine holds the connection pool. |
+| `checkpointer.*` (including SQLite WAL/journal settings) | `make_checkpointer()` binds the persistent checkpointer once at startup. |
+| `run_events.*` | `make_run_event_store()` selects memory- vs. SQL-backed implementation at startup. |
+| `stream_bridge.*` | `make_stream_bridge()` constructs the bridge object once. |
+| `sandbox.use` | `get_sandbox_provider()` caches the provider singleton (`_default_sandbox_provider`); a new class path takes effect only on next process start. |
+| `log_level` | `apply_logging_level()` is called only in `app.py` startup; it mutates the root logger's level, and `get_app_config()` returning a fresh `AppConfig` does not retrigger it. |
+| `channels.*` IM platform credentials | `start_channel_service()` is invoked once during startup; live channels are not rebuilt on config change. |
+
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_CONFIG_PATH` environment variable
@@ -225,12 +274,19 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 
+**RunManager / RunStore contract**:
+- `RunManager.get()` is async; direct callers must `await` it.
+- When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
+- `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
+- Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
+- `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
+
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`
-**Provider Pattern**: `SandboxProvider` with `acquire`, `get`, `release` lifecycle
+**Provider Pattern**: `SandboxProvider` with `acquire`, `acquire_async`, `get`, `release` lifecycle. Async agent/tool paths call async sandbox lifecycle hooks so Docker sandbox creation, discovery, cross-process locking, readiness polling, and release stay off the event loop.
 **Implementations**:
 - `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-thread `LocalSandbox` (id `local:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`.
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation
@@ -289,7 +345,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - **Cache invalidation**: Detects config file changes via mtime comparison
 - **Transports**: stdio (command-based), SSE, HTTP
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
-- **Runtime updates**: Gateway API saves to extensions_config.json; LangGraph detects via mtime
+- **Runtime updates**: Gateway API saves to extensions_config.json; the Gateway-embedded runtime detects changes via mtime
 
 ### Skills System (`packages/harness/deerflow/skills/`)
 
@@ -316,7 +372,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 ### IM Channels System (`app/channels/`)
 
-Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via the LangGraph Server.
+Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
 
 **Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
@@ -390,6 +446,24 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 
 - `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)
 - `resolve_class(path, base_class)` - Import and validate class against base class
+
+### Tracing System (`packages/harness/deerflow/tracing/`)
+
+LangSmith and Langfuse are both supported. The wiring lives in two layers:
+
+- `factory.py::build_tracing_callbacks()` — returns the LangChain `CallbackHandler` list for the providers currently enabled via env vars (`LANGSMITH_TRACING`, `LANGFUSE_TRACING`, etc.). The handlers are attached at the **graph invocation root** for in-graph runs (`make_lead_agent` and `DeerFlowClient.stream` both append them to `config["callbacks"]` before invoking the graph) so a single run produces one trace with all node / LLM / tool calls as child spans. Standalone callers — anything that invokes a model outside such a graph (e.g. `MemoryUpdater`) — keep `create_chat_model`'s default `attach_tracing=True`, which falls back to model-level callback attachment.
+- `metadata.py::build_langfuse_trace_metadata()` — builds the Langfuse-reserved trace attributes for `RunnableConfig.metadata`. The Langfuse v4 `langchain.CallbackHandler` lifts these onto the root trace (see its `_parse_langfuse_trace_attributes`), but only when it sees `on_chain_start(parent_run_id=None)` — which is why the callbacks have to live at the graph root, not the model.
+
+**Trace-attribute injection points**: both `runtime/runs/worker.py::run_agent` (gateway path) and `client.py::DeerFlowClient.stream` (embedded path) merge the metadata into `config["metadata"]` right before constructing the graph. Caller-supplied keys win via `setdefault`, so an external `session_id` override is preserved. Field mapping:
+
+| Langfuse field         | Source                                       |
+|-----------------------|----------------------------------------------|
+| `langfuse_session_id` | LangGraph `thread_id`                         |
+| `langfuse_user_id`    | `get_effective_user_id()` (`default` in no-auth) |
+| `langfuse_trace_name` | `RunRecord.assistant_id` / client `agent_name` (defaults to `lead-agent`) |
+| `langfuse_tags`       | `env:<DEER_FLOW_ENV>` + `model:<model_name>`  |
+
+Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only deployments are unaffected. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment. Tests live in `tests/test_tracing_factory.py`, `tests/test_tracing_metadata.py`, `tests/test_worker_langfuse_metadata.py`, and `tests/test_client_langfuse_metadata.py`.
 
 ### Config Schema
 
