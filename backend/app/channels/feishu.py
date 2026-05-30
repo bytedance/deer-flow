@@ -66,7 +66,7 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
-        self._pending_clarifications: dict[str, dict[str, Any]] = {}
+        self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
@@ -81,8 +81,8 @@ class FeishuChannel(Channel):
         return None
 
     @staticmethod
-    def _pending_key(chat_id: str, user_id: str) -> str:
-        return f"{chat_id}:{user_id}"
+    def _pending_key(chat_id: str, user_id: str) -> tuple[str, str]:
+        return (chat_id, user_id)
 
     @property
     def supports_streaming(self) -> bool:
@@ -626,14 +626,18 @@ class FeishuChannel(Channel):
             return
 
         key = self._pending_key(msg.chat_id, user_id)
+        pending = {
+            "thread_id": msg.thread_id,
+            "topic_id": topic_id,
+            "source_message_id": source_message_id,
+            "card_message_id": card_message_id,
+            "created_at": time.time(),
+        }
         with self._thread_lock:
-            self._pending_clarifications[key] = {
-                "thread_id": msg.thread_id,
-                "topic_id": topic_id,
-                "source_message_id": source_message_id,
-                "card_message_id": card_message_id,
-                "created_at": time.time(),
-            }
+            # Plain-message clarification continuity is a short-lived in-memory
+            # hint; explicit Feishu replies are still covered by persisted
+            # message-id mappings.
+            self._pending_clarifications.setdefault(key, []).append(pending)
         logger.info(
             "[Feishu] pending clarification remembered: chat_id=%s user_id=%s topic_id=%s thread_id=%s",
             msg.chat_id,
@@ -645,18 +649,24 @@ class FeishuChannel(Channel):
     def _consume_pending_clarification(self, chat_id: str, user_id: str) -> dict[str, Any] | None:
         key = self._pending_key(chat_id, user_id)
         with self._thread_lock:
-            pending = self._pending_clarifications.get(key)
-            if pending is None:
+            pending_items = self._pending_clarifications.get(key)
+            if not pending_items:
                 return None
 
-            created_at = pending.get("created_at")
-            if not isinstance(created_at, (int, float)) or time.time() - created_at > PENDING_CLARIFICATION_TTL_SECONDS:
-                self._pending_clarifications.pop(key, None)
+            now = time.time()
+            while pending_items:
+                pending = pending_items.pop(0)
+                created_at = pending.get("created_at")
+                if isinstance(created_at, (int, float)) and now - created_at <= PENDING_CLARIFICATION_TTL_SECONDS:
+                    if pending_items:
+                        self._pending_clarifications[key] = pending_items
+                    else:
+                        self._pending_clarifications.pop(key, None)
+                    return pending
                 logger.info("[Feishu] pending clarification expired: chat_id=%s user_id=%s", chat_id, user_id)
-                return None
 
             self._pending_clarifications.pop(key, None)
-            return pending
+            return None
 
     def _ensure_pending_thread_mapping(self, chat_id: str, user_id: str, pending: dict[str, Any]) -> None:
         store = self.config.get("channel_store")

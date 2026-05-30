@@ -209,22 +209,44 @@ def _extract_response_text(result: dict | list) -> str:
     return ""
 
 
-def _has_current_turn_clarification(result: dict | list) -> bool:
-    """Return True when the current turn asked for clarification."""
+def _messages_from_result(result: dict | list) -> list[Any]:
     if isinstance(result, list):
-        messages = result
-    elif isinstance(result, dict):
+        return result
+    if isinstance(result, dict):
         messages = result.get("messages", [])
-    else:
-        return False
+        if isinstance(messages, list):
+            return messages
+    return []
 
+
+def _current_turn_messages(result: dict | list) -> list[dict[str, Any]]:
+    messages = _messages_from_result(result)
+    current_turn: list[dict[str, Any]] = []
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
         if msg.get("type") == "human":
             break
-        if msg.get("type") == "tool" and msg.get("name") == "ask_clarification":
-            return True
+        current_turn.append(msg)
+    current_turn.reverse()
+    return current_turn
+
+
+def _has_current_turn_clarification(result: dict | list) -> bool:
+    """Return True only when the current turn's final result is clarification."""
+    for msg in reversed(_current_turn_messages(result)):
+        msg_type = msg.get("type")
+        if msg_type == "tool":
+            return msg.get("name") == "ask_clarification"
+        if msg_type == "ai":
+            content = msg.get("content")
+            if isinstance(content, str):
+                if content:
+                    return False
+            elif content:
+                return False
+            if msg.get("tool_calls"):
+                return False
     return False
 
 

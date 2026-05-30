@@ -399,6 +399,47 @@ class TestExtractResponseText:
         assert _extract_response_text(result) == "Here is the plan."
 
 
+class TestClarificationDetection:
+    def test_final_clarification_tool_message_is_pending(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is True
+
+    def test_clarification_followed_by_regular_ai_is_not_pending(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                {"type": "ai", "content": "I will continue without pending clarification."},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is False
+
+    def test_previous_turn_clarification_does_not_mark_current_turn(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                {"type": "human", "content": "prod"},
+                {"type": "ai", "content": "Deploying to prod."},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is False
+
+
 # ---------------------------------------------------------------------------
 # ChannelManager tests
 # ---------------------------------------------------------------------------
