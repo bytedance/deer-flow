@@ -126,8 +126,10 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
   for #1917); `test_sqlite_lifespan.py` (locks the offload around
   SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
-  and `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
-  API offloading its file IO via `asyncio.to_thread`, fix #3084).
+  `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
+  API offloading its file IO via `asyncio.to_thread`, fix #3084); and
+  `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
+  offloading the uploads-directory scan off the event loop).
 - `test_gate_smoke.py` is a meta-test asserting the gate actually catches
   unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
   opt-out works.
