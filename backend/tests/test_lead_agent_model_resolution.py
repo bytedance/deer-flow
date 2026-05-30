@@ -476,6 +476,24 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
+def test_create_summarization_middleware_uses_frontend_supported_update_key(monkeypatch):
+    """LangGraph update keys use the middleware class name plus hook name."""
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.summarization = SummarizationConfig(enabled=True)
+    app_config.memory = MemoryConfig(enabled=False)
+
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: fake_model)
+
+    middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
+
+    assert middleware is not None
+    update_key = f"{type(middleware).__name__}.before_model"
+    assert update_key == "DeerFlowSummarizationMiddleware.before_model"
+
+
 def test_create_summarization_middleware_threads_resolved_app_config_to_model(monkeypatch):
     fallback_app_config = _make_app_config([_make_model("fallback-model", supports_thinking=False)])
     fallback_app_config.summarization = SummarizationConfig(enabled=True, model_name="fallback-model")
