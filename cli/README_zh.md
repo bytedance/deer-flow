@@ -49,7 +49,19 @@ cli/
 
 ### 本地运行
 
-首先安装 harness 包（开发模式）：
+首先在项目根目录配置环境变量（包含模型、技能、MCP工具等配置）：
+
+```bash
+cd deer-flow
+make config
+```
+
+**配置提示：**
+- **模型配置**：参考config.example.yaml，配置在config.yaml中
+- **技能配置**：在 `skills/` 目录下添加或修改技能配置文件
+- **MCP工具配置**：参考extensions_config.example.json，配置在extensions_config.json中
+
+然后安装 harness 包（开发模式）并运行 CLI：
 
 ```bash
 cd backend/packages/harness
@@ -61,10 +73,25 @@ python cli.py
 
 ### Docker 运行
 
+首先在宿主机配置环境变量（包含模型、技能、MCP工具等配置）：
+
 ```bash
-docker-compose build
-docker-compose up -d
-docker-compose exec app python cli.py
+cd deer-flow
+make config
+```
+
+**配置提示：**
+- **模型配置**：参考config.example.yaml，配置在config.yaml中
+- **技能配置**：在 `skills/` 目录下添加或修改技能配置文件
+- **MCP工具配置**：参考extensions_config.example.json，配置在extensions_config.json中
+
+然后构建并运行容器：
+
+```bash
+cd cli
+docker compose build
+docker compose up -d
+docker compose exec app bash -c "cd /deer-flow && python cli/cli.py"
 ```
 
 ## 使用说明
