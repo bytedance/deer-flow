@@ -97,6 +97,15 @@ def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
     return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
+def _release_sandbox_after_upload_sync(sandbox_provider: SandboxProvider, sandbox_id: str | None) -> None:
+    if sandbox_id is None:
+        return
+    try:
+        sandbox_provider.release(sandbox_id)
+    except Exception:
+        logger.warning("Failed to release sandbox %s after upload sync", sandbox_id, exc_info=True)
+
+
 def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
     """Read a value from the uploads config, supporting dict and attribute access."""
     uploads_cfg = getattr(app_config, "uploads", None)
@@ -220,10 +229,12 @@ async def upload_files(
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
+    sandbox_id = None
     if sync_to_sandbox:
         sandbox_id = sandbox_provider.acquire(thread_id)
         sandbox = sandbox_provider.get(sandbox_id)
         if sandbox is None:
+            _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
 
@@ -285,6 +296,7 @@ async def upload_files(
 
         except HTTPException as e:
             _cleanup_uploaded_paths(written_paths)
+            _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
             raise e
         except UnsafeUploadPathError as e:
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -293,6 +305,7 @@ async def upload_files(
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
             _cleanup_uploaded_paths(written_paths)
+            _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
     # Uploaded files are created with 0o600 permissions (owner read/write only).
@@ -302,13 +315,16 @@ async def upload_files(
     # directory is bind-mounted into the container or synced via
     # sandbox.update_file.  Always add group/other read bits so every sandbox
     # configuration can read the uploaded content.
-    for file_path in written_paths:
-        _make_file_sandbox_readable(file_path)
+    try:
+        for file_path in written_paths:
+            _make_file_sandbox_readable(file_path)
 
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            _make_file_sandbox_writable(file_path)
-            sandbox.update_file(virtual_path, file_path.read_bytes())
+        if sync_to_sandbox:
+            for file_path, virtual_path in sandbox_sync_targets:
+                _make_file_sandbox_writable(file_path)
+                sandbox.update_file(virtual_path, file_path.read_bytes())
+    finally:
+        _release_sandbox_after_upload_sync(sandbox_provider, sandbox_id)
 
     message = f"Successfully uploaded {len(uploaded_files)} file(s)"
     if skipped_files:

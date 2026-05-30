@@ -60,6 +60,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
 
     sandbox.update_file.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
@@ -266,6 +267,7 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
 
     assert result.success is True
     provider.acquire.assert_called_once_with("thread-aio")
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
 
 
@@ -288,6 +290,30 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
     assert list(thread_uploads_dir.iterdir()) == []
     assert file.read_calls == []
     provider.get.assert_not_called()
+    provider.release.assert_not_called()
+
+
+def test_upload_files_releases_non_local_sandbox_when_get_fails(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.return_value = "aio-1"
+    provider.get.return_value = None
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    assert list(thread_uploads_dir.iterdir()) == []
+    assert file.read_calls == []
+    provider.release.assert_called_once_with("aio-1")
 
 
 def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
@@ -379,6 +405,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     assert exc_info.value.status_code == 413
     provider.acquire.assert_called_once_with("thread-aio")
     provider.get.assert_called_once_with("aio-1")
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
 
@@ -405,8 +432,31 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     assert exc_info.value.status_code == 500
     provider.acquire.assert_called_once_with("thread-aio")
     provider.get.assert_called_once_with("aio-1")
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
+
+
+def test_upload_files_releases_non_local_sandbox_when_sync_fails(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.return_value = "aio-1"
+    sandbox = MagicMock()
+    sandbox.update_file.side_effect = RuntimeError("sync failed")
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+        with pytest.raises(RuntimeError, match="sync failed"):
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    provider.release.assert_called_once_with("aio-1")
 
 
 def test_make_file_sandbox_writable_adds_write_bits_for_regular_files(tmp_path):

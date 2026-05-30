@@ -136,6 +136,7 @@ class AioSandboxProvider(SandboxProvider):
         self._thread_sandboxes: dict[str, str] = {}  # thread_id -> sandbox_id
         self._thread_locks: dict[str, threading.Lock] = {}  # thread_id -> in-process lock
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
+        self._lease_counts: dict[str, int] = {}  # sandbox_id -> active acquire() lease count
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
@@ -459,6 +460,14 @@ class AioSandboxProvider(SandboxProvider):
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
         return self._deterministic_sandbox_id(thread_id) if thread_id else str(uuid.uuid4())[:8]
 
+    def _lease_counts_map(self) -> dict[str, int]:
+        """Return the active lease map, creating it for test-constructed providers."""
+        lease_counts = getattr(self, "_lease_counts", None)
+        if lease_counts is None:
+            lease_counts = {}
+            self._lease_counts = lease_counts
+        return lease_counts
+
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
@@ -472,6 +481,8 @@ class AioSandboxProvider(SandboxProvider):
             if existing_id in self._sandboxes:
                 suffix = " (post-lock check)" if post_lock else ""
                 logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id}{suffix}")
+                lease_counts = self._lease_counts_map()
+                lease_counts[existing_id] = lease_counts.get(existing_id, 0) + 1
                 self._last_activity[existing_id] = time.time()
                 return existing_id
 
@@ -491,6 +502,7 @@ class AioSandboxProvider(SandboxProvider):
             sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
+            self._lease_counts_map()[sandbox_id] = 1
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[thread_id] = sandbox_id
 
@@ -508,6 +520,7 @@ class AioSandboxProvider(SandboxProvider):
         with self._lock:
             self._sandboxes[info.sandbox_id] = sandbox
             self._sandbox_infos[info.sandbox_id] = info
+            self._lease_counts_map()[info.sandbox_id] = 1
             self._last_activity[info.sandbox_id] = time.time()
             self._thread_sandboxes[thread_id] = info.sandbox_id
 
@@ -520,6 +533,7 @@ class AioSandboxProvider(SandboxProvider):
         with self._lock:
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
+            self._lease_counts_map()[sandbox_id] = 1
             self._last_activity[sandbox_id] = time.time()
             if thread_id:
                 self._thread_sandboxes[thread_id] = sandbox_id
@@ -797,6 +811,15 @@ class AioSandboxProvider(SandboxProvider):
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
+            lease_counts = self._lease_counts_map()
+            active_leases = lease_counts.get(sandbox_id, 1 if sandbox_id in self._sandboxes else 0)
+            if active_leases > 1:
+                lease_counts[sandbox_id] = active_leases - 1
+                self._last_activity[sandbox_id] = time.time()
+                logger.info(f"Released sandbox lease {sandbox_id} ({active_leases - 1} active lease(s) remain)")
+                return
+
+            lease_counts.pop(sandbox_id, None)
             self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
@@ -824,6 +847,7 @@ class AioSandboxProvider(SandboxProvider):
         with self._lock:
             self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
+            self._lease_counts_map().pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
                 del self._thread_sandboxes[tid]
