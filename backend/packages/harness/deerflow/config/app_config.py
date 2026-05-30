@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
@@ -41,7 +41,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.runtime_paths import existing_project_file
 
-load_dotenv()
+load_dotenv(find_dotenv(usecwd=True))
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ class DocumentRepository:
     @staticmethod
     def _row_to_dict(row: KnowledgeBaseDocumentRow) -> dict[str, Any]:
         d = row.to_dict()
-        for key in ("created_at", "updated_at", "deleted_at", "last_indexed_at"):
+        for key in ("created_at", "updated_at", "deleted_at", "last_indexed_at", "index_queued_at"):
             val = d.get(key)
             if isinstance(val, datetime):
                 d[key] = val.isoformat()

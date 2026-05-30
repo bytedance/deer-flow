@@ -256,7 +256,7 @@ class StoreMemoryStorage(MemoryStorage):
 
     def _ns(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str, str, str, str]:
         """Return the Store namespace for the current tenant, user, and agent."""
-        return ("memory", get_current_tenant_id(), user_id or "", agent_name or "default")
+        return ("memory", get_current_tenant_id(), user_id or "_anonymous", agent_name or "default")
 
     def _get_store(self) -> BaseStore:
         store = self._store_factory()
