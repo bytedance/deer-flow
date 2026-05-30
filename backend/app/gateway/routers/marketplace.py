@@ -26,6 +26,7 @@ from deerflow.report_templates.repository import (
     RepositoryError,
     Scope,
     TemplateNotFoundError,
+    VersionNotFoundError,
 )
 from deerflow.report_templates.service import get_repository
 from deerflow.runtime.user_context import get_effective_user_id
@@ -267,11 +268,28 @@ async def install_template(
     if listing is None:
         raise HTTPException(status_code=404, detail=f"listing {listing_id!r} not found")
 
-    # Resolve source template
+    # Resolve source template — search installer scopes first, then listing
+    # publisher's private scope and listing tenant (cross-user/tenant installs).
+    source_scope = None
+    source_record = None
     try:
         source_scope, source_record = _resolve_template(listing["template_id"], principal)
     except HTTPException:
-        raise HTTPException(status_code=404, detail=f"source template {listing['template_id']!r} not found")
+        for fallback_scope in (
+            Scope.private(listing.get("created_by", "")),
+            Scope.tenant(listing.get("tenant_id", "")),
+        ):
+            try:
+                record = template_repo.get_template(fallback_scope, listing["template_id"])
+                source_scope, source_record = fallback_scope, record
+                break
+            except (TemplateNotFoundError, ValueError, Exception):
+                continue
+        if source_record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"source template {listing['template_id']!r} has been removed from marketplace",
+            )
 
     # Determine target scope
     if body.target_visibility == "private":
@@ -285,16 +303,24 @@ async def install_template(
 
     # Fork the template
     target_name = body.target_name or source_record.name
+    target_display_name = (
+        listing.get("display_name")
+        or getattr(source_record, "display_name", None)
+        or target_name
+    )
     try:
-        forked = template_repo.fork_template(
+        forked = template_repo.fork(
             source_scope=source_scope,
             source_template_id=listing["template_id"],
-            source_version=listing["template_version"],
+            source_version=int(listing["template_version"]),
             target_scope=target_scope,
+            target_owner_user_id=principal.user_id,
+            target_tenant_id=principal.tenant_id,
             new_name=target_name,
-            new_display_name=listing["display_name"],
-            new_description=listing["description"],
+            new_display_name=target_display_name,
         )
+    except VersionNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"source version not found: {e}")
     except RepositoryError as e:
         raise HTTPException(status_code=500, detail=f"fork failed: {e}")
 

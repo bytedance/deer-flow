@@ -376,6 +376,21 @@ async def delete_template(
         )
     except EtagMismatchError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # Clean up marketplace listings referencing this template
+    try:
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.marketplace.repository import MarketplaceRepository
+
+        sf = get_session_factory()
+        if sf is not None:
+            mp_repo = MarketplaceRepository(sf)
+            listing = await mp_repo.get_listing_by_template(template_id)
+            if listing is not None:
+                await mp_repo.delete_listing(listing["id"])
+    except Exception:
+        pass
+
     return {"deleted": True}
 
 
