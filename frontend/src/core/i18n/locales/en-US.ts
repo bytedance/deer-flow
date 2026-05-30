@@ -456,9 +456,13 @@ export const enUS: Translations = {
     permission_denied: "Insufficient permissions. This feature may require admin approval.",
     rate_limited: "Too many requests. Please wait a moment before trying again.",
     quota_daily_exceeded: (used: number, limit: number) =>
-      `Daily usage limit reached ($${used.toFixed(2)} / $${limit.toFixed(2)}). Quota resets at midnight. Contact your admin to increase the limit.`,
+      limit === 0
+        ? "No quota configured for this account. Please contact your administrator."
+        : `Daily usage limit reached ($${used.toFixed(2)} / $${limit.toFixed(2)}). Quota resets at midnight. Contact your admin to increase the limit.`,
     quota_monthly_exceeded: (used: number, limit: number) =>
-      `Monthly usage limit reached ($${used.toFixed(2)} / $${limit.toFixed(2)}). Quota resets on the 1st. Contact your admin to increase the limit.`,
+      limit === 0
+        ? "No quota configured for this account. Please contact your administrator."
+        : `Monthly usage limit reached ($${used.toFixed(2)} / $${limit.toFixed(2)}). Quota resets on the 1st. Contact your admin to increase the limit.`,
     showDetails: "Show details",
     hideDetails: "Hide details",
     retry: "Retry",

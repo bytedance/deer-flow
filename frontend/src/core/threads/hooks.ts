@@ -125,8 +125,23 @@ interface QuotaErrorDetail {
 
 function extractQuotaError(error: unknown): QuotaErrorDetail | null {
   if (typeof error !== "object" || error === null) return null;
-  const detail = Reflect.get(error, "detail");
+
+  let detail = Reflect.get(error, "detail");
+
+  if (detail === undefined || detail === null) {
+    const text = Reflect.get(error, "text");
+    if (typeof text === "string") {
+      try {
+        const parsed = JSON.parse(text);
+        detail = parsed?.detail;
+      } catch {
+        // Malformed JSON — fall through
+      }
+    }
+  }
+
   if (typeof detail !== "object" || detail === null) return null;
+
   const code = Reflect.get(detail, "code");
   if (code === "quota_daily_exceeded" || code === "quota_monthly_exceeded") {
     return {

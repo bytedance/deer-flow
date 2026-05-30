@@ -425,9 +425,13 @@ export const zhCN: Translations = {
     permission_denied: "权限不足，这个功能可能需要联系管理员开通。",
     rate_limited: "请求过于频繁，请稍后再试。",
     quota_daily_exceeded: (used: number, limit: number) =>
-      `今日用量已达上限（已用 $${used.toFixed(2)} / 限额 $${limit.toFixed(2)}）。配额将在次日零点重置，如需提高限额请联系管理员。`,
+      limit === 0
+        ? "您的账户未配置配额限制，请联系管理员开通。"
+        : `今日用量已达上限（已用 $${used.toFixed(2)} / 限额 $${limit.toFixed(2)}）。配额将在次日零点重置，如需提高限额请联系管理员。`,
     quota_monthly_exceeded: (used: number, limit: number) =>
-      `本月用量已达上限（已用 $${used.toFixed(2)} / 限额 $${limit.toFixed(2)}）。配额将在下月 1 日重置，如需提高限额请联系管理员。`,
+      limit === 0
+        ? "您的账户未配置配额限制，请联系管理员开通。"
+        : `本月用量已达上限（已用 $${used.toFixed(2)} / 限额 $${limit.toFixed(2)}）。配额将在下月 1 日重置，如需提高限额请联系管理员。`,
     showDetails: "查看详情",
     hideDetails: "收起详情",
     retry: "重试",
