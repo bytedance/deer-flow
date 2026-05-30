@@ -16,17 +16,20 @@ import {
 import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractReasoningContentFromMessage,
   extractTextFromMessage,
+  getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
   hasReasoning,
+  isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { parseSubtaskResult } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -183,27 +186,32 @@ export function MessageList({
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
   );
+  const streamingMessages = useMemo(
+    () =>
+      getStreamingMessageLookup(
+        messages,
+        thread.isLoading,
+        thread.getMessagesMetadata,
+      ),
+    [messages, thread.getMessagesMetadata, thread.isLoading],
+  );
 
-  const renderAssistantCopyButton = useCallback((messages: Message[]) => {
-    const clipboardData = [...messages]
-      .reverse()
-      .filter((message) => message.type === "ai")
-      .map((message) => {
-        const content = extractContentFromMessage(message);
-        return content ?? extractReasoningContentFromMessage(message) ?? "";
-      })
-      .find((content) => content.length > 0);
+  const renderAssistantCopyButton = useCallback(
+    (messages: Message[], isStreaming: boolean) => {
+      const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
 
-    if (!clipboardData) {
-      return null;
-    }
+      if (!clipboardData) {
+        return null;
+      }
 
-    return (
-      <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
-        <CopyButton clipboardData={clipboardData} />
-      </div>
-    );
-  }, []);
+      return (
+        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+          <CopyButton clipboardData={clipboardData} />
+        </div>
+      );
+    },
+    [],
+  );
 
   const renderTokenUsage = useCallback(
     ({
@@ -293,7 +301,13 @@ export function MessageList({
                   turnUsageMessages,
                 })}
                 {group.type === "assistant" &&
-                  renderAssistantCopyButton(group.messages)}
+                  renderAssistantCopyButton(
+                    group.messages,
+                    isAssistantMessageGroupStreaming(
+                      group.messages,
+                      streamingMessages,
+                    ),
+                  )}
               </div>
             );
           } else if (group.type === "assistant:clarification") {
@@ -359,33 +373,10 @@ export function MessageList({
               } else if (message.type === "tool") {
                 const taskId = message.tool_call_id;
                 if (taskId) {
-                  const result = extractTextFromMessage(message);
-                  if (result.startsWith("Task Succeeded. Result:")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "completed",
-                      result: result
-                        .split("Task Succeeded. Result:")[1]
-                        ?.trim(),
-                    });
-                  } else if (result.startsWith("Task failed.")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result.split("Task failed.")[1]?.trim(),
-                    });
-                  } else if (result.startsWith("Task timed out")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result,
-                    });
-                  } else {
-                    updateSubtask({
-                      id: taskId,
-                      status: "in_progress",
-                    });
-                  }
+                  const parsed = parseSubtaskResult(
+                    extractTextFromMessage(message),
+                  );
+                  updateSubtask({ id: taskId, ...parsed });
                 }
               }
             }

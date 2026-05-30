@@ -1,7 +1,12 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,6 +16,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
@@ -45,15 +51,88 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
-function mergeMessages(
+function isNonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
+  "SummarizationMiddleware.before_model",
+  "DeerFlowSummarizationMiddleware.before_model",
+]);
+
+function messageIdentity(message: Message): string | undefined {
+  if (
+    "tool_call_id" in message &&
+    typeof message.tool_call_id === "string" &&
+    message.tool_call_id.length > 0
+  ) {
+    return `tool:${message.tool_call_id}`;
+  }
+  if (typeof message.id === "string" && message.id.length > 0) {
+    return `message:${message.id}`;
+  }
+  return undefined;
+}
+
+function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  const lastIndexByIdentity = new Map<string, number>();
+  const lastVisibleIndexByIdentity = new Map<string, number>();
+
+  // This is a UI-display dedupe rule, not a general LangChain message-stream
+  // contract. Hidden messages that share an identity with a visible message are
+  // treated as control messages for this merged view; hidden messages carrying
+  // independent tracing/task semantics should use a distinct id or a custom
+  // stream/state channel instead of relying on message dedupe preservation.
+  messages.forEach((message, index) => {
+    const identity = messageIdentity(message);
+    if (identity) {
+      lastIndexByIdentity.set(identity, index);
+      if (!isHiddenFromUIMessage(message)) {
+        lastVisibleIndexByIdentity.set(identity, index);
+      }
+    }
+  });
+
+  return messages.filter((message, index) => {
+    const identity = messageIdentity(message);
+    if (!identity) {
+      return true;
+    }
+    const visibleIndex = lastVisibleIndexByIdentity.get(identity);
+    if (visibleIndex !== undefined) {
+      return visibleIndex === index;
+    }
+    return lastIndexByIdentity.get(identity) === index;
+  });
+}
+
+function findLatestUnloadedRunIndex(
+  runs: Run[],
+  loadedRunIds: ReadonlySet<string>,
+): number {
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i];
+    if (run && !loadedRunIds.has(run.run_id)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
 ): Message[] {
+  // Only visible live messages should trim overlapping history. Hidden messages
+  // are UI control messages in this path, not observability records; any hidden
+  // message that must survive as task/tracing data should use custom events or a
+  // separate state channel instead of participating in this overlap heuristic.
   const threadMessageIds = new Set(
     threadMessages
-      .map((m) => ("tool_call_id" in m ? m.tool_call_id : m.id))
-      .filter(Boolean),
+      .filter((message) => !isHiddenFromUIMessage(message))
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
   );
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
@@ -65,28 +144,19 @@ function mergeMessages(
     if (!msg) {
       continue;
     }
-    if (
-      (msg?.id && threadMessageIds.has(msg.id)) ||
-      ("tool_call_id" in msg && threadMessageIds.has(msg.tool_call_id))
-    ) {
+    const identity = messageIdentity(msg);
+    if (identity && threadMessageIds.has(identity)) {
       cutoff = i;
     } else {
       break;
     }
   }
 
-  return [
+  return dedupeMessagesByIdentity([
     ...historyMessages.slice(0, cutoff),
     ...threadMessages,
     ...optimisticMessages,
-  ];
-}
-
-function messageIdentity(message: Message): string | undefined {
-  if ("tool_call_id" in message) {
-    return message.tool_call_id;
-  }
-  return message.id;
+  ]);
 }
 
 function getMessagesAfterBaseline(
@@ -97,6 +167,86 @@ function getMessagesAfterBaseline(
     const id = messageIdentity(message);
     return !id || !baselineMessageIds.has(id);
   });
+}
+
+export function getVisibleOptimisticMessages(
+  optimisticMessages: Message[],
+  previousHumanMessageCount: number,
+  currentHumanMessageCount: number,
+): Message[] {
+  if (
+    optimisticMessages.some((message) => message.type === "human") &&
+    currentHumanMessageCount > previousHumanMessageCount
+  ) {
+    return [];
+  }
+  return optimisticMessages;
+}
+
+export function getSummarizationMiddlewareMessages(
+  data: unknown,
+): Message[] | undefined {
+  if (typeof data !== "object" || data === null) {
+    return undefined;
+  }
+
+  for (const [key, update] of Object.entries(data)) {
+    if (!SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof update !== "object" || update === null) {
+      continue;
+    }
+
+    const messages = Reflect.get(update, "messages");
+    if (Array.isArray(messages)) {
+      return [...messages] as Message[];
+    }
+  }
+
+  return undefined;
+}
+
+export function upsertThreadInSearchCache(
+  queryClient: QueryClient,
+  thread: AgentThread,
+) {
+  queryClient.setQueriesData(
+    {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) => {
+      if (!oldData) {
+        return [thread];
+      }
+
+      const existingIndex = oldData.findIndex(
+        (t) => t.thread_id === thread.thread_id,
+      );
+      if (existingIndex === -1) {
+        return [thread, ...oldData];
+      }
+
+      return oldData.map((t, index) => {
+        if (index !== existingIndex) {
+          return t;
+        }
+        return {
+          ...thread,
+          ...t,
+          metadata: {
+            ...(thread.metadata ?? {}),
+            ...(t.metadata ?? {}),
+          },
+          values: {
+            ...thread.values,
+            ...t.values,
+          },
+        };
+      });
+    },
+  );
 }
 
 function getStreamErrorMessage(error: unknown): string {
@@ -191,6 +341,20 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
+      const now = new Date().toISOString();
+      upsertThreadInSearchCache(queryClient, {
+        thread_id: meta.thread_id,
+        created_at: now,
+        updated_at: now,
+        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        status: "busy",
+        values: {
+          title: t.pages.newChat,
+          messages: [],
+          artifacts: [],
+        },
+        interrupts: {},
+      });
       if (context.agent_name && !isMock) {
         void getAPIClient()
           .threads.update(meta.thread_id, {
@@ -208,24 +372,25 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
-      if (data["SummarizationMiddleware.before_model"]) {
-        const _messages = [
-          ...(data["SummarizationMiddleware.before_model"].messages ?? []),
-        ];
-
-        if (_messages.length < 2) {
-          return;
-        }
+      const _messages = getSummarizationMiddlewareMessages(data);
+      if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
           if (m.name === "summary" && m.type === "human") {
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const _lastKeepMessage = _messages[2];
+        const firstRetainedVisibleIdentity = _messages
+          .filter((message) => message.type !== "remove")
+          .filter((message) => !isHiddenFromUIMessage(message))
+          .map(messageIdentity)
+          .find(isNonEmptyString);
         const _currentMessages = [...messagesRef.current];
         const _movedMessages: Message[] = [];
         for (const m of _currentMessages) {
-          if (m.id !== undefined && m.id === _lastKeepMessage?.id) {
+          if (
+            firstRetainedVisibleIdentity &&
+            messageIdentity(m) === firstRetainedVisibleIdentity
+          ) {
             break;
           }
           if (!summarizedRef.current?.has(m.id ?? "")) {
@@ -591,10 +756,16 @@ export function useThreadStream({
     messagesRef.current = thread.messages;
   }
 
+  const visibleOptimisticMessages = getVisibleOptimisticMessages(
+    optimisticMessages,
+    prevHumanMsgCountRef.current,
+    humanMessageCount,
+  );
+
   const mergedMessages = mergeMessages(
     history,
     thread.messages,
-    optimisticMessages,
+    visibleOptimisticMessages,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
@@ -627,48 +798,105 @@ export function useThreadHistory(threadId: string) {
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
   const loadingRef = useRef(false);
+  const pendingLoadRef = useRef(false);
+  const loadingRunIdRef = useRef<string | null>(null);
+  const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
-  loadingRef.current = loading;
   const loadMessages = useCallback(async () => {
+    if (loadingRef.current) {
+      const pendingRunIndex = findLatestUnloadedRunIndex(
+        runsRef.current,
+        loadedRunIdsRef.current,
+      );
+      const pendingRun = runsRef.current[pendingRunIndex];
+      if (pendingRun && pendingRun.run_id !== loadingRunIdRef.current) {
+        pendingLoadRef.current = true;
+      }
+      return;
+    }
     if (runsRef.current.length === 0) {
       return;
     }
-    const run = runsRef.current[indexRef.current];
-    if (!run || loadingRef.current) {
-      return;
-    }
+
+    loadingRef.current = true;
+    setLoading(true);
+
     try {
-      setLoading(true);
-      const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadIdRef.current)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
+      do {
+        pendingLoadRef.current = false;
+
+        const nextRunIndex = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+        indexRef.current = nextRunIndex;
+
+        const run = runsRef.current[nextRunIndex];
+        if (!run) {
+          indexRef.current = -1;
+          return;
+        }
+
+        const requestThreadId = threadIdRef.current;
+        loadingRunIdRef.current = run.run_id;
+        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
           },
-          credentials: "include",
-        },
-      ).then((res) => {
-        return res.json();
-      });
-      const _messages = result.data
-        .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
-        .map((m) => m.content);
-      setMessages((prev) => [..._messages, ...prev]);
-      indexRef.current -= 1;
+        ).then((res) => {
+          return res.json();
+        });
+        const _messages = result.data
+          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
+          .map((m) => m.content);
+        if (threadIdRef.current !== requestThreadId) {
+          return;
+        }
+        setMessages((prev) =>
+          dedupeMessagesByIdentity([..._messages, ...prev]),
+        );
+        loadedRunIdsRef.current.add(run.run_id);
+        indexRef.current = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+      } while (pendingLoadRef.current);
     } catch (err) {
       console.error(err);
     } finally {
+      loadingRef.current = false;
+      loadingRunIdRef.current = null;
       setLoading(false);
     }
   }, []);
   useEffect(() => {
+    const threadChanged = threadIdRef.current !== threadId;
     threadIdRef.current = threadId;
+
+    if (threadChanged) {
+      runsRef.current = [];
+      indexRef.current = -1;
+      pendingLoadRef.current = false;
+      loadingRunIdRef.current = null;
+      loadedRunIdsRef.current = new Set();
+      loadingRef.current = false;
+      setLoading(false);
+      setMessages([]);
+    }
+
     if (runs.data && runs.data.length > 0) {
       runsRef.current = runs.data ?? [];
-      indexRef.current = runs.data.length - 1;
+      indexRef.current = findLatestUnloadedRunIndex(
+        runs.data,
+        loadedRunIdsRef.current,
+      );
     }
     loadMessages().catch(() => {
       toast.error("Failed to load thread history.");
@@ -677,7 +905,7 @@ export function useThreadHistory(threadId: string) {
 
   const appendMessages = useCallback((_messages: Message[]) => {
     setMessages((prev) => {
-      return [...prev, ..._messages];
+      return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
   const hasMore = indexRef.current >= 0 || !runs.data;

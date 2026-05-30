@@ -146,13 +146,6 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     return normalized
 
 
-def _strip_loop_warning_text(text: str) -> str:
-    """Remove middleware-authored loop warning lines from display text."""
-    if "[LOOP DETECTED]" not in text:
-        return text
-    return "\n".join(line for line in text.splitlines() if "[LOOP DETECTED]" not in line).strip()
-
-
 def _extract_response_text(result: dict | list) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
@@ -162,7 +155,6 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
-    - Strips loop-detection warnings attached to tool-call AI messages
     """
     if isinstance(result, list):
         messages = result
@@ -181,6 +173,8 @@ def _extract_response_text(result: dict | list) -> str:
 
         # Stop at the last human message — anything before it is a previous turn
         if msg_type == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
 
         # Check for tool messages from ask_clarification (interrupt case)
@@ -192,12 +186,7 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
-            has_tool_calls = bool(msg.get("tool_calls"))
             if isinstance(content, str) and content:
-                if has_tool_calls:
-                    content = _strip_loop_warning_text(content)
-                    if not content:
-                        continue
                 return content
             # content can be a list of content blocks
             if isinstance(content, list):
@@ -208,8 +197,6 @@ def _extract_response_text(result: dict | list) -> str:
                     elif isinstance(block, str):
                         parts.append(block)
                 text = "".join(parts)
-                if has_tool_calls:
-                    text = _strip_loop_warning_text(text)
                 if text:
                     return text
     return ""
@@ -328,6 +315,8 @@ def _extract_artifacts(result: dict | list) -> list[str]:
             continue
         # Stop at the last human message — anything before it is a previous turn
         if msg.get("type") == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
         # Look for AI messages with present_files tool calls
         if msg.get("type") == "ai":
@@ -338,6 +327,18 @@ def _extract_artifacts(result: dict | list) -> list[str]:
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
     return artifacts
+
+
+def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
+    """Return whether a human message is an internal control message hidden from UI."""
+    if msg.get("type") != "human":
+        return False
+
+    additional_kwargs = msg.get("additional_kwargs")
+    if not isinstance(additional_kwargs, Mapping):
+        return False
+
+    return additional_kwargs.get("hide_from_ui") is True
 
 
 def _format_artifact_text(artifacts: list[str]) -> str:
@@ -787,13 +788,22 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        try:
+            result = await client.runs.wait(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+                multitask_strategy="reject",
+            )
+        except Exception as exc:
+            if _is_thread_busy_error(exc):
+                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                return
+            else:
+                raise
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)

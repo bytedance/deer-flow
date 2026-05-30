@@ -269,6 +269,39 @@ class TestDbRunEventStore:
     """Tests for DbRunEventStore with temp SQLite."""
 
     @pytest.mark.anyio
+    async def test_postgres_max_seq_uses_advisory_lock_without_for_update(self):
+        from sqlalchemy.dialects import postgresql
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        class FakeSession:
+            def __init__(self):
+                self.dialect = postgresql.dialect()
+                self.execute_calls = []
+                self.scalar_stmt = None
+
+            def get_bind(self):
+                return self
+
+            async def execute(self, stmt, params=None):
+                self.execute_calls.append((stmt, params))
+
+            async def scalar(self, stmt):
+                self.scalar_stmt = stmt
+                return 41
+
+        session = FakeSession()
+
+        max_seq = await DbRunEventStore._max_seq_for_thread(session, "thread-1")
+
+        assert max_seq == 41
+        assert session.execute_calls
+        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
+        compiled = str(session.scalar_stmt.compile(dialect=postgresql.dialect()))
+        assert "FOR UPDATE" not in compiled
+
+    @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
