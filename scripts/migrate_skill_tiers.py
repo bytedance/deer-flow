@@ -26,7 +26,6 @@ INDUSTRIAL_SKILLS: set[str] = {
     "rotating-fault-diagnosis",
     "rotating-device-context",
     "pump-fault-diagnosis",
-    "static-equipment-corrosion-diagnosis",
     "ins-device-analysis",
     "ins-get-trend-data",
     "ins-get-waveform-data",
@@ -34,15 +33,6 @@ INDUSTRIAL_SKILLS: set[str] = {
     "ins-extract-orbit-centerline-features",
     "ins-extract-spectral-waveform-features",
     "ins-extract-trend-features",
-    "ins-get-trend-data-2k",
-    "ins-extract-trend-features-2k",
-    "ins-device-analysis-2k",
-    "ins-get-trend-data-6k",
-    "ins-extract-trend-features-6k",
-    "ins-device-analysis-6k",
-    "ins-get-trend-data-9k",
-    "ins-extract-trend-features-9k",
-    "ins-device-analysis-9k",
 }
 
 CORE_TIER = "core-industrial"

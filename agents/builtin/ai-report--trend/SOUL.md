@@ -112,8 +112,7 @@ Ultra:    ultra_trend.py
           {"label": "温度", "value": "temperature"},
           {"label": "压力", "value": "pressure"},
           {"label": "流量", "value": "flow_rate"},
-          {"label": "腐蚀速率", "value": "corrosion_rate"},
-          {"label": "电机电流", "value": "motor_current"}
+          {"label": "腐蚀速率", "value": "corrosion_rate"}
         ]
       },
       {
@@ -176,7 +175,7 @@ Ultra:    ultra_trend.py
 - 8-60 天 → `daily`
 - >60 天 → `weekly`
 
-默认指标列表（当 `metrics` 为空时使用）：`vibration_level,temperature,pressure,flow_rate,corrosion_rate,motor_current,runtime_rate,alarm_count`
+默认指标列表（当 `metrics` 为空时使用）：`vibration_level,temperature,pressure,flow_rate,corrosion_rate,runtime_rate,alarm_count`
 
 ```bash
 python /mnt/skills/custom/data-analyst/scripts/query_trend.py \

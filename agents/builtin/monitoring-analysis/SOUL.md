@@ -128,8 +128,7 @@ Ultra:    ultra_trend.py, ultra_anomaly.py, ultra_kpi.py, ultra_correlation.py, 
           {"label": "温度", "value": "temperature"},
           {"label": "压力", "value": "pressure"},
           {"label": "流量", "value": "flow_rate"},
-          {"label": "腐蚀速率", "value": "corrosion_rate"},
-          {"label": "电机电流", "value": "motor_current"}
+          {"label": "腐蚀速率", "value": "corrosion_rate"}
         ]
       }
     ],
@@ -396,7 +395,6 @@ THRESHOLDS = {
     "temperature": {"upper": 85, "warning_ratio": 0.8},
     "pressure": {"upper": 2.5, "lower": 0.5, "warning_ratio": 0.8},
     "flow_rate": {"lower": 50, "warning_ratio": 0.8},
-    "motor_current": {"upper": 150, "warning_ratio": 0.8},
     "corrosion_rate": {"upper": 0.5, "warning_ratio": 0.8},
 }
 
@@ -655,7 +653,7 @@ TARGETS = {
 DISPLAY_NAMES = {
     "runtime_rate": "运行率", "alarm_count": "告警数量", "vibration_level": "振动烈度",
     "temperature": "温度", "pressure": "压力", "flow_rate": "流量",
-    "corrosion_rate": "腐蚀速率", "motor_current": "电机电流",
+    "corrosion_rate": "腐蚀速率",
 }
 
 kpi_summary = []
@@ -908,7 +906,7 @@ significant.sort(key=lambda x: x["abs_r"], reverse=True)
 DISPLAY_NAMES = {
     "runtime_rate": "运行率", "alarm_count": "告警数量", "vibration_level": "振动烈度",
     "temperature": "温度", "pressure": "压力", "flow_rate": "流量",
-    "corrosion_rate": "腐蚀速率", "motor_current": "电机电流",
+    "corrosion_rate": "腐蚀速率",
 }
 
 output = {
@@ -965,8 +963,6 @@ print(json.dumps({"ok": True, "metrics": n, "significant_pairs": len(significant
 Domain interpretation 参考：
 - vibration_level ↔ temperature 正相关：典型的机械摩擦升温模式，建议关注轴承/密封状态
 - flow_rate ↔ pressure 负相关：符合流体力学特性；若偏离历史基线，可能指示管路堵塞或阀门异常
-- vibration_level ↔ motor_current 正相关：负载增大或转子不平衡表现
-- temperature ↔ motor_current：电气/机械过载表现
 
 ### Pro 关联扩展（capability_tier = pro）
 

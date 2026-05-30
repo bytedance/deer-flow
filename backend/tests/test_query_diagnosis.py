@@ -134,7 +134,7 @@ def test_pump_process_channels_match_design(query_diagnosis):
         compare="none",
     )
     proc = payload["process_signals"]
-    assert {"discharge_pressure", "suction_pressure", "flow_rate", "motor_current"}.issubset(proc.keys())
+    assert {"discharge_pressure", "suction_pressure", "flow_rate"}.issubset(proc.keys())
     assert proc["flow_rate"]["unit"] == "m3/h"
 
 
