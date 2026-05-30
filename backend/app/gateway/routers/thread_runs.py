@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
-from app.gateway.services import sse_consumer, start_run
+from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -175,24 +175,25 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
+    completed = True
     if record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
+        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
-    checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-        if checkpoint_tuple is not None:
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
-    except Exception:
-        logger.exception("Failed to fetch final state for run %s", record.run_id)
+    if completed:
+        checkpointer = get_checkpointer(request)
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            checkpoint_tuple = await checkpointer.aget_tuple(config)
+            if checkpoint_tuple is not None:
+                checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+                channel_values = checkpoint.get("channel_values", {})
+                return serialize_channel_values(channel_values)
+        except Exception:
+            logger.exception("Failed to fetch final state for run %s", record.run_id)
 
     return {"status": record.status.value, "error": record.error}
 
@@ -277,7 +278,12 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     )
 
 
-@router.api_route("/{thread_id}/runs/{run_id}/stream", methods=["GET", "POST"], response_model=None)
+# Register GET and POST as separate routes so each method gets a unique OpenAPI
+# operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
+# across both methods, which makes FastAPI emit the same ``operationId`` twice and
+# warn about a duplicate operation id during OpenAPI generation.
+@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
+@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
     thread_id: str,

@@ -88,17 +88,54 @@ make stop       # Stop all services
 
 **Backend directory** (for backend development only):
 ```bash
-make install    # Install backend dependencies
-make dev        # Run Gateway API with reload (port 8001)
-make gateway    # Run Gateway API only (port 8001)
-make test       # Run all backend tests
-make lint       # Lint with ruff
-make format     # Format code with ruff
+make install            # Install backend dependencies
+make dev                # Run Gateway API with reload (port 8001)
+make gateway            # Run Gateway API only (port 8001)
+make test               # Run all backend tests
+make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
+make lint               # Lint with ruff
+make format             # Format code with ruff
 ```
+
+The `detect-blocking-io` target parses `app/`, `packages/harness/deerflow/`,
+and `scripts/` with AST. By default it reports only blocking IO candidates that
+are inside async code, reachable from async code in the same file, or reachable
+from sync-only `AgentMiddleware` before/after hooks that LangGraph can execute
+on the async graph path. It prints a concise summary and writes complete JSON
+findings to `.deer-flow/blocking-io-findings.json` at the repository root
+(both `make detect-blocking-io` from the repo root and `cd backend && make
+detect-blocking-io` resolve to the same repo-root path). JSON findings include
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code` for model-assisted or manual review. `priority` is a deterministic
+review ordering from operation type, not proof of a bug. Bare-name same-file
+calls are resolved by function name, so duplicate helper names in one file can
+conservatively over-report async reachability. It is intentionally
+informational and is not run from CI in this round.
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+Blocking-IO runtime gate (`tests/blocking_io/`):
+- Wraps every item under `tests/blocking_io/` with a strict Blockbuster
+  context scoped to `app.*` and `deerflow.*` (see
+  `tests/support/detectors/blocking_io_runtime.py`). Any sync blocking IO
+  call whose stack passes through DeerFlow business code while running on
+  the asyncio event loop raises `BlockingError` and fails the test.
+- Regression anchors live there: `test_skills_load.py` (locks the
+  `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
+  for #1917); `test_sqlite_lifespan.py` (locks the offload around
+  SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
+  and `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
+  API offloading its file IO via `asyncio.to_thread`, fix #3084).
+- `test_gate_smoke.py` is a meta-test asserting the gate actually catches
+  unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
+  opt-out works.
+- Coverage boundary: the gate only sees code that test execution actually
+  touches. Static AST coverage is a separate concern (out of scope for
+  this PR).
+- CI: runs on every PR via `.github/workflows/backend-blocking-io-tests.yml`,
+  hard-fail.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
@@ -242,6 +279,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
+- `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
@@ -307,7 +345,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - **Cache invalidation**: Detects config file changes via mtime comparison
 - **Transports**: stdio (command-based), SSE, HTTP
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
-- **Runtime updates**: Gateway API saves to extensions_config.json; LangGraph detects via mtime
+- **Runtime updates**: Gateway API saves to extensions_config.json; the Gateway-embedded runtime detects changes via mtime
 
 ### Skills System (`packages/harness/deerflow/skills/`)
 
@@ -334,7 +372,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 ### IM Channels System (`app/channels/`)
 
-Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via the LangGraph Server.
+Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
 
 **Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
