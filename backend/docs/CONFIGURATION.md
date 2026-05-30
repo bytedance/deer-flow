@@ -36,6 +36,7 @@ models:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
+- Xiaomi MiMo (`deerflow.models.patched_mimo:PatchedChatMiMo`)
 - Claude Code OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
 - Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider
@@ -165,6 +166,37 @@ models:
 ```
 
 For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
+
+**MiMo with thinking via OpenAI-compatible API**:
+
+MiMo returns `reasoning_content` on assistant messages in thinking mode. In multi-turn agent conversations with tool calls, subsequent requests must preserve that historical `reasoning_content` on assistant messages or the MiMo API can return HTTP 400. Standard `langchain_openai:ChatOpenAI` drops this provider-specific field, so use `deerflow.models.patched_mimo:PatchedChatMiMo`:
+
+For pay-as-you-go API keys (`sk-...`), use `https://api.xiaomimimo.com/v1`. For Token Plan keys (`tp-...`), use the regional Token Plan Base URL shown in the MiMo console, such as `https://token-plan-cn.xiaomimimo.com/v1`. MiMo documents these key types as separate and non-interchangeable.
+
+`PatchedChatMiMo` is model-id agnostic. Use it for every MiMo thinking model entry you configure, including model entries referenced by `subagents.*.model` overrides (for example `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`, `mimo-v2-omni`, or `mimo-v2-flash`).
+
+```yaml
+models:
+  - name: mimo-v2.5-pro
+    display_name: MiMo V2.5 Pro
+    use: deerflow.models.patched_mimo:PatchedChatMiMo
+    model: mimo-v2.5-pro
+    api_key: $MIMO_API_KEY
+    base_url: https://api.xiaomimimo.com/v1
+    max_tokens: 8192
+    supports_thinking: true
+    supports_vision: false
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+
+`PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
 ### Tool Groups
 
@@ -319,6 +351,7 @@ models:
 - `OPENAI_API_KEY` - OpenAI API key
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `DEEPSEEK_API_KEY` - DeepSeek API key
+- `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
