@@ -139,6 +139,11 @@ The runtime anchors protect confirmed blocking-IO bug shapes:
 - SQLite checkpointer setup, including path resolution and parent-directory
   creation.
 - Subagent skill metadata loading through `SubagentExecutor._load_skills()`.
+- `JsonlRunEventStore` async API (`put` / `list_*` / `delete_*`): the JSONL
+  run-event backend offloads its synchronous file IO via `asyncio.to_thread`
+  (fix #3084); this anchor drives the real async API under the gate so any
+  blocking IO reintroduced on the loop fails, not only removal of one
+  `to_thread` call.
 - `UploadsMiddleware.before_agent` uploads-directory scan: a sync-only middleware
   hook runs on the event loop under async graph execution, so the scan is
   offloaded via `abefore_agent` + `run_in_executor`.
