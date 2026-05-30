@@ -146,6 +146,7 @@ export interface Translations {
     nameStepAlreadyExistsError: string;
     nameStepNetworkError: string;
     nameStepCheckError: string;
+    nameStepCheckErrorWithDetail: string;
     nameStepApiDisabledError: string;
     nameStepBootstrapMessage: string;
     save: string;
