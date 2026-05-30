@@ -83,3 +83,24 @@ def test_frontend_rewrites_langgraph_prefix_to_gateway():
     assert "DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL" not in next_config
     assert "http://127.0.0.1:2024" not in next_config
     assert "langgraph-compat" not in api_client
+
+
+def test_smoke_test_docs_do_not_expect_standalone_langgraph_server():
+    smoke_files = {
+        ".agent/skills/smoke-test/SKILL.md": _read(".agent/skills/smoke-test/SKILL.md"),
+        ".agent/skills/smoke-test/references/SOP.md": _read(".agent/skills/smoke-test/references/SOP.md"),
+        ".agent/skills/smoke-test/references/troubleshooting.md": _read(".agent/skills/smoke-test/references/troubleshooting.md"),
+        ".agent/skills/smoke-test/scripts/check_local_env.sh": _read(".agent/skills/smoke-test/scripts/check_local_env.sh"),
+        ".agent/skills/smoke-test/scripts/deploy_local.sh": _read(".agent/skills/smoke-test/scripts/deploy_local.sh"),
+        ".agent/skills/smoke-test/scripts/health_check.sh": _read(".agent/skills/smoke-test/scripts/health_check.sh"),
+        ".agent/skills/smoke-test/templates/report.local.template.md": _read(".agent/skills/smoke-test/templates/report.local.template.md"),
+        ".agent/skills/smoke-test/templates/report.docker.template.md": _read(".agent/skills/smoke-test/templates/report.docker.template.md"),
+    }
+
+    for path, content in smoke_files.items():
+        assert "localhost:2024" not in content, path
+        assert "127.0.0.1:2024" not in content, path
+        assert "deer-flow-langgraph" not in content, path
+        assert "langgraph.log" not in content, path
+        assert "LangGraph service" not in content, path
+        assert "langgraph dev" not in content, path
