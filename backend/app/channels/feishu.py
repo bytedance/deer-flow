@@ -37,9 +37,9 @@ class FeishuChannel(Channel):
 
     Message flow:
         1. User sends a message → bot adds "OK" emoji reaction
-        2. Bot replies in thread: "Working on it......"
+        2. Bot replies with a card: "Working on it......"
         3. Agent processes the message and returns a result
-        4. Bot replies in thread with the result
+        4. Bot updates the card with the result
         5. Bot adds "DONE" emoji reaction to the original message
     """
 
@@ -245,7 +245,7 @@ class FeishuChannel(Channel):
                 content = json.dumps({"file_key": file_key})
 
             if msg.thread_ts:
-                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).reply_in_thread(True).build()).build()
+                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).build()).build()
                 await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
             else:
                 request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
@@ -428,7 +428,7 @@ class FeishuChannel(Channel):
             return None
 
         content = self._build_card_content(text)
-        request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
+        request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
@@ -591,9 +591,8 @@ class FeishuChannel(Channel):
             msg_id = message.message_id
             sender_id = event.event.sender.sender_id.open_id
 
-            # root_id is set when the message is a reply within a Feishu thread.
-            # Use it as topic_id so all replies share the same DeerFlow thread.
             root_id = getattr(message, "root_id", None) or None
+            chat_type = getattr(message, "chat_type", None)
 
             # Parse message content
             content = json.loads(message.content)
@@ -654,10 +653,11 @@ class FeishuChannel(Channel):
             text = text.strip()
 
             logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, chat_type=%s, sender=%s, text=%r",
                 chat_id,
                 msg_id,
                 root_id,
+                chat_type,
                 sender_id,
                 text[:100] if text else "",
             )
@@ -673,8 +673,13 @@ class FeishuChannel(Channel):
             else:
                 msg_type = InboundMessageType.CHAT
 
-            # topic_id: use root_id for replies (same topic), msg_id for new messages (new topic)
-            topic_id = root_id or msg_id
+            # topic_id determines which LangGraph thread the message maps to.
+            # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
+            # Group chats: use root_id for replies (same topic), msg_id for new messages.
+            if chat_type == "p2p":
+                topic_id = None
+            else:
+                topic_id = root_id or msg_id
 
             inbound = self._make_inbound(
                 chat_id=chat_id,
