@@ -85,26 +85,27 @@ class DeerFlowProductionEngine:
     def _switch_checkpointer(self, session_id: str):
         """
         Switch to the checkpointer for the specified session.
-        Properly closes the previous client and checkpointer to release all resources.
+        Properly closes the previous checkpointer to release all resources.
+        Reuses the existing DeerFlowClient so runtime settings survive the switch.
         """
-        # 1) Close old client FIRST so its agent releases any reference to the old
-        #    checkpointer.  This avoids a half-closed connection being held alive.
-        if self.client is not None:
-            self.client = None
-
-        # 2) Now it is safe to exit the old checkpointer’s context manager.
+        # 1) Tear down the old checkpointer (agent holds a ref via the client).
         if self._current_checkpointer_cm is not None:
             self._current_checkpointer_cm.__exit__(None, None, None)
             self._current_checkpointer_cm = None
             self.checkpointer = None
 
-        # 3) Create a new, completely isolated checkpointer for the target session.
+        # 2) Create a new, completely isolated checkpointer for the target session.
         db_path = self._get_checkpoint_path(session_id)
         self._current_checkpointer_cm = SqliteSaver.from_conn_string(str(db_path))
         self.checkpointer = self._current_checkpointer_cm.__enter__()
 
-        # 4) Create a fresh client with the new checkpointer.
-        self.client = DeerFlowClient(checkpointer=self.checkpointer)
+        # 3) Swap the checkpointer on the existing client, preserving runtime
+        #    settings (model, plan mode, subagent, skills, etc.).
+        if self.client is not None:
+            self.client._checkpointer = self.checkpointer
+            self.client.reset_agent()
+        else:
+            self.client = DeerFlowClient(checkpointer=self.checkpointer)
 
     def _create_default_session(self):
         """Create a default session when no sessions exist."""
@@ -157,6 +158,9 @@ class DeerFlowProductionEngine:
         """
         if session_id is None or not re.fullmatch(r'[\w-]+', session_id):
             session_id = uuid.uuid4().hex
+        if session_id in self.store.sessions:
+            print(f"[Session] ID already exists: {session_id}")
+            return session_id
         self.store.sessions[session_id] = {
             "created_at": time.time(),
             "last_active": time.time(),
