@@ -67,7 +67,7 @@ make config
 cd backend/packages/harness
 pip install -e .
 
-cd cli
+cd ../../../cli
 python cli.py
 ```
 

@@ -14,6 +14,7 @@ License: MIT
 
 import os
 import time
+import re
 import uuid
 import json
 from pathlib import Path
@@ -154,7 +155,8 @@ class DeerFlowProductionEngine:
         Returns:
             str: The created session ID.
         """
-        session_id = session_id or uuid.uuid4().hex
+        if session_id is None or not re.fullmatch(r'[\w-]+', session_id):
+            session_id = uuid.uuid4().hex
         self.store.sessions[session_id] = {
             "created_at": time.time(),
             "last_active": time.time(),
@@ -330,9 +332,11 @@ class DeerFlowProductionEngine:
                 messages = cp["values"].get("messages", [])
                 
                 for msg in messages:
-                    msg_id = msg.get("id", str(uuid.uuid4()))
+                    msg_id = msg.get("id")
+                    if msg_id is None:
+                        msg_id = f"__no_id__:{msg.get('type', '')}:{msg.get('content', '')}"
                     is_duplicate = msg_id in seen_message_ids
-                    
+
                     if not is_duplicate:
                         seen_message_ids.add(msg_id)
                         
@@ -552,14 +556,13 @@ class DeerFlowProductionEngine:
         print(f"[Session] Restored from archive: {session_id}")
         return True
 
-    def chat(self, message, session_id=None, checkpoint_id=None, **kwargs):
+    def chat(self, message, session_id=None, **kwargs):
         """
         Send a message to the agent and stream the response.
         
         Args:
             message: The user's input message.
             session_id: ID of the session. Uses current session if None.
-            checkpoint_id: Optional checkpoint ID to resume from.
             **kwargs: Additional keyword arguments passed to client.stream().
             
         Yields:
@@ -571,8 +574,11 @@ class DeerFlowProductionEngine:
 
         self.store.sessions[session_id]["last_active"] = time.time()
         stream_kwargs = {"thread_id": session_id, **kwargs}
-        if checkpoint_id:
-            stream_kwargs["checkpoint_id"] = checkpoint_id
+        # TODO: checkpoint_id is accepted but DeerFlowClient._get_runnable_config
+        # does not forward it into configurable["checkpoint_id"].  Rollback will
+        # take effect once the client is patched to include it.
+        # if checkpoint_id:
+        #     stream_kwargs["checkpoint_id"] = checkpoint_id
 
         full_response = ""
         tool_calls = 0
@@ -780,7 +786,9 @@ class DeerFlowProductionEngine:
                 new_msgs = []
                 for msg in messages:
                     msg_id = msg.get("id")
-                    if msg_id and msg_id not in seen_message_ids:
+                    if msg_id is None:
+                        msg_id = f"__no_id__:{msg.get('type', '')}:{msg.get('content', '')}"
+                    if msg_id not in seen_message_ids:
                         seen_message_ids.add(msg_id)
                         new_msgs.append(msg)
 

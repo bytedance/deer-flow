@@ -116,8 +116,8 @@ def main():
                 print("  Debugging | 诊断流程:")
                 print("    !steps             Show current session steps | 查看当前会话步骤")
                 print("    !steps_all         Show all checkpoints (de‑duplicated) | 查看全部检查点（去重）")
-                print("    !back <N>          Go back to step N | 回退到第N步")
-                print("    !back_cp <N>       Go back to checkpoint N (from !steps_all) | 回退到第N个检查点")
+                # print("    !back <N>          Go back to step N | 回退到第N步")
+                # print("    !back_cp <N>       Go back to checkpoint N (from !steps_all) | 回退到第N个检查点")
                 print("  File Management | 文件管理:")
                 print("    !upload <path>     Upload file | 上传文件")
                 print("    !files             List uploaded files | 列出上传文件")
@@ -235,49 +235,51 @@ def main():
                 print()
                 continue
 
-            if user_input.lower().startswith("!back"):
-                parts = user_input.split()
-                if len(parts) < 2:
-                    print("[Error] Usage: !back <step_number> | 用法: !back <步骤号>")
-                    continue
-                try:
-                    step_num = int(parts[1])
-                    steps = engine.get_session_steps()
-                    if step_num < 1 or step_num > len(steps):
-                        print(f"[Error] Step must be between 1 and {len(steps)} | 步骤必须在1到{len(steps)}之间")
-                        continue
-                    target_step = steps[step_num - 1]
-                    print(f"\n[Rollback | 回溯] Reverted to step {step_num} | 已回退到步骤 {step_num}")
-                    print(f"Context | 上下文: {target_step['user_input']}\n")
-                    print("AI: ", end="", flush=True)
-                    for chunk in engine.chat("Continue analysis from here | 继续从这里开始分析", checkpoint_id=target_step["checkpoint_id"]):
-                        print(chunk, end="", flush=True)
-                    print("\n")
-                except ValueError:
-                    print("[Error] Invalid step number | 无效的步骤号")
-                continue
+            # TODO: Rollback commands — checkpoint_id passthrough to DeerFlowClient is not yet implemented.
+            # See client._get_runnable_config (missing configurable["checkpoint_id"]).
+            # if user_input.lower().startswith("!back_cp"):
+            #     parts = user_input.split()
+            #     if len(parts) < 2:
+            #         print("[Error] Usage: !back_cp <checkpoint_index> | 用法: !back_cp <检查点索引>")
+            #         continue
+            #     try:
+            #         cp_idx = int(parts[1])
+            #         cps = engine.get_all_checkpoint_steps()
+            #         if cp_idx < 1 or cp_idx > len(cps):
+            #             print(f"[Error] Checkpoint index must be between 1 and {len(cps)} | 检查点索引必须在1到{len(cps)}之间")
+            #             continue
+            #         target_cp = cps[cp_idx - 1]
+            #         print(f"\n[Rollback to Checkpoint | 回退到检查点] Index {cp_idx} | ID: {target_cp['checkpoint_id']}")
+            #         print("AI: ", end="", flush=True)
+            #         for chunk in engine.chat("Continue analysis from this checkpoint | 继续从该检查点分析",
+            #                                  checkpoint_id=target_cp["checkpoint_id"]):
+            #             print(chunk, end="", flush=True)
+            #         print("\n")
+            #     except ValueError:
+            #         print("[Error] Invalid checkpoint index | 无效的检查点索引")
+            #     continue
 
-            if user_input.lower().startswith("!back_cp"):
-                parts = user_input.split()
-                if len(parts) < 2:
-                    print("[Error] Usage: !back_cp <checkpoint_index> | 用法: !back_cp <检查点索引>")
-                    continue
-                try:
-                    cp_idx = int(parts[1])
-                    cps = engine.get_all_checkpoint_steps()
-                    if cp_idx < 1 or cp_idx > len(cps):
-                        print(f"[Error] Checkpoint index must be between 1 and {len(cps)} | 检查点索引必须在1到{len(cps)}之间")
-                        continue
-                    target_cp = cps[cp_idx - 1]
-                    print(f"\n[Rollback to Checkpoint | 回退到检查点] Index {cp_idx} | ID: {target_cp['checkpoint_id']}")
-                    print("AI: ", end="", flush=True)
-                    for chunk in engine.chat("Continue analysis from this checkpoint | 继续从该检查点分析",
-                                             checkpoint_id=target_cp["checkpoint_id"]):
-                        print(chunk, end="", flush=True)
-                    print("\n")
-                except ValueError:
-                    print("[Error] Invalid checkpoint index | 无效的检查点索引")
-                continue
+            # if user_input.lower().startswith("!back"):
+            #     parts = user_input.split()
+            #     if len(parts) < 2:
+            #         print("[Error] Usage: !back <step_number> | 用法: !back <步骤号>")
+            #         continue
+            #     try:
+            #         step_num = int(parts[1])
+            #         steps = engine.get_session_steps()
+            #         if step_num < 1 or step_num > len(steps):
+            #             print(f"[Error] Step must be between 1 and {len(steps)} | 步骤必须在1到{len(steps)}之间")
+            #             continue
+            #         target_step = steps[step_num - 1]
+            #         print(f"\n[Rollback | 回溯] Reverted to step {step_num} | 已回退到步骤 {step_num}")
+            #         print(f"Context | 上下文: {target_step['user_input']}\n")
+            #         print("AI: ", end="", flush=True)
+            #         for chunk in engine.chat("Continue analysis from here | 继续从这里开始分析", checkpoint_id=target_step["checkpoint_id"]):
+            #             print(chunk, end="", flush=True)
+            #         print("\n")
+            #     except ValueError:
+            #         print("[Error] Invalid step number | 无效的步骤号")
+            #     continue
 
             if user_input.lower().startswith("!upload"):
                 parts = user_input.split()

@@ -72,10 +72,14 @@ class SessionStore:
         while True:
             try:
                 session_id = self._write_queue.get(timeout=1)
-                if session_id is None:
-                    # Shutdown signal received
-                    break
+            except queue.Empty:
+                continue
 
+            if session_id is None:
+                self._write_queue.task_done()
+                break
+
+            try:
                 with self._lock:
                     data = self._pending_writes.pop(session_id, None)
 
@@ -83,13 +87,10 @@ class SessionStore:
                     session_file = self.sessions_dir / f"{session_id}.json"
                     with open(session_file, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2)
-
-                self._write_queue.task_done()
-            except queue.Empty:
-                continue
             except Exception:
-                # Continue running even if a write fails
-                continue
+                pass
+            finally:
+                self._write_queue.task_done()
 
     def save_async(self, session_id: str):
         """
@@ -137,17 +138,26 @@ class SessionStore:
     def archive_session_files(self, session_id: str):
         """
         Move a session from active to archived status.
-        
+
+        Flushes any pending async write before archiving so the archive
+        file is always created, even if the worker hasn't written the
+        active file to disk yet.
+
         Args:
             session_id: ID of the session to archive
         """
         with self._lock:
-            self._pending_writes.pop(session_id, None)
+            pending_data = self._pending_writes.pop(session_id, None)
 
         session_file = self.sessions_dir / f"{session_id}.json"
         archive_file = self.archive_dir / f"{session_id}.json"
+
         if session_file.exists():
             session_file.rename(archive_file)
+        elif pending_data is not None:
+            # Pending write never flushed — write directly to archive.
+            with open(archive_file, "w", encoding="utf-8") as f:
+                json.dump(pending_data, f, indent=2)
 
         # Remove from in-memory cache
         if session_id in self.sessions:
