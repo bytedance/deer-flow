@@ -177,6 +177,24 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _build_circuit_breaker_message(self) -> str:
         return "The configured LLM provider is currently unavailable due to continuous failures. Circuit breaker is engaged to protect the system. Please wait a moment before trying again."
 
+    def _build_error_fallback_message(
+        self,
+        content: str,
+        *,
+        error_type: str,
+        reason: str,
+        detail: str,
+    ) -> AIMessage:
+        return AIMessage(
+            content=content,
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_type": error_type,
+                "error_reason": reason,
+                "error_detail": detail,
+            },
+        )
+
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
         detail = _extract_error_detail(exc)
         if reason == "quota":
@@ -186,6 +204,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if reason in {"busy", "transient"}:
             return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
         return f"LLM request failed: {detail}"
+
+    def _build_user_fallback_message(self, exc: BaseException, reason: str) -> AIMessage:
+        return self._build_error_fallback_message(
+            self._build_user_message(exc, reason),
+            error_type=type(exc).__name__,
+            reason=reason,
+            detail=_extract_error_detail(exc),
+        )
 
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
         try:
@@ -212,7 +238,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return AIMessage(content=self._build_circuit_breaker_message())
+            return self._build_error_fallback_message(
+                self._build_circuit_breaker_message(),
+                error_type="CircuitBreakerOpen",
+                reason="circuit_open",
+                detail="LLM circuit breaker is open",
+            )
 
         attempt = 1
         while True:
@@ -249,7 +280,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return AIMessage(content=self._build_user_message(exc, reason))
+                return self._build_user_fallback_message(exc, reason)
 
     @override
     async def awrap_model_call(
@@ -258,7 +289,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return AIMessage(content=self._build_circuit_breaker_message())
+            return self._build_error_fallback_message(
+                self._build_circuit_breaker_message(),
+                error_type="CircuitBreakerOpen",
+                reason="circuit_open",
+                detail="LLM circuit breaker is open",
+            )
 
         attempt = 1
         while True:
@@ -295,7 +331,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return AIMessage(content=self._build_user_message(exc, reason))
+                return self._build_user_fallback_message(exc, reason)
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
