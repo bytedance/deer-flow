@@ -156,14 +156,12 @@ export function buildRunMessagesUrl(
   runId: string,
   beforeSeq?: number,
 ) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-  const url = new URL(
-    `${normalizedBaseUrl}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`,
-  );
+  const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
+  const url = `${baseUrl.replace(/\/+$/, "")}${path}`;
   if (beforeSeq !== undefined) {
-    url.searchParams.set("before_seq", String(beforeSeq));
+    return `${url}?${new URLSearchParams({ before_seq: String(beforeSeq) })}`;
   }
-  return url.toString();
+  return url;
 }
 
 export function mergeMessages(

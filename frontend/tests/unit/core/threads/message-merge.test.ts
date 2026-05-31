@@ -319,3 +319,27 @@ test("buildRunMessagesUrl omits before_seq when loading the latest page", () => 
     buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
   ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
 });
+
+test("buildRunMessagesUrl supports the default relative backend URL", () => {
+  expect(buildRunMessagesUrl("", "thread-1", "run-1", 18)).toBe(
+    "/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(buildRunMessagesUrl("", "thread-1", "run-1")).toBe(
+    "/api/threads/thread-1/runs/run-1/messages",
+  );
+});
+
+test("buildRunMessagesUrl preserves configured backend base paths", () => {
+  expect(buildRunMessagesUrl("/backend/", "thread-1", "run-1", 18)).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(
+    buildRunMessagesUrl(
+      "https://api.example.test/backend/",
+      "thread-1",
+      "run-1",
+    ),
+  ).toBe(
+    "https://api.example.test/backend/api/threads/thread-1/runs/run-1/messages",
+  );
+});
