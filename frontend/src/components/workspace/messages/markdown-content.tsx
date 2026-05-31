@@ -11,7 +11,10 @@ import {
   isArtifactVirtualPath,
   resolveArtifactURL,
 } from "@/core/artifacts/utils";
-import { streamdownPlugins } from "@/core/streamdown";
+import {
+  preprocessStreamdownMarkdown,
+  streamdownPlugins,
+} from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -39,6 +42,10 @@ export function MarkdownContent({
   components: componentsFromProps,
   threadId,
 }: MarkdownContentProps) {
+  const normalizedContent = useMemo(
+    () => preprocessStreamdownMarkdown(content),
+    [content],
+  );
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -81,7 +88,7 @@ export function MarkdownContent({
       rehypePlugins={rehypePlugins}
       components={components}
     >
-      {content}
+      {normalizedContent}
     </MessageResponse>
   );
 }
