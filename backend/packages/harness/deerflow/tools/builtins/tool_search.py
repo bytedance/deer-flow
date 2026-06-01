@@ -16,10 +16,14 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Annotated
 
 from langchain.tools import BaseTool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_function
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,65 @@ def _catalog_regex_score(pattern: str, t: BaseTool) -> int:
     except re.error:
         regex = re.compile(re.escape(pattern), re.IGNORECASE)
     return len(regex.findall(f"{t.name} {t.description or ''}"))
+
+
+@dataclass(frozen=True)
+class DeferredToolSetup:
+    tool_search_tool: BaseTool | None
+    deferred_names: frozenset[str]
+    catalog_hash: str | None
+
+
+def _is_mcp_tool(t: BaseTool) -> bool:
+    return (getattr(t, "metadata", None) or {}).get("deerflow_mcp") is True
+
+
+def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
+    catalog_hash = catalog.hash
+
+    @tool
+    def tool_search(query: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+        """Fetches full schema definitions for deferred tools so they can be called.
+
+        Deferred tools appear by name in <available-deferred-tools> in the system
+        prompt. Until fetched, only the name is known. This tool matches a query
+        against the deferred tools and returns the matched tools complete schemas;
+        once returned, a tool becomes callable.
+
+        Query forms:
+          - "select:Read,Edit" -- fetch these exact tools by name
+          - "notebook jupyter" -- keyword search, up to max_results best matches
+          - "+slack send" -- require "slack" in the name, rank by remaining terms
+        """
+        matched = catalog.search(query)[:MAX_RESULTS]
+        if not matched:
+            content, names = f"No tools found matching: {query}", []
+        else:
+            content = json.dumps([convert_to_openai_function(t) for t in matched], indent=2, ensure_ascii=False)
+            names = [t.name for t in matched]
+        return Command(
+            update={
+                "promoted": {"catalog_hash": catalog_hash, "names": names},
+                "messages": [ToolMessage(content=content, tool_call_id=tool_call_id, name="tool_search")],
+            }
+        )
+
+    return tool_search
+
+
+def build_deferred_tool_setup(filtered_tools: list[BaseTool], *, enabled: bool) -> DeferredToolSetup:
+    """Build the deferred-tool setup from a POLICY-FILTERED tool list.
+
+    Must be called after skill/agent tool-policy filtering so the catalog never
+    exposes a tool the current agent is not allowed to use.
+    """
+    if not enabled:
+        return DeferredToolSetup(None, frozenset(), None)
+    deferred = [t for t in filtered_tools if _is_mcp_tool(t)]
+    if not deferred:
+        return DeferredToolSetup(None, frozenset(), None)
+    catalog = DeferredToolCatalog(tuple(deferred))
+    return DeferredToolSetup(build_tool_search_tool(catalog), catalog.names, catalog.hash)
 
 
 @dataclass
