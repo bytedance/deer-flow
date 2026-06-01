@@ -40,8 +40,18 @@ def test_search_regex_on_description(catalog):
     assert "beta_translate" in [t.name for t in got]
 
 
-def test_search_invalid_regex_falls_back_to_literal(catalog):
-    assert catalog.search("alpha(") == [] or True
+def test_search_invalid_regex_falls_back_to_literal():
+    @as_tool
+    def calc(expr: str) -> str:
+        "Compute sum(a, b) style expressions."
+        return expr
+
+    cat = DeferredToolCatalog((calc, alpha_search))
+    # "sum(" is an invalid regex (unbalanced paren). search() must not raise; it
+    # falls back to a literal match, which finds calc's "sum(" in its description.
+    assert [t.name for t in cat.search("sum(")] == ["calc"]
+    # A literal with no match is deterministically empty (and still must not raise).
+    assert cat.search("zzz(") == []
 
 
 def test_hash_stable_across_instances():

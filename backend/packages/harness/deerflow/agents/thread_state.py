@@ -73,7 +73,7 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     """
     if not new:
         return existing
-    if existing is None or existing["catalog_hash"] != new["catalog_hash"]:
+    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
         return {
             "catalog_hash": new["catalog_hash"],
             "names": list(dict.fromkeys(new["names"])),

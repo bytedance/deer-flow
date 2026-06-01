@@ -33,3 +33,11 @@ def test_merge_promoted_unions_names_when_catalog_hash_matches():
     result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["fetch", "scrape"]})
 
     assert result == {"catalog_hash": "abc", "names": ["search", "fetch", "scrape"]}
+
+
+def test_merge_promoted_replaces_malformed_existing_without_crash():
+    # A forward-incompatible / externally-injected persisted state could lack
+    # catalog_hash; the reducer must treat it as a mismatch and replace, not crash.
+    result = merge_promoted({"names": ["stale"]}, {"catalog_hash": "abc", "names": ["search"]})
+
+    assert result == {"catalog_hash": "abc", "names": ["search"]}

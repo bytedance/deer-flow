@@ -36,6 +36,9 @@ MAX_RESULTS = 5  # Max tools returned per search
 # ── Catalog ──
 
 
+# NOTE: frozen=True without slots=True keeps __dict__, which is what lets the
+# @cached_property fields below cache (they write to instance.__dict__, bypassing
+# the frozen __setattr__). Do NOT add slots=True or hash/names break at runtime.
 @dataclass(frozen=True)
 class DeferredToolCatalog:
     """Immutable catalog of deferred tools. Pure search, no mutation."""
