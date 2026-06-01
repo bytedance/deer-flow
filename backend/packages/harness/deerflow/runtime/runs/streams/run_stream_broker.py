@@ -19,9 +19,11 @@ class RunStreamEvent:
 class RunStreamBroker(Protocol):
     """Realtime publish/subscribe boundary for run streams."""
 
-    async def publish(self, run_id: RunId, event: str, data: Any) -> None: ...
+    async def publish(self, run_id: RunId, event: str, data: Any) -> None:
+        pass
 
-    async def publish_terminal(self, run_id: RunId, *, event: str = "end", data: Any = None) -> None: ...
+    async def publish_terminal(self, run_id: RunId, *, event: str = "end", data: Any = None) -> None:
+        pass
 
     def subscribe(
         self,
@@ -29,9 +31,11 @@ class RunStreamBroker(Protocol):
         *,
         last_event_id: str | None = None,
         heartbeat_interval: float = 15.0,
-    ) -> AsyncIterator[RunStreamEvent]: ...
+    ) -> AsyncIterator[RunStreamEvent]:
+        pass
 
-    async def cleanup(self, run_id: RunId, *, delay: float = 0) -> None: ...
+    async def cleanup(self, run_id: RunId, *, delay: float = 0) -> None:
+        pass
 
 
 __all__ = [

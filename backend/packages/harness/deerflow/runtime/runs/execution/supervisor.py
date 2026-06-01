@@ -10,7 +10,8 @@ from ..domain import CancelAction, RunId
 class RunSupervisor(Protocol):
     """Controls lifecycle operations for already scheduled runs."""
 
-    async def cancel(self, run_id: RunId, *, action: CancelAction = CancelAction.interrupt) -> bool: ...
+    async def cancel(self, run_id: RunId, *, action: CancelAction = CancelAction.interrupt) -> bool:
+        pass
 
 
 __all__ = [

@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 class RunEventLog(Protocol):
     """Persistence boundary for run messages and execution trace events."""
 
-    async def append(self, events: list[RunEvent]) -> list[StoredRunEvent]: ...
+    async def append(self, events: list[RunEvent]) -> list[StoredRunEvent]:
+        pass
 
     async def list_messages_by_run(
         self,
@@ -23,7 +24,8 @@ class RunEventLog(Protocol):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
-    ) -> list[RunMessageView]: ...
+    ) -> list[RunMessageView]:
+        pass
 
     async def list_events_by_run(
         self,
@@ -31,7 +33,8 @@ class RunEventLog(Protocol):
         run_id: RunId,
         *,
         limit: int = 500,
-    ) -> list[StoredRunEvent]: ...
+    ) -> list[StoredRunEvent]:
+        pass
 
 
 __all__ = [

@@ -13,9 +13,11 @@ if TYPE_CHECKING:
 class RunRepository(Protocol):
     """Persistence boundary for run state snapshots."""
 
-    async def save(self, run: Run) -> None: ...
+    async def save(self, run: Run) -> None:
+        pass
 
-    async def get(self, run_id: RunId, *, user_id: UserId | None = None) -> Run | None: ...
+    async def get(self, run_id: RunId, *, user_id: UserId | None = None) -> Run | None:
+        pass
 
     async def list_by_thread(
         self,
@@ -23,9 +25,11 @@ class RunRepository(Protocol):
         *,
         user_id: UserId | None = None,
         limit: int = 100,
-    ) -> list[RunSnapshot]: ...
+    ) -> list[RunSnapshot]:
+        pass
 
-    async def delete(self, run_id: RunId) -> bool: ...
+    async def delete(self, run_id: RunId) -> bool:
+        pass
 
 
 __all__ = [

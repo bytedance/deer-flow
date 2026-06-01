@@ -16,7 +16,8 @@ class RunExecutionHandle:
 class RunExecutionScheduler(Protocol):
     """Starts background execution for an accepted run."""
 
-    async def start(self, run_id: RunId) -> RunExecutionHandle: ...
+    async def start(self, run_id: RunId) -> RunExecutionHandle:
+        pass
 
 
 __all__ = [

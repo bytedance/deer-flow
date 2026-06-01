@@ -10,7 +10,8 @@ from ..domain import Run
 class RunExecutor(Protocol):
     """Executes one run against the underlying agent or graph runtime."""
 
-    async def execute(self, run: Run) -> None: ...
+    async def execute(self, run: Run) -> None:
+        pass
 
 
 __all__ = [
