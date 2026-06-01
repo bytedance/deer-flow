@@ -1144,9 +1144,11 @@ export const PromptInputSpeechButton = ({
 }: PromptInputSpeechButtonProps) => {
   const controller = useOptionalPromptInputController();
   const [state, setState] = useState<RecordingState>("idle");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const recordingStartRef = useRef<number>(0);
   const callbacksRef = useRef({
     controller,
     textareaRef,
@@ -1269,6 +1271,7 @@ export const PromptInputSpeechButton = ({
 
       mediaRecorderRef.current = recorder;
       recorder.start();
+      recordingStartRef.current = Date.now();
       setState("recording");
     } catch (err) {
       if (streamRef.current) {
@@ -1292,6 +1295,19 @@ export const PromptInputSpeechButton = ({
       void startRecording();
     }
   }, [autoStart, externalDisabled, state, startRecording]);
+
+  useEffect(() => {
+    if (state !== "recording") {
+      setElapsedSeconds(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setElapsedSeconds(
+        Math.floor((Date.now() - recordingStartRef.current) / 1000),
+      );
+    }, 200);
+    return () => clearInterval(interval);
+  }, [state]);
 
   useEffect(() => {
     return () => {
@@ -1322,12 +1338,14 @@ export const PromptInputSpeechButton = ({
   const isRecording = state === "recording";
   const isTranscribing = state === "transcribing";
 
+  const recordingTime = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+
   return (
     <PromptInputButton
       {...props}
       className={cn(
-        "relative transition-all duration-200",
-        isRecording && "bg-red-100 text-red-600 animate-pulse",
+        "relative transition-all duration-200 gap-1",
+        isRecording && "bg-red-100 text-red-600 animate-pulse min-w-[4rem]",
         isTranscribing && "opacity-60",
         className,
       )}
@@ -1336,6 +1354,11 @@ export const PromptInputSpeechButton = ({
     >
       {isTranscribing ? (
         <Loader2Icon className="size-4 animate-spin" />
+      ) : isRecording ? (
+        <>
+          <SquareIcon className="size-3" />
+          <span className="text-xs tabular-nums">{recordingTime}</span>
+        </>
       ) : (
         <MicIcon className="size-4" />
       )}

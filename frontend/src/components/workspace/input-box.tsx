@@ -1002,7 +1002,6 @@ export function InputBox({
                 <PromptInputSpeechButton
                   aria-label={t.inputBox.microphoneInput}
                   className="px-2!"
-                  autoStart
                   threadId={threadId}
                   disabled={microphoneButtonDisabled}
                   language={audioLocale}

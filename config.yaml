@@ -266,9 +266,9 @@ run_events:
   max_trace_content: 10240
   track_token_usage: true
 audio_input:
-  enabled: false
-  microphone_enabled: false
-  file_transcription_enabled: false
+  enabled: true
+  microphone_enabled: true
+  file_transcription_enabled: true
   default_locale: zh-CN
   supported_locales:
     - zh-CN
@@ -287,11 +287,12 @@ audio_input:
     - audio/flac
   max_file_size: 26214400
   provider:
-    use: deerflow.audio.providers.openai:OpenAITranscriptionProvider
+    use: deerflow.audio.providers.qwen_asr:QwenASRTranscriptionProvider
     config:
-      model: openai/whisper-1
-      api_key: $OPENAI_API_KEY
-      base_url: https://aiapi.shenguyun.com/v1
+      model: qwen3-asr-flash
+      api_key: $DASHSCOPE_API_KEY
+      base_url: https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+      timeout_s: 120.0
 http_connectors:
   default:
     - name: list_datasets
