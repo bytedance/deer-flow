@@ -121,6 +121,10 @@ class XsyReportInput(BaseModel):
     end_date: str | None = Field(default=None, description="结束日期 (YYYY-MM-DD)")
 
 
+class WorkbenchTodoStatsInput(BaseModel):
+    """No parameters needed — fetches current todo counts."""
+
+
 def build_integration_tools(
     auth_context: AuthContext,
     data_tools: list[str],
@@ -156,6 +160,7 @@ def build_integration_tools(
     monitoring_tools = registry.get_tool("monitoring")
     assessment_tools = registry.get_tool("assessment")
     xsy_tools = registry.get_tool("xsy")
+    workbench_tools = registry.get_tool("workbench")
 
     if _should_include(data_tools, "asset_get_catalog", "asset"):
         if asset_tools:
@@ -350,6 +355,18 @@ def build_integration_tools(
                 ),
             ))
 
+    if _should_include(data_tools, "workbench_get_todo_stats", "workbench"):
+        if workbench_tools:
+            tools.append(StructuredTool(
+                name="workbench_get_todo_stats",
+                description="查询待办统计（异常/启机/停机待处理数量）",
+                args_schema=WorkbenchTodoStatsInput,
+                coroutine=_make_coro(
+                    workbench_tools.get_todo_stats, tenant_id, user_id,
+                    _transform_no_args, token,
+                ),
+            ))
+
     logger.info("Built %d integration tools for data_tools=%s", len(tools), data_tools)
     return tools
 
@@ -502,3 +519,7 @@ def _transform_xsy_report_args(kwargs: dict) -> dict:
         "start_date": kwargs.get("start_date"),
         "end_date": kwargs.get("end_date"),
     }
+
+
+def _transform_no_args(_kwargs: dict) -> dict:
+    return {}

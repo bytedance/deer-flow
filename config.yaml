@@ -356,8 +356,6 @@ rpc:
     - name: ins-base-rpc
 #      discovery: ins-base-rpc    # Nacos 服务发现名称（与 base_url 二选一）
       base_url: "http://182.92.187.198:8601"  # 直连模式（与 discovery 二选一）
-    - name: workbench-service
-      base_url: "http://182.92.187.198"  # 服务平台（待办统计）
 
 # ============================================================================
 # 外部系统集成 (CRM/ERP/InS/SMS)
@@ -365,6 +363,18 @@ rpc:
 integrations:
   enabled: true
   systems:
+    workbench:
+      system_type: workbench
+      display_name: "服务平台"
+      description: "服务平台集成，提供待办统计（异常/启机/停机）"
+      transport_type: http
+      base_url: "http://182.92.187.198"
+      auth_type: bearer
+      auth_mode: user_token
+      timeout_seconds: 30.0
+      enabled: true
+      capabilities:
+        - todo_stats.get
     xsy_prod:
       system_type: xsy
       display_name: "销售易 CRM"
@@ -401,3 +411,5 @@ integrations:
       primary_system_key: xsy_prod
     xsy.report:
       primary_system_key: xsy_prod
+    todo_stats.get:
+      primary_system_key: workbench

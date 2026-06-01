@@ -26,7 +26,7 @@ class IntegrationSystemConfig(BaseModel):
     """Configuration for an external system connection."""
 
     system_key: str = Field(description="Unique identifier, e.g. 'ins_prod', 'sms_prod'")
-    system_type: Literal["ins", "sms", "crm", "erp", "xsy", "custom"] = Field(
+    system_type: Literal["ins", "sms", "crm", "erp", "xsy", "workbench", "custom"] = Field(
         description="Adapter type discriminator"
     )
     display_name: str = Field(description="Human-readable name")

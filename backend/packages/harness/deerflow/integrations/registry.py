@@ -179,6 +179,7 @@ def initialize_registry(config: IntegrationsConfig | None) -> IntegrationRegistr
     from deerflow.integrations.adapters.erp import ErpAdapter
     from deerflow.integrations.adapters.ins import InsAdapter
     from deerflow.integrations.adapters.sms import SmsAdapter
+    from deerflow.integrations.adapters.workbench import WorkbenchAdapter
     from deerflow.integrations.adapters.xsy import XsyAdapter
 
     adapter_factories = {
@@ -186,6 +187,7 @@ def initialize_registry(config: IntegrationsConfig | None) -> IntegrationRegistr
         "sms": SmsAdapter,
         "crm": CrmAdapter,
         "erp": ErpAdapter,
+        "workbench": WorkbenchAdapter,
         "xsy": XsyAdapter,
     }
 
