@@ -12,7 +12,11 @@ import {
 
 const ALL_TYPES = ["model", "skill", "mcp", "connector", "agent"] as const;
 
-export default function CapabilitiesPage() {
+export default function CapabilitiesPage({
+  onSelectDetail,
+}: {
+  onSelectDetail?: (type: string, name: string) => void;
+}) {
   const [caps, setCaps] = useState<CapabilitySummary[]>([]);
   const [activeType, setActiveType] = useState<string>("");
   const [scopeFilter, setScopeFilter] = useState<string>("");
@@ -98,12 +102,22 @@ export default function CapabilitiesPage() {
               {caps.map((c) => (
                 <tr key={`${c.type}/${c.name}`} className="border-b last:border-0 hover:bg-muted/30">
                   <td className="px-4 py-2">
-                    <Link
-                      href={`/workspace/capabilities/${c.type}/${encodeURIComponent(c.name)}`}
-                      className="text-primary hover:underline font-medium"
-                    >
-                      {c.display_name || c.name}
-                    </Link>
+                    {onSelectDetail ? (
+                      <button
+                        type="button"
+                        onClick={() => onSelectDetail(c.type, c.name)}
+                        className="text-primary hover:underline font-medium text-left"
+                      >
+                        {c.display_name || c.name}
+                      </button>
+                    ) : (
+                      <Link
+                        href={`/workspace/capabilities/${c.type}/${encodeURIComponent(c.name)}`}
+                        className="text-primary hover:underline font-medium"
+                      >
+                        {c.display_name || c.name}
+                      </Link>
+                    )}
                     {c.description && (
                       <div className="text-muted-foreground text-xs mt-0.5 line-clamp-1">
                         {c.description}
