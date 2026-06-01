@@ -31,26 +31,32 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
     from deerflow.config.auth_config import get_auth_config
 
     config = get_auth_config()
+    from app.gateway.csrf_middleware import is_secure_request
+
+    is_https = is_secure_request(request)
     response.set_cookie(
         key="access_token",
         value=token_value,
         path="/",
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=is_https,
+        samesite="none" if is_https else "lax",
         max_age=config.token_expiry_days * 24 * 3600,
     )
 
 
 def _set_refresh_cookie(response: Response, refresh_value: str, request: Request) -> None:
     """Set the refresh_token HttpOnly cookie on the response."""
+    from app.gateway.csrf_middleware import is_secure_request
+
+    is_https = is_secure_request(request)
     response.set_cookie(
         key="refresh_token",
         value=refresh_value,
         path="/",
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=is_https,
+        samesite="none" if is_https else "lax",
         max_age=7 * 24 * 3600,
     )
 
@@ -58,8 +64,11 @@ def _set_refresh_cookie(response: Response, refresh_value: str, request: Request
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
     """Logout current user by clearing the cookie."""
-    response.delete_cookie(key="access_token", secure=True, samesite="none")
-    response.delete_cookie(key="refresh_token", secure=True, samesite="none")
+    from app.gateway.csrf_middleware import is_secure_request
+
+    is_https = is_secure_request(request)
+    response.delete_cookie(key="access_token", secure=is_https, samesite="lax")
+    response.delete_cookie(key="refresh_token", secure=is_https, samesite="lax")
     return MessageResponse(message="Successfully logged out")
 
 
@@ -94,8 +103,11 @@ async def refresh(request: Request, response: Response):
 
     new_token = await provider.refresh_token(refresh_token)
     if new_token is None:
-        response.delete_cookie(key="access_token", secure=True, samesite="none")
-        response.delete_cookie(key="refresh_token", secure=True, samesite="none")
+        from app.gateway.csrf_middleware import is_secure_request
+
+        is_https = is_secure_request(request)
+        response.delete_cookie(key="access_token", secure=is_https, samesite="lax")
+        response.delete_cookie(key="refresh_token", secure=is_https, samesite="lax")
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(
