@@ -1,21 +1,10 @@
-"""Run status and disconnect mode enums."""
+"""Compatibility exports for run status and disconnect mode enums."""
 
-from enum import StrEnum
+# Existing callers import these enums from ``runs.schemas``. Re-export the
+# domain definitions until all imports move to ``runs.domain``.
+from .domain import DisconnectMode, RunStatus
 
-
-class RunStatus(StrEnum):
-    """Lifecycle status of a single run."""
-
-    pending = "pending"
-    running = "running"
-    success = "success"
-    error = "error"
-    timeout = "timeout"
-    interrupted = "interrupted"
-
-
-class DisconnectMode(StrEnum):
-    """Behaviour when the SSE consumer disconnects."""
-
-    cancel = "cancel"
-    continue_ = "continue"
+__all__ = [
+    "DisconnectMode",
+    "RunStatus",
+]
