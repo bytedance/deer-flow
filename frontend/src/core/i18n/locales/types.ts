@@ -442,6 +442,15 @@ export interface Translations {
     removeTodo: (content: string) => string;
   };
 
+  // Todo Counts (待办数量)
+  todoCounts: {
+    anomalyPending: string;
+    startupPending: string;
+    shutdownPending: string;
+    loading: string;
+    unavailable: string;
+  };
+
   // Shortcuts
   shortcuts: {
     searchActions: string;

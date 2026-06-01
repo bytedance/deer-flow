@@ -191,6 +191,7 @@ class RpcClient:
         params: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         """Call a Java RPC service with a raw path (no endpoint config lookup).
 
@@ -203,6 +204,8 @@ class RpcClient:
             http_method: HTTP method (GET, POST, PUT, DELETE).
             params: Query string parameters (GET/DELETE) or request body (POST/PUT).
             timeout: Per-call timeout override in seconds.
+            extra_headers: Additional HTTP headers to include in the request
+                (e.g. Authorization for token forwarding).
 
         Returns:
             Parsed JSON response.
@@ -229,9 +232,11 @@ class RpcClient:
 
         try:
             if retry_cfg.max_attempts > 1:
-                resp = await self._request_with_retry(http, endpoint, url, params, call_timeout, retry_cfg.max_attempts)
+                resp = await self._request_with_retry(
+                    http, endpoint, url, params, call_timeout, retry_cfg.max_attempts, extra_headers
+                )
             else:
-                resp = await self._do_request(http, endpoint, url, params, call_timeout)
+                resp = await self._do_request(http, endpoint, url, params, call_timeout, extra_headers)
         except RpcError:
             raise
         except httpx.TimeoutException:
@@ -258,17 +263,18 @@ class RpcClient:
         url: str,
         params: dict[str, Any],
         timeout: float,
+        extra_headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         http_method = endpoint.http_method.upper()
         body_params = {k: v for k, v in params.items() if f"{{{k}}}" not in endpoint.path}
         if http_method == "GET":
-            return await http.get(url, params=body_params, timeout=timeout)
+            return await http.get(url, params=body_params, timeout=timeout, headers=extra_headers)
         elif http_method == "PUT":
-            return await http.put(url, json=body_params, timeout=timeout)
+            return await http.put(url, json=body_params, timeout=timeout, headers=extra_headers)
         elif http_method == "DELETE":
-            return await http.delete(url, params=body_params, timeout=timeout)
+            return await http.delete(url, params=body_params, timeout=timeout, headers=extra_headers)
         else:
-            return await http.post(url, json=body_params, timeout=timeout)
+            return await http.post(url, json=body_params, timeout=timeout, headers=extra_headers)
 
     async def _request_with_retry(
         self,
@@ -278,11 +284,12 @@ class RpcClient:
         params: dict[str, Any],
         timeout: float,
         max_attempts: int,
+        extra_headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                return await self._do_request(http, endpoint, url, params, timeout)
+                return await self._do_request(http, endpoint, url, params, timeout, extra_headers)
             except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
                 last_error = e
                 if attempt < max_attempts:
