@@ -10,6 +10,7 @@ The parser now uses ``yaml.safe_load`` consistently with ``validation.py``.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from deerflow.skills.parser import parse_skill_file
@@ -156,3 +157,62 @@ def test_parse_nonexistent_file_returns_none(tmp_path):
     """Non-existent files are handled gracefully."""
     skill = parse_skill_file(tmp_path / "ghost" / "SKILL.md", category="custom")
     assert skill is None
+
+
+# ---------------------------------------------------------------------------
+# Friendly YAML error reporting
+# ---------------------------------------------------------------------------
+
+
+def test_parse_unquoted_colon_value_logs_line_and_hint(tmp_path, caplog):
+    """Unquoted value with ': ' produces a log that includes the offending line and a fix hint.
+
+    Regression for issue #3333: SKILL.md authored by an LLM frequently
+    contains ``description: foo: bar`` which PyYAML rejects with
+    ``mapping values are not allowed here``. The skill is correctly skipped
+    (the file is not silently accepted), but the error log must point the
+    author at the exact line and how to quote it.
+    """
+
+    front_matter = "name: collect-startrun\ndescription: StarRun collector: progress, errors, tables out"
+    skill_file = _write_skill(tmp_path, front_matter)
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "Invalid YAML front-matter" in combined
+    # The offending source line is echoed back to the author.
+    assert "StarRun collector: progress" in combined
+    # The hint shows the canonical fix (quoted value).
+    assert 'description: "StarRun collector: progress, errors, tables out"' in combined
+
+
+def test_parse_unrelated_yaml_error_omits_quoting_hint(tmp_path, caplog):
+    """Errors other than 'mapping values are not allowed' must NOT carry the quoting hint."""
+
+    # Unclosed flow sequence is a scanner error of a different shape; the
+    # quoting hint would be misleading and must be suppressed.
+    skill_file = _write_skill(tmp_path, "name: [unclosed\ndescription: x")
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "Invalid YAML front-matter" in combined
+    assert "hint:" not in combined
+
+
+def test_parse_valid_skill_emits_no_error_log(tmp_path, caplog):
+    """Sanity check: a valid SKILL.md must not produce any error logs."""
+
+    skill_file = _write_skill(tmp_path, 'name: ok-skill\ndescription: "Foo: bar"')
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.description == "Foo: bar"
+    assert not caplog.records, "valid SKILL.md must not log errors"
