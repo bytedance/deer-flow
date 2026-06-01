@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 FROM ${BASE_IMAGE}
 
-ARG PIP_INDEX_URL
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY features-tool/requirements.txt /tmp/features-tool-requirements.txt
 
