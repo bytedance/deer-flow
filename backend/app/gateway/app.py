@@ -59,6 +59,7 @@ from app.gateway.routers import (
     thread_runs,
     threads,
     uploads,
+    workbench,
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.config.app_config import apply_logging_level
@@ -758,9 +759,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Personalized greeting API
     app.include_router(greetings.router)
 
-    # Organize tree API (proxy to ins-bus-rpc)
+    # Organize tree & Machine API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
     app.include_router(machine.router)
+
+    # Workbench API (proxy to external 服务平台)
+    app.include_router(workbench.router)
 
     # Closed-loop tickets API
     app.include_router(closure_tickets.router)

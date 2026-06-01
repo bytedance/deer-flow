@@ -535,6 +535,15 @@ export const enUS: Translations = {
     removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
+  // Todo Counts
+  todoCounts: {
+    anomalyPending: "Anomaly",
+    startupPending: "Startup",
+    shutdownPending: "Shutdown",
+    loading: "Loading…",
+    unavailable: "—",
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",

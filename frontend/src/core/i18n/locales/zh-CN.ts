@@ -503,6 +503,15 @@ export const zhCN: Translations = {
     removeTodo: (content: string) => `移除 To-do：${content}`,
   },
 
+  // Todo Counts (待办数量)
+  todoCounts: {
+    anomalyPending: "异常",
+    startupPending: "启机",
+    shutdownPending: "停机",
+    loading: "加载中…",
+    unavailable: "—",
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",

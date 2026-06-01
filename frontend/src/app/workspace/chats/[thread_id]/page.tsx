@@ -29,6 +29,7 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
+import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
 import { useGreeting } from "@/core/greeting/use-greeting";
@@ -156,6 +157,7 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex items-center gap-2">
+              <TodoCountIndicator />
               <TokenUsageIndicator
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}

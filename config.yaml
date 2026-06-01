@@ -356,6 +356,8 @@ rpc:
     - name: ins-base-rpc
 #      discovery: ins-base-rpc    # Nacos 服务发现名称（与 base_url 二选一）
       base_url: "http://182.92.187.198:8601"  # 直连模式（与 discovery 二选一）
+    - name: workbench-service
+      base_url: "http://182.92.187.198"  # 服务平台（待办统计）
 
 # ============================================================================
 # 外部系统集成 (CRM/ERP/InS/SMS)

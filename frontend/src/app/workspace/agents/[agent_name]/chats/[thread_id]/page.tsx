@@ -26,6 +26,7 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
+import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
@@ -169,6 +170,7 @@ export default function AgentChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="mr-4 flex items-center">
+              <TodoCountIndicator />
               <Tooltip content={t.agents.newChat}>
                 <Button
                   size="sm"
