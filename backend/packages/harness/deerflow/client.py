@@ -238,7 +238,7 @@ class DeerFlowClient:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
-        final_tools, deferred_setup = _assemble_deferred(tools, enabled=get_app_config().tool_search.enabled)
+        final_tools, deferred_setup = _assemble_deferred(tools, enabled=self._app_config.tool_search.enabled)
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
