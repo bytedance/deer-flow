@@ -7,12 +7,14 @@ from .base import (
     build_audio_transcription_provider,
 )
 from .openai import OpenAITranscriptionProvider
+from .qwen_asr import QwenASRTranscriptionProvider
 
 __all__ = [
     "AudioTranscriptionProvider",
     "AudioTranscriptionProviderError",
     "AudioTranscriptionResult",
     "OpenAITranscriptionProvider",
+    "QwenASRTranscriptionProvider",
     "build_audio_transcription_provider",
 ]
 
