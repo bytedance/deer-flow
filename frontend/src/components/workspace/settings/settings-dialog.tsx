@@ -3,6 +3,7 @@
 import {
   BellIcon,
   BotIcon,
+  CoinsIcon,
   InfoIcon,
   BrainIcon,
   PaletteIcon,
@@ -23,6 +24,7 @@ import { AboutSettingsPage } from "@/components/workspace/settings/about-setting
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AgentSettingsPage } from "@/components/workspace/settings/agent-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
+import { BudgetSettingsPage } from "@/components/workspace/settings/budget-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -38,6 +40,7 @@ type SettingsSection =
   | "skills"
   | "agents"
   | "notification"
+  | "budget"
   | "about";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
@@ -74,6 +77,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         id: "notification",
         label: t.settings.sections.notification,
         icon: BellIcon,
+      },
+      {
+        id: "budget",
+        label: t.settings.sections.budget,
+        icon: CoinsIcon,
       },
       {
         id: "memory",
@@ -153,6 +161,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 />
               )}
               {activeSection === "notification" && <NotificationSettingsPage />}
+              {activeSection === "budget" && <BudgetSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>

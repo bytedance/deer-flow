@@ -563,6 +563,7 @@ export const enUS: Translations = {
     sections: {
       account: "Account",
       appearance: "Appearance",
+      budget: "Cost & Quota",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -728,6 +729,11 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      tabs: {
+        toolManagement: "Tool Management",
+        capabilities: "Capabilities",
+        a2uiDebug: "A2UI Debug",
+      },
     },
     skills: {
       title: "Agent Skills",
@@ -850,7 +856,7 @@ export const enUS: Translations = {
 
   marketplace: {
     title: "Template Marketplace",
-    subtitle: "Discover, install, and share report templates",
+    subtitle: "Install and share report templates",
     searchPlaceholder: "Search templates...",
     allCategories: "All Categories",
     sortByNewest: "Newest",

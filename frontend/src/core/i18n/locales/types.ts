@@ -469,6 +469,7 @@ export interface Translations {
     sections: {
       account: string;
       appearance: string;
+      budget: string;
       memory: string;
       tools: string;
       skills: string;
@@ -625,6 +626,11 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      tabs: {
+        toolManagement: string;
+        capabilities: string;
+        a2uiDebug: string;
+      };
     };
     skills: {
       title: string;

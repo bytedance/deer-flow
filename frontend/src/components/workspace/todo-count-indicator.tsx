@@ -1,8 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Play, Power } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, Bell, Play, Power } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { fetchGateway } from "@/core/api";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
@@ -18,6 +26,14 @@ interface TodoCounts {
   shutdownPending: number;
 }
 
+interface TodoItem {
+  key: string;
+  icon: React.ReactNode;
+  label: string;
+  count: number;
+  color: string;
+}
+
 // ---------------------------------------------------------------------------
 // Indicator
 // ---------------------------------------------------------------------------
@@ -26,6 +42,7 @@ export function TodoCountIndicator() {
   const { t } = useI18n();
   const [counts, setCounts] = useState<TodoCounts | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const fetch = useCallback(async () => {
     try {
@@ -35,6 +52,7 @@ export function TodoCountIndicator() {
       if (res.ok) {
         const data = (await res.json()) as TodoCounts;
         setCounts(data);
+        setLastUpdated(new Date());
       }
     } catch (err) {
       console.warn("[TodoCountIndicator] fetch failed", err);
@@ -49,76 +67,93 @@ export function TodoCountIndicator() {
     return () => clearInterval(interval);
   }, [fetch]);
 
-  return (
-    <div className="flex items-center gap-1">
-      <CountBadge
-        icon={<AlertTriangle className="size-3" />}
-        label={t.todoCounts.anomalyPending}
-        count={counts?.anomalyPending}
-        loading={loading}
-        intent="warning"
-      />
-      <CountBadge
-        icon={<Play className="size-3" />}
-        label={t.todoCounts.startupPending}
-        count={counts?.startupPending}
-        loading={loading}
-        intent="info"
-      />
-      <CountBadge
-        icon={<Power className="size-3" />}
-        label={t.todoCounts.shutdownPending}
-        count={counts?.shutdownPending}
-        loading={loading}
-        intent="neutral"
-      />
-    </div>
-  );
-}
+  const total = useMemo(() => {
+    if (!counts) return 0;
+    return counts.anomalyPending + counts.startupPending + counts.shutdownPending;
+  }, [counts]);
 
-// ---------------------------------------------------------------------------
-// Internal
-// ---------------------------------------------------------------------------
+  const items: TodoItem[] = useMemo(() => {
+    const c = counts;
+    return [
+      {
+        key: "anomaly",
+        icon: <AlertTriangle className="size-4" />,
+        label: t.todoCounts.anomalyPending,
+        count: c?.anomalyPending ?? 0,
+        color: "text-amber-600 bg-amber-100 dark:text-amber-400 dark:bg-amber-950",
+      },
+      {
+        key: "startup",
+        icon: <Play className="size-4" />,
+        label: t.todoCounts.startupPending,
+        count: c?.startupPending ?? 0,
+        color: "text-blue-600 bg-blue-100 dark:text-blue-400 dark:bg-blue-950",
+      },
+      {
+        key: "shutdown",
+        icon: <Power className="size-4" />,
+        label: t.todoCounts.shutdownPending,
+        count: c?.shutdownPending ?? 0,
+        color: "text-gray-600 bg-gray-100 dark:text-gray-400 dark:bg-gray-800",
+      },
+    ];
+  }, [counts, t]);
 
-interface CountBadgeProps {
-  icon: React.ReactNode;
-  label: string;
-  count: number | undefined;
-  loading: boolean;
-  intent: "warning" | "info" | "neutral";
-}
-
-const intentStyles: Record<CountBadgeProps["intent"], string> = {
-  warning:
-    "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-400",
-  info: "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-400",
-  neutral:
-    "border-gray-200 bg-gray-50 text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400",
-};
-
-function CountBadge({ icon, label, count, loading, intent }: CountBadgeProps) {
-  const { t } = useI18n();
-  const hasData = count !== undefined;
+  const hasPending = total > 0;
 
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-xs font-medium",
-        intentStyles[intent],
-      )}
-      title={label}
-    >
-      {icon}
-      <span className="hidden sm:inline">{label}</span>
-      <span
-        className={cn(
-          "tabular-nums font-semibold",
-          loading && "animate-pulse",
-          !hasData && !loading && "opacity-50",
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "relative size-8",
+            hasPending && "text-amber-600 dark:text-amber-400",
+          )}
+        >
+          <Bell className={cn("size-4", loading && "animate-pulse")} />
+          {hasPending && (
+            <span className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full bg-amber-500 text-[10px] font-bold text-white">
+              {total > 99 ? "99+" : total}
+            </span>
+          )}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          {t.todoCounts.loading}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {items.map((item) => (
+          <div
+            key={item.key}
+            className="flex items-center gap-3 px-2 py-2 text-sm cursor-default"
+          >
+            <span
+              className={cn(
+                "flex size-6 items-center justify-center rounded",
+                item.color,
+              )}
+            >
+              {item.icon}
+            </span>
+            <span className="flex-1">{item.label}</span>
+            <span className="tabular-nums font-semibold">{item.count}</span>
+          </div>
+        ))}
+        {lastUpdated && (
+          <>
+            <DropdownMenuSeparator />
+            <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+              {lastUpdated.toLocaleTimeString("zh-CN", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </div>
+          </>
         )}
-      >
-        {loading ? "…" : hasData ? count : t.todoCounts.unavailable}
-      </span>
-    </span>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

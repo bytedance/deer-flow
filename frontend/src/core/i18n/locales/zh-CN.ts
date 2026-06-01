@@ -184,7 +184,7 @@ export const zhCN: Translations = {
   // Sidebar
   sidebar: {
     newChat: "新对话",
-    chats: "对话",
+    chats: "对话历史",
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
@@ -442,7 +442,7 @@ export const zhCN: Translations = {
   budget: {
     today: "今日用量",
     thisMonth: "本月用量",
-    todayUsage: "今日用量详情",
+    todayUsage: "用量详情",
     monthlyUsage: "本月用量详情",
     used: "已用",
     of: "/",
@@ -530,6 +530,7 @@ export const zhCN: Translations = {
     sections: {
       account: "账号",
       appearance: "外观",
+      budget: "用量",
       memory: "记忆",
       tools: "工具",
       skills: "技能",
@@ -692,6 +693,11 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      tabs: {
+        toolManagement: "工具管理",
+        capabilities: "平台能力",
+        a2uiDebug: "A2UI 调试",
+      },
     },
     skills: {
       title: "技能",
@@ -813,7 +819,7 @@ export const zhCN: Translations = {
 
   marketplace: {
     title: "模板市场",
-    subtitle: "发现、安装和分享报告模板",
+    subtitle: "安装和分享报告模板",
     searchPlaceholder: "搜索模板...",
     allCategories: "所有分类",
     sortByNewest: "最新",

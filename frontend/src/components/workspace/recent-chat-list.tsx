@@ -192,7 +192,7 @@ export function RecentChatList() {
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {nonReportThreads.map((thread) => {
+              {nonReportThreads.slice(0, 5).map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 return (
                   <SidebarMenuItem

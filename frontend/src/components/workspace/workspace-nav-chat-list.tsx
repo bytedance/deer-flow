@@ -10,8 +10,6 @@ import {
   FileTextIcon,
   HistoryIcon,
   MessagesSquare,
-  Settings2Icon,
-  WrenchIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -40,7 +38,6 @@ import { ThreadActionMenu } from "./report-templates/thread-action-menu";
 
 const STORAGE_KEY = "sidebar-agents-collapsed";
 const REPORT_THREADS_KEY = "sidebar-report-threads-collapsed";
-const TOOLS_MENU_KEY = "sidebar-tools-collapsed";
 
 const NAV_ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   FileText: FileTextIcon,
@@ -65,11 +62,6 @@ export function WorkspaceNavChatList() {
     return localStorage.getItem(STORAGE_KEY) !== "true";
   });
 
-  const [toolsOpen, setToolsOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(TOOLS_MENU_KEY) !== "true";
-  });
-
   const [activeGroup, setActiveGroup] = useState<Agent | null>(null);
   const childAgents = useAgentChildren(activeGroup?.name);
 
@@ -89,10 +81,6 @@ export function WorkspaceNavChatList() {
     localStorage.setItem(STORAGE_KEY, agentsOpen ? "false" : "true");
   }, [agentsOpen]);
 
-  useEffect(() => {
-    localStorage.setItem(TOOLS_MENU_KEY, toolsOpen ? "false" : "true");
-  }, [toolsOpen]);
-
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -101,6 +89,15 @@ export function WorkspaceNavChatList() {
             <Link className="text-muted-foreground" href="/workspace/chats">
               <MessagesSquare />
               <span>{t.sidebar.chats}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+
+        <SidebarMenuItem>
+          <SidebarMenuButton isActive={pathname.startsWith("/workspace/knowledge-bases")} asChild>
+            <Link className="text-muted-foreground" href="/workspace/knowledge-bases">
+              <BookOpenIcon />
+              <span>{t.sidebar.knowledgeBases}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -192,74 +189,6 @@ export function WorkspaceNavChatList() {
             </SidebarMenuItem>
           );
         })}
-
-        {/* Collapsible Tools menu */}
-        <SidebarMenuItem>
-          <Collapsible open={toolsOpen} onOpenChange={setToolsOpen}>
-            <CollapsibleTrigger asChild>
-              <SidebarMenuButton>
-                <WrenchIcon className="size-4" />
-                <span className="flex-1 text-left">
-                  {t.locale.localName === "中文" ? "工具" : "Tools"}
-                </span>
-                <ChevronDownIcon
-                  className={cn(
-                    "size-4 transition-transform",
-                    !toolsOpen && "-rotate-90",
-                  )}
-                />
-              </SidebarMenuButton>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <SidebarMenu className="ml-3 border-l pl-2">
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    isActive={pathname.startsWith("/workspace/knowledge-bases")}
-                    asChild
-                  >
-                    <Link
-                      className="text-muted-foreground"
-                      href="/workspace/knowledge-bases"
-                    >
-                      <BookOpenIcon />
-                      <span>{t.sidebar.knowledgeBases}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    isActive={pathname.startsWith("/workspace/capabilities")}
-                    asChild
-                  >
-                    <Link
-                      className="text-muted-foreground"
-                      href="/workspace/capabilities"
-                    >
-                      <Settings2Icon className="size-4" />
-                      <span>{t.locale.localName === "中文" ? "平台能力" : "Capabilities"}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    isActive={pathname.startsWith("/workspace/debug/a2ui")}
-                    asChild
-                  >
-                    <Link
-                      className="text-muted-foreground"
-                      href="/workspace/debug/a2ui"
-                    >
-                      <BugIcon />
-                      <span>{t.sidebar.a2uiDebug}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              </SidebarMenu>
-            </CollapsibleContent>
-          </Collapsible>
-        </SidebarMenuItem>
       </SidebarMenu>
 
       <AgentChildSelector
