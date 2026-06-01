@@ -342,6 +342,51 @@ async def test_session_pool_tool_no_headers_omits_meta():
 
 
 @pytest.mark.asyncio
+async def test_session_pool_tool_ignores_unsupported_header_type(caplog):
+    """Defensive path: non-mapping truthy headers should be ignored safely."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        x: int = Field(..., description="x")
+
+    class TruthyHeaders:
+        def __bool__(self) -> bool:
+            return True
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    async def invalid_header_interceptor(request, handler):
+        return await handler(request.override(headers=TruthyHeaders()))
+
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "srv",
+            {"transport": "stdio", "command": "x", "args": []},
+            tool_interceptors=[invalid_header_interceptor],
+        )
+        await wrapped.coroutine(runtime=None, x=1)
+
+    mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
+    assert "unsupported type" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_session_pool_tool_extracts_thread_id():
     """Thread ID is extracted from runtime.config when not in context."""
     from langchain_core.tools import StructuredTool

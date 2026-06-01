@@ -12,6 +12,7 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
+_SAFE_USER_ID_DIGEST_HEX_LEN = 16
 
 
 def _default_local_base_dir() -> Path:
@@ -46,7 +47,7 @@ def make_safe_user_id(raw: str) -> str:
     sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw)
     if sanitized == raw:
         return raw
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
     return f"{sanitized}-{digest}"
 
 

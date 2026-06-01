@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -141,7 +142,10 @@ def _make_session_pool_tool(
                 # forwarding them through MCP call meta.
                 call_kwargs: dict[str, Any] = {}
                 if request.headers:
-                    call_kwargs["meta"] = {"headers": dict(request.headers)}
+                    if isinstance(request.headers, Mapping):
+                        call_kwargs["meta"] = {"headers": dict(request.headers)}
+                    else:
+                        logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
                 return await session.call_tool(request.name, request.args, **call_kwargs)
 
             handler = base_handler

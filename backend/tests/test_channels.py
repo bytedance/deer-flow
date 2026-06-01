@@ -1625,6 +1625,16 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] != raw
         assert run_context["channel_user_id"] == raw
 
+    @pytest.mark.parametrize("raw_user_id", ["", None])
+    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id):
+        manager = self._manager()
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw_user_id, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert "user_id" not in run_context
+        assert "channel_user_id" not in run_context
+
 
 # ---------------------------------------------------------------------------
 # ChannelService tests
