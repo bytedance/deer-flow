@@ -257,13 +257,16 @@ def create_auth_middleware():
                                 # If we refreshed the token, update the cookie
                                 # so subsequent requests use the new token.
                                 if access_token != request.cookies.get("access_token"):
+                                    from app.gateway.csrf_middleware import is_secure_request
+
+                                    is_https = is_secure_request(request)
                                     response.set_cookie(
                                         key="access_token",
                                         value=access_token,
                                         path="/",
                                         httponly=True,
-                                        secure=True,
-                                        samesite="none",
+                                        secure=is_https,
+                                        samesite="none" if is_https else "lax",
                                     )
                                 return response
                             finally:

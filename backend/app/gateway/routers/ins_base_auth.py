@@ -52,21 +52,22 @@ def _set_session_cookie(response: Response, token_value: str, request: Request) 
         value=token_value,
         path="/",
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=is_https,
+        samesite="none" if is_https else "lax",
         max_age=config.token_expiry_days * 24 * 3600,
     )
 
 
 def _set_refresh_cookie(response: Response, refresh_value: str, request: Request) -> None:
     """Set the refresh_token HttpOnly cookie on the response."""
+    is_https = is_secure_request(request)
     response.set_cookie(
         key="refresh_token",
         value=refresh_value,
         path="/",
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=is_https,
+        samesite="none" if is_https else "lax",
         max_age=7 * 24 * 3600,
     )
 
