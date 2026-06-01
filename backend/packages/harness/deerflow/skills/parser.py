@@ -18,18 +18,24 @@ def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> st
     source_lines = source.splitlines()
     if mark is not None and 0 <= mark.line < len(source_lines):
         offending = source_lines[mark.line]
-        lines.append(f"  line {mark.line + 1}: {offending}")
+
+        # mark.line is 0-based within the front-matter body; +1 makes it
+        # 1-based, +1 more accounts for the leading `---` fence that the
+        # front-matter regex strips before yaml.safe_load sees it. The
+        # result matches the line number an author sees in their editor.
+        file_line_number = mark.line + 2
+        lines.append(f"  line {file_line_number}: {offending}")
 
         # Targeted hint for the most common authoring mistake: an unquoted
         # scalar value whose body contains ``: ``. We only surface the hint
         # when we are confident it applies, to avoid misleading authors who
         # hit unrelated YAML errors.
-        if "mapping values are not allowed" in str(exc) and ":" in offending:
+        if getattr(exc, "problem", "") == "mapping values are not allowed here" and ":" in offending:
             key, _, value = offending.partition(":")
             value = value.strip()
             if value and value[0] not in {'"', "'", "|", ">", "[", "{"}:
                 escaped = value.replace('"', '\\"')
-                lines.append(f'  hint: values containing ":" must be quoted, e.g. {key.strip()}: "{escaped}"')
+                lines.append(f'  hint: values containing ":" must be quoted, e.g. {key}: "{escaped}"')
 
     return "\n".join(lines)
 

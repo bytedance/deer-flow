@@ -165,16 +165,27 @@ def test_parse_nonexistent_file_returns_none(tmp_path):
 
 
 def test_parse_unquoted_colon_value_logs_line_and_hint(tmp_path, caplog):
-    """Unquoted value with ': ' produces a log that includes the offending line and a fix hint.
+    """Unquoted value with ': ' produces a log that exposes the full offending line
+    (PyYAML truncates long lines with `...`) and a copy-pasteable quoting hint.
 
     Regression for issue #3333: SKILL.md authored by an LLM frequently
     contains ``description: foo: bar`` which PyYAML rejects with
     ``mapping values are not allowed here``. The skill is correctly skipped
-    (the file is not silently accepted), but the error log must point the
-    author at the exact line and how to quote it.
+    (the file is not silently accepted). Before this change the only
+    diagnostic was PyYAML's own message, which (a) numbers lines within
+    the front-matter body rather than the file and (b) truncates long
+    values with '...'. The new behaviour pins:
+      * the line number an author sees in their editor (file-line, not
+        front-matter-line),
+      * the *full* offending line (no '...' truncation), and
+      * a copy-pasteable `key: "value"` hint.
     """
 
-    front_matter = "name: collect-startrun\ndescription: StarRun collector: progress, errors, tables out"
+    # The description value is intentionally long enough to trigger
+    # PyYAML's own '...' truncation in the rendered str(exc); our hint
+    # must echo the *full* value regardless.
+    long_value = "StarRun collector: progress, errors, tables out, plus assorted diagnostic notes"
+    front_matter = f"name: collect-startrun\ndescription: {long_value}"
     skill_file = _write_skill(tmp_path, front_matter)
 
     with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
@@ -183,10 +194,46 @@ def test_parse_unquoted_colon_value_logs_line_and_hint(tmp_path, caplog):
     assert skill is None
     combined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "Invalid YAML front-matter" in combined
-    # The offending source line is echoed back to the author.
-    assert "StarRun collector: progress" in combined
-    # The hint shows the canonical fix (quoted value).
-    assert 'description: "StarRun collector: progress, errors, tables out"' in combined
+
+    # 1. File-line, not front-matter-line. `description` is the 2nd line
+    #    of the front-matter body, which is line 3 of the file (line 1
+    #    is the leading `---` fence). Before this PR the log said
+    #    `line 2`, which sent authors to the wrong row.
+    assert f"line 3: description: {long_value}" in combined
+
+    # 2. The full value is preserved -- PyYAML's own message truncates
+    #    long values with '...', so the presence of the un-truncated tail
+    #    proves we are reading the source line ourselves, not echoing
+    #    PyYAML's snippet.
+    assert "plus assorted diagnostic notes" in combined
+    assert "..." not in [line for line in combined.splitlines() if line.startswith("  line ")][0]
+
+    # 3. The copy-pasteable quoting hint is the actually-new diagnostic.
+    assert f'hint: values containing ":" must be quoted, e.g. description: "{long_value}"' in combined
+
+
+def test_parse_unquoted_colon_value_preserves_nested_key_indent(tmp_path, caplog):
+    """Nested keys must keep their leading indentation in the quoting hint.
+
+    Regression guard for CR feedback on PR #3335: an earlier version of
+    the hint called ``key.strip()``, which turned ``  author: foo: bar``
+    into ``author: "foo: bar"``. Pasting that back under a parent mapping
+    silently moved the field to the top level. The hint must preserve
+    the original indentation so authors can copy-paste-fix in place.
+    """
+
+    # A two-space-indented nested key triggers the same scanner error,
+    # but its hint must keep the indentation.
+    front_matter = "name: nested-skill\nmetadata:\n  author: Jane: Doe"
+    skill_file = _write_skill(tmp_path, front_matter)
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(rec.getMessage() for rec in caplog.records)
+    # Two leading spaces in front of `author` are preserved.
+    assert 'hint: values containing ":" must be quoted, e.g.   author: "Jane: Doe"' in combined
 
 
 def test_parse_unrelated_yaml_error_omits_quoting_hint(tmp_path, caplog):
