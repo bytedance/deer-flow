@@ -30,8 +30,9 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from app.gateway.auth.models import UserResponse
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_closure_service
+from app.gateway.deps import get_closure_service, get_local_provider
 from deerflow.closed_loop.schemas import (
     ClosurePriority,
     ClosureSourceType,
@@ -297,3 +298,33 @@ async def notifications_summary(request: Request) -> NotificationsSummary:
         )
     except ClosureServiceError as e:
         _raise_for(e)
+
+
+# ---------------------------------------------------------------------------
+# Tenant users (for assignee selection)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/tenant-users",
+    response_model=list[UserResponse],
+    summary="List users in the current tenant for ticket assignment",
+)
+@require_permission("closure", "read")
+async def list_tenant_users_for_assignment(request: Request) -> list[UserResponse]:
+    tenant_id, _actor, _perms = _principal(request)
+    try:
+        provider = get_local_provider()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="User service not available")
+    users = await provider.list_users(tenant_id)
+    return [
+        UserResponse(
+            id=str(u.id),
+            email=u.email,
+            system_role=u.system_role,
+            needs_setup=u.needs_setup,
+            tenant_id=u.tenant_id,
+        )
+        for u in users
+    ]

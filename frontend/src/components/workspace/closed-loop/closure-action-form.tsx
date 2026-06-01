@@ -2,11 +2,21 @@
 
 import { useMemo, useState } from "react";
 
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useClosureTenantUsers } from "@/core/closed-loop";
 import type {
   ClosureAction,
   ClosureStatus,
   ClosureTicket,
+  TenantUser,
 } from "@/core/closed-loop";
 
 interface ActionDef {
@@ -33,6 +43,12 @@ const ACTIONS_BY_STATUS: Record<ClosureStatus, ActionDef[]> = {
   ],
   closed: [],
   rejected: [],
+};
+
+const ROLE_LABEL: Record<string, string> = {
+  superadmin: "超管",
+  tenant_admin: "租户管理员",
+  user: "用户",
 };
 
 function canVerify(systemRole: string | undefined): boolean {
@@ -62,6 +78,7 @@ export function ClosureActionForm({
 
   const [activeAction, setActiveAction] = useState<ClosureAction | null>(null);
   const [assignee, setAssignee] = useState("");
+  const [assigneeLabel, setAssigneeLabel] = useState("");
   const [summary, setSummary] = useState("");
   const [reason, setReason] = useState("");
 
@@ -76,6 +93,7 @@ export function ClosureActionForm({
   const reset = () => {
     setActiveAction(null);
     setAssignee("");
+    setAssigneeLabel("");
     setSummary("");
     setReason("");
   };
@@ -113,7 +131,6 @@ export function ClosureActionForm({
                 ? "bg-destructive text-destructive-foreground hover:opacity-90"
                 : "bg-muted text-foreground hover:bg-accent";
           if (a.action === "start") {
-            // start has no payload; submit immediately
             return (
               <button
                 key={a.action}
@@ -144,15 +161,15 @@ export function ClosureActionForm({
       </div>
 
       {activeAction === "assign" && (
-        <Inline
-          label="受理人 ID"
+        <AssigneeSelector
           value={assignee}
-          placeholder="输入受理人 user id"
-          required
-          onChange={setAssignee}
+          label={assigneeLabel}
+          onSelect={(id, label) => {
+            setAssignee(id);
+            setAssigneeLabel(label);
+          }}
           onSubmit={() => void handleSubmit("assign")}
           onCancel={reset}
-          submitLabel="派单"
           pending={pending}
         />
       )}
@@ -197,6 +214,129 @@ export function ClosureActionForm({
           pending={pending}
         />
       )}
+    </div>
+  );
+}
+
+function AssigneeSelector({
+  value,
+  label: _label,
+  onSelect,
+  onSubmit,
+  onCancel,
+  pending,
+}: {
+  value: string;
+  label: string;
+  onSelect: (id: string, label: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  pending: boolean;
+}) {
+  const { users, isLoading } = useClosureTenantUsers();
+  const [filter, setFilter] = useState("");
+
+  const filtered = useMemo(() => {
+    if (!filter.trim()) return users;
+    const q = filter.toLowerCase();
+    return users.filter(
+      (u) =>
+        u.email.toLowerCase().includes(q) ||
+        u.id.toLowerCase().includes(q) ||
+        (u.real_name ?? "").toLowerCase().includes(q) ||
+        (u.user_name ?? "").toLowerCase().includes(q),
+    );
+  }, [users, filter]);
+
+  const selectedUser = users.find((u) => u.id === value);
+  const disabled = pending || !value;
+
+  return (
+    <div className="bg-muted/30 rounded border p-2">
+      <label className="text-muted-foreground mb-1 block text-[11px]">
+        受理人
+      </label>
+
+      {selectedUser ? (
+        <div className="mb-2 flex items-center gap-2 rounded border bg-background px-2 py-1.5 text-xs">
+          <span className="flex-1">
+            {selectedUser.real_name ?? selectedUser.user_name ?? selectedUser.email}
+            <span className="text-muted-foreground ml-1.5">
+              ({selectedUser.email})
+            </span>
+          </span>
+          <span className="text-muted-foreground text-[10px]">
+            {ROLE_LABEL[selectedUser.system_role] ?? selectedUser.system_role}
+          </span>
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground text-xs"
+            onClick={() => {
+              onSelect("", "");
+              setFilter("");
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : (
+        <Command className="border" shouldFilter={false}>
+          <CommandInput
+            placeholder={isLoading ? "加载中…" : "搜索用户名或邮箱…"}
+            value={filter}
+            onValueChange={setFilter}
+          />
+          <CommandList>
+            <CommandEmpty>
+              {isLoading ? "加载中…" : "无匹配用户"}
+            </CommandEmpty>
+            <CommandGroup>
+              {filtered.map((u: TenantUser) => (
+                <CommandItem
+                  key={u.id}
+                  value={u.id}
+                  onSelect={() => {
+                    const displayLabel =
+                      u.real_name ?? u.user_name ?? u.email;
+                    onSelect(u.id, displayLabel);
+                    setFilter("");
+                  }}
+                  className="text-xs"
+                >
+                  <span className="flex-1">
+                    {u.real_name ?? u.user_name ?? u.email}
+                  </span>
+                  <span className="text-muted-foreground text-[10px]">
+                    {u.email}
+                  </span>
+                  <span className="text-muted-foreground text-[10px]">
+                    {ROLE_LABEL[u.system_role] ?? u.system_role}
+                  </span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      )}
+
+      <div className="mt-2 flex justify-end gap-2">
+        <button
+          type="button"
+          className="hover:bg-accent rounded border px-2 py-1 text-xs"
+          onClick={onCancel}
+          disabled={pending}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          className="bg-primary text-primary-foreground rounded px-3 py-1 text-xs disabled:opacity-50"
+          onClick={onSubmit}
+          disabled={disabled}
+        >
+          派单
+        </button>
+      </div>
     </div>
   );
 }

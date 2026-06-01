@@ -8,6 +8,7 @@ import type {
   ClosureTicketListResponse,
   CreateClosureTicketRequest,
   ListClosureTicketsParams,
+  TenantUser,
   TransitionClosureTicketRequest,
   UpdateClosureTicketRequest,
 } from "./types";
@@ -135,4 +136,14 @@ export async function getClosureNotificationsSummary(): Promise<ClosureNotificat
     throw new Error(`Failed to load summary: ${await _readError(res)}`);
   }
   return res.json() as Promise<ClosureNotificationsSummary>;
+}
+
+export async function listClosureTenantUsers(): Promise<TenantUser[]> {
+  const res = await fetchGateway(
+    `${getBackendBaseURL()}/api/closure/tenant-users`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to load tenant users: ${await _readError(res)}`);
+  }
+  return res.json() as Promise<TenantUser[]>;
 }

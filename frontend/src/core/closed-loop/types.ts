@@ -133,3 +133,13 @@ export interface TransitionClosureTicketRequest {
   action: ClosureAction;
   payload?: Record<string, unknown>;
 }
+
+export interface TenantUser {
+  id: string;
+  email: string;
+  system_role: "superadmin" | "tenant_admin" | "user";
+  needs_setup: boolean;
+  tenant_id: string;
+  user_name?: string;
+  real_name?: string;
+}

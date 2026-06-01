@@ -5,6 +5,7 @@ import {
   getClosureNotificationsSummary,
   getClosureTicket,
   listClosureTicketEvents,
+  listClosureTenantUsers,
   listClosureTickets,
   transitionClosureTicket,
   updateClosureTicket,
@@ -13,6 +14,7 @@ import type {
   ClosureTicket,
   CreateClosureTicketRequest,
   ListClosureTicketsParams,
+  TenantUser,
   TransitionClosureTicketRequest,
   UpdateClosureTicketRequest,
 } from "./types";
@@ -26,6 +28,7 @@ export const closureQueryKeys = {
   detail: (id: string) => [QUERY_KEY_ROOT, "detail", id] as const,
   events: (id: string) => [QUERY_KEY_ROOT, "events", id] as const,
   summary: () => [QUERY_KEY_ROOT, "summary"] as const,
+  tenantUsers: () => [QUERY_KEY_ROOT, "tenant-users"] as const,
 };
 
 export function useClosureTickets(params?: ListClosureTicketsParams) {
@@ -143,4 +146,17 @@ export function useTransitionClosureTicket() {
       void queryClient.invalidateQueries({ queryKey: [QUERY_KEY_ROOT] });
     },
   });
+}
+
+export function useClosureTenantUsers() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: closureQueryKeys.tenantUsers(),
+    queryFn: () => listClosureTenantUsers(),
+    staleTime: 60_000,
+  });
+  return {
+    users: data ?? [] as TenantUser[],
+    isLoading,
+    error,
+  };
 }
