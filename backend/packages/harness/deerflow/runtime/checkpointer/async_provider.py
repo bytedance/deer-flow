@@ -75,8 +75,8 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
         async with AsyncConnectionPool(
             config.connection_string,
-            min_size=2,
-            max_size=10,
+            min_size=1,
+            max_size=5,
             max_lifetime=1800.0,
             max_idle=300.0,
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
@@ -130,8 +130,8 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
         async with AsyncConnectionPool(
             db_config.postgres_url,
-            min_size=2,
-            max_size=10,
+            min_size=1,
+            max_size=5,
             max_lifetime=1800.0,
             max_idle=300.0,
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},

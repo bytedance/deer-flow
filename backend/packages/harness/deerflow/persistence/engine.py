@@ -113,6 +113,7 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
+    max_overflow: int = 5,
     sqlite_dir: str = "",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
@@ -122,6 +123,7 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
+        max_overflow: Maximum overflow connections beyond pool_size (postgres only).
         sqlite_dir: Directory to create for SQLite (ensured to exist).
     """
     global _engine, _session_factory
@@ -170,6 +172,7 @@ async def init_engine(
             url,
             echo=echo,
             pool_size=pool_size,
+            max_overflow=max_overflow,
             pool_pre_ping=True,
             json_serializer=_json_serializer,
         )
@@ -199,7 +202,7 @@ async def init_engine(
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database
             await _engine.dispose()
-            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, pool_pre_ping=True, json_serializer=_json_serializer)
+            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, max_overflow=max_overflow, pool_pre_ping=True, json_serializer=_json_serializer)
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
             async with _engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
@@ -228,6 +231,7 @@ async def init_engine_from_config(config) -> None:
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
+        max_overflow=config.max_overflow,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
     )
 

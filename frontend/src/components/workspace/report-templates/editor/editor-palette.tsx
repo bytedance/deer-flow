@@ -30,11 +30,6 @@ export function EditorPalette() {
         },
         { type: "date", label: t.editor.datePicker, icon: FormInput },
         {
-          type: "device-selector",
-          label: t.editor.deviceSelector,
-          icon: FormInput,
-        },
-        {
           type: "device-selector-multi",
           label: t.editor.deviceMultiSelect,
           icon: FormInput,

@@ -18,12 +18,17 @@ export interface FormField {
 export interface FormStep {
   id: string;
   title: string;
+  component?: "form" | "device-selector-multi";
   fields: FormField[];
   next?: string;
   before_step?: {
     script: string;
     args?: Record<string, unknown>;
   };
+  device_filter?: {
+    type_id_from?: string;
+  };
+  max_select?: number;
 }
 
 export interface DataStep {

@@ -1,6 +1,6 @@
 name: ai-report--custom
-display_name: "自定义模板"
-description: "按需定制报告格式"
+display_name: "报告中心"
+description: "选择模板生成报告，或创建和定制报告模板"
 icon: "📝"
 parent: ai-report
 order: 8

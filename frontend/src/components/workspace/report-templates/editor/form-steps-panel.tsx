@@ -32,17 +32,16 @@ const FORM_FIELD_TYPES = new Set([
   "select",
   "multi-select",
   "date",
-  "device-selector",
-  "device-selector-multi",
 ]);
+
+/** Step-level component types — these convert the whole step, not add a field. */
+const STEP_COMPONENT_TYPES = new Set(["device-selector-multi"]);
 
 function createDefaultField(
   type: string,
   labels: {
     selectInput: string;
     multiSelectInput: string;
-    deviceSelector: string;
-    deviceMultiSelect: string;
     datePicker: string;
     textInput: string;
     optionOne: string;
@@ -73,22 +72,6 @@ function createDefaultField(
           { label: labels.optionOne, value: "option_1" },
           { label: labels.optionTwo, value: "option_2" },
         ],
-      };
-    case "device-selector":
-      return {
-        name,
-        type,
-        label: labels.deviceSelector,
-        required: false,
-        searchable: true,
-      };
-    case "device-selector-multi":
-      return {
-        name,
-        type,
-        label: labels.deviceMultiSelect,
-        required: false,
-        searchable: true,
       };
     case "date":
       return { name, type, label: labels.datePicker, required: false };
@@ -134,7 +117,40 @@ export function FormStepsPanel({
       setDragOverStepId(null);
 
       const type = event.dataTransfer.getData("application/template-component");
-      if (!type || !FORM_FIELD_TYPES.has(type)) return;
+      if (!type || (!FORM_FIELD_TYPES.has(type) && !STEP_COMPONENT_TYPES.has(type))) return;
+
+      // Step-level components: upgrade the whole step instead of adding a field.
+      if (STEP_COMPONENT_TYPES.has(type)) {
+        if (targetStepId) {
+          onUpdate((prev) =>
+            prev.map((step) =>
+              step.id === targetStepId
+                ? { ...step, component: type as "device-selector-multi", fields: [] }
+                : step,
+            ),
+          );
+          onSelect(targetStepId);
+          return;
+        }
+
+        const newId = `step_${Date.now().toString(36)}`;
+        const newStep: FormStep = {
+          id: newId,
+          title: `${t.editor.stepDefaultTitle} ${(steps.length ?? 0) + 1}`,
+          component: type as "device-selector-multi",
+          fields: [],
+        };
+
+        onUpdate((prev) => {
+          const updated = [...prev, newStep];
+          return updated.map((step, index) => ({
+            ...step,
+            next: index < updated.length - 1 ? updated[index + 1]!.id : undefined,
+          }));
+        });
+        onSelect(newId);
+        return;
+      }
 
       const newField = createDefaultField(type, t.editor);
 

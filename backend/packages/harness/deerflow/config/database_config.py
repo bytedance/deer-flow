@@ -74,6 +74,10 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    max_overflow: int = Field(
+        default=5,
+        description="Maximum overflow connections beyond pool_size (postgres only). Total connections per process = pool_size + max_overflow.",
+    )
 
     # -- Derived helpers (not user-configured) --
 

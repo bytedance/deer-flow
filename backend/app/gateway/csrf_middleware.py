@@ -45,6 +45,8 @@ def should_check_csrf(request: Request) -> bool:
 
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
     {
+        "/api/auth/login",
+        "/api/auth/refresh",
         "/api/v1/auth/ins-base/login",
         "/api/v1/auth/ins-base/refresh",
         "/api/v1/auth/ins-base/authenticate",
@@ -81,6 +83,14 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 header_token = request.headers.get(CSRF_HEADER_NAME)
 
                 if not cookie_token or not header_token:
+                    # Bootstrap: already-authenticated users who lack a CSRF
+                    # cookie (e.g. sessions created before the login endpoint
+                    # was added to _AUTH_EXEMPT_PATHS) get a one-time auto-
+                    # generated token instead of a hard 403.
+                    if _has_session_cookie(request):
+                        response = await call_next(request)
+                        _set_csrf_cookie(request, response)
+                        return response
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
@@ -96,19 +106,34 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         # For auth endpoints that set up session, also set CSRF cookie
         if _is_auth and request.method == "POST":
-            # Generate a new CSRF token for the session
-            csrf_token = generate_csrf_token()
-            is_https = is_secure_request(request)
-            response.set_cookie(
-                key=CSRF_COOKIE_NAME,
-                value=csrf_token,
-                path="/",
-                httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
-                secure=is_https,
-                samesite="strict",
-            )
+            _set_csrf_cookie(request, response)
 
         return response
+
+
+def _has_session_cookie(request: Request) -> bool:
+    """Return True when the request carries a recognised session cookie.
+
+    Used to bootstrap a CSRF token for already-authenticated users whose
+    login happened before the CSRF cookie was wired into the auth endpoints.
+    """
+    return (
+        request.cookies.get("access_token") is not None
+        or request.headers.get("Authorization", "").startswith("Bearer ")
+    )
+
+
+def _set_csrf_cookie(request: Request, response: Response) -> None:
+    """Generate a fresh CSRF token and attach it to the response."""
+    csrf_token = generate_csrf_token()
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        path="/",
+        httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
+        secure=is_secure_request(request),
+        samesite="strict",
+    )
 
 
 def get_csrf_token(request: Request) -> str | None:

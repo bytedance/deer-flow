@@ -14,6 +14,8 @@ database:
 
   # PostgreSQL 配置（backend: postgres 时生效）
   postgres_url: $POSTGRES_URL
+  pool_size: 5
+  max_overflow: 5
 auth:
   enabled: true
   rsa_public_key: $RSA_PUBLIC
