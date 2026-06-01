@@ -2,10 +2,25 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  buildRunMessagesUrl,
+  getNextRunMessagesBeforeSeq,
+  getOldestRunMessageSeq,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
   mergeMessages,
+  runMessagesPageHasMore,
 } from "@/core/threads/hooks";
+import type { RunMessage } from "@/core/threads/types";
+
+function runMessage(seq?: number): RunMessage {
+  return {
+    run_id: "run-1",
+    ...(seq === undefined ? {} : { seq }),
+    content: {} as Message,
+    metadata: { caller: "" },
+    created_at: "2026-05-22T00:00:00Z",
+  };
+}
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {
@@ -253,4 +268,60 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], has_more: true })).toBe(true);
+  expect(runMessagesPageHasMore({ data: [], has_more: false })).toBe(false);
+});
+
+test("runMessagesPageHasMore keeps compatibility with camelCase pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], hasMore: true })).toBe(true);
+});
+
+test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
+  expect(
+    getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
+  ).toBe(8);
+});
+
+test("getOldestRunMessageSeq ignores rows without seq", () => {
+  expect(getOldestRunMessageSeq([runMessage()])).toBeNull();
+});
+
+test("getNextRunMessagesBeforeSeq keeps runs pending when has_more lacks seq", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: true }),
+  ).toBeUndefined();
+});
+
+test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: false }),
+  ).toBeNull();
+});
+
+test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
+  expect(
+    buildRunMessagesUrl(
+      "https://api.example.test/",
+      "thread/with space",
+      "run?one",
+      18,
+    ),
+  ).toBe(
+    "https://api.example.test/api/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
+  );
+});
+
+test("buildRunMessagesUrl omits before_seq when loading the latest page", () => {
+  expect(
+    buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
+  ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
+});
+
+test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
+  expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
+    "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
+  );
 });
