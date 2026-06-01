@@ -4,6 +4,7 @@ description: "擅长设备状态趋势分析、异常检测、KPI健康评估和
 icon: "📊"
 order: 3
 model: null
+plan_mode: true
 tool_groups:
   - bash
   - monitoring:pro

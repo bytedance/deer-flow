@@ -511,6 +511,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_co
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
+    # Agent-level plan_mode default: when the user hasn't explicitly enabled plan mode
+    # via the mode selector, respect the agent's own plan_mode preference.
+    if not is_plan_mode and agent_config and agent_config.plan_mode:
+        is_plan_mode = True
+        if "context" not in config:
+            config["context"] = {}
+        if isinstance(config.get("context"), dict):
+            config["context"]["is_plan_mode"] = True
+        if isinstance(config.get("configurable"), dict):
+            config["configurable"]["is_plan_mode"] = True
+
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=app_config)
 

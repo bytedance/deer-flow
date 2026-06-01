@@ -104,6 +104,18 @@ class TestAgentConfig:
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
 
+    def test_plan_mode_defaults_to_false(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(name="test-agent")
+        assert cfg.plan_mode is False
+
+    def test_plan_mode_explicit_true(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(name="test-agent", plan_mode=True)
+        assert cfg.plan_mode is True
+
 
 # ===========================================================================
 # 3. load_agent_config

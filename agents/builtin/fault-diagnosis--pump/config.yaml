@@ -5,6 +5,7 @@ icon: "💧"
 parent: fault-diagnosis
 order: 1
 model: null
+plan_mode: true
 tool_groups:
   - bash
 exclude_tools: []

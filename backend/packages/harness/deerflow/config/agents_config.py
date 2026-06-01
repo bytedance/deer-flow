@@ -73,6 +73,7 @@ class AgentConfig(BaseModel):
     starters: list[StarterConfig] | None = None
     nav_items: list[NavItem] | None = None
     advanced: dict[str, Any] | None = None
+    plan_mode: bool = False
 
 
 class AgentInfo(BaseModel):

@@ -410,3 +410,69 @@ def test_memory_middleware_uses_explicit_memory_config_without_global_read(monke
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
 
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None
+
+
+def test_agent_config_plan_mode_default_overrides_runtime(monkeypatch):
+    """When agent config has plan_mode=true, it enables todo even if runtime says false."""
+    from deerflow.config.agents_config import AgentConfig
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    agent_config = AgentConfig(name="test-agent", plan_mode=True)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda agent_name, tenant_id=None: agent_config)
+
+    captured_build_config: dict[str, object] = {}
+
+    def _capture_build_middlewares(config, model_name, agent_name=None, **kwargs):
+        captured_build_config["config"] = config
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", _capture_build_middlewares)
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        app_config=app_config,
+    )
+
+    cfg = lead_agent_module._get_runtime_config(captured_build_config["config"])
+    assert cfg.get("is_plan_mode") is True
+
+
+def test_agent_config_plan_mode_false_leaves_runtime_unchanged(monkeypatch):
+    """When agent config has plan_mode=false (default), runtime is_plan_mode=false stays false."""
+    from deerflow.config.agents_config import AgentConfig
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    agent_config = AgentConfig(name="test-agent", plan_mode=False)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda agent_name, tenant_id=None: agent_config)
+
+    captured_build_config: dict[str, object] = {}
+
+    def _capture_build_middlewares(config, model_name, agent_name=None, **kwargs):
+        captured_build_config["config"] = config
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", _capture_build_middlewares)
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        app_config=app_config,
+    )
+
+    cfg = lead_agent_module._get_runtime_config(captured_build_config["config"])
+    assert cfg.get("is_plan_mode") is False

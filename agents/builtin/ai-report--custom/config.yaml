@@ -5,6 +5,7 @@ icon: "📝"
 parent: ai-report
 order: 8
 model: null
+plan_mode: true
 tool_groups:
   - bash
 mcp_servers: null
