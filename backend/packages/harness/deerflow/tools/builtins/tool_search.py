@@ -10,10 +10,12 @@ Source-agnostic: no mention of MCP or tool origin.
 """
 
 import contextvars
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass
+from functools import cached_property
 
 from langchain.tools import BaseTool
 from langchain_core.tools import tool
@@ -25,6 +27,56 @@ MAX_RESULTS = 5  # Max tools returned per search
 
 
 # ── Registry ──
+
+
+@dataclass(frozen=True)
+class DeferredToolCatalog:
+    """Immutable catalog of deferred tools. Pure search, no mutation."""
+
+    tools: tuple[BaseTool, ...]
+
+    @cached_property
+    def names(self) -> frozenset[str]:
+        return frozenset(t.name for t in self.tools)
+
+    @cached_property
+    def hash(self) -> str:
+        canon = [{"name": t.name, "schema": convert_to_openai_function(t)} for t in sorted(self.tools, key=lambda t: t.name)]
+        blob = json.dumps(canon, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    def search(self, query: str) -> list[BaseTool]:
+        if query.startswith("select:"):
+            wanted = {n.strip() for n in query[7:].split(",")}
+            return [t for t in self.tools if t.name in wanted][:MAX_RESULTS]
+
+        if query.startswith("+"):
+            parts = query[1:].split(None, 1)
+            required = parts[0].lower()
+            candidates = [t for t in self.tools if required in t.name.lower()]
+            if len(parts) > 1:
+                candidates.sort(key=lambda t: _catalog_regex_score(parts[1], t), reverse=True)
+            return candidates[:MAX_RESULTS]
+
+        try:
+            regex = re.compile(query, re.IGNORECASE)
+        except re.error:
+            regex = re.compile(re.escape(query), re.IGNORECASE)
+        scored: list[tuple[int, BaseTool]] = []
+        for t in self.tools:
+            searchable = f"{t.name} {t.description or ''}"
+            if regex.search(searchable):
+                scored.append((2 if regex.search(t.name) else 1, t))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [t for _, t in scored][:MAX_RESULTS]
+
+
+def _catalog_regex_score(pattern: str, t: BaseTool) -> int:
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        regex = re.compile(re.escape(pattern), re.IGNORECASE)
+    return len(regex.findall(f"{t.name} {t.description or ''}"))
 
 
 @dataclass
