@@ -484,10 +484,17 @@ def run_script(
     output_path_strs: dict[str, str] = {}
     for output_id, path in output_paths.items():
         if not path.exists():
+            stdout_error = _parse_structured_error(completed.stdout) or {}
+            stdout_excerpt = completed.stdout[-2048:] if completed.stdout else ""
             raise ScriptExecutionError(
                 script=script_qualified_name,
                 code="OUTPUT_MISSING",
                 message=f"script did not produce declared output {output_id!r} at {path}",
+                details={
+                    "stdout_error": stdout_error.get("error") if stdout_error else None,
+                    "stdout_excerpt": stdout_excerpt,
+                    "stderr_excerpt": completed.stderr[-2048:] if completed.stderr else "",
+                },
             )
         size = path.stat().st_size
         if size > descriptor.max_output_bytes:

@@ -65,6 +65,13 @@ def _output_dir() -> Path:
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
+def _runtime_data_dir(output_dir: str | None) -> Path | None:
+    """Map runtime ``--output-dir`` roots to the platform's ``data/`` subdir."""
+    if not output_dir:
+        return None
+    return Path(output_dir) / "data"
+
+
 def fetch_day(
     date_str: str,
     equipment_ids: list[str],
@@ -173,8 +180,8 @@ def build_result(
     return result
 
 
-def write_payload(result: dict) -> Path:
-    out_dir = _output_dir()
+def write_payload(result: dict, output_dir: Path | None = None) -> Path:
+    out_dir = output_dir or _output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / OUTPUT_FILENAME
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -204,6 +211,11 @@ def main() -> int:
     parser.add_argument("--type", default="all", help="Equipment type filter")
     parser.add_argument("--scope", default=None, help="Scope: all/area/specific")
     parser.add_argument("--scope-filter", default="", help="Area names or equipment IDs for scope")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional runtime output root; payload is written under <output-dir>/data/",
+    )
     args = parser.parse_args()
 
     try:
@@ -267,7 +279,7 @@ def main() -> int:
             return error_output(kpi_error)
 
         result = build_result(args.date, equipment_ids, kpi_keys, args.compare, eq_type, include_per_equipment, is_scope_mode, equipment_meta)
-        out_path = write_payload(result)
+        out_path = write_payload(result, _runtime_data_dir(args.output_dir))
         print(json.dumps({"output": str(out_path), "report_date": result["report_date"]}, ensure_ascii=False))
         return 0
     except Exception as exc:  # noqa: BLE001 - report to stdout per Skill convention

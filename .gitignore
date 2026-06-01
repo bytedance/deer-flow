@@ -51,6 +51,9 @@ debug.log
 # Local probe / scratch scripts
 tmp_probe/
 
+# Report template run artifacts
+**/runs/
+
 # recall_l2 evaluation run outputs (baseline.json is tracked, run-* are local artifacts)
 backend/tests/recall_l2/reports/run-*.json
 

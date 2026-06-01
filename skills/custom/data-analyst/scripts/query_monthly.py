@@ -164,6 +164,13 @@ def _output_dir() -> Path:
     )
 
 
+def _runtime_data_dir(output_dir: str | None) -> Path | None:
+    """Map runtime ``--output-dir`` roots to the platform's ``data/`` subdir."""
+    if not output_dir:
+        return None
+    return Path(output_dir) / "data"
+
+
 def _build_week_buckets(month_start: str, day_count: int) -> list[dict]:
     """Month-anchored 7-day buckets. W1 from month_start, W5 truncates at month_end.
 
@@ -523,8 +530,8 @@ def build_result(
     return result
 
 
-def write_payload(result: dict) -> Path:
-    out_dir = _output_dir()
+def write_payload(result: dict, output_dir: Path | None = None) -> Path:
+    out_dir = output_dir or _output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / OUTPUT_FILENAME
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -559,6 +566,11 @@ def main() -> int:
         "--include-daily",
         action="store_true",
         help="Reserved for V2 trend analysis; MVP keeps daily series internal only",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional runtime output root; payload is written under <output-dir>/data/",
     )
     args = parser.parse_args()
 
@@ -629,7 +641,7 @@ def main() -> int:
         # knows to derive mtbf/mttr/target_rate even though the query layer
         # didn't pull them from the daily series.
         result["kpi_keys"] = kpi_keys
-        out_path = write_payload(result)
+        out_path = write_payload(result, _runtime_data_dir(args.output_dir))
         print(
             json.dumps(
                 {

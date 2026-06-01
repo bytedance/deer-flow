@@ -48,6 +48,7 @@ class ReportRunErrorCode:
 # ---------------------------------------------------------------------------
 
 _TEMPLATE_ID_RE = re.compile(r"^tpl_[A-Z0-9]{20,32}$")
+_BUILTIN_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 _REPORT_RUN_ID_RE = re.compile(r"^rr_[A-Z0-9]{20,32}$")
 _USER_TENANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -289,7 +290,12 @@ class ReportRunRecord(BaseModel):
     @field_validator("template_id")
     @classmethod
     def _check_template_id(cls, v: str) -> str:
-        return validate_template_id(v)
+        if _TEMPLATE_ID_RE.fullmatch(v) or _BUILTIN_NAME_RE.fullmatch(v):
+            return v
+        raise ValueError(
+            f"template_id {v!r} must match {_TEMPLATE_ID_RE.pattern!r} (ULID-style) "
+            f"or {_BUILTIN_NAME_RE.pattern!r} (builtin name)"
+        )
 
     @field_validator("user_id", "tenant_id")
     @classmethod
