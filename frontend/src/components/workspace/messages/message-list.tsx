@@ -20,15 +20,10 @@ import { partitionStandaloneBlockIds, isSubmittedBlock, filterSupersededInteract
 import { useI18n } from "@/core/i18n/hooks";
 import { useAgent } from "@/core/agents";
 import {
-  buildTokenDebugSteps,
-  type TokenUsageInlineMode,
-} from "@/core/messages/usage-model";
-import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractReasoningContentFromMessage,
   extractTextFromMessage,
-  getAssistantTurnUsageMessages,
   getMessageGroups,
   hasContent,
   hasPresentFiles,
@@ -50,10 +45,6 @@ import { GenerationProcessPanel } from "./generation-process-panel";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
-import {
-  MessageTokenUsageDebugList,
-  MessageTokenUsageList,
-} from "./message-token-usage";
 import { RetrievalSources } from "./retrieval-sources";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
@@ -194,7 +185,6 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-  tokenUsageInlineMode = "off",
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
@@ -204,7 +194,6 @@ export function MessageList({
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
-  tokenUsageInlineMode?: TokenUsageInlineMode;
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
@@ -262,11 +251,6 @@ export function MessageList({
       ),
     [blocks, resolvedBlockHistory.duplicatedRawBlockIds],
   );
-  const tokenDebugSteps = useMemo(
-    () => buildTokenDebugSteps(messages, t),
-    [messages, t],
-  );
-
   const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
   const preStreamBlockIdsRef = useRef<Set<string>>(new Set());
   const [liveStreamMessageKeys, setLiveStreamMessageKeys] = useState<
@@ -377,8 +361,6 @@ export function MessageList({
     () => getMessageGroups(visibleMessages, thread.isLoading),
     [visibleMessages, thread.isLoading],
   );
-  const turnUsageMessagesByGroupIndex =
-    getAssistantTurnUsageMessages(groupedMessages);
   const claimedBlockIds = useMemo(() => {
     const ids: string[] = [];
     for (const group of groupedMessages) {
@@ -844,52 +826,6 @@ export function MessageList({
     );
   }, []);
 
-  const renderTokenUsage = useCallback(
-    ({
-      messages,
-      turnUsageMessages,
-      inlineDebug = true,
-      debugMessageIds,
-    }: {
-      messages: Message[];
-      turnUsageMessages?: Message[] | null;
-      inlineDebug?: boolean;
-      debugMessageIds?: string[];
-    }) => {
-      if (tokenUsageInlineMode === "per_turn") {
-        return (
-          <MessageTokenUsageList
-            enabled={true}
-            isLoading={thread.isLoading}
-            messages={turnUsageMessages ?? []}
-          />
-        );
-      }
-
-      if (tokenUsageInlineMode === "step_debug" && inlineDebug) {
-        const messageIds = new Set(
-          debugMessageIds ??
-            messages
-              .filter((message) => message.type === "ai")
-              .map((message) => message.id)
-              .filter((id): id is string => typeof id === "string"),
-        );
-        return (
-          <MessageTokenUsageDebugList
-            enabled={true}
-            isLoading={thread.isLoading}
-            steps={tokenDebugSteps.filter((step) =>
-              messageIds.has(step.messageId),
-            )}
-          />
-        );
-      }
-
-      return null;
-    },
-    [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
-  );
-
   const handleInteraction = useCallback(
     (
       callbackId: string,
@@ -998,25 +934,13 @@ export function MessageList({
                     <div className="flex flex-col gap-3">
                       {item.groups.map((pg, pgOffset) => {
                         const origIndex = item.startIndex + pgOffset;
-                        const turnUsageMessages = turnUsageMessagesByGroupIndex[origIndex];
 
                         return (
                           <div key={`${origIndex}-processing-${pg.id}`} className="w-full">
                             <MessageGroup
                               messages={pg.messages}
                               isLoading={thread.isLoading}
-                              tokenDebugSteps={tokenDebugSteps.filter((step) =>
-                                pg.messages.some(
-                                  (message) => message.id === step.messageId,
-                                ),
-                              )}
-                              showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
                             />
-                            {renderTokenUsage({
-                              messages: pg.messages,
-                              turnUsageMessages,
-                              inlineDebug: false,
-                            })}
                           </div>
                         );
                       })}
@@ -1063,7 +987,6 @@ export function MessageList({
             return null;
           }
 
-          const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
           const previousItem = itemIndex > 0 ? renderItems[itemIndex - 1] : null;
           const previousGroup =
             previousItem?.type === "group"
@@ -1145,10 +1068,6 @@ export function MessageList({
                     />
                   );
                 })}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                })}
                 {group.type === "assistant" && (
                   <RetrievalSources messages={messages} />
                 )}
@@ -1166,10 +1085,6 @@ export function MessageList({
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
                   />
-                  {renderTokenUsage({
-                    messages: group.messages,
-                    turnUsageMessages,
-                  })}
                 </div>
               );
             }
@@ -1192,10 +1107,6 @@ export function MessageList({
                   />
                 )}
                 <ArtifactFileList files={files} threadId={threadId} />
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                })}
               </div>
             );
           } else if (group.type === "assistant:subagent") {
@@ -1270,12 +1181,6 @@ export function MessageList({
                     key={"thinking-group-" + message.id}
                     messages={[message]}
                     isLoading={thread.isLoading}
-                    tokenDebugSteps={tokenDebugSteps.filter(
-                      (step) => step.messageId === message.id,
-                    )}
-                    showTokenDebugSummaries={
-                      tokenUsageInlineMode === "step_debug"
-                    }
                   />,
                 );
               } else if (message.id) {
@@ -1300,11 +1205,6 @@ export function MessageList({
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                  debugMessageIds: subagentDebugMessageIds,
-                })}
               </div>
             );
           } else if (group.type === "assistant:processing") {
@@ -1317,12 +1217,6 @@ export function MessageList({
                 <MessageGroup
                   messages={group.messages}
                   isLoading={thread.isLoading}
-                  tokenDebugSteps={tokenDebugSteps.filter((step) =>
-                    group.messages.some(
-                      (message) => message.id === step.messageId,
-                    ),
-                  )}
-                  showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
                 />
                 {blockIds.length > 0 && (
                   <GenUIBlockList
@@ -1337,11 +1231,6 @@ export function MessageList({
                     onInteraction={handleInteraction}
                   />
                 )}
-                {renderTokenUsage({
-                  messages: group.messages,
-                  turnUsageMessages,
-                  inlineDebug: false,
-                })}
               </div>
             );
           }

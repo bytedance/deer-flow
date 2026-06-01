@@ -5,7 +5,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
-import { MemoryTrigger } from "@/components/workspace/memory-trigger";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import {
   ChatBox,
@@ -30,11 +29,9 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
-import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
 import { useGreeting } from "@/core/greeting/use-greeting";
 import { useI18n } from "@/core/i18n/hooks";
-import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -49,7 +46,6 @@ export default function ChatPage() {
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
-  const { tokenUsageEnabled } = useModels();
   const mountedRef = useRef(false);
   useSpecificChatMode();
 
@@ -135,9 +131,6 @@ export default function ChatPage() {
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
-  const tokenUsageInlineMode = tokenUsageEnabled
-    ? localSettings.tokenUsage.inlineMode
-    : "off";
 
   return (
     <>
@@ -158,16 +151,7 @@ export default function ChatPage() {
             </div>
             <div className="flex items-center gap-2">
               <TodoCountIndicator />
-              <TokenUsageIndicator
-                enabled={tokenUsageEnabled}
-                messages={thread.messages}
-                preferences={localSettings.tokenUsage}
-                onPreferencesChange={(preferences) =>
-                  setLocalSettings("tokenUsage", preferences)
-                }
-              />
               <ExportTrigger threadId={threadId} />
-              <MemoryTrigger threadId={threadId} />
               <ChatReportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -182,7 +166,6 @@ export default function ChatPage() {
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
-                tokenUsageInlineMode={tokenUsageInlineMode}
                 agentName={settings.context.agent_name as string | undefined}
               />
             </div>

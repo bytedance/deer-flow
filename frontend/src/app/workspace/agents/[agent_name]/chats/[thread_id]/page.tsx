@@ -27,11 +27,9 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
-import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
-import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
@@ -54,7 +52,6 @@ export default function AgentChatPage() {
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
-  const { tokenUsageEnabled } = useModels();
 
   const { showNotification } = useNotification();
   const {
@@ -137,9 +134,6 @@ export default function AgentChatPage() {
     ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
-  const tokenUsageInlineMode = tokenUsageEnabled
-    ? localSettings.tokenUsage.inlineMode
-    : "off";
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -182,14 +176,6 @@ export default function AgentChatPage() {
                   <PlusSquare /> {t.agents.newChat}
                 </Button>
               </Tooltip>
-              <TokenUsageIndicator
-                enabled={tokenUsageEnabled}
-                messages={thread.messages}
-                preferences={localSettings.tokenUsage}
-                onPreferencesChange={(preferences) =>
-                  setLocalSettings("tokenUsage", preferences)
-                }
-              />
               <ExportTrigger threadId={threadId} />
               <ChatReportTrigger threadId={threadId} />
               <ArtifactTrigger />
@@ -206,7 +192,6 @@ export default function AgentChatPage() {
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
-                tokenUsageInlineMode={tokenUsageInlineMode}
                 agentName={agent_name}
               />
             </div>
