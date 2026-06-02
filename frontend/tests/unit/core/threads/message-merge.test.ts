@@ -2,9 +2,25 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
+  buildRunMessagesUrl,
+  getNextRunMessagesBeforeSeq,
+  getOldestRunMessageSeq,
+  getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
   mergeMessages,
+  runMessagesPageHasMore,
 } from "@/core/threads/hooks";
+import type { RunMessage } from "@/core/threads/types";
+
+function runMessage(seq?: number): RunMessage {
+  return {
+    run_id: "run-1",
+    ...(seq === undefined ? {} : { seq }),
+    content: {} as Message,
+    metadata: { caller: "" },
+    created_at: "2026-05-22T00:00:00Z",
+  };
+}
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {
@@ -64,6 +80,104 @@ test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   } as Message;
 
   expect(mergeMessages([oldTool], [liveTool], [])).toEqual([liveTool]);
+});
+
+test("mergeMessages keeps a visible history message when a hidden live message reuses its id", () => {
+  const historyHuman = {
+    id: "human-1",
+    type: "human",
+    content: "visible user prompt",
+  } as Message;
+  const hiddenReminder = {
+    id: "human-1",
+    type: "human",
+    content: "<system-reminder>hidden</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const liveAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live answer",
+  } as Message;
+
+  expect(mergeMessages([historyHuman], [hiddenReminder, liveAi], [])).toEqual([
+    historyHuman,
+    liveAi,
+  ]);
+});
+
+test("mergeMessages lets a visible live message replace overlapping hidden history", () => {
+  const hiddenHistoryHuman = {
+    id: "human-1",
+    type: "human",
+    content: "<system-reminder>hidden</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const liveHuman = {
+    id: "human-1",
+    type: "human",
+    content: "visible user prompt",
+  } as Message;
+
+  expect(mergeMessages([hiddenHistoryHuman], [liveHuman], [])).toEqual([
+    liveHuman,
+  ]);
+});
+
+test("getSummarizationMiddlewareMessages matches DeerFlow summarization update keys", () => {
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+  const summary = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "summary",
+  } as Message;
+
+  expect(
+    getSummarizationMiddlewareMessages({
+      "DeerFlowSummarizationMiddleware.before_model": {
+        messages: [removeAll, summary],
+      },
+    }),
+  ).toEqual([removeAll, summary]);
+});
+
+test("getSummarizationMiddlewareMessages matches base LangChain summarization update keys", () => {
+  const summary = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "summary",
+  } as Message;
+
+  expect(
+    getSummarizationMiddlewareMessages({
+      "SummarizationMiddleware.before_model": {
+        messages: [summary],
+      },
+    }),
+  ).toEqual([summary]);
+});
+
+test("getSummarizationMiddlewareMessages ignores unrelated suffix-sharing update keys", () => {
+  const summary = {
+    id: "summary-1",
+    type: "human",
+    name: "summary",
+    content: "summary",
+  } as Message;
+
+  expect(
+    getSummarizationMiddlewareMessages({
+      "OtherSummarizationMiddleware.before_model": {
+        messages: [summary],
+      },
+    }),
+  ).toBeUndefined();
 });
 
 test("getVisibleOptimisticMessages hides optimistic user input after server human arrives", () => {
@@ -154,4 +268,60 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], has_more: true })).toBe(true);
+  expect(runMessagesPageHasMore({ data: [], has_more: false })).toBe(false);
+});
+
+test("runMessagesPageHasMore keeps compatibility with camelCase pagination field", () => {
+  expect(runMessagesPageHasMore({ data: [], hasMore: true })).toBe(true);
+});
+
+test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
+  expect(
+    getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
+  ).toBe(8);
+});
+
+test("getOldestRunMessageSeq ignores rows without seq", () => {
+  expect(getOldestRunMessageSeq([runMessage()])).toBeNull();
+});
+
+test("getNextRunMessagesBeforeSeq keeps runs pending when has_more lacks seq", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: true }),
+  ).toBeUndefined();
+});
+
+test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", () => {
+  expect(
+    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: false }),
+  ).toBeNull();
+});
+
+test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
+  expect(
+    buildRunMessagesUrl(
+      "https://api.example.test/",
+      "thread/with space",
+      "run?one",
+      18,
+    ),
+  ).toBe(
+    "https://api.example.test/api/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
+  );
+});
+
+test("buildRunMessagesUrl omits before_seq when loading the latest page", () => {
+  expect(
+    buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
+  ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
+});
+
+test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
+  expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
+    "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
+  );
 });
