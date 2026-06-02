@@ -34,7 +34,7 @@ def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> st
             key, _, value = offending.partition(":")
             value = value.strip()
             if value and value[0] not in {'"', "'", "|", ">", "[", "{"}:
-                escaped = value.replace('"', '\\"')
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
                 lines.append(f'  hint: values containing ":" must be quoted, e.g. {key}: "{escaped}"')
 
     return "\n".join(lines)

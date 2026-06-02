@@ -263,3 +263,50 @@ def test_parse_valid_skill_emits_no_error_log(tmp_path, caplog):
     assert skill is not None
     assert skill.description == "Foo: bar"
     assert not caplog.records, "valid SKILL.md must not log errors"
+
+
+def test_parse_unquoted_colon_value_escapes_backslashes_in_hint(tmp_path, caplog):
+    """Backslashes in the offending value must be doubled in the hint.
+
+    Regression guard for CR feedback on PR #3335: an earlier version of
+    the hint only escaped ``"`` but left ``\\`` untouched. Pasting the
+    suggested ``key: "..."`` back into the file would then be reparsed
+    as an escape sequence by PyYAML's double-quoted scalar rules and
+    either fail to load or silently change meaning (e.g. ``C:\\Temp``
+    becoming ``C:<TAB>emp``). The hint must double the backslash so the
+    suggested scalar is valid YAML when pasted back.
+    """
+
+    # The second ``: `` (after ``path``) is what trips PyYAML's
+    # "mapping values are not allowed here"; the ``C:\Temp`` segment
+    # carries the backslash that the hint must escape.
+    front_matter = "name: path-skill\ndescription: Windows path: C:\\Temp"
+    skill_file = _write_skill(tmp_path, front_matter)
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert r'description: "Windows path: C:\\Temp"' in combined
+
+
+def test_parse_unquoted_colon_value_escapes_regex_in_hint(tmp_path, caplog):
+    """Regex-style ``\\d`` must also be escaped in the hint.
+
+    Same root cause as the Windows-path guard above, but with a
+    regex-style escape that is even more likely to appear in
+    LLM-authored skills (e.g. a ``description`` that quotes a regex).
+    PyYAML rejects ``\\d`` in double-quoted scalars, so the hint must
+    emit ``\\\\d`` to remain valid.
+    """
+
+    front_matter = "name: regex-skill\ndescription: match: \\d+ digits"
+    skill_file = _write_skill(tmp_path, front_matter)
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert r'description: "match: \\d+ digits"' in combined
