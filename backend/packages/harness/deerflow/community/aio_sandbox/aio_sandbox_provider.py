@@ -790,14 +790,20 @@ class AioSandboxProvider(SandboxProvider):
         thread on its next turn without a cold-start.  The container will only be
         stopped when the replicas limit forces eviction or during shutdown.
 
+        The host-side HTTP client owned by the cached ``AioSandbox`` instance is
+        closed before the instance is dropped (#2872). The warm-pool entry only
+        stores ``SandboxInfo``, so a fresh ``AioSandbox`` (and a fresh client)
+        is constructed if the container is later reclaimed.
+
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
         info = None
+        sandbox = None
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -807,6 +813,15 @@ class AioSandboxProvider(SandboxProvider):
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
 
+        if sandbox is not None:
+            # Defense-in-depth: close() already swallows its own errors; this
+            # guard only protects against a future close() that misbehaves, so
+            # host-side client cleanup can never block parking in the warm pool.
+            try:
+                sandbox.close()
+            except Exception as e:
+                logger.warning(f"Error closing sandbox {sandbox_id} during release: {e}")
+
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
     def destroy(self, sandbox_id: str) -> None:
@@ -815,14 +830,19 @@ class AioSandboxProvider(SandboxProvider):
         Unlike release(), this actually stops the container.  Use this for
         explicit cleanup, capacity-driven eviction, or shutdown.
 
+        The host-side HTTP client owned by the cached ``AioSandbox`` instance is
+        closed alongside backend/container destruction so no client/socket
+        resources leak (#2872).
+
         Args:
             sandbox_id: The ID of the sandbox to destroy.
         """
         info = None
+        sandbox = None
         thread_ids_to_remove: list[str] = []
 
         with self._lock:
-            self._sandboxes.pop(sandbox_id, None)
+            sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
@@ -833,6 +853,15 @@ class AioSandboxProvider(SandboxProvider):
                 info, _ = self._warm_pool.pop(sandbox_id)
             else:
                 self._warm_pool.pop(sandbox_id, None)
+
+        if sandbox is not None:
+            # Defense-in-depth: close() already swallows its own errors; this
+            # guard only protects against a future close() that misbehaves, so
+            # host-side client cleanup can never block container destruction.
+            try:
+                sandbox.close()
+            except Exception as e:
+                logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
             self._backend.destroy(info)
