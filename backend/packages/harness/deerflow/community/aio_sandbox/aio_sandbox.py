@@ -269,6 +269,24 @@ class AioSandbox(Sandbox):
 
         return matches, truncated
 
+    def close(self) -> None:
+        """Close the underlying AioSandbox client, releasing socket/connection resources.
+
+        Best-effort: errors are logged but not raised so callers don't need
+        special handling during teardown.  Idempotent: safe to call multiple
+        times; subsequent calls after the first are no-ops.
+        """
+        client = self._client
+        if client is not None and hasattr(client, "close"):
+            self._client = None  # Set to None BEFORE calling close so
+                                 # repeated calls are true no-ops even if
+                                 # close() raises.
+            try:
+                client.close()
+                logger.debug(f"Closed AioSandbox client for sandbox {self.id}")
+            except Exception as e:
+                logger.warning(f"Error closing AioSandbox client for sandbox {self.id}: {e}")
+
     def update_file(self, path: str, content: bytes) -> None:
         """Update a file with binary content in the sandbox.
 
