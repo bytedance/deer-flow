@@ -119,6 +119,19 @@ export function findLatestUnloadedRunIndex(
   return -1;
 }
 
+export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
+
+export function shouldAutoContinueOnEmptyRun(
+  fetchedMessageCount: number,
+  consecutiveEmptyLoads: number,
+  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+): boolean {
+  return (
+    fetchedMessageCount === 0 &&
+    consecutiveEmptyLoads < maxConsecutiveEmptyLoads
+  );
+}
+
 type RunMessagesPageResponse = {
   data: RunMessage[];
   has_more?: boolean;
@@ -874,6 +887,7 @@ export function useThreadHistory(threadId: string) {
     setLoading(true);
 
     try {
+      let consecutiveEmptyLoads = 0;
       do {
         pendingLoadRef.current = false;
 
@@ -927,6 +941,17 @@ export function useThreadHistory(threadId: string) {
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
           loadedRunIdsRef.current.add(run.run_id);
+          if (
+            shouldAutoContinueOnEmptyRun(
+              _messages.length,
+              consecutiveEmptyLoads,
+            )
+          ) {
+            consecutiveEmptyLoads += 1;
+            pendingLoadRef.current = true;
+          } else {
+            consecutiveEmptyLoads = 0;
+          }
         }
         indexRef.current = findLatestUnloadedRunIndex(
           runsRef.current,
