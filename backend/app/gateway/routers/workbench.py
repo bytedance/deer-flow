@@ -48,7 +48,12 @@ async def get_todo_stats(request: Request) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="User token not available for workbench API")
 
-    adapter = await ensure_sms_adapter()
+    try:
+        adapter = await ensure_sms_adapter()
+    except Exception as e:
+        logger.exception("Failed to initialize SmsAdapter for workbench API")
+        raise HTTPException(status_code=503, detail=f"Workbench service not available: {e}")
+
     try:
         result = await adapter.call(
             capability_key="todo_stats.get",

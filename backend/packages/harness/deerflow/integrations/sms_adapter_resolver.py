@@ -21,17 +21,30 @@ _adapter_initialized: bool = False
 
 def _load_sms_config() -> IntegrationSystemConfig | None:
     """Load SMS system config from the integrations section of config.yaml."""
+    import os
     from pathlib import Path
 
-    config_path = Path("/app/config.yaml")
-    if not config_path.exists():
-        logger.warning("config.yaml not found at %s", config_path)
+    # Resolve config.yaml path the same way the rest of the app does,
+    # rather than hardcoding /app/config.yaml.
+    config_path = None
+    env_path = os.getenv("DEER_FLOW_CONFIG_PATH")
+    if env_path:
+        config_path = Path(env_path)
+    else:
+        # Search project root (current dir + parent dir)
+        for candidate in (Path("config.yaml"), Path("..") / "config.yaml"):
+            if candidate.exists():
+                config_path = candidate.resolve()
+                break
+
+    if config_path is None or not config_path.exists():
+        logger.warning("config.yaml not found via DEER_FLOW_CONFIG_PATH or project root search")
         return None
 
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
-        logger.exception("Failed to read config.yaml")
+        logger.exception("Failed to read config.yaml at %s", config_path)
         return None
 
     integrations_raw = raw.get("integrations")
