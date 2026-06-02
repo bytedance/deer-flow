@@ -3,9 +3,11 @@
 import { Store } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { GenUIRenderer } from "@/components/genui/GenUIRenderer";
+import { BlockPersistProvider } from "@/core/genui/block-persist-context";
 import type { UIBlock } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -13,7 +15,7 @@ import {
   logCrossPageNavigation,
 } from "@/core/models/navigation";
 import type { DataFileEntry } from "@/core/report-templates";
-import { useReportRun, useReportRunPayload, useReportTemplate } from "@/core/report-templates";
+import { updateReportRunPayload, useReportRun, useReportRunPayload, useReportTemplate } from "@/core/report-templates";
 import { pathOfThread } from "@/core/threads/utils";
 
 import { CreateClosureTicketDialog } from "../closed-loop/create-closure-ticket-dialog";
@@ -118,6 +120,7 @@ function buildPayloadBlocks(
 
 export function ReportRunDetailPage({ runId }: Props) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const { run, isLoading, error } = useReportRun(runId);
   const { payload } = useReportRunPayload(runId);
   const searchParams = useSearchParams();
@@ -126,6 +129,35 @@ export function ReportRunDetailPage({ runId }: Props) {
   const payloadBlocks = useMemo(
     () => buildPayloadBlocks(runId, payload),
     [payload, runId],
+  );
+
+  const payloadRef = useRef(payload);
+  payloadRef.current = payload;
+
+  const handleSaveContent = useCallback(
+    async (blockId: string, content: string) => {
+      const current = payloadRef.current;
+      const sections = current?.sections as PayloadSection[] | undefined;
+      if (!sections) throw new Error("No sections in payload");
+
+      // blockId format: report-detail-{runId}-{sectionId}
+      const prefix = `report-detail-${runId}-`;
+      if (!blockId.startsWith(prefix)) throw new Error("Unknown blockId format");
+      const sectionKey = blockId.slice(prefix.length);
+
+      const updated = sections.map((section, index) => {
+        const key = String(section.id ?? index);
+        if (key !== sectionKey) return section;
+        return {
+          ...section,
+          props: { ...(section.props ?? {}), content },
+        };
+      });
+
+      await updateReportRunPayload(runId, updated);
+      queryClient.invalidateQueries({ queryKey: ["report-runs", "payload", runId] });
+    },
+    [runId, queryClient],
   );
 
   useEffect(() => {
@@ -423,16 +455,18 @@ export function ReportRunDetailPage({ runId }: Props) {
           {t.reportRuns.reportPreview}
         </h2>
         {payloadBlocks.length > 0 ? (
-          <div className="flex flex-col gap-3">
-            {payloadBlocks.map((block) => (
-              <GenUIRenderer
-                key={block.block_id}
-                block={block}
-                threadId={run.thread_id}
-                disableExpiration={true}
-              />
-            ))}
-          </div>
+          <BlockPersistProvider saveContent={handleSaveContent}>
+            <div className="flex flex-col gap-3">
+              {payloadBlocks.map((block) => (
+                <GenUIRenderer
+                  key={block.block_id}
+                  block={block}
+                  threadId={run.thread_id}
+                  disableExpiration={true}
+                />
+              ))}
+            </div>
+          </BlockPersistProvider>
         ) : (
           <div className="text-muted-foreground text-xs">
             {run.report_payload_path

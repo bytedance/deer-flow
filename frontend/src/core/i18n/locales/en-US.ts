@@ -1192,6 +1192,7 @@ export const enUS: Translations = {
     skip: "Skip",
     // Markdown block
     saveSuccess: "Saved successfully",
+    saveFailed: "Save failed",
     discardUnsaved: "Discard unsaved changes?",
     edit: "Edit",
     save: "Save",

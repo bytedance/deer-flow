@@ -23,6 +23,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from deerflow.report_templates.records import validate_report_run_id
 from deerflow.report_templates.repository import (
@@ -128,6 +129,49 @@ async def get_report_run(report_run_id: str, request: Request):
             if run.user_id != principal.user_id and not principal.is_superadmin:
                 raise HTTPException(status_code=403, detail="not your report run")
             return {"run": {**run.model_dump(), "data_files": _list_data_files(run)}}
+    raise HTTPException(status_code=404, detail=f"report_run {report_run_id!r} not found")
+
+
+class UpdatePayloadRequest(BaseModel):
+    sections: list[dict]
+
+
+@router.put("/{report_run_id}/payload", summary="Overwrite report_payload.json")
+async def update_report_payload(
+    report_run_id: str, body: UpdatePayloadRequest, request: Request
+):
+    try:
+        validate_report_run_id(report_run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    principal = _principal_from_request(request)
+    repo = get_repository()
+    for scope in _scopes_for_listing(principal):
+        try:
+            templates = repo.list_templates(scope)
+        except Exception:  # noqa: BLE001
+            continue
+        for entry in templates:
+            run = repo.get_report_run(scope, entry.id, report_run_id)
+            if run is None:
+                continue
+            if run.user_id != principal.user_id and not principal.is_superadmin:
+                raise HTTPException(status_code=403, detail="not your report run")
+            if not run.report_payload_path:
+                raise HTTPException(status_code=404, detail="payload not assembled yet")
+            payload_path = Path(run.report_payload_path)
+            if not payload_path.exists():
+                raise HTTPException(status_code=410, detail="payload file gone")
+            try:
+                existing = json.loads(payload_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                raise HTTPException(status_code=500, detail=f"payload unreadable: {e}")
+            existing["sections"] = body.sections
+            try:
+                payload_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError as e:
+                raise HTTPException(status_code=500, detail=f"failed to write payload: {e}")
+            return {"updated": True}
     raise HTTPException(status_code=404, detail=f"report_run {report_run_id!r} not found")
 
 

@@ -1148,6 +1148,7 @@ export const zhCN: Translations = {
     skip: "跳过",
     // Markdown block
     saveSuccess: "保存成功",
+    saveFailed: "保存失败",
     discardUnsaved: "放弃未保存的更改？",
     edit: "编辑",
     save: "保存",

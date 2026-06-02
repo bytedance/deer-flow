@@ -1073,6 +1073,7 @@ export interface Translations {
     skip: string;
     // Markdown block
     saveSuccess: string;
+    saveFailed: string;
     discardUnsaved: string;
     edit: string;
     save: string;

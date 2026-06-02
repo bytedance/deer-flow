@@ -1,11 +1,13 @@
 "use client";
 
+import { Loader2 } from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import {
   MessageResponse,
 } from "@/components/ai-elements/message";
+import { useBlockPersist } from "@/core/genui/block-persist-context";
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -16,8 +18,8 @@ interface MarkdownBlockProps {
 
 export default function MarkdownBlock({ block }: MarkdownBlockProps) {
   const { t } = useI18n();
-  // Subscribe directly to the specific block from the store so edits
-  // are reflected immediately regardless of parent re-render timing.
+  const persist = useBlockPersist();
+  const updateBlockProps = useBlockStore((state) => state.updateBlockProps);
   const storeBlock = useBlockStore(
     (state) => state.blocks.get(block.block_id),
   );
@@ -28,6 +30,7 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
   const title = effectiveBlock.props.title as string | undefined;
 
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [editContent, setEditContent] = useState(content);
 
   const handleStartEdit = useCallback(() => {
@@ -35,18 +38,32 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
     setIsEditing(true);
   }, [content]);
 
-  const handleSave = useCallback(() => {
-    useBlockStore.getState().updateBlockProps(block_id, { content: editContent });
-    setIsEditing(false);
-    toast.success(t.genui.saveSuccess);
-  }, [block_id, editContent]);
+  const handleSave = useCallback(async () => {
+    const updates = { content: editContent };
+    updateBlockProps(block_id, updates);
+    if (persist) {
+      setIsSaving(true);
+      try {
+        await persist.saveContent(block_id, editContent);
+        toast.success(t.genui.saveSuccess);
+        setIsEditing(false);
+      } catch {
+        toast.error(t.genui.saveFailed);
+      } finally {
+        setIsSaving(false);
+      }
+    } else {
+      setIsEditing(false);
+      toast.success(t.genui.saveSuccess);
+    }
+  }, [block_id, editContent, persist, t, updateBlockProps]);
 
   const handleCancel = useCallback(() => {
     if (editContent !== content) {
       if (!window.confirm(t.genui.discardUnsaved)) return;
     }
     setIsEditing(false);
-  }, [editContent, content]);
+  }, [editContent, content, t.genui.discardUnsaved]);
 
   if (!content) return null;
 
@@ -78,9 +95,13 @@ export default function MarkdownBlock({ block }: MarkdownBlockProps) {
               {t.common.cancel}
             </button>
             <button
-              className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               onClick={handleSave}
+              disabled={isSaving}
             >
+              {isSaving ? (
+                <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />
+              ) : null}
               {t.genui.save}
             </button>
           </div>

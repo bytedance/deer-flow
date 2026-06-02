@@ -194,3 +194,14 @@ export async function getReportRunPayload(
 ): Promise<Record<string, unknown>> {
   return _gateway(`${RUNS_PREFIX}/${id}/payload`);
 }
+
+export async function updateReportRunPayload(
+  id: string,
+  sections: Record<string, unknown>[],
+): Promise<void> {
+  await _gateway(`${RUNS_PREFIX}/${id}/payload`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sections }),
+  });
+}
