@@ -26,6 +26,9 @@ const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent 
   "device-selector": () => import("@/components/genui/DeviceSelectorBlock") as any,
   "device-selector-multi": () => import("@/components/genui/DeviceSelectorMultiBlock") as any,
   "sub-device-selector": () => import("@/components/genui/SubDeviceSelectorBlock") as any,
+  // Abnormal judgment components
+  "abnormal-list-selector": () => import("@/components/genui/AbnormalListSelectorBlock") as any,
+  "agent_handoff": () => import("@/components/genui/AgentHandoffBlock") as any,
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 

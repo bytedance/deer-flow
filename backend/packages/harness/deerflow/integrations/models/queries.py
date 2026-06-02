@@ -144,6 +144,33 @@ class RiskRankingQuery:
 
 
 # ---------------------------------------------------------------------------
+# Abnormal (SMS) queries
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AbnormalListQuery:
+    """Query for SMS abnormal list."""
+
+    tenant_id: str
+    current_page: int = 1
+    page_size: int = 10
+    start_time: int | None = None  # 毫秒时间戳
+    end_time: int | None = None  # 毫秒时间戳
+    org_id: int = 0
+    extra_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AbnormalDetailQuery:
+    """Query for SMS abnormal detail."""
+
+    tenant_id: str
+    abnormal_id: str
+    extra_params: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # CRM queries
 # ---------------------------------------------------------------------------
 

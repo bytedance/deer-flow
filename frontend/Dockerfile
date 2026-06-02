@@ -1,6 +1,6 @@
 # Frontend Dockerfile
 # Supports two targets:
-#   --target dev   — install deps only, run `pnpm dev` at container start
+#   --target dev   — install deps only, src mounted via volume at runtime
 #   --target prod  — full build baked in, run `pnpm start` at container start (default if no --target is specified)
 
 ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
@@ -21,16 +21,29 @@ RUN pnpm config set store-dir ${PNPM_STORE_PATH}
 # Optionally override npm registry for restricted networks (e.g. NPM_REGISTRY=https://registry.npmmirror.com)
 RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
 WORKDIR /app
-COPY frontend ./frontend
 
-# ── Dev: install only, CMD is overridden by docker-compose ───────────────────
-FROM base AS dev
-RUN cd /app/frontend && pnpm install --frozen-lockfile
+# ── Deps: install only when package.json / lockfile change ────────────────────
+# By COPYing only the dependency manifests + config files before RUN install,
+# Docker's layer cache keeps this step cached as long as these files are
+# unchanged. Source code (src/) is mounted via volume at runtime, not baked in.
+FROM base AS deps
+# Config files (rarely change — good cache candidates)
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./frontend/
+COPY frontend/postcss.config.js frontend/components.json ./frontend/
+COPY frontend/next.config.js frontend/tsconfig.json ./frontend/
+# Install dependencies. BuildKit cache mount persists pnpm store across builds —
+# even when package.json changes, already-downloaded packages skip re-download.
+# The store path must match what pnpm config set store-dir configured above.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    cd /app/frontend && pnpm install --frozen-lockfile
+
+# ── Dev: inherit deps, source is mounted via volume at runtime ────────────────
+FROM deps AS dev
 EXPOSE 3000
 
-# ── Builder: install + compile Next.js ───────────────────────────────────────
-FROM base AS builder
-RUN cd /app/frontend && pnpm install --frozen-lockfile
+# ── Builder: install + copy full source + compile Next.js ─────────────────────
+FROM deps AS builder
+COPY frontend ./frontend
 # Skip env validation — runtime vars are injected by nginx/container
 RUN cd /app/frontend && SKIP_ENV_VALIDATION=1 pnpm build
 

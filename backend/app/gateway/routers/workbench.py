@@ -1,48 +1,17 @@
-"""Workbench API router — proxies todo statistics through the integration adapter."""
+"""Workbench API router — proxies todo statistics through SmsAdapter."""
 
 from __future__ import annotations
 
 import logging
-import time
 
 from fastapi import APIRouter, HTTPException, Request
 
 from deerflow.integrations.adapters.base import AuthContext
-from deerflow.integrations.adapters.workbench import WorkbenchAdapter
-from deerflow.integrations.config import IntegrationSystemConfig
+from deerflow.integrations.sms_adapter_resolver import ensure_sms_adapter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"])
-
-_adapter: WorkbenchAdapter | None = None
-_adapter_initialized: bool = False
-
-
-def _get_adapter() -> WorkbenchAdapter:
-    global _adapter
-    if _adapter is None:
-        _adapter = WorkbenchAdapter(
-            IntegrationSystemConfig(
-                system_key="workbench",
-                system_type="workbench",
-                display_name="服务平台",
-                base_url="http://182.92.187.198",
-                auth_type="bearer",
-                auth_mode="user_token",
-                timeout_seconds=30.0,
-            )
-        )
-    return _adapter
-
-
-async def _ensure_adapter() -> WorkbenchAdapter:
-    global _adapter_initialized
-    adapter = _get_adapter()
-    if not _adapter_initialized:
-        await adapter.initialize()
-        _adapter_initialized = True
-    return adapter
 
 
 def _resolve_access_token(request: Request) -> str | None:
@@ -79,8 +48,8 @@ async def get_todo_stats(request: Request) -> dict:
     if not token:
         raise HTTPException(status_code=401, detail="User token not available for workbench API")
 
+    adapter = await ensure_sms_adapter()
     try:
-        adapter = await _ensure_adapter()
         result = await adapter.call(
             capability_key="todo_stats.get",
             query=None,
@@ -91,5 +60,5 @@ async def get_todo_stats(request: Request) -> dict:
         )
         return result
     except Exception as e:
-        logger.exception("Failed to fetch workbench todo stats")
+        logger.exception("Failed to fetch workbench todo stats via SMS adapter")
         raise HTTPException(status_code=502, detail=f"Workbench service unavailable: {e}")

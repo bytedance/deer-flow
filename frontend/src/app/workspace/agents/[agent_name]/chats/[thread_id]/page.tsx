@@ -1,7 +1,7 @@
 "use client";
 
 import { BotIcon, PlusSquare } from "lucide-react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -42,6 +42,7 @@ export default function AgentChatPage() {
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const { agent_name } = useParams<{
     agent_name: string;
@@ -171,6 +172,47 @@ export default function AgentChatPage() {
     }, 100);
     return () => clearTimeout(timer);
   }, [deepLink.autoSend, deepLink.prompt]);
+
+  // Handoff from another agent (e.g. abnormal-judgment → fault-diagnosis)
+  const handoffFired = useRef(false);
+  useEffect(() => {
+    if (!isNewThread || handoffFired.current) return;
+    const isHandoff = searchParams.get("handoff") === "1";
+    if (!isHandoff) return;
+
+    const key = `handoff:${agent_name}`;
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return;
+
+    handoffFired.current = true;
+    sessionStorage.removeItem(key);
+
+    let handoff: Record<string, unknown>;
+    try {
+      handoff = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    const eq = (handoff.equipment ?? {}) as Record<string, unknown>;
+    const events = (handoff.events ?? []) as Array<Record<string, unknown>>;
+    const jd = (handoff.judgment ?? {}) as Record<string, unknown>;
+
+    const firstMessage = [
+      "---HANDOFF_DATA---",
+      JSON.stringify(handoff),
+      "---END_HANDOFF_DATA---",
+      "",
+      `收到异常研判Agent转交：${eq["component_name"] ?? ""} 判定为 ${jd["suspected_fault_type"] ?? "故障"}（置信度 ${Math.round(((jd["confidence"] as number) ?? 0) * 100)}%），请诊断。`,
+    ].join("\n");
+
+    void sendMessage(
+      threadId,
+      { text: firstMessage, files: [] },
+      { agent_name },
+      { additionalKwargs: { handoff } },
+    );
+  }, [isNewThread, searchParams, agent_name, sendMessage, threadId]);
 
   const handleStarterClick = useCallback(
     (prompt: string) => {

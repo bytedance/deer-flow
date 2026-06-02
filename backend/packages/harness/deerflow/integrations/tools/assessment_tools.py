@@ -13,6 +13,8 @@ from typing import Any
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.errors import IntegrationError
 from deerflow.integrations.models.queries import (
+    AbnormalDetailQuery,
+    AbnormalListQuery,
     AnomalyStatsQuery,
     HealthAssessmentQuery,
     RiskRankingQuery,
@@ -227,3 +229,176 @@ class AssessmentTools:
         except Exception as e:
             logger.error("Unexpected error getting risk ranking: %s", e)
             return f"获取风险排名时发生错误: {e}"
+
+    async def get_abnormal_list(
+        self,
+        tenant_id: str,
+        user_id: str,
+        current_page: int = 1,
+        page_size: int = 10,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        org_id: int = 0,
+        token: str | None = None,
+    ) -> str:
+        """获取SMS异常列表。
+
+        Args:
+            tenant_id: 租户ID
+            user_id: 用户ID
+            current_page: 当前页码（默认1）
+            page_size: 每页条数（默认10）
+            start_time: 开始时间（毫秒时间戳，默认30天前）
+            end_time: 结束时间（毫秒时间戳，默认当前）
+            org_id: 组织ID（默认0）
+            token: 用户访问令牌
+
+        Returns:
+            格式化的异常列表JSON字符串
+        """
+        try:
+            import json
+            import time
+
+            if end_time is None:
+                end_time = int(time.time() * 1000)
+            if start_time is None:
+                start_time = end_time - 30 * 24 * 3600 * 1000
+
+            query = AbnormalListQuery(
+                tenant_id=tenant_id,
+                current_page=current_page,
+                page_size=page_size,
+                start_time=start_time,
+                end_time=end_time,
+                org_id=org_id,
+            )
+            auth_context = AuthContext(tenant_id=tenant_id, user_id=user_id, token=token)
+            result = await self._service.get_abnormal_list(query, auth_context)
+            items = result.data
+
+            if not items:
+                return json.dumps({"total": 0, "items": []}, ensure_ascii=False)
+
+            return json.dumps({
+                "total": len(items),
+                "items": [
+                    {
+                        "abnormal_id": item.abnormal_id,
+                        "mac_path": item.mac_path,
+                        "mac_name": item.mac_name,
+                        "component_name": item.component_name,
+                        "mac_id": item.mac_id,
+                        "component_id": item.component_id,
+                        "latest_health": item.latest_health,
+                        "latest_level": item.latest_level,
+                        "event_count": item.event_count,
+                        "first_event_time": item.first_event_time,
+                        "process_status": item.process_status,
+                        "run_status": item.run_status,
+                        "mac_type": item.mac_type,
+                    }
+                    for item in items
+                ],
+            }, ensure_ascii=False)
+
+        except IntegrationError as e:
+            logger.error("Failed to get abnormal list: %s", e)
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Unexpected error getting abnormal list: %s", e)
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    async def get_abnormal_detail(
+        self,
+        tenant_id: str,
+        user_id: str,
+        abnormal_id: str,
+        mac_id: str = "",
+        component_id: str = "",
+        token: str | None = None,
+    ) -> str:
+        """获取SMS异常详情。
+
+        Args:
+            tenant_id: 租户ID
+            user_id: 用户ID
+            abnormal_id: 异常ID
+            mac_id: 设备ID（从列表数据补充，详情接口不返回）
+            component_id: 子设备ID（从列表数据补充，详情接口不返回）
+            token: 用户访问令牌
+
+        Returns:
+            格式化的异常详情JSON字符串
+        """
+        try:
+            import json
+
+            query = AbnormalDetailQuery(
+                tenant_id=tenant_id,
+                abnormal_id=abnormal_id,
+            )
+            auth_context = AuthContext(tenant_id=tenant_id, user_id=user_id, token=token)
+            result = await self._service.get_abnormal_detail(query, auth_context)
+            detail = result.data
+
+            # 补充列表侧字段（详情接口mac_id/component_id可能为空）
+            if not detail.mac_id and mac_id:
+                detail = detail.__class__(
+                    abnormal_id=detail.abnormal_id,
+                    process_status=detail.process_status,
+                    mac_path=detail.mac_path,
+                    mac_name=detail.mac_name,
+                    component_name=detail.component_name,
+                    events=detail.events,
+                    logs=detail.logs,
+                    ai_analyse=detail.ai_analyse,
+                    risk_assessment=detail.risk_assessment,
+                    mac_id=mac_id,
+                    component_id=component_id,
+                )
+
+            return json.dumps({
+                "abnormal_id": detail.abnormal_id,
+                "mac_path": detail.mac_path,
+                "mac_name": detail.mac_name,
+                "component_name": detail.component_name,
+                "mac_id": detail.mac_id,
+                "component_id": detail.component_id,
+                "process_status": detail.process_status,
+                "events": [
+                    {
+                        "time": e.time,
+                        "health": e.health,
+                        "type": e.type,
+                        "run_status": e.run_status,
+                        "event_level": e.event_level,
+                        "desc": e.desc,
+                        "points": [
+                            {
+                                "point_id": p.point_id,
+                                "point_name": p.point_name,
+                                "value_type": p.value_type,
+                                "point_type": p.point_type,
+                            }
+                            for p in e.points
+                        ],
+                        "time_range_start": e.time_range_start,
+                        "time_range_end": e.time_range_end,
+                        "factory_id": e.factory_id,
+                    }
+                    for e in detail.events
+                ],
+                "logs": list(detail.logs),
+                "ai_analyse": detail.ai_analyse,
+                "risk_assessment": detail.risk_assessment,
+            }, ensure_ascii=False)
+
+        except IntegrationError as e:
+            logger.error("Failed to get abnormal detail: %s", e)
+            import json
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Unexpected error getting abnormal detail: %s", e)
+            import json
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
