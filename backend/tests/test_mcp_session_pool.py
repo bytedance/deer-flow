@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool, reset_session_pool
 
 
@@ -244,7 +245,7 @@ async def test_session_pool_tool_wrapping():
     connection = {"transport": "stdio", "command": "pw", "args": []}
 
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
-        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection, ExtensionsConfig())
 
         # Simulate a tool call with a runtime context containing thread_id.
         mock_runtime = MagicMock()
@@ -282,7 +283,7 @@ async def test_session_pool_tool_extracts_thread_id():
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
-        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
+        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []}, ExtensionsConfig())
 
         mock_runtime = MagicMock()
         mock_runtime.context = {}
@@ -292,7 +293,7 @@ async def test_session_pool_tool_extracts_thread_id():
 
     # Verify the session was created with the correct scope key.
     pool = get_session_pool()
-    assert ("server", "from-config") in pool._entries
+    assert ("server", "test-user-autouse:from-config:vglobal") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -321,13 +322,13 @@ async def test_session_pool_tool_default_scope():
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
-        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
+        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []}, ExtensionsConfig())
 
         # No thread_id in runtime at all.
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "default") in pool._entries
+    assert ("server", "test-user-autouse:default:vglobal") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -361,13 +362,13 @@ async def test_session_pool_tool_get_config_fallback():
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
         patch("deerflow.mcp.tools.get_config", return_value=fake_config),
     ):
-        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
+        wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []}, ExtensionsConfig())
 
         # runtime=None — get_config() fallback should provide thread_id
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "from-langgraph-config") in pool._entries
+    assert ("server", "test-user-autouse:from-langgraph-config:vglobal") in pool._entries
 
 
 def test_session_pool_tool_sync_wrapper_path_is_safe():
@@ -398,7 +399,7 @@ def test_session_pool_tool_sync_wrapper_path_is_safe():
     connection = {"transport": "stdio", "command": "pw", "args": []}
 
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm):
-        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection, ExtensionsConfig())
         # Attach the sync wrapper exactly as get_mcp_tools() does.
         wrapped.func = make_sync_tool_wrapper(wrapped.coroutine, wrapped.name)
 

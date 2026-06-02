@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp.credentials import McpUserCredentials, resolve_mcp_user_id, resolve_server_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,8 @@ class OAuthTokenManager:
 
     def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
         self._oauth_by_server = oauth_by_server
-        self._tokens: dict[str, _OAuthToken] = {}
-        self._locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in oauth_by_server}
+        self._tokens: dict[tuple[str, str, int], _OAuthToken] = {}
+        self._locks: dict[tuple[str, str, int], asyncio.Lock] = {}
 
     @classmethod
     def from_extensions_config(cls, extensions_config: ExtensionsConfig) -> OAuthTokenManager:
@@ -44,24 +45,31 @@ class OAuthTokenManager:
     def oauth_server_names(self) -> list[str]:
         return list(self._oauth_by_server.keys())
 
-    async def get_authorization_header(self, server_name: str) -> str | None:
-        oauth = self._oauth_by_server.get(server_name)
+    async def get_authorization_header(
+        self,
+        server_name: str,
+        *,
+        user_id: str = "default",
+        credentials: McpUserCredentials | None = None,
+    ) -> str | None:
+        oauth = credentials.oauth if credentials is not None and credentials.oauth is not None else self._oauth_by_server.get(server_name)
         if not oauth:
             return None
 
-        token = self._tokens.get(server_name)
+        key = (server_name, user_id, credentials.version if credentials is not None else 0)
+        token = self._tokens.get(key)
         if token and not self._is_expiring(token, oauth):
             return f"{token.token_type} {token.access_token}"
 
-        lock = self._locks[server_name]
+        lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            token = self._tokens.get(server_name)
+            token = self._tokens.get(key)
             if token and not self._is_expiring(token, oauth):
                 return f"{token.token_type} {token.access_token}"
 
             fresh = await self._fetch_token(oauth)
-            self._tokens[server_name] = fresh
-            logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
+            self._tokens[key] = fresh
+            logger.info("Refreshed OAuth access token for MCP server: %s user=%s", server_name, user_id)
             return f"{fresh.token_type} {fresh.access_token}"
 
     @staticmethod
@@ -122,11 +130,26 @@ class OAuthTokenManager:
 def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
     """Build a tool interceptor that injects OAuth Authorization headers."""
     token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
-    if not token_manager.has_oauth_servers():
+    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    if not token_manager.has_oauth_servers() and not enabled_servers:
         return None
 
     async def oauth_interceptor(request: Any, handler: Any) -> Any:
-        header = await token_manager.get_authorization_header(request.server_name)
+        server_config = enabled_servers.get(request.server_name)
+        user_id = resolve_mcp_user_id(getattr(request, "runtime", None))
+        credentials = None
+        if server_config is not None:
+            credentials = await resolve_server_credentials(
+                request.server_name,
+                server_config,
+                user_id=user_id,
+                include_global_secrets=True,
+            )
+        header = await token_manager.get_authorization_header(
+            request.server_name,
+            user_id=user_id,
+            credentials=credentials,
+        )
         if not header:
             return await handler(request)
 
@@ -137,14 +160,32 @@ def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | N
     return oauth_interceptor
 
 
-async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict[str, str]:
+async def get_initial_oauth_headers(
+    extensions_config: ExtensionsConfig,
+    *,
+    user_id: str | None = None,
+) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
     token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
-    if not token_manager.has_oauth_servers():
+    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    if not token_manager.has_oauth_servers() and user_id is None:
         return {}
 
     headers: dict[str, str] = {}
-    for server_name in token_manager.oauth_server_names():
-        headers[server_name] = await token_manager.get_authorization_header(server_name) or ""
+    server_names = list(enabled_servers) if user_id is not None else token_manager.oauth_server_names()
+    for server_name in server_names:
+        credentials = None
+        if user_id is not None and server_name in enabled_servers:
+            credentials = await resolve_server_credentials(
+                server_name,
+                enabled_servers[server_name],
+                user_id=user_id,
+                include_global_secrets=True,
+            )
+        headers[server_name] = await token_manager.get_authorization_header(
+            server_name,
+            user_id=user_id or "default",
+            credentials=credentials,
+        ) or ""
 
     return {name: value for name, value in headers.items() if value}
