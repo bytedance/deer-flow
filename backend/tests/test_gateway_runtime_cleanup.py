@@ -104,3 +104,17 @@ def test_smoke_test_docs_do_not_expect_standalone_langgraph_server():
         assert "langgraph.log" not in content, path
         assert "LangGraph service" not in content, path
         assert "langgraph dev" not in content, path
+
+
+def test_gateway_runtime_docs_do_not_reference_transition_modes():
+    docs = {
+        "backend/docs/AUTH_UPGRADE.md": _read("backend/docs/AUTH_UPGRADE.md"),
+        "backend/docs/AUTH_TEST_DOCKER_GAP.md": _read("backend/docs/AUTH_TEST_DOCKER_GAP.md"),
+        "docs/CODE_CHANGE_SUMMARY_BY_FILE.md": _read("docs/CODE_CHANGE_SUMMARY_BY_FILE.md"),
+    }
+
+    for path, content in docs.items():
+        assert "make dev-pro" not in content, path
+        assert "./scripts/deploy.sh --gateway" not in content, path
+        assert "docker compose --profile gateway" not in content, path
+        assert "`/api/langgraph/*` → LangGraph" not in content, path
