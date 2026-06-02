@@ -35,6 +35,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_injected_reminder(message: BaseMessage) -> bool:
+    """Return True for framework-injected HumanMessages that are not real user input.
+
+    Middleware injects HumanMessages to keep the model on track (e.g. the
+    ``todo_reminder`` / ``todo_completion_reminder`` from TodoMiddleware and the
+    dynamic-context reminder). They carry ``hide_from_ui`` and must not be
+    mistaken for the user's first prompt. Summarization output (``name="summary"``)
+    is likewise not user input.
+    """
+    if getattr(message, "name", None) == "summary":
+        return True
+    additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+    return bool(additional_kwargs.get("hide_from_ui"))
+
+
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
@@ -209,7 +224,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary":
+                    if isinstance(m, HumanMessage) and not _is_injected_reminder(m):
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(
