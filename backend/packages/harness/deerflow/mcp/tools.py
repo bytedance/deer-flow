@@ -137,6 +137,8 @@ def _make_session_pool_tool(
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
+                if request.name != original_name:
+                    raise ValueError(f"Tool name mismatch: expected {original_name!r}, got {request.name!r}")
                 return await session.call_tool(request.name, request.args)
 
             handler = base_handler
