@@ -7,8 +7,14 @@ Usage:
     python query_monitoring.py batch --input /mnt/user-data/outputs/abnormal_detail.json [--output <path>]
 
 Environment:
-    INS_BASE_URL      — InS base URL (default: http://182.92.187.198)
-    INS_ACCESS_TOKEN  — Bearer token
+    INS_BASE_URL           — InS base URL (default: http://182.92.187.198)
+    INS_ACCESS_TOKEN       — Bearer token (injected by Deer Flow runtime)
+    INS_REFRESH_TOKEN      — Refresh token for auto-renewal on 401 (injected by Deer Flow runtime)
+    DEER_FLOW_GATEWAY_URL  — Deer Flow Gateway URL for token refresh (default: http://localhost:8001)
+
+When INS_REFRESH_TOKEN is available, HTTP 401 responses trigger an automatic
+token refresh via ``POST /api/auth/ins-base/refresh`` on the Deer Flow Gateway.
+On success the new token is used for a single retry.
 """
 
 from __future__ import annotations
@@ -21,7 +27,11 @@ import urllib.request
 import urllib.error
 
 INS_BASE = os.environ.get("INS_BASE_URL", "http://182.92.187.198")
-TOKEN = os.environ.get("INS_ACCESS_TOKEN", "")
+GATEWAY_URL = os.environ.get("DEER_FLOW_GATEWAY_URL", "http://localhost:8001")
+REFRESH_TOKEN = os.environ.get("INS_REFRESH_TOKEN", "")
+
+# Mutable token — _try_refresh_token() updates it in-place on successful refresh.
+_token = os.environ.get("INS_ACCESS_TOKEN", "")
 
 # 8K rotating machinery — must match InsApiClient in features-tool
 TREND_PATH = "/ins-os-view/sg8kData/getTrendDataHis"
@@ -31,27 +41,83 @@ FEATURES = "pp_value,rms,1x,2x,remain_freq,speed,gap"
 INCLUDE_FILTER = "history,startstop,blackbox,alarm"
 
 
+def _try_refresh_token() -> bool:
+    """Attempt to refresh the access token via Deer Flow Gateway.
+
+    Calls ``POST /api/auth/ins-base/refresh`` with the stored refresh token.
+    On success, updates the module-level ``_token`` and returns True.
+
+    Returns:
+        True if the token was successfully refreshed.
+    """
+    if not REFRESH_TOKEN:
+        print("[query_monitoring] no INS_REFRESH_TOKEN available, cannot refresh", file=sys.stderr)
+        return False
+
+    refresh_url = f"{GATEWAY_URL}/api/auth/ins-base/refresh"
+    body = json.dumps({"refresh_token": REFRESH_TOKEN}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    print(f"[query_monitoring] attempting token refresh via {refresh_url}", file=sys.stderr)
+    req = urllib.request.Request(refresh_url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")[:500]
+        print(f"[query_monitoring] token refresh HTTP {e.code}: {body_text}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"[query_monitoring] token refresh error: {e}", file=sys.stderr)
+        return False
+
+    new_token = data.get("token") or data.get("access_token")
+    if not new_token or not isinstance(new_token, str) or not new_token.strip():
+        print(f"[query_monitoring] token refresh response missing token: {data}", file=sys.stderr)
+        return False
+
+    global _token
+    _token = new_token.strip()
+    print("[query_monitoring] token refreshed successfully", file=sys.stderr)
+    return True
+
+
 def _get(path: str, params: dict) -> dict:
     qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
     url = f"{INS_BASE}{path}?{qs}"
-    headers = {"Accept": "application/json"}
-    if TOKEN:
-        headers["Authorization"] = f"Bearer {TOKEN}"
 
-    print(f"[query_monitoring] GET {url}", file=sys.stderr)
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read()
-            print(f"[query_monitoring] response: {len(raw)} bytes", file=sys.stderr)
-            return json.loads(raw)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:500]
-        print(f"[query_monitoring] HTTP {e.code}: {body}", file=sys.stderr)
-        return {"error": f"HTTP {e.code}", "detail": body}
-    except Exception as e:
-        print(f"[query_monitoring] error: {e}", file=sys.stderr)
-        return {"error": str(e)}
+    def _do_request() -> dict:
+        headers = {"Accept": "application/json"}
+        if _token:
+            headers["Authorization"] = f"Bearer {_token}"
+
+        print(f"[query_monitoring] GET {url}", file=sys.stderr)
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+                print(f"[query_monitoring] response: {len(raw)} bytes", file=sys.stderr)
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:500]
+            print(f"[query_monitoring] HTTP {e.code}: {body}", file=sys.stderr)
+            return {"error": f"HTTP {e.code}", "detail": body, "status_code": e.code}
+        except Exception as e:
+            print(f"[query_monitoring] error: {e}", file=sys.stderr)
+            return {"error": str(e)}
+
+    result = _do_request()
+
+    # Auto-refresh on 401 when a refresh token is available.
+    if isinstance(result, dict) and result.get("status_code") == 401:
+        if _try_refresh_token():
+            print("[query_monitoring] retrying request with refreshed token", file=sys.stderr)
+            result = _do_request()
+
+    return result
 
 
 def _extract_trend_summary(raw: dict, point_id: str) -> dict:

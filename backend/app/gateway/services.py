@@ -429,11 +429,15 @@ async def start_run(
     access_token = _resolve_request_access_token(request)
     if access_token:
         runtime_context["access_token"] = access_token
+    refresh_token = request.cookies.get("refresh_token", "").strip()
+    if refresh_token:
+        runtime_context["refresh_token"] = refresh_token
     logger.info(
-        "start_run: injected context tenant_id=%s, user_id=%s, access_token=%s",
+        "start_run: injected context tenant_id=%s, user_id=%s, access_token=%s, refresh_token=%s",
         runtime_context["tenant_id"],
         runtime_context["user_id"],
         "present" if access_token else "absent",
+        "present" if refresh_token else "absent",
     )
 
     stream_modes = normalize_stream_modes(body.stream_mode)

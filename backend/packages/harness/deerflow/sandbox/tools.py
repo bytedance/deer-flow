@@ -1219,6 +1219,9 @@ def _runtime_shell_env(runtime: ToolRuntime[ContextT, ThreadState]) -> dict[str,
     access_token = context.get("access_token")
     if isinstance(access_token, str) and access_token.strip():
         env["INS_ACCESS_TOKEN"] = access_token.strip()
+    refresh_token = context.get("refresh_token")
+    if isinstance(refresh_token, str) and refresh_token.strip():
+        env["INS_REFRESH_TOKEN"] = refresh_token.strip()
     user_id = context.get("user_id")
     if user_id is not None:
         env["DEER_FLOW_EFFECTIVE_USER_ID"] = str(user_id)
@@ -1228,6 +1231,9 @@ def _runtime_shell_env(runtime: ToolRuntime[ContextT, ThreadState]) -> dict[str,
     internal_token = _os.environ.get("DEER_FLOW_INTERNAL_AUTH_VALUE")
     if internal_token:
         env["DEER_FLOW_INTERNAL_AUTH_VALUE"] = internal_token
+    gateway_url = _os.environ.get("DEER_FLOW_GATEWAY_URL")
+    if gateway_url:
+        env["DEER_FLOW_GATEWAY_URL"] = gateway_url
     return env
 
 
