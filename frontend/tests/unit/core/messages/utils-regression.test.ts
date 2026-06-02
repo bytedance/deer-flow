@@ -219,7 +219,22 @@ describe("regression: tool-call messages must not swallow text/reasoning content
       "assistant:subagent",
     ]);
     expect(groups[1]!.messages.map((message) => message.id)).toEqual(["ai-1"]);
+    expect(groups[1]!.messages[0]!.content).toBe(
+      "Launching a subagent to help.",
+    );
     expect(groups[2]!.messages.map((message) => message.id)).toEqual(["ai-1"]);
+    expect(groups[2]!.messages[0]!.type).toBe("ai");
+    expect(groups[2]!.messages[0]!.tool_calls).toEqual([
+      {
+        id: "tc-1",
+        name: "task",
+        args: {
+          subagent_type: "general-purpose",
+          description: "Inspect the issue",
+          prompt: "Inspect the issue",
+        },
+      },
+    ]);
   });
 
   test("subagent tool result attaches to the subagent group", () => {
