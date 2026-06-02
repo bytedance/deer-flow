@@ -46,9 +46,9 @@ def test_service_launchers_always_use_gateway_runtime():
 def test_backend_container_only_exposes_gateway_port():
     dockerfile = _read("backend/Dockerfile")
 
-    assert "EXPOSE 8001 2024" not in dockerfile
+    assert not re.search(r"^EXPOSE\s+.*\b2024\b", dockerfile, re.M)
     assert "langgraph: 2024" not in dockerfile
-    assert "EXPOSE 8001" in dockerfile
+    assert re.search(r"^EXPOSE\s+8001\b", dockerfile, re.M)
 
 
 def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
