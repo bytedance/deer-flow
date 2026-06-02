@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { type PromptInputMessage, usePromptInputController } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import {
   ChatBox,
+  useDeepLinkChat,
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
@@ -48,6 +49,7 @@ export default function ChatPage() {
   const [localSettings, setLocalSettings] = useLocalSettings();
   const mountedRef = useRef(false);
   useSpecificChatMode();
+  const deepLink = useDeepLinkChat(isNewThread);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -123,6 +125,54 @@ export default function ChatPage() {
     window.addEventListener("genui:interaction-submitted", handler);
     return () => window.removeEventListener("genui:interaction-submitted", handler);
   }, [threadId, sendMessage]);
+
+  // Deep-link auto-send
+  const deepLinkFiredRef = useRef(false);
+  const promptInputController = usePromptInputController();
+  const setInputRef = useRef(promptInputController.textInput.setInput);
+  setInputRef.current = promptInputController.textInput.setInput;
+
+  useEffect(() => {
+    if (deepLink.source) {
+      console.info(`[DeepLink] source=${deepLink.source}`);
+    }
+  }, [deepLink.source]);
+
+  useEffect(() => {
+    if (!deepLink.autoSend || !deepLink.prompt || deepLinkFiredRef.current) return;
+    deepLinkFiredRef.current = true;
+    const allParams = {
+      ...(deepLink.source ? { source: deepLink.source } : {}),
+      ...(deepLink.context ? { context: deepLink.context } : {}),
+      ...deepLink.passthroughParams,
+    };
+    void sendMessage(
+      threadId,
+      { text: deepLink.prompt, files: [] },
+      undefined,
+      { additionalKwargs: allParams },
+    );
+  }, [deepLink.autoSend, deepLink.prompt, deepLink.source, deepLink.context, deepLink.passthroughParams, threadId, sendMessage]);
+
+  // Deep-link pre-fill (when auto_send is not set)
+  const lastPreFillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (deepLink.autoSend) return;
+    const text = deepLink.prompt;
+    if (!text || text === lastPreFillRef.current) return;
+    lastPreFillRef.current = text;
+    const timer = setTimeout(() => {
+      setInputRef.current(text);
+      const textarea = document.querySelector("textarea");
+      if (textarea) {
+        textarea.focus();
+        textarea.selectionStart = textarea.value.length;
+        textarea.selectionEnd = textarea.value.length;
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [deepLink.autoSend, deepLink.prompt]);
+
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);

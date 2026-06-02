@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { usePromptInputController } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -15,7 +16,7 @@ import {
   getChatComposerFrameClassName,
 } from "@/components/workspace/chat-composer-layout";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
-import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import { ChatBox, useDeepLinkChat, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -50,6 +51,7 @@ export default function AgentChatPage() {
 
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
+  const deepLink = useDeepLinkChat(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
 
@@ -99,14 +101,76 @@ export default function AgentChatPage() {
   );
 
   const autoStartFired = useRef(false);
+
+  // Deep-link auto-send: takes precedence over agent auto_start
   useEffect(() => {
-    if (!isNewThread || !agent?.starters || autoStartFired.current) return;
-    const autoStarter = agent.starters.find((s) => s.auto_start);
+    if (!isNewThread || autoStartFired.current) return;
+
+    if (deepLink.autoSend) {
+      const allParams = {
+        ...(deepLink.source ? { source: deepLink.source } : {}),
+        ...(deepLink.context ? { context: deepLink.context } : {}),
+        ...deepLink.passthroughParams,
+      };
+
+      if (deepLink.prompt) {
+        // Deep-link has its own prompt — send immediately
+        autoStartFired.current = true;
+        void sendMessage(threadId, { text: deepLink.prompt, files: [] }, { agent_name }, { additionalKwargs: allParams });
+        return;
+      }
+
+      if (Object.keys(deepLink.passthroughParams).length > 0) {
+        // Passthrough-only: need agent's auto_start prompt — wait for agent to load
+        if (!agent) return; // agent not loaded yet, re-run on next render
+        const agentPrompt = agent.starters?.find((s) => s.auto_start)?.prompt;
+        if (agentPrompt) {
+          autoStartFired.current = true;
+          void sendMessage(threadId, { text: agentPrompt, files: [] }, { agent_name }, { additionalKwargs: allParams });
+          return;
+        }
+      }
+
+      // deepLink.autoSend=true but no prompt and no passthrough — fall through to agent auto_start
+    }
+
+    // Fallback: agent-configured auto_start
+    if (!agent) return;
+    const autoStarter = agent.starters?.find((s) => s.auto_start);
     if (autoStarter) {
       autoStartFired.current = true;
       void sendMessage(threadId, { text: autoStarter.prompt, files: [] }, { agent_name }, { additionalKwargs: { hide_from_ui: true } });
     }
-  }, [isNewThread, agent, sendMessage, threadId, agent_name]);
+  }, [isNewThread, agent, sendMessage, threadId, agent_name, deepLink]);
+
+  // Deep-link pre-fill (when auto_send is not set)
+  const promptInputController = usePromptInputController();
+  const setInputRef = useRef(promptInputController.textInput.setInput);
+  setInputRef.current = promptInputController.textInput.setInput;
+
+  useEffect(() => {
+    if (deepLink.source) {
+      console.info(`[DeepLink] source=${deepLink.source}`);
+    }
+  }, [deepLink.source]);
+
+  const lastPreFillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (deepLink.autoSend) return;
+    const text = deepLink.prompt;
+    if (!text || text === lastPreFillRef.current) return;
+    lastPreFillRef.current = text;
+    const timer = setTimeout(() => {
+      setInputRef.current(text);
+      const textarea = document.querySelector("textarea");
+      if (textarea) {
+        textarea.focus();
+        textarea.selectionStart = textarea.value.length;
+        textarea.selectionEnd = textarea.value.length;
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [deepLink.autoSend, deepLink.prompt]);
 
   const handleStarterClick = useCallback(
     (prompt: string) => {
