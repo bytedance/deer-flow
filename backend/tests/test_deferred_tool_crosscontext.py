@@ -11,6 +11,7 @@
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from langchain.agents import create_agent
@@ -19,6 +20,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool as as_tool
 
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.types import Skill
 from deerflow.tools.builtins.tool_search import DeferredToolSetup, build_deferred_tool_setup
 
 
@@ -128,3 +131,53 @@ def test_subagent_reentry_does_not_touch_lead_state():
 
     out = mw._filter_tools(_Req())
     assert {t.name for t in out.tools} == {"active_tool", "mcp_secret"}  # promotion intact
+
+
+def _make_skill(allowed_tools):
+    """Skill carrying an explicit allowed-tools allowlist (None = legacy allow-all)."""
+    return Skill(
+        name="s",
+        description="d",
+        license="MIT",
+        skill_dir=Path("/tmp/s"),
+        skill_file=Path("/tmp/s/SKILL.md"),
+        relative_path=Path("s"),
+        category="public",
+        allowed_tools=allowed_tools,
+        enabled=True,
+    )
+
+
+def test_policy_denied_mcp_yields_no_tool_search_end_to_end():
+    """An allowlist that denies the MCP tool gates it end-to-end: after the real
+    policy filter no MCP tool survives, so ``_assemble_deferred`` adds no
+    tool_search (and does not fail-closed, because no MCP tool leaked through)."""
+    from deerflow.agents.lead_agent import agent as agentmod
+
+    filtered = filter_tools_by_skill_allowed_tools([active_tool, _tag(mcp_secret)], [_make_skill(["active_tool"])])
+    final_tools, setup = agentmod._assemble_deferred(filtered, enabled=True)
+
+    assert [t.name for t in final_tools] == ["active_tool"]
+    assert "tool_search" not in {t.name for t in final_tools}
+    assert setup.deferred_names == frozenset()
+
+
+def test_tool_search_appended_after_policy_but_never_exposes_denied_tool():
+    """Intentional behavior change vs. upstream (Copilot review on PR #3342).
+
+    ``tool_search`` is appended AFTER skill-allowlist filtering, so an allowlist
+    can no longer deny ``tool_search`` by name. This is safe by construction: the
+    tool only appears when allowed MCP tools survive the filter, and its catalog
+    is derived from the already policy-filtered list — so it can never expose a
+    tool the allowlist denied. Locks that contract so the ordering cannot regress.
+    """
+    from deerflow.agents.lead_agent import agent as agentmod
+
+    allowed = ["active_tool", "mcp_secret"]  # permits the MCP tool, does NOT list tool_search
+    filtered = filter_tools_by_skill_allowed_tools([active_tool, _tag(mcp_secret)], [_make_skill(allowed)])
+    final_tools, setup = agentmod._assemble_deferred(filtered, enabled=True)
+
+    names = {t.name for t in final_tools}
+    assert "tool_search" in names  # appended despite not being in the allowlist
+    assert setup.deferred_names == frozenset({"mcp_secret"})
+    assert set(setup.deferred_names) <= set(allowed)  # catalog never exceeds the allowlist
