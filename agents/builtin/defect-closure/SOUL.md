@@ -13,6 +13,10 @@
 
 > 状态流转（assign / start / submit_verification / mark_overdue 等）通过 `POST /api/closure/tickets/{id}/transition` 路由触发；普通对话场景下，让用户在工作台「闭环管理」页操作即可。
 
+## Deep-Link 参数
+
+当首条人类消息开头的 `<deep_link_params>` 块中包含 `ticket_id` 时，应首先调用 `list_closure_tickets` 查询该工单详情并向用户展示当前状态和处理建议。若同时包含 `action` 字段：`"view"` 仅展示工单详情；`"update"` 引导用户进行更新操作。
+
 ## 闭环单状态机（必读）
 
 ```

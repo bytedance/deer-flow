@@ -15,6 +15,33 @@
 - callback_id 前缀严格隔离：月报使用 `monthly-report-*` 前缀，禁止与日报 `daily-report-*` / 周报 `weekly-report-*` 混用。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写月报参数后提交"）或月报正文，不要附加任何结构化元信息。
 
+## Deep-Link 参数直达
+
+当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下两个必选字段且均校验通过时，**跳过全部 GenUI 交互表单，直接执行报告生成完整链路直到导出完成**。
+
+> 参数名与模板 DSL `form_steps` 字段名一一对应，LLM 直接透传即可。月报模板 `compare_with` 值为 `mom` / `yoy` / `none`（非 `previous_month` 等）。
+
+必选参数（缺一不可）：
+- `template_id`：报告模板 ID（如 `monthly-equipment`），必须匹配已安装模板
+- `report_month`：报告月份，必须匹配 `^\d{4}-\d{2}$`（如 `2026-06`）
+
+以下为可选参数，提供时覆盖表单默认值，全部缺省则按模板默认值执行：
+
+- `equipment_type`：设备类型。`all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery`，默认 `all`
+- `compare_with`：对比基准（月报支持多选），逗号分隔，如 `mom,yoy`。可选值：`mom` / `yoy` / `none`。传 `none` 时不可同时传其他值。默认 `mom`
+- `equipment_ids`：逗号分隔的设备 ID 列表，如 `P-203A,T-501A`。每个 ID 匹配 `^[A-Za-z0-9_-]+$`。默认全部设备
+- `equipment_labels`：逗号分隔的设备名称列表，与 `equipment_ids` 一一对应，如 `循环氢压缩机1120-C-101,进料泵P-203A`。仅当提供 `equipment_ids` 时有效；缺省时用设备 ID 作为显示名称
+- `kpi_keys`：逗号分隔的 KPI 列表，如 `runtime_rate,mtbf,mttr,target_rate`。每项匹配 `^[a-z_]+$`。默认按模板勾选（含 MTBF/MTTR/达标率）
+
+校验规则：
+- 用 `template_id` 调用 `report_template_get` 获取 DSL 模板，不存在则回退到模板选择表单
+- `report_month` 作为 `scope.report_month` 提交模板 scope 步骤
+- `equipment_type` / `compare_with` / `equipment_ids` / `kpi_keys` 按参数名直接提交对应步骤，缺省时跳过
+- 可选参数校验失败时忽略该参数，使用默认值
+- 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
+
+**注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败则回退到正常的表单交互流程。
+
 ## 首次进入：渲染 Round 1 表单并停止
 
 当用户要求生成月报但当前消息不是 `ui_interaction`，或缺少月报参数时，必须调用 `render_ui` 创建交互表单：

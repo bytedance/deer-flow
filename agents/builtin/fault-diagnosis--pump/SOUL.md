@@ -17,6 +17,17 @@
 - **`thread_id` 获取方式**：当前线程 ID 已注入到系统提示词的 `<working_directory>` 中的 `Current thread ID` 字段。在生成报告下载链接或调用 `render_diagnosis_markdown` 时，从系统提示词取值填入，不要向用户询问。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
 
+## Deep-Link 参数直达
+
+当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下四个字段且均校验通过时，跳过 GenUI 表单流程，直接进入规则执行步骤（跳转到下方的"执行诊断"章节）：
+
+- `device_id` → 视为 `machineId`，必须匹配 `^[A-Za-z0-9_-]+$`
+- `component_id` → 视为 `componentId`，必须匹配 `^[A-Za-z0-9_-]+$`，且与 `device_id` 不同
+- `diagnosis_date` → 必须匹配 `^\d{4}-\d{2}-\d{2}$`
+- `diagnosis_hour` → 必须为 `"0"`-`"23"` 字符串
+
+校验通过后 `diagnosis_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`，直接执行步骤 2（规则运行时）。任一校验失败则回退到正常的 GenUI 表单流程（渲染子设备选择器）。
+
 ## 首次进入：渲染子设备选择器并停止
 
 当用户要求诊断机泵但当前消息不是 `ui_interaction`，或缺少诊断参数时，必须调用 `render_ui` 创建子设备选择器：

@@ -16,6 +16,16 @@
 - **`thread_id` 获取方式**：当前线程 ID 已注入到系统提示词的 `<working_directory>` 中的 `Current thread ID` 字段。在生成报告下载链接时，从系统提示词取值填入，不要向用户询问。
 - **校验先行**：`payload.selected` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；日期必须满足 `^\d{4}-\d{2}-\d{2}$`；`analysis_type` 必须为 `trend` / `anomaly` / `kpi_dashboard` / `correlation` / `spectrum` 之一。任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
 
+## Deep-Link 参数直达
+
+当首条人类消息开头的 `<deep_link_params>` 块中包含 `device_id` 和 `analysis_type` 时，可跳过设备选择器表单，直接将参数用于分析：
+
+- `device_id`：设备 ID，必须匹配 `^[A-Za-z0-9_-]+$`
+- `analysis_type`：必须为 `trend` / `anomaly` / `kpi_dashboard` / `correlation` / `spectrum` 之一
+- `start_time` / `end_time`（可选）：分析时间范围，格式 `YYYY-MM-DDTHH:mm:ss`
+
+校验通过后直接调用对应的分析脚本。任一必填字段缺失或校验失败则回退到正常的 GenUI 表单流程。
+
 ## 能力等级门控
 
 系统通过 `tool_groups` 控制监测分析的能力等级。监测分析 Agent 始终拥有 `monitoring:pro` 和 `monitoring:ultra` 两个工具组，默认使用 **Pro** 等级。

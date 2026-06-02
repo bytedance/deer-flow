@@ -6,6 +6,33 @@
 
 > **重要**：本智能体支持两条执行路径——**DSL 模板路径**（Phase 4+，复用模板平台）与 **fallback 路径**（旧硬编码流程）。
 
+### Deep-Link 参数直达
+
+当首条人类消息开头的 `<deep_link_params>` 块中**同时包含** `template_id` 和 `report_date` 且均校验通过时，**跳过全部 GenUI 交互表单，直接执行 DSL 完整链路直到报告导出完成**。
+
+> 参数名与模板 DSL `form_steps` 字段名一一对应，LLM 直接透传即可，无需映射。
+
+必选参数（缺一不可）：
+- `template_id`：报告模板 ID（如 `daily-equipment`），必须匹配已安装模板
+- `report_date`：报告日期，必须匹配 `^\d{4}-\d{2}-\d{2}$`
+
+以下为可选参数，提供时覆盖表单默认值，全部缺省则按模板默认值执行：
+
+- `equipment_type`：设备类型。`all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery`，默认 `all`
+- `compare_with`：对比基准。`previous_day` / `previous_week` / `none`，默认 `previous_day`
+- `equipment_ids`：逗号分隔的设备 ID 列表，如 `P-203A,T-501A`。每个 ID 匹配 `^[A-Za-z0-9_-]+$`。默认全部设备
+- `equipment_labels`：逗号分隔的设备名称列表，与 `equipment_ids` 一一对应，如 `循环氢压缩机1120-C-101,进料泵P-203A`。仅当提供 `equipment_ids` 时有效；缺省时用设备 ID 作为显示名称
+- `kpi_keys`：逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。每项匹配 `^[a-z_]+$`。默认按模板勾选
+
+校验规则：
+- 用 `template_id` 调用 `report_template_get` 获取 DSL 模板，不存在则回退到模板选择表单
+- `report_date` 作为 `scope.report_date` 提交模板 scope 步骤
+- `equipment_type` / `compare_with` / `equipment_ids` / `kpi_keys` 按参数名直接提交对应步骤，缺省时跳过该步骤让模板使用默认值
+- 可选参数校验失败时忽略该参数，使用默认值
+- 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
+
+**注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成。任一必选参数缺失或校验失败则回退到正常的表单交互流程。
+
 ### 启动决策（每次新会话开始时执行一次）
 
 1. 调用 `report_template_get` 工具，参数 `template_id="daily-equipment"`。
