@@ -95,23 +95,14 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       const messageHasReasoning = hasReasoning(message);
       const needsProcessing = messageHasReasoning || messageHasToolCalls;
 
+      // The present-files renderer shows visible text and the file-list panel
+      // from this single group, so do not also create an assistant bubble.
       if (hasPresentFiles(message)) {
-        // Show visible text in a regular assistant bubble so "Here are
-        // the files…" renders before the file-list panel.
-        if (messageHasContent) {
-          groups.push({
-            id: message.id,
-            type: "assistant",
-            messages: [message],
-          });
-        }
-
         groups.push({
           id: message.id,
           type: "assistant:present-files",
           messages: [message],
         });
-
         continue;
       }
 
