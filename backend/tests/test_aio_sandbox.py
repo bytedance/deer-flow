@@ -323,31 +323,53 @@ class TestDownloadFile:
 class TestClose:
     """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
 
-    def test_close_calls_underlying_httpx_client(self, sandbox):
-        """close() should close the wrapped httpx_client owned by the agent_sandbox client."""
-        httpx_client = MagicMock()
-        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+    def test_close_calls_real_nested_httpx_client(self, sandbox):
+        """close() must close the real httpx.Client at the bottom of the chain.
+
+        Mirrors the actual Fern structure:
+            Sandbox._client_wrapper.httpx_client  -> Fern HttpClient (no close())
+                .httpx_client                     -> httpx.Client    (the real owner)
+
+        The intermediate HttpClient deliberately exposes NO close(), so a naive
+        one-level lookup (the original bug) would silently close nothing.
+        """
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)  # no close on this layer
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
 
         sandbox.close()
 
-        httpx_client.close.assert_called_once_with()
+        real_httpx.close.assert_called_once_with()
+
+    def test_close_clears_client_reference(self, sandbox):
+        """After close(), the client reference must be dropped (use-after-close safety)."""
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
+
+        sandbox.close()
+
+        assert sandbox._client is None
+        assert sandbox._closed is True
 
     def test_close_is_idempotent(self, sandbox):
         """Calling close() multiple times must close the underlying client at most once."""
-        httpx_client = MagicMock()
-        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
 
         sandbox.close()
         sandbox.close()
         sandbox.close()
 
-        assert httpx_client.close.call_count == 1
+        assert real_httpx.close.call_count == 1
 
     def test_close_swallows_exceptions(self, sandbox, caplog):
         """close() must be best-effort: client errors are logged but never raised."""
-        httpx_client = MagicMock()
-        httpx_client.close.side_effect = RuntimeError("teardown boom")
-        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=httpx_client)
+        real_httpx = MagicMock(spec=["close"])
+        real_httpx.close.side_effect = RuntimeError("teardown boom")
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
 
         with caplog.at_level("WARNING"):
             sandbox.close()
@@ -355,7 +377,7 @@ class TestClose:
         assert "Error closing AioSandbox client" in caplog.text
 
     def test_close_falls_back_to_client_close(self, sandbox):
-        """If no nested wrapper.httpx_client, close() should call the client's own close()."""
+        """If no nested httpx.Client is reachable, close() degrades to the client's own close()."""
         # Replace the mocked client with a stub that exposes only top-level close()
         client = MagicMock(spec=["close"])
         sandbox._client = client
@@ -368,3 +390,4 @@ class TestClose:
         """A client without any close attribute must not crash close()."""
         sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
         sandbox.close()  # must not raise
+        assert sandbox._client is None

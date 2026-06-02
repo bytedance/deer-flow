@@ -814,6 +814,9 @@ class AioSandboxProvider(SandboxProvider):
                 self._warm_pool[sandbox_id] = (info, time.time())
 
         if sandbox is not None:
+            # Defense-in-depth: close() already swallows its own errors; this
+            # guard only protects against a future close() that misbehaves, so
+            # host-side client cleanup can never block parking in the warm pool.
             try:
                 sandbox.close()
             except Exception as e:
@@ -852,6 +855,9 @@ class AioSandboxProvider(SandboxProvider):
                 self._warm_pool.pop(sandbox_id, None)
 
         if sandbox is not None:
+            # Defense-in-depth: close() already swallows its own errors; this
+            # guard only protects against a future close() that misbehaves, so
+            # host-side client cleanup can never block container destruction.
             try:
                 sandbox.close()
             except Exception as e:
