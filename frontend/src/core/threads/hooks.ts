@@ -106,11 +106,11 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
-function findLatestUnloadedRunIndex(
+export function findLatestUnloadedRunIndex(
   runs: Run[],
   loadedRunIds: ReadonlySet<string>,
 ): number {
-  for (let i = runs.length - 1; i >= 0; i--) {
+  for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
     if (run && !loadedRunIds.has(run.run_id)) {
       return i;

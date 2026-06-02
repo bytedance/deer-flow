@@ -1,8 +1,9 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
   buildRunMessagesUrl,
+  findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
   getSummarizationMiddlewareMessages,
@@ -324,4 +325,78 @@ test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", ()
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
   );
+});
+
+test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set())).toBe(0);
+});
+
+test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next newest unloaded run", () => {
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+  ] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set(["R6"]))).toBe(1);
+});
+
+test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
+  const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {
+  // Simulate backend list_by_thread returning newest first.
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  const runIdToContent: Record<string, string> = {
+    R1: "A",
+    R2: "B",
+    R3: "C",
+    R4: "D",
+    R5: "E",
+    R6: "F",
+  };
+
+  const loaded = new Set<string>();
+  let messages: Message[] = [];
+
+  while (true) {
+    const index = findLatestUnloadedRunIndex(runs, loaded);
+    if (index === -1) break;
+    const run = runs[index]!;
+    const pageMessages = [
+      {
+        id: run.run_id,
+        type: "human",
+        content: runIdToContent[run.run_id],
+      } as Message,
+    ];
+    // Mirror loadMessages: prepend new page to existing messages.
+    messages = [...pageMessages, ...messages];
+    loaded.add(run.run_id);
+  }
+
+  expect(messages.map((m) => m.content)).toEqual([
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+  ]);
 });
