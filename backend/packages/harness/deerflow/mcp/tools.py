@@ -9,7 +9,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.client import build_servers_config_async
 from deerflow.mcp.credentials import (
     credential_scope_key,
     resolve_mcp_user_id,
@@ -257,7 +257,7 @@ async def get_mcp_tools(user_id: str | None = None) -> list[BaseTool]:
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
     extensions_config = ExtensionsConfig.from_file()
-    servers_config = build_servers_config(extensions_config, user_id=user_id)
+    servers_config = await build_servers_config_async(extensions_config, user_id=user_id)
 
     if not servers_config:
         logger.info("No enabled MCP servers configured")

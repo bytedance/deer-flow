@@ -3,7 +3,7 @@
 import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-from deerflow.mcp.client import build_server_params, build_servers_config
+from deerflow.mcp.client import build_server_params, build_servers_config, build_servers_config_async
 
 
 def test_build_server_params_stdio_success():
@@ -111,3 +111,34 @@ def test_build_servers_config_skips_invalid_server_and_keeps_valid_ones():
     assert result["valid-stdio"]["transport"] == "stdio"
     assert "invalid-stdio" not in result
     assert "disabled-http" not in result
+
+
+@pytest.mark.asyncio
+async def test_build_servers_config_async_uses_user_credentials():
+    from deerflow.mcp.credentials import (
+        InMemoryMcpUserCredentialStore,
+        push_mcp_credential_store,
+        reset_mcp_credential_store_context,
+    )
+
+    store = InMemoryMcpUserCredentialStore()
+    await store.upsert("user-a", "github", env={"GITHUB_TOKEN": "token-a"})
+    token = push_mcp_credential_store(store)
+    try:
+        extensions = ExtensionsConfig(
+            mcp_servers={
+                "github": McpServerConfig(
+                    enabled=True,
+                    type="stdio",
+                    command="github-mcp-server",
+                    env={"GITHUB_TOKEN": "global-token"},
+                )
+            },
+            skills={},
+        )
+
+        result = await build_servers_config_async(extensions, user_id="user-a")
+
+        assert result["github"]["env"] == {"GITHUB_TOKEN": "token-a"}
+    finally:
+        reset_mcp_credential_store_context(token)

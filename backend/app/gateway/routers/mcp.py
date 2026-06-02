@@ -143,6 +143,17 @@ def _credentials_to_server_response(credentials: McpUserCredentials | None) -> M
     )
 
 
+def _validate_user_oauth_config(oauth: McpOAuthConfig | None) -> None:
+    if oauth is None or not oauth.enabled:
+        return
+    if not oauth.token_url:
+        raise HTTPException(status_code=422, detail="OAuth token_url is required when OAuth is enabled")
+    if oauth.grant_type == "client_credentials" and (not oauth.client_id or not oauth.client_secret):
+        raise HTTPException(status_code=422, detail="OAuth client_credentials requires client_id and client_secret")
+    if oauth.grant_type == "refresh_token" and not oauth.refresh_token:
+        raise HTTPException(status_code=422, detail="OAuth refresh_token grant requires refresh_token")
+
+
 async def _close_mcp_server_sessions(server_name: str) -> None:
     try:
         from deerflow.mcp.session_pool import get_session_pool
@@ -362,9 +373,7 @@ async def list_mcp_user_credentials(
         entries = await store.list_for_user(user_id)  # type: ignore[attr-defined]
     else:
         entries = []
-    return McpUserCredentialsListResponse(
-        credentials={entry.server_name: _credentials_to_response(entry) for entry in entries}
-    )
+    return McpUserCredentialsListResponse(credentials={entry.server_name: _credentials_to_response(entry) for entry in entries})
 
 
 @router.get(
@@ -408,6 +417,7 @@ async def update_mcp_user_credentials(
         _credentials_to_server_response(existing),
     )
     oauth = McpOAuthConfig.model_validate(merged.oauth.model_dump()) if merged.oauth is not None else None
+    _validate_user_oauth_config(oauth)
 
     updated = await store.upsert(
         user_id,

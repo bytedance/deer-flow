@@ -36,7 +36,7 @@ def test_mcp_tool_sync_wrapper_generation():
     with (
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
         patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
-        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
+        patch("deerflow.mcp.tools.build_servers_config_async", new_callable=AsyncMock, return_value={"test-server": {}}),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
     ):
         # Run the async function manually with asyncio.run

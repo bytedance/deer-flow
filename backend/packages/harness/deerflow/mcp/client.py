@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-from deerflow.mcp.credentials import McpUserCredentials, resolve_server_credentials_sync
+from deerflow.mcp.credentials import McpUserCredentials, resolve_server_credentials, resolve_server_credentials_sync
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,43 @@ def build_servers_config(
             credentials = None
             if user_id is not None:
                 credentials = resolve_server_credentials_sync(
+                    server_name,
+                    server_config,
+                    user_id=user_id,
+                    include_global_secrets=include_global_secrets,
+                )
+            servers_config[server_name] = build_server_params(
+                server_name,
+                server_config,
+                credentials=credentials,
+                include_global_secrets=include_global_secrets,
+            )
+            logger.info(f"Configured MCP server: {server_name}")
+        except Exception as e:
+            logger.error(f"Failed to configure MCP server '{server_name}': {e}")
+
+    return servers_config
+
+
+async def build_servers_config_async(
+    extensions_config: ExtensionsConfig,
+    *,
+    user_id: str | None = None,
+    include_global_secrets: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Build servers configuration without crossing async/sync boundaries."""
+    enabled_servers = extensions_config.get_enabled_mcp_servers()
+
+    if not enabled_servers:
+        logger.info("No enabled MCP servers found")
+        return {}
+
+    servers_config = {}
+    for server_name, server_config in enabled_servers.items():
+        try:
+            credentials = None
+            if user_id is not None:
+                credentials = await resolve_server_credentials(
                     server_name,
                     server_config,
                     user_id=user_id,

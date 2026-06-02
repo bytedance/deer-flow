@@ -461,7 +461,7 @@ async def test_http_transport_tools_not_pooled():
 
     with (
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
-        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.build_servers_config_async", new_callable=AsyncMock, return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
         patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,

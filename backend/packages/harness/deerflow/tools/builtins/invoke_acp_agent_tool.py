@@ -79,19 +79,13 @@ def _build_acp_mcp_servers() -> list[dict[str, Any]]:
                 raise ValueError(f"MCP server '{name}' with stdio transport requires 'command' field")
             payload["command"] = command
             payload["args"] = server_config.get("args") or []
-            payload["env"] = [
-                {"name": key, "value": value}
-                for key, value in (server_config.get("env") or {}).items()
-            ]
+            payload["env"] = [{"name": key, "value": value} for key, value in (server_config.get("env") or {}).items()]
         elif transport_type in ("http", "sse"):
             url = server_config.get("url")
             if not url:
                 raise ValueError(f"MCP server '{name}' with {transport_type} transport requires 'url' field")
             payload["url"] = url
-            payload["headers"] = [
-                {"name": key, "value": value}
-                for key, value in (server_config.get("headers") or {}).items()
-            ]
+            payload["headers"] = [{"name": key, "value": value} for key, value in (server_config.get("headers") or {}).items()]
         else:
             raise ValueError(f"MCP server '{name}' has unsupported transport type: {transport_type}")
 

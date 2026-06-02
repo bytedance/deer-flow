@@ -57,6 +57,7 @@ class OAuthTokenManager:
             return None
 
         key = (server_name, user_id, credentials.version if credentials is not None else 0)
+        self._prune_stale_versions(key)
         token = self._tokens.get(key)
         if token and not self._is_expiring(token, oauth):
             return f"{token.token_type} {token.access_token}"
@@ -71,6 +72,13 @@ class OAuthTokenManager:
             self._tokens[key] = fresh
             logger.info("Refreshed OAuth access token for MCP server: %s user=%s", server_name, user_id)
             return f"{fresh.token_type} {fresh.access_token}"
+
+    def _prune_stale_versions(self, current_key: tuple[str, str, int]) -> None:
+        server_name, user_id, _ = current_key
+        stale_keys = [key for key in set(self._tokens) | set(self._locks) if key != current_key and key[0] == server_name and key[1] == user_id]
+        for key in stale_keys:
+            self._tokens.pop(key, None)
+            self._locks.pop(key, None)
 
     @staticmethod
     def _is_expiring(token: _OAuthToken, oauth: McpOAuthConfig) -> bool:
@@ -182,10 +190,13 @@ async def get_initial_oauth_headers(
                 user_id=user_id,
                 include_global_secrets=True,
             )
-        headers[server_name] = await token_manager.get_authorization_header(
-            server_name,
-            user_id=user_id or "default",
-            credentials=credentials,
-        ) or ""
+        headers[server_name] = (
+            await token_manager.get_authorization_header(
+                server_name,
+                user_id=user_id or "default",
+                credentials=credentials,
+            )
+            or ""
+        )
 
     return {name: value for name, value in headers.items() if value}

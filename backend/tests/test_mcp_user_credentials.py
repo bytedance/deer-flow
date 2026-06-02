@@ -82,9 +82,7 @@ async def test_stdio_session_pool_scopes_by_user_and_uses_user_env():
 
         sessions = [AsyncMock(), AsyncMock()]
         for session in sessions:
-            session.call_tool = AsyncMock(
-                return_value=MagicMock(content=[], isError=False, structuredContent=None)
-            )
+            session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
 
         class _CM:
             def __init__(self, session):
@@ -129,12 +127,8 @@ async def test_stdio_session_pool_scopes_by_user_and_uses_user_env():
             await wrapped.coroutine(runtime=_runtime("user-b"), query="repos for user b")
 
         assert create_session.call_count == 2
-        assert create_session.call_args_list[0].args[0]["env"] == {
-            "GITHUB_PERSONAL_ACCESS_TOKEN": "token-a"
-        }
-        assert create_session.call_args_list[1].args[0]["env"] == {
-            "GITHUB_PERSONAL_ACCESS_TOKEN": "token-b"
-        }
+        assert create_session.call_args_list[0].args[0]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "token-a"}
+        assert create_session.call_args_list[1].args[0]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "token-b"}
         pool_keys = set(get_session_pool()._entries)
         assert ("github", "user-a:shared-thread:v1") in pool_keys
         assert ("github", "user-b:shared-thread:v1") in pool_keys
@@ -221,13 +215,17 @@ def test_oauth_token_cache_is_scoped_by_user_and_credential_version(monkeypatch)
 
     monkeypatch.setattr("httpx.AsyncClient", _client_factory)
 
-    manager = OAuthTokenManager({"secure-http": McpOAuthConfig(
-        enabled=True,
-        token_url="https://auth.example.com/oauth/token",
-        grant_type="client_credentials",
-        client_id="global-client",
-        client_secret="global-secret",
-    )})
+    manager = OAuthTokenManager(
+        {
+            "secure-http": McpOAuthConfig(
+                enabled=True,
+                token_url="https://auth.example.com/oauth/token",
+                grant_type="client_credentials",
+                client_id="global-client",
+                client_secret="global-secret",
+            )
+        }
+    )
 
     from deerflow.mcp.credentials import McpUserCredentials
 
@@ -296,6 +294,53 @@ def test_oauth_token_cache_is_scoped_by_user_and_credential_version(monkeypatch)
     ]
 
 
+def test_oauth_token_cache_prunes_stale_versions(monkeypatch):
+    post_calls = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(post_calls=post_calls, **kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    manager = OAuthTokenManager({})
+
+    from deerflow.mcp.credentials import McpUserCredentials
+
+    first_credentials = McpUserCredentials(
+        user_id="user-a",
+        server_name="secure-http",
+        oauth=McpOAuthConfig(
+            enabled=True,
+            token_url="https://auth.example.com/oauth/token",
+            grant_type="client_credentials",
+            client_id="client-a",
+            client_secret="secret-a",
+        ),
+        version=1,
+    )
+    second_credentials = McpUserCredentials(
+        user_id="user-a",
+        server_name="secure-http",
+        oauth=McpOAuthConfig(
+            enabled=True,
+            token_url="https://auth.example.com/oauth/token",
+            grant_type="client_credentials",
+            client_id="client-a",
+            client_secret="secret-a-new",
+        ),
+        version=2,
+    )
+
+    asyncio.run(manager.get_authorization_header("secure-http", user_id="user-a", credentials=first_credentials))
+    assert ("secure-http", "user-a", 1) in manager._tokens
+
+    asyncio.run(manager.get_authorization_header("secure-http", user_id="user-a", credentials=second_credentials))
+
+    assert ("secure-http", "user-a", 1) not in manager._tokens
+    assert ("secure-http", "user-a", 1) not in manager._locks
+    assert ("secure-http", "user-a", 2) in manager._tokens
+
+
 def test_contextvar_user_still_isolates_oauth_cache(monkeypatch):
     post_calls = []
 
@@ -304,13 +349,17 @@ def test_contextvar_user_still_isolates_oauth_cache(monkeypatch):
 
     monkeypatch.setattr("httpx.AsyncClient", _client_factory)
 
-    manager = OAuthTokenManager({"secure-http": McpOAuthConfig(
-        enabled=True,
-        token_url="https://auth.example.com/oauth/token",
-        grant_type="client_credentials",
-        client_id="global-client",
-        client_secret="global-secret",
-    )})
+    manager = OAuthTokenManager(
+        {
+            "secure-http": McpOAuthConfig(
+                enabled=True,
+                token_url="https://auth.example.com/oauth/token",
+                grant_type="client_credentials",
+                client_id="global-client",
+                client_secret="global-secret",
+            )
+        }
+    )
 
     token_a = set_current_user(SimpleNamespace(id="user-a"))
     try:
@@ -542,6 +591,54 @@ async def test_mcp_credentials_api_masks_preserves_secrets_and_isolates_users():
         assert await store.get("user-a", "github") is not None
     finally:
         reset_current_user(user_b_token)
+        reset_extensions_config()
+
+
+@pytest.mark.asyncio
+async def test_mcp_credentials_api_rejects_enabled_oauth_without_token_url():
+    from app.gateway.routers.mcp import (
+        McpOAuthConfigResponse,
+        McpUserCredentialsUpdateRequest,
+        update_mcp_user_credentials,
+    )
+    from deerflow.config.extensions_config import reset_extensions_config, set_extensions_config
+
+    store = InMemoryMcpUserCredentialStore()
+    set_extensions_config(
+        ExtensionsConfig.model_validate(
+            {
+                "mcpServers": {
+                    "secure-http": {
+                        "enabled": True,
+                        "type": "http",
+                        "url": "https://api.example.com/mcp",
+                    }
+                }
+            }
+        )
+    )
+
+    token = set_current_user(SimpleNamespace(id="user-a"))
+    try:
+        with pytest.raises(Exception) as exc_info:
+            await update_mcp_user_credentials(
+                "secure-http",
+                McpUserCredentialsUpdateRequest(
+                    oauth=McpOAuthConfigResponse(
+                        enabled=True,
+                        token_url="",
+                        grant_type="client_credentials",
+                        client_id="client-a",
+                        client_secret="secret-a",
+                    ),
+                ),
+                store=store,
+            )
+
+        assert getattr(exc_info.value, "status_code", None) == 422
+        assert await store.get("user-a", "secure-http") is None
+    finally:
+        reset_current_user(token)
         reset_extensions_config()
 
 
