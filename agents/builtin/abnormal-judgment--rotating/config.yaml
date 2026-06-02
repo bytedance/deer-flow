@@ -1,0 +1,27 @@
+name: abnormal-judgment--rotating
+display_name: "旋转机组异常研判"
+description: "汽轮机 / 离心 / 轴流 / 齿轮 / 螺杆压缩机 / 齿轮箱的异常事件研判，覆盖传感器、阈值、波动、趋势、升速曲线五类异常"
+icon: "⚙️"
+parent: abnormal-judgment
+order: 1
+model: null
+plan_mode: true
+tool_groups:
+  - bash
+exclude_tools: []
+skills:
+  - rotating-device-context
+  - vibration-fault-diagnosis
+mcp_servers: null
+tags:
+  - abnormal
+  - judgment
+  - rotating
+  - turbine
+  - compressor
+starters:
+  - label: "研判旋转机组异常"
+    prompt: "查看最近的旋转机组异常事件并进行研判"
+    auto_start: true
+advanced:
+  subagent_enabled: false

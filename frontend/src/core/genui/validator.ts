@@ -309,6 +309,22 @@ const subDeviceSelectorPropsSchema = z.object({
   queryParams: deviceQueryParamsSchema.optional(),
 });
 
+// ─── Abnormal judgment schemas ──────────────────────────────────────
+
+const abnormalListSelectorPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  org_id: z.number().optional(),
+  page_size: z.number().min(1).max(50).optional(),
+});
+
+const agentHandoffPropsSchema = z.object({
+  target_agent: z.string().max(200),
+  target_display_name: z.string().max(200),
+  target_icon: z.string().max(10).optional(),
+  message: z.string().max(2000),
+  handoff_data: z.record(z.unknown()),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -329,6 +345,8 @@ const propsSchemas: Record<string, z.ZodType> = {
   "device-selector": deviceSelectorPropsSchema,
   "device-selector-multi": deviceSelectorMultiPropsSchema,
   "sub-device-selector": subDeviceSelectorPropsSchema,
+  "abnormal-list-selector": abnormalListSelectorPropsSchema,
+  "agent_handoff": agentHandoffPropsSchema,
 };
 
 export function validateProps(

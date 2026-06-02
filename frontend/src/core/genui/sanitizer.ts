@@ -64,6 +64,12 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   "sub-device-selector": new Set([
     "title", "queryParams",
   ]),
+  "abnormal-list-selector": new Set([
+    "title", "org_id", "page_size",
+  ]),
+  "agent_handoff": new Set([
+    "target_agent", "target_display_name", "target_icon", "message", "handoff_data",
+  ]),
 };
 
 function sanitizeValue(value: unknown, depth = 0): unknown {

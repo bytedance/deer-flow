@@ -1,7 +1,7 @@
 """SmsAdapter implementation.
 
 Integrates with Sms (设备异常统计与评估系统) providing health assessment,
-anomaly statistics, and risk ranking capabilities.
+anomaly statistics, risk ranking, abnormal list/detail, and workbench todo stats.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import httpx
 
 from deerflow.integrations.adapters.base import AuthContext, HealthStatus
 from deerflow.integrations.adapters.sms.transform import (
+    transform_abnormal_detail,
+    transform_abnormal_list,
     transform_anomaly_stats,
     transform_health_assessment,
     transform_risk_ranking,
@@ -28,6 +30,9 @@ from deerflow.integrations.errors import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STATS_PATH = "/api/workbench/getStats"
+_ONE_DAY_MS = 24 * 60 * 60 * 1000
 
 
 class SmsAdapter:
@@ -109,6 +114,9 @@ class SmsAdapter:
             "health.assessment": self._handle_health_assessment,
             "health.anomaly_statistics": self._handle_anomaly_statistics,
             "health.risk_ranking": self._handle_risk_ranking,
+            "abnormal.list": self._handle_abnormal_list,
+            "abnormal.detail": self._handle_abnormal_detail,
+            "todo_stats.get": self._handle_todo_stats,
         }
 
         handler = handlers.get(capability_key)
@@ -339,3 +347,143 @@ class SmsAdapter:
         data = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
 
         return transform_risk_ranking(data, self._config.system_key, tenant_id)
+
+    async def _handle_abnormal_list(
+        self,
+        query: Any,
+        auth_context: AuthContext,
+    ) -> Any:
+        """Handle abnormal.list capability — fetch paginated abnormal list."""
+        if self._http is None:
+            raise IntegrationError(
+                message="HTTP client not initialized",
+                system_key=self._config.system_key,
+            )
+
+        params: dict[str, Any] = {
+            "currentPage": getattr(query, "current_page", 1),
+            "pageSize": getattr(query, "page_size", 10),
+            "orgId": getattr(query, "org_id", 0),
+            "userId": getattr(query, "user_id", 1),
+        }
+        if hasattr(query, "start_time") and query.start_time:
+            params["startTime"] = query.start_time
+        if hasattr(query, "end_time") and query.end_time:
+            params["endTime"] = query.end_time
+        if hasattr(query, "extra_params"):
+            params.update(query.extra_params)
+
+        response = await self._http.get(
+            "/api/abnormal/list",
+            params=params,
+            headers=self._build_headers(auth_context),
+        )
+        response.raise_for_status()
+
+        raw_data = response.json()
+        if not isinstance(raw_data, dict):
+            raise IntegrationDataShapeError(
+                message=f"Expected dict, got {type(raw_data).__name__}",
+                system_key=self._config.system_key,
+                capability_key="abnormal.list",
+            )
+
+        # Check SMS business-level error code
+        sms_code = raw_data.get("code")
+        if sms_code and sms_code != 200:
+            sms_msg = raw_data.get("msg", "unknown")
+            logger.warning("abnormal.list SMS error: code=%s msg=%s", sms_code, sms_msg)
+            raise IntegrationError(
+                message=f"SMS abnormal.list failed: [{sms_code}] {sms_msg}",
+                system_key=self._config.system_key,
+                capability_key="abnormal.list",
+            )
+
+        # Unwrap standard response envelope
+        data = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
+        result = transform_abnormal_list(data, self._config.system_key)
+        logger.info("abnormal.list: rows=%d", len(result))
+        return result
+
+    async def _handle_abnormal_detail(
+        self,
+        query: Any,
+        auth_context: AuthContext,
+    ) -> Any:
+        """Handle abnormal.detail capability — fetch single abnormal detail with events."""
+        if self._http is None:
+            raise IntegrationError(
+                message="HTTP client not initialized",
+                system_key=self._config.system_key,
+            )
+
+        abnormal_id = getattr(query, "abnormal_id", "")
+        if not abnormal_id:
+            raise IntegrationError(
+                message="abnormal_id is required for abnormal.detail",
+                system_key=self._config.system_key,
+                capability_key="abnormal.detail",
+            )
+
+        params: dict[str, Any] = {"abnormalId": abnormal_id}
+        if hasattr(query, "extra_params"):
+            params.update(query.extra_params)
+
+        response = await self._http.get(
+            "/api/abnormal/detail",
+            params=params,
+            headers=self._build_headers(auth_context),
+        )
+        response.raise_for_status()
+
+        raw_data = response.json()
+        if not isinstance(raw_data, dict):
+            raise IntegrationDataShapeError(
+                message=f"Expected dict, got {type(raw_data).__name__}",
+                system_key=self._config.system_key,
+                capability_key="abnormal.detail",
+            )
+
+        # Unwrap standard response envelope
+        data = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else raw_data
+        return transform_abnormal_detail(data, self._config.system_key, abnormal_id=abnormal_id)
+
+    async def _handle_todo_stats(
+        self,
+        query: Any,
+        auth_context: AuthContext,
+    ) -> dict[str, int]:
+        """Handle todo_stats.get capability — fetch workbench pending counts."""
+        if self._http is None:
+            raise IntegrationError(
+                message="HTTP client not initialized",
+                system_key=self._config.system_key,
+            )
+
+        headers = self._build_headers(auth_context)
+        now_ms = int(time.time() * 1000)
+        params = {
+            "startTime": str(now_ms - _ONE_DAY_MS),
+            "endTime": str(now_ms),
+        }
+
+        response = await self._http.get(
+            _STATS_PATH,
+            params=params,
+            headers=headers,
+        )
+
+        if response.status_code in (401, 403):
+            raise IntegrationAuthError(
+                system_key=self._config.system_key,
+                capability="todo_stats.get",
+            )
+        response.raise_for_status()
+
+        body = response.json()
+        data = body.get("data", body) if isinstance(body, dict) else {}
+        return {
+            "anomalyPending": data.get("pendingCount", 0),
+            "startupPending": data.get("startPendingCount", 0),
+            "shutdownPending": data.get("stopPendingCount", 0),
+        }

@@ -83,6 +83,19 @@ class RiskRankingInput(BaseModel):
     min_risk_score: float = Field(default=0.0, description="最小风险分数")
 
 
+class AbnormalListInput(BaseModel):
+    current_page: int = Field(default=1, ge=1, description="当前页码")
+    page_size: int = Field(default=10, ge=1, le=100, description="每页条数")
+    start_time: int | None = Field(default=None, description="开始时间（毫秒时间戳）")
+    end_time: int | None = Field(default=None, description="结束时间（毫秒时间戳）")
+
+
+class AbnormalDetailInput(BaseModel):
+    abnormal_id: str = Field(description="异常ID")
+    mac_id: str = Field(default="", description="设备ID（从列表补充）")
+    component_id: str = Field(default="", description="子设备ID（从列表补充）")
+
+
 class OutboundQueryInput(BaseModel):
     spec_model: str | None = Field(default=None, description="规格型号过滤")
     start_date: str | None = Field(default=None, description="开始日期 (YYYY-MM-DD)")
@@ -282,6 +295,30 @@ def build_integration_tools(
                 ),
             ))
 
+    if _should_include(data_tools, "abnormal_get_list", "assessment"):
+        if assessment_tools:
+            tools.append(StructuredTool(
+                name="abnormal_get_list",
+                description="获取SMS系统的设备异常列表，支持分页和时间范围过滤，返回异常ID、设备信息、健康值和严重等级",
+                args_schema=AbnormalListInput,
+                coroutine=_make_coro(
+                    assessment_tools.get_abnormal_list, tenant_id, user_id,
+                    _passthrough, token,
+                ),
+            ))
+
+    if _should_include(data_tools, "abnormal_get_detail", "assessment"):
+        if assessment_tools:
+            tools.append(StructuredTool(
+                name="abnormal_get_detail",
+                description="获取指定异常的详情，包含所有异常事件（类型、等级、关联测点、时间范围）和操作日志",
+                args_schema=AbnormalDetailInput,
+                coroutine=_make_coro(
+                    assessment_tools.get_abnormal_detail, tenant_id, user_id,
+                    _passthrough, token,
+                ),
+            ))
+
     # XSY (销售易) CRM tools
     if _should_include(data_tools, "crm_query_outbound", "crm"):
         if xsy_tools:
@@ -377,6 +414,11 @@ def _should_include(data_tools: list[str], tool_name: str, group: str) -> bool:
     if f"{group}.*" in data_tools:
         return True
     return tool_name in data_tools
+
+
+def _passthrough(kwargs: dict) -> dict:
+    """Pass input kwargs through unchanged (tool params match schema directly)."""
+    return {k: v for k, v in kwargs.items()}
 
 
 def _make_coro(method, tenant_id, user_id, args_transform, token=None):

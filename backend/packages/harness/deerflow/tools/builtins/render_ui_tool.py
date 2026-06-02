@@ -9,7 +9,7 @@ from langgraph.config import get_config, get_stream_writer
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
 ALLOWED_COMPONENTS = frozenset(
-    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image", "device-selector", "device-selector-multi", "sub-device-selector"}
+    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image", "device-selector", "device-selector-multi", "sub-device-selector", "abnormal-list-selector", "agent_handoff"}
 )
 
 ALLOWED_ACTIONS = frozenset({"create", "update", "delete"})
@@ -36,7 +36,7 @@ def render_ui_tool(
     cards, forms, and more. The component will be rendered in the chat interface.
 
     Args:
-        component: Component type. One of: chart, echart, table, card, form, confirm, code, timeline, markdown, layout, image, device-selector, device-selector-multi, sub-device-selector.
+        component: Component type. One of: chart, echart, table, card, form, confirm, code, timeline, markdown, layout, image, device-selector, device-selector-multi, sub-device-selector, abnormal-list-selector, agent_handoff.
         props: Component properties object. Structure depends on the component type.
         interactive: Whether the component accepts user interaction (e.g., form submission).
         callback_id: Required if interactive=True. Used to route interaction callbacks back to the agent.

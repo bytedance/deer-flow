@@ -10,6 +10,10 @@ from datetime import datetime
 from typing import Any
 
 from deerflow.integrations.models.assessment import (
+    AbnormalDetail,
+    AbnormalEvent,
+    AbnormalItem,
+    AbnormalPoint,
     AnomalyStats,
     EquipmentRisk,
     HealthAssessment,
@@ -199,6 +203,131 @@ def transform_risk_ranking(
             "ranking_model": raw_data.get("model"),
         },
         provenance=provenance,
+    )
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def transform_abnormal_list(
+    raw_data: dict[str, Any],
+    system_key: str,
+) -> tuple[AbnormalItem, ...]:
+    """Transform SMS abnormal list response into AbnormalItem tuple.
+
+    Args:
+        raw_data: Response data from SMS /api/abnormal/list.
+        system_key: The system key for provenance.
+
+    Returns:
+        Tuple of AbnormalItem instances.
+    """
+    rows = raw_data.get("rows") or []
+    items: list[AbnormalItem] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        items.append(AbnormalItem(
+            abnormal_id=str(row.get("id", "")),
+            process_status=str(row.get("processStatus", "")),
+            mac_path=str(row.get("macPath", "")),
+            mac_name=str(row.get("macName", "")),
+            component_name=str(row.get("componentName", "")),
+            mac_id=str(row.get("macId", "")),
+            component_id=str(row.get("componentId", "")),
+            serious_health=_safe_float(row.get("seriousHealth")),
+            latest_health=_safe_float(row.get("latestHealth")),
+            first_event_time=_safe_int(row.get("firstEventTime")),
+            lastest_event_time=_safe_int(row.get("lastestEventTime")),
+            serious_level=_safe_int(row.get("seriousLevel")),
+            latest_level=_safe_int(row.get("latestLevel")),
+            event_count=_safe_int(row.get("eventCount")),
+            recorder=str(row.get("recorder", "")),
+            run_status=str(row.get("runStatus", "")),
+            process_duration=_safe_int(row.get("processDuration")),
+            mac_type=_safe_int(row.get("macType"), 1),
+            defect_transfer_status=_safe_int(row.get("defectTransferStatus")),
+            fault_transfer_status=_safe_int(row.get("faultTransferStatus")),
+        ))
+    return tuple(items)
+
+
+def transform_abnormal_detail(
+    raw_data: dict[str, Any],
+    system_key: str,
+    abnormal_id: str = "",
+    mac_id: str = "",
+    component_id: str = "",
+) -> AbnormalDetail:
+    """Transform SMS abnormal detail response into AbnormalDetail.
+
+    Args:
+        raw_data: Response data from SMS /api/abnormal/detail.
+        system_key: The system key for provenance.
+        abnormal_id: The abnormal ID (from the request).
+        mac_id: Equipment ID supplemented from list data.
+        component_id: Sub-device ID supplemented from list data.
+
+    Returns:
+        AbnormalDetail instance.
+    """
+    data = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else {}
+
+    events: list[AbnormalEvent] = []
+    for evt in data.get("events") or []:
+        if not isinstance(evt, dict):
+            continue
+        jp = evt.get("jumpParams") or {}
+        points: list[AbnormalPoint] = []
+        for pt in jp.get("points") or []:
+            if not isinstance(pt, dict):
+                continue
+            points.append(AbnormalPoint(
+                point_id=str(pt.get("pointId", "")),
+                point_name=str(pt.get("pointName", "")),
+                value_type=str(pt.get("valueType", "")),
+                point_type=_safe_int(pt.get("pointType")),
+            ))
+        events.append(AbnormalEvent(
+            time=_safe_int(evt.get("time")),
+            health=_safe_float(evt.get("health")) if evt.get("health") is not None else None,
+            type=str(evt.get("type", "")),
+            run_status=str(evt.get("runStatus", "")),
+            event_level=_safe_int(evt.get("eventLevel")),
+            desc=str(evt.get("desc", "")),
+            points=tuple(points),
+            time_range_start=_safe_int(jp.get("startTime")),
+            time_range_end=_safe_int(jp.get("endTime")),
+            factory_id=str(jp.get("factoryId", "")),
+        ))
+
+    return AbnormalDetail(
+        abnormal_id=abnormal_id,
+        process_status=str(data.get("processStatus", "")),
+        mac_path=str(data.get("macPath", "")),
+        mac_name=str(data.get("macName", "")),
+        component_name=str(data.get("componentName", "")),
+        events=tuple(events),
+        logs=tuple(data.get("logs") or []),
+        ai_analyse=data.get("aiAnalyse"),
+        risk_assessment=data.get("riskAssessment"),
+        mac_id=mac_id,
+        component_id=component_id,
     )
 
 

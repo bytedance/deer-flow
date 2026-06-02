@@ -7,6 +7,8 @@ import logging
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.models.queries import (
+    AbnormalDetailQuery,
+    AbnormalListQuery,
     AnomalyStatsQuery,
     HealthAssessmentQuery,
     RiskRankingQuery,
@@ -85,6 +87,48 @@ class AssessmentService:
         logger.info("Getting risk ranking")
         return await self._router.route(
             capability_key="health.risk_ranking",
+            query=query,
+            auth_context=auth_context,
+        )
+
+    async def get_abnormal_list(
+        self,
+        query: AbnormalListQuery,
+        auth_context: AuthContext,
+    ) -> ServiceResult:
+        """Get paginated abnormal event list.
+
+        Args:
+            query: Abnormal list query with pagination and time range.
+            auth_context: Authentication context for downstream calls.
+
+        Returns:
+            ServiceResult containing tuple[AbnormalItem, ...].
+        """
+        logger.info("Getting abnormal list: page=%s", query.current_page)
+        return await self._router.route(
+            capability_key="abnormal.list",
+            query=query,
+            auth_context=auth_context,
+        )
+
+    async def get_abnormal_detail(
+        self,
+        query: AbnormalDetailQuery,
+        auth_context: AuthContext,
+    ) -> ServiceResult:
+        """Get abnormal detail with events and points.
+
+        Args:
+            query: Abnormal detail query with abnormal_id.
+            auth_context: Authentication context for downstream calls.
+
+        Returns:
+            ServiceResult containing AbnormalDetail.
+        """
+        logger.info("Getting abnormal detail: id=%s", query.abnormal_id)
+        return await self._router.route(
+            capability_key="abnormal.detail",
             query=query,
             auth_context=auth_context,
         )

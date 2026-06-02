@@ -123,3 +123,78 @@ class RiskRanking:
             source_metadata=self.source_metadata,
             provenance=provenance,
         )
+
+
+# ---------------------------------------------------------------------------
+# Abnormal (SMS) models
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AbnormalPoint:
+    """SMS abnormal event point / measurement point reference."""
+
+    point_id: str
+    point_name: str
+    value_type: str
+    point_type: int
+
+
+@dataclass(frozen=True)
+class AbnormalEvent:
+    """Single abnormal event within an anomaly."""
+
+    time: int  # 毫秒时间戳
+    health: float | None
+    type: str  # sensor / t / w / k / d
+    run_status: str
+    event_level: int
+    desc: str
+    points: tuple[AbnormalPoint, ...]
+    time_range_start: int  # jumpParams.startTime
+    time_range_end: int  # jumpParams.endTime
+    factory_id: str
+
+
+@dataclass(frozen=True)
+class AbnormalItem:
+    """Single row in the abnormal list."""
+
+    abnormal_id: str
+    process_status: str
+    mac_path: str
+    mac_name: str
+    component_name: str
+    mac_id: str
+    component_id: str
+    serious_health: float
+    latest_health: float
+    first_event_time: int
+    lastest_event_time: int
+    serious_level: int
+    latest_level: int
+    event_count: int
+    recorder: str = ""
+    run_status: str = ""
+    process_duration: int = 0
+    mac_type: int = 1
+    defect_transfer_status: int = 0
+    fault_transfer_status: int = 0
+
+
+@dataclass(frozen=True)
+class AbnormalDetail:
+    """Full detail of a single anomaly."""
+
+    abnormal_id: str
+    process_status: str
+    mac_path: str
+    mac_name: str
+    component_name: str
+    events: tuple[AbnormalEvent, ...]
+    logs: tuple[dict[str, Any], ...] = ()
+    ai_analyse: dict[str, Any] | None = None
+    risk_assessment: dict[str, Any] | None = None
+    # 以下字段从列表侧带入（详情接口不返回）
+    mac_id: str = ""
+    component_id: str = ""

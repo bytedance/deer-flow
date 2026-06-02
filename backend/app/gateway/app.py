@@ -18,6 +18,7 @@ from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.deps import langgraph_runtime
 from app.gateway.middleware.rate_limit import create_rate_limit_middleware
 from app.gateway.routers import (
+    abnormal,
     admin,
     agents,
     artifacts,
@@ -466,6 +467,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to start Nacos registration (non-fatal)")
 
+        # Pre-initialise shared SmsAdapter so first request doesn't stall
+        try:
+            from deerflow.integrations.sms_adapter_resolver import ensure_sms_adapter
+            await asyncio.wait_for(ensure_sms_adapter(), timeout=10.0)
+        except Exception:
+            logger.exception("Failed to pre-initialise SmsAdapter (non-fatal)")
+
         yield
 
         # Stop closure overdue scanner first so it does not race with engine teardown.
@@ -762,6 +770,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Organize tree & Machine API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
     app.include_router(machine.router)
+
+    # Abnormal (SMS) proxy for A2UI components
+    app.include_router(abnormal.router)
 
     # Workbench API (proxy to external 服务平台)
     app.include_router(workbench.router)

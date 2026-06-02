@@ -1,0 +1,18 @@
+name: abnormal-judgment
+display_name: "异常研判"
+description: "对设备异常事件进行智能研判，识别根因、评估风险、给出处置建议，支持关联故障诊断深度分析"
+icon: "🔍"
+type: group
+order: 2
+model: null
+tool_groups:
+  - bash
+exclude_tools: []
+skills: []
+mcp_servers: null
+tags:
+  - abnormal
+  - judgment
+  - diagnosis
+advanced:
+  subagent_enabled: false

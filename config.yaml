@@ -366,18 +366,6 @@ rpc:
 integrations:
   enabled: true
   systems:
-    workbench:
-      system_type: workbench
-      display_name: "服务平台"
-      description: "服务平台集成，提供待办统计（异常/启机/停机）"
-      transport_type: http
-      base_url: "http://182.92.187.198"
-      auth_type: bearer
-      auth_mode: user_token
-      timeout_seconds: 30.0
-      enabled: true
-      capabilities:
-        - todo_stats.get
     xsy_prod:
       system_type: xsy
       display_name: "销售易 CRM"
@@ -401,6 +389,23 @@ integrations:
         client_secret_env: "$XSY_CLIENT_SECRET"
         username_env: "$XSY_USERNAME"
         password_env: "$XSY_PASSWORD"
+    sms:
+      system_type: sms
+      display_name: "SMS设备异常统计与评估系统"
+      description: "SMS集成，提供异常列表/详情、健康评估、风险排名、待办统计"
+      transport_type: http
+      base_url: "http://182.92.187.198"
+      auth_type: bearer
+      auth_mode: user_token
+      timeout_seconds: 30.0
+      enabled: true
+      capabilities:
+        - abnormal.list
+        - abnormal.detail
+        - health.assessment
+        - health.anomaly_statistics
+        - health.risk_ranking
+        - todo_stats.get
   routes:
     outbound.query:
       primary_system_key: xsy_prod
@@ -415,4 +420,14 @@ integrations:
     xsy.report:
       primary_system_key: xsy_prod
     todo_stats.get:
-      primary_system_key: workbench
+      primary_system_key: sms
+    abnormal.list:
+      primary_system_key: sms
+    abnormal.detail:
+      primary_system_key: sms
+    health.assessment:
+      primary_system_key: sms
+    health.anomaly_statistics:
+      primary_system_key: sms
+    health.risk_ranking:
+      primary_system_key: sms
