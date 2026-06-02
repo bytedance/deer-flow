@@ -188,6 +188,33 @@ class TestLoadAgentConfig:
 
         assert cfg.skills is None
 
+    def test_user_memory_dir_does_not_shadow_shared_agent_config(self, tmp_path):
+        _write_agent(tmp_path, "code-qa", {"name": "code-qa", "skills": ["codebase-qa"]})
+        memory_only_dir = tmp_path / "users" / "alice" / "agents" / "code-qa"
+        memory_only_dir.mkdir(parents=True)
+        (memory_only_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("code-qa", user_id="alice")
+
+        assert cfg.name == "code-qa"
+        assert cfg.skills == ["codebase-qa"]
+
+    def test_per_user_agent_config_still_takes_precedence_over_shared_config(self, tmp_path):
+        _write_agent(tmp_path, "code-qa", {"name": "code-qa", "description": "shared"})
+        user_agent_dir = tmp_path / "users" / "alice" / "agents" / "code-qa"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "config.yaml").write_text("name: code-qa\ndescription: private\n", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("code-qa", user_id="alice")
+
+        assert cfg.description == "private"
+
     def test_legacy_prompt_file_field_ignored(self, tmp_path):
         """Unknown fields like the old prompt_file should be silently ignored."""
         agent_dir = tmp_path / "agents" / "legacy-agent"
@@ -234,6 +261,20 @@ class TestLoadAgentSoul:
             soul = load_agent_soul(cfg.name)
 
         assert soul is None
+
+    def test_user_memory_dir_does_not_shadow_shared_agent_soul(self, tmp_path):
+        expected_soul = "Shared code QA soul."
+        _write_agent(tmp_path, "code-qa", {"name": "code-qa"}, soul=expected_soul)
+        memory_only_dir = tmp_path / "users" / "alice" / "agents" / "code-qa"
+        memory_only_dir.mkdir(parents=True)
+        (memory_only_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("code-qa", user_id="alice")
+
+        assert soul == expected_soul
 
     def test_empty_soul_file_returns_none(self, tmp_path):
         agent_dir = tmp_path / "agents" / "empty-soul"
@@ -318,6 +359,20 @@ class TestListCustomAgents:
 
         names = [a.name for a in agents]
         assert names == sorted(names)
+
+    def test_memory_only_user_dir_does_not_hide_shared_agent(self, tmp_path):
+        _write_agent(tmp_path, "code-qa", {"name": "code-qa", "description": "shared"})
+        memory_only_dir = tmp_path / "users" / "alice" / "agents" / "code-qa"
+        memory_only_dir.mkdir(parents=True)
+        (memory_only_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import list_custom_agents
+
+            agents = list_custom_agents(user_id="alice")
+
+        assert [agent.name for agent in agents] == ["code-qa"]
+        assert agents[0].description == "shared"
 
 
 # ===========================================================================
