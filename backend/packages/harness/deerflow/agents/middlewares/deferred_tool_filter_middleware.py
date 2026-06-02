@@ -29,6 +29,10 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
     ToolNode still holds all tools (including deferred) for execution routing,
     but the LLM only sees active tool schemas — deferred tools are discoverable
     via tool_search at runtime.
+
+    After each model call, previously promoted tools are re-deferred so they
+    don't stay bound to the model forever (issue #2968). Only tools promoted
+    during the current tool-execution phase are visible to the next model call.
     """
 
     def _filter_tools(self, request: ModelRequest) -> ModelRequest:
@@ -45,6 +49,21 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
             logger.debug(f"Filtered {len(request.tools) - len(active_tools)} deferred tool schema(s) from model binding")
 
         return request.override(tools=active_tools)
+
+    @staticmethod
+    def _reset_promoted() -> None:
+        """Re-defer tools that were promoted in a previous turn (issue #2968).
+
+        Called AFTER each model call so that promoted tools are only visible
+        for the turn immediately following their promotion. Without this,
+        once promoted a tool's schema stays bound to the model forever,
+        continuously consuming context tokens even when no longer needed.
+        """
+        from deerflow.tools.builtins.tool_search import get_deferred_registry
+
+        registry = get_deferred_registry()
+        if registry:
+            registry.reset_promoted()
 
     def _blocked_tool_message(self, request: ToolCallRequest) -> ToolMessage | None:
         from deerflow.tools.builtins.tool_search import get_deferred_registry
@@ -74,7 +93,9 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._filter_tools(request))
+        result = handler(self._filter_tools(request))
+        self._reset_promoted()
+        return result
 
     @override
     def wrap_tool_call(
@@ -93,7 +114,9 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._filter_tools(request))
+        result = await handler(self._filter_tools(request))
+        self._reset_promoted()
+        return result
 
     @override
     async def awrap_tool_call(
