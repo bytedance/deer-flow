@@ -26,12 +26,12 @@ class ToolOutputConfig(BaseModel):
     preview_head_chars: int = Field(
         default=2_000,
         ge=0,
-        description="Characters to keep from the head of the output in the preview.",
+        description="Sampling budget retained for compatibility. Typed previews use this with preview_tail_chars only for fallback samples inside the structured synopsis.",
     )
     preview_tail_chars: int = Field(
         default=1_000,
         ge=0,
-        description="Characters to keep from the tail of the output in the preview.",
+        description="Sampling budget retained for compatibility. Typed previews use this with preview_head_chars only for fallback samples inside the structured synopsis.",
     )
     fallback_max_chars: int = Field(
         default=30_000,
