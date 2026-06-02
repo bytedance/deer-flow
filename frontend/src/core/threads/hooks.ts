@@ -8,7 +8,6 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
-import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
@@ -17,12 +16,11 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
+import { fetchRunHistoryMessages, fetchThreadTokenUsage } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
-  RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
 
@@ -726,19 +724,11 @@ export function useThreadHistory(threadId: string) {
 
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
-        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-          {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-          },
-        ).then((res) => {
-          return res.json();
-        });
-        const _messages = result.data
+        const result = await fetchRunHistoryMessages(
+          requestThreadId,
+          run.run_id,
+        );
+        const _messages = result
           .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
           .map((m) => m.content);
         if (threadIdRef.current !== requestThreadId) {

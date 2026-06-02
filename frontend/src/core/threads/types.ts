@@ -25,11 +25,18 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
+  seq: number;
   content: Message;
   metadata: {
     caller: string;
   };
   created_at: string;
+}
+
+export interface RunMessagesPage {
+  data: RunMessage[];
+  has_more?: boolean;
+  hasMore?: boolean;
 }
 
 export interface ThreadTokenUsageResponse {
