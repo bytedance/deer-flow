@@ -90,11 +90,12 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(msg, dict):
                 role = msg.get("role", msg.get("type", "user"))
                 content = msg.get("content", "")
+                additional_kwargs = msg.get("additional_kwargs") or {}
                 if role in ("user", "human"):
-                    converted.append(HumanMessage(content=content))
+                    converted.append(HumanMessage(content=content, additional_kwargs=additional_kwargs))
                 else:
                     # TODO: handle other message types (system, ai, tool)
-                    converted.append(HumanMessage(content=content))
+                    converted.append(HumanMessage(content=content, additional_kwargs=additional_kwargs))
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}

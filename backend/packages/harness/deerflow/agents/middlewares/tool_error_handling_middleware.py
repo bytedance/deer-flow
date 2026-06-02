@@ -134,6 +134,10 @@ def _build_runtime_middlewares(
 
         middlewares.insert(1, UploadsMiddleware())
 
+    from deerflow.agents.middlewares.passthrough_params_middleware import PassthroughParamsMiddleware
+
+    middlewares.insert(1, PassthroughParamsMiddleware())
+
     if include_dangling_tool_call_patch:
         from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 

@@ -91,16 +91,50 @@ def submit_step(
     return next_id
 
 
+def _normalize_csv_list(value: Any) -> list[str]:
+    """Normalize a value that may be a CSV string, a list, or a single value."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return []
+
+
 def _normalize_payload(step: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     """Transform GenUI callback payload into the canonical form_state format.
 
     For ``device-selector-multi`` steps the frontend sends
     ``{selected: [{id, label, type, path}]}``. We map it to the field names
     expected by downstream data_steps (``equipment_ids`` / ``equipment_labels``).
+
+    Deep-link path: when ``selected`` is absent but ``equipment_ids`` is present,
+    accept it directly (as list or CSV string) with optional ``equipment_labels``.
+    When labels are missing, fall back to using IDs as labels.
     """
     if step.get("component") != "device-selector-multi":
         return dict(payload)
 
+    # Deep-link / programmatic path: accept equipment_ids directly.
+    if "selected" not in payload and "equipment_ids" in payload:
+        equipment_ids = _normalize_csv_list(payload["equipment_ids"])
+        if not equipment_ids:
+            raise SubmitStepError(
+                f"device-selector-multi step {step['id']!r}: equipment_ids must be a non-empty list or CSV string"
+            )
+        equipment_labels = _normalize_csv_list(payload.get("equipment_labels", []))
+        if not equipment_labels:
+            equipment_labels = list(equipment_ids)
+        elif len(equipment_labels) != len(equipment_ids):
+            raise SubmitStepError(
+                f"device-selector-multi step {step['id']!r}: "
+                f"equipment_labels length ({len(equipment_labels)}) must match equipment_ids length ({len(equipment_ids)})"
+            )
+        return {
+            "equipment_ids": equipment_ids,
+            "equipment_labels": equipment_labels,
+        }
+
+    # Normal GenUI path: selected array from device-selector-multi component.
     selected = payload.get("selected")
     if not isinstance(selected, list) or len(selected) == 0:
         raise SubmitStepError(
