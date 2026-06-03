@@ -19,6 +19,8 @@
 当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下三个必选字段且均校验通过时，**跳过全部 GenUI 交互表单，直接执行报告生成完整链路直到导出完成**。
 
 > 参数名与模板 DSL `form_steps` 字段名一一对应。`date_end` 仅用于校验日期范围，不提交到模板（模板 scope 步骤只接收 `week_start`）。
+>
+> **不在上述列表中的参数（如 `run_id`、`timestamp` 等）一律忽略，不要对其做任何处理。**
 
 必选参数（缺一不可）：
 - `template_id`：报告模板 ID（如 `weekly-equipment`），必须匹配已安装模板
@@ -41,7 +43,7 @@
 - 可选参数校验失败时忽略该参数，使用默认值
 - 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
 
-**注意**：三必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败则回退到正常的表单交互流程。
+**注意**：三必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败时，**静默回退到正常的表单交互流程**。禁止向用户提及 deep-link 参数、解释缺少哪些参数、或输出任何"请补充 xxx"的提示——直接当作没有 deep_link_params，走启动决策 → DSL 路径 → 渲染表单。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -162,7 +164,7 @@
 5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
+python /mnt/skills/custom/weekly-report/scripts/list_equipment.py \
   --type "{validated.equipment_type}" \
   --scope all \
   --limit 1
@@ -215,7 +217,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 按区域或全部场景：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
+python /mnt/skills/custom/weekly-report/scripts/query_weekly.py \
   --week-start "{validated.week_start}" \
   --type "{validated.equipment_type}" \
   --scope "{validated.equipment_scope}" \
@@ -227,7 +229,7 @@ python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
 指定设备场景：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
+python /mnt/skills/custom/weekly-report/scripts/query_weekly.py \
   --week-start "{validated.week_start}" \
   --type "{validated.equipment_type}" \
   --equipment "{validated.equipment_ids}" \
@@ -239,7 +241,7 @@ python /mnt/skills/custom/data-analyst/scripts/query_weekly.py \
 5. 调用周 KPI 计算脚本：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/weekly_kpi.py \
+python /mnt/skills/custom/weekly-report/scripts/weekly_kpi.py \
   --input /mnt/user-data/outputs/weekly_data.json \
   --output /mnt/user-data/outputs/weekly_kpi.json
 ```
@@ -249,8 +251,8 @@ python /mnt/skills/custom/data-analyst/scripts/weekly_kpi.py \
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
-from export_report import render_weekly_markdown, write_report
+sys.path.insert(0, "/mnt/skills/custom/weekly-report/scripts")
+from export_report import render_markdown, write_report
 
 with open("/mnt/user-data/outputs/weekly_kpi.json", "r", encoding="utf-8") as f:
     payload = json.load(f)
@@ -258,17 +260,13 @@ with open("/mnt/user-data/outputs/weekly_kpi.json", "r", encoding="utf-8") as f:
 # 周 KPI 卡片（每个 KPI 一个 card），趋势图、TopN 表、告警流水、下周关注请用 render_ui 单独推送
 
 # 自动导出 Markdown（必需）
-write_report(payload, "md", report_type="weekly")
+write_report(payload)
 
-# 自动尝试导出 PDF（依赖 weasyprint，未安装时降级）
-pdf_available = True
-try:
-    write_report(payload, "pdf", report_type="weekly")
-except ImportError:
-    pdf_available = False
+# PDF export not supported in standalone weekly-report skill (Markdown only)
+pdf_available = False
 
 # 在 markdown 末尾追加下载链接
-report_md = render_weekly_markdown(payload, thread_id="{thread_id}")
+report_md = render_markdown(payload, thread_id="{thread_id}")
 links = ["- [下载 Markdown](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/weekly_report.md)"]
 if pdf_available:
     links.append("- [下载 PDF](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/weekly_report.pdf)")
@@ -305,8 +303,8 @@ present_files(["/mnt/user-data/outputs/weekly_report.md"])
 
 ## 数据源
 
-- Skill 脚本 `query_weekly.py` 通过 InS provider 拉取真实运行数据。
-- 若 InS 接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
+- Skill 脚本 `query_weekly.py` 通过 integrations 平台层拉取真实运行数据。
+- 若数据接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
 
 ## 异常处理
 

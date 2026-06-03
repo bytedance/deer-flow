@@ -45,7 +45,7 @@
 
 各等级脚本输出格式兼容，确保报告导出流水线无额外分支
 
-脚本路径约定（`/mnt/skills/custom/data-analyst/scripts/` 下统一管理）：
+脚本路径约定（`/mnt/skills/custom/monitoring-analysis/scripts/` 下统一管理）：
 
 ```
 Basic:    trend_analysis.py（现有）
@@ -205,7 +205,7 @@ Ultra:    ultra_trend.py, ultra_anomaly.py, ultra_kpi.py, ultra_correlation.py, 
 - >60 天 → `weekly`
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "{metrics_csv}" \
   --date-range "{date_start}..{date_end}" \
   --aggregation {hourly|daily|weekly} \
@@ -223,7 +223,7 @@ python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
 
 ```bash
 # 并行拉取告警事件和启停事件
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "{metrics_csv}" \
   --date-range "{date_start}..{date_end}" \
   --aggregation {hourly|daily|weekly} \
@@ -238,7 +238,7 @@ Pro 扩展 `query_trend.py` 参数：`--include-alarms`（拉取告警事件序�
 **Ultra 统一数据视图**（在 Pro 基础上追加）：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "{metrics_csv}" \
   --date-range "{date_start}..{date_end}" \
   --aggregation {hourly|daily|weekly} \
@@ -257,7 +257,7 @@ Ultra 扩展参数：`--include-waveform`、`--include-spectrum`，合并为统�
 在步骤 T1 完成后，对拉取的数据进行质量评估：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/data_quality.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/data_quality.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --tier {pro|ultra} \
   --output-dir /mnt/user-data/outputs/
@@ -271,7 +271,7 @@ python /mnt/skills/custom/data-analyst/scripts/data_quality.py \
 ## 步骤 T2：执行趋势分析
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/trend_analysis.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/trend_analysis.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -333,7 +333,7 @@ python /mnt/skills/custom/data-analyst/scripts/trend_analysis.py \
 替换步骤 T2 的 `trend_analysis.py` 为 `pro_trend.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/pro_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/pro_trend.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -357,7 +357,7 @@ Pro 趋势输出包含：
 替换步骤 T2 的脚本为 `ultra_trend.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/ultra_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/ultra_trend.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --model-path /opt/features-tool/models/trend_forecaster.onnx \
   --output-dir /mnt/user-data/outputs/
@@ -383,7 +383,7 @@ Ultra 趋势输出包含 Pro 全部字段，额外：
 ## 步骤 A1：拉取监测数据
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "{metrics_csv}" \
   --date-range "{date_start}..{date_end}" \
   --aggregation daily \
@@ -584,7 +584,7 @@ print(json.dumps({"ok": True, "anomalies_found": len(anomalies)}))
 替换步骤 A2 的内联 Python 为 `pro_anomaly.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/pro_anomaly.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/pro_anomaly.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -606,7 +606,7 @@ Pro 异常输出包含：
 替换脚本为 `ultra_anomaly.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/ultra_anomaly.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/ultra_anomaly.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --model-path /opt/features-tool/models/anomaly_autoencoder.onnx \
   --output-dir /mnt/user-data/outputs/
@@ -630,7 +630,7 @@ Ultra 异常输出包含 Pro 全部字段，额外：
 ## 步骤 K1：拉取 KPI 数据
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
+python /mnt/skills/custom/daily-report/scripts/query_daily.py \
   --date "{date_end}" \
   --type "all" \
   --equipment "{equipment_ids_csv}" \
@@ -773,7 +773,7 @@ print(json.dumps({"ok": True, "compliance_pct": compliance_pct}))
 替换步骤 K2 的内联 Python 为 `pro_kpi.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/pro_kpi.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/pro_kpi.py \
   --input /mnt/user-data/outputs/daily_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -792,7 +792,7 @@ Pro KPI 输出包含：
 替换脚本为 `ultra_kpi.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/ultra_kpi.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/ultra_kpi.py \
   --input /mnt/user-data/outputs/daily_data.json \
   --model-path /opt/features-tool/models/health_predictor.onnx \
   --output-dir /mnt/user-data/outputs/
@@ -820,7 +820,7 @@ Ultra KPI 输出包含 Pro 全部字段，额外：
 ## 步骤 C2：拉取多参数数据
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "{metrics_csv_or_defaults}" \
   --date-range "{date_start}..{date_end}" \
   --aggregation daily \
@@ -979,7 +979,7 @@ Domain interpretation 参考：
 替换步骤 C3 的内联 Python 为 `pro_correlation.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/pro_correlation.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/pro_correlation.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -999,7 +999,7 @@ Pro 关联输出包含：
 替换脚本为 `ultra_correlation.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/ultra_correlation.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/ultra_correlation.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -1028,7 +1028,7 @@ Ultra 关联输出包含 Pro 全部字段，额外：
 使用 `query_trend.py --aggregation daily` 拉取所选设备在指定时间范围内的趋势数据，用于提取候选时间戳。
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/query_trend.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
   --metric-keys "vibration_level" \
   --date-range "{date_start}..{date_end}" \
   --aggregation daily \
@@ -1319,7 +1319,7 @@ bash /mnt/skills/custom/ins-extract-orbit-centerline-features/scripts/run.sh '{"
 在步骤 S2b 之后，追加运行 `pro_spectrum.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/pro_spectrum.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/pro_spectrum.py \
   --input /mnt/user-data/outputs/waveform_data.json \
   --features /mnt/user-data/outputs/spectrum_features.json \
   --equipment-type "{equipment_type}" \
@@ -1342,7 +1342,7 @@ Pro 图谱输出包含：
 追加运行 `ultra_spectrum.py`：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/ultra_spectrum.py \
+python /mnt/skills/custom/monitoring-analysis/scripts/ultra_spectrum.py \
   --input /mnt/user-data/outputs/waveform_data.json \
   --features /mnt/user-data/outputs/spectrum_features.json \
   --pro-result /mnt/user-data/outputs/pro_spectrum_result.json \
@@ -1455,7 +1455,7 @@ with open("/mnt/user-data/outputs/monitoring_features.json", "w", encoding="utf-
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
+sys.path.insert(0, "/mnt/skills/custom/monitoring-analysis/scripts")
 from export_report import write_report
 
 with open("/mnt/user-data/outputs/monitoring_features.json", "r", encoding="utf-8") as f:

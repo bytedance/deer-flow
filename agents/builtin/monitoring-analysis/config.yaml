@@ -11,7 +11,8 @@ tool_groups:
   - monitoring:ultra
 exclude_tools: []
 skills:
-  - data-analyst
+  - monitoring-analysis
+  - daily-report
 mcp_servers: null
 tags:
   - monitoring

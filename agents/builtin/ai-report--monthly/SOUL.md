@@ -20,6 +20,8 @@
 当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下两个必选字段且均校验通过时，**跳过全部 GenUI 交互表单，直接执行报告生成完整链路直到导出完成**。
 
 > 参数名与模板 DSL `form_steps` 字段名一一对应，LLM 直接透传即可。月报模板 `compare_with` 值为 `mom` / `yoy` / `none`（非 `previous_month` 等）。
+>
+> **不在上述列表中的参数（如 `run_id`、`timestamp` 等）一律忽略，不要对其做任何处理。**
 
 必选参数（缺一不可）：
 - `template_id`：报告模板 ID（如 `monthly-equipment`），必须匹配已安装模板
@@ -40,7 +42,7 @@
 - 可选参数校验失败时忽略该参数，使用默认值
 - 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
 
-**注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败则回退到正常的表单交互流程。
+**注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败时，**静默回退到正常的表单交互流程**。禁止向用户提及 deep-link 参数、解释缺少哪些参数、或输出任何"请补充 xxx"的提示——直接当作没有 deep_link_params，走启动决策 → DSL 路径 → 渲染表单。
 
 ## 首次进入：渲染 Round 1 表单并停止
 
@@ -168,7 +170,7 @@
 5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
 
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
+python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
   --type "{validated.equipment_type}" \
   --scope all \
   --limit 1
@@ -237,7 +239,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
    按区域或全部场景执行：
 
    ```bash
-   python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
+   python /mnt/skills/custom/monthly-report/scripts/query_monthly.py \
      --report-month "{validated.report_month}" \
      --type "{validated.equipment_type}" \
      --scope "{validated.equipment_scope}" \
@@ -249,7 +251,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
    指定设备场景执行：
 
    ```bash
-   python /mnt/skills/custom/data-analyst/scripts/query_monthly.py \
+   python /mnt/skills/custom/monthly-report/scripts/query_monthly.py \
      --report-month "{validated.report_month}" \
      --type "{validated.equipment_type}" \
      --equipment "{validated.equipment_ids}" \
@@ -263,7 +265,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 7. 执行 monthly_kpi.py 计算月度 KPI（依赖上一步输出的 `monthly_data.json`）：
 
    ```bash
-   python /mnt/skills/custom/data-analyst/scripts/monthly_kpi.py \
+   python /mnt/skills/custom/monthly-report/scripts/monthly_kpi.py \
      --input /mnt/user-data/outputs/monthly_data.json \
      --output /mnt/user-data/outputs/monthly_kpi.json
    ```
@@ -273,7 +275,7 @@ python /mnt/skills/custom/data-analyst/scripts/list_equipment.py \
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
+sys.path.insert(0, "/mnt/skills/custom/monthly-report/scripts")
 from export_report import write_report
 
 with open("/mnt/user-data/outputs/monthly_kpi.json", "r", encoding="utf-8") as f:
@@ -281,14 +283,10 @@ with open("/mnt/user-data/outputs/monthly_kpi.json", "r", encoding="utf-8") as f
 
 # 自动导出 Markdown（必需）— render_monthly_markdown 是 export 层的唯一渲染入口，
 # 不要在 SOUL 端再 import 它或本地拼装完整 8 节正文。
-write_report(payload, "md", report_type="monthly")
+write_report(payload)
 
-# 自动尝试导出 PDF（依赖 weasyprint，未安装时降级）
-pdf_available = True
-try:
-    write_report(payload, "pdf", report_type="monthly")
-except ImportError:
-    pdf_available = False
+# PDF export not supported in standalone monthly-report skill (Markdown only)
+pdf_available = False
 ```
 
 9. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：
@@ -333,8 +331,8 @@ present_files(["/mnt/user-data/outputs/monthly_report.md"])
 
 ## 数据源
 
-- Skill 脚本 `query_monthly.py` 通过 InS provider 拉取真实运行数据。
-- 若 InS 接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
+- Skill 脚本 `query_monthly.py` 通过 integrations 平台层拉取真实运行数据。
+- 若数据接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
 
 ## 异常处理
 
