@@ -160,6 +160,118 @@ def test_summarization_middleware_emits_frontend_update_key_in_agent_stream() ->
     assert emitted[1].content == ("Here is a summary of the conversation to date:\n\ncompressed summary")
 
 
+def test_summary_model_is_tagged_nostream_to_avoid_stream_pollution() -> None:
+    tags_during_summary: list[list[str]] = []
+
+    class _RecordingChatModel(_StaticChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            tags_during_summary.append(list(run_manager.tags) if run_manager else [])
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    model = _RecordingChatModel(text="compressed summary")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+
+    # The dedicated summary model must carry the "nostream" tag so LangGraph's
+    # messages-tuple stream handler skips its tokens, while the raw model used by
+    # the parent for profile / token inspection stays untagged.
+    assert "nostream" in (middleware._summary_model.config.get("tags") or [])
+    assert "nostream" not in (getattr(middleware.model, "config", {}).get("tags") or [])
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    # The summary LLM call must actually run with the nostream tag (this is what the
+    # stream handler inspects), and the shared self.model must remain the raw,
+    # untagged model so parent logic (profile / _get_ls_params) keeps working.
+    assert tags_during_summary == [["nostream"]]
+    assert middleware.model is model
+    assert result["messages"][1].content.startswith("Here is a summary")
+
+
+def test_summarization_does_not_mutate_shared_model_across_concurrent_runs() -> None:
+    """Concurrent runs must not observe a swapped-out self.model during summarization.
+
+    The agent/middleware instance is cached and reused, so summarization must never
+    temporarily replace the shared self.model: doing so would leak the nostream
+    RunnableBinding to other coroutines mid-flight and break parent logic that
+    inspects the raw model (profile / _get_ls_params).
+    """
+    import asyncio
+
+    observed_models: list[object] = []
+    release = asyncio.Event()
+
+    class _BlockingChatModel(_StaticChatModel):
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            # Hold the summary call open so a concurrent run can inspect self.model.
+            await release.wait()
+            return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    model = _BlockingChatModel(text="compressed summary")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+
+    async def _run() -> None:
+        summarizing = asyncio.create_task(middleware.abefore_model({"messages": _messages()}, _runtime()))
+        # Let the summary task reach the (blocked) LLM call.
+        await asyncio.sleep(0)
+        # A concurrent run reads the shared model while summarization is in flight.
+        observed_models.append(middleware.model)
+        release.set()
+        await summarizing
+
+    asyncio.run(_run())
+
+    assert observed_models == [model]
+
+
+def test_raw_model_is_preserved_for_parent_profile_inspection() -> None:
+    """self.model must stay the original model so attribute access does not drift."""
+    model = _StaticChatModel(text="compressed summary")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+
+    middleware.before_model({"messages": _messages()}, _runtime())
+
+    # The shared field is never reassigned to the RunnableBinding.
+    assert middleware.model is model
+    assert middleware._summary_model is not model
+
+
+def test_summary_model_preserves_existing_tags_when_adding_nostream() -> None:
+    """Adding "nostream" must not clobber tags already bound on the model.
+
+    lead_agent/agent.py binds "middleware:summarize" for RunJournal attribution. Because
+    RunnableBinding.with_config shallow-merges config, the summary model must explicitly
+    preserve existing tags instead of overwriting them with just ["nostream"].
+    """
+    tagged_model = _StaticChatModel(text="compressed summary").with_config(tags=["middleware:summarize"])
+    middleware = DeerFlowSummarizationMiddleware(
+        model=tagged_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+
+    summary_tags = middleware._summary_model.config.get("tags") or []
+    assert "middleware:summarize" in summary_tags
+    assert "nostream" in summary_tags
+    # No duplicate "nostream" even if invoked when one was already present.
+    assert summary_tags.count("nostream") == 1
+
+
 def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
