@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DSL_SCHEMA_VERSION = "1"
 
@@ -207,8 +207,18 @@ class DataStep(BaseModel):
     id: str
     kind: Literal["script"] = "script"
     name: str
+    provider: str | None = None
     args: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, v: str | None) -> str | None:
+        if v is not None and v not in {"platform", "ins", "demo", "http"}:
+            raise ValueError(
+                f"provider must be one of platform/ins/demo/http or null, got: {v!r}"
+            )
+        return v
 
 
 class TransformStep(BaseModel):

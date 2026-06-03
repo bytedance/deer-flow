@@ -11,7 +11,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from deerflow.agents.memory.updater import aget_memory_data
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id
 from deerflow.rpc.machine_service import MachineServiceClient
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,27 @@ def _time_of_day_key() -> str:
     if hour < 18:
         return "afternoon"
     return "evening"
+
+
+def _resolve_user_context() -> tuple[int, int] | None:
+    """Extract (user_id, org_id) from the authenticated user context.
+
+    Returns ``None`` when no user is authenticated (e.g. no-auth mode),
+    signalling callers to skip external data queries gracefully.
+    """
+    user = get_current_user()
+    if user is None:
+        return None
+
+    user_id = int(user.id) if user.id else 0
+    if user_id == 0:
+        return None
+
+    ins_data = getattr(user, "ins_base_user_data", None) or {}
+    org = ins_data.get("org") or {}
+    org_id = int(org.get("orgId") or ins_data.get("orgId", 0))
+
+    return (user_id, org_id)
 
 
 async def _get_active_alerts(user_id: int, org_id: int) -> list[dict[str, Any]]:
@@ -226,7 +247,17 @@ async def _generate_greeting(thread_id: str) -> dict[str, Any]:
     elif pending_followup and lang == "en-US":
         greeting_text = "Last time you analyzed some data. Would you like me to follow up?"
 
-    alerts = await _get_active_alerts(user_id=1, org_id=1)
+    user_ctx = _resolve_user_context()
+    if user_ctx is None:
+        logger.debug("Greeting: no authenticated user context, skipping alerts/tickets/maintenance queries")
+        return {
+            "greeting": greeting_text,
+            "suggestions": suggestions,
+            "language": lang,
+            "alert_count": 0,
+        }
+
+    alerts = await _get_active_alerts(*user_ctx)
     if alerts:
         alert_count = len(alerts)
         if lang == "zh-CN":
@@ -236,8 +267,8 @@ async def _generate_greeting(thread_id: str) -> dict[str, Any]:
         greeting_text = f"{alert_msg}\n\n{greeting_text}"
 
     tickets, maintenance = await asyncio.gather(
-        _get_recent_closure_tickets(user_id=1, org_id=1),
-        _get_upcoming_maintenance(user_id=1, org_id=1),
+        _get_recent_closure_tickets(*user_ctx),
+        _get_upcoming_maintenance(*user_ctx),
     )
 
     follow_ups: list[str] = []

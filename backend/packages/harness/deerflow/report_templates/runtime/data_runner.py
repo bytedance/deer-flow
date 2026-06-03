@@ -374,6 +374,7 @@ def run_script(
     run_output_dir: Path,
     context: dict[str, Any],
     python_executable: str | None = None,
+    provider: str | None = None,
 ) -> StepResult:
     """Execute one script and return its parsed outputs.
 
@@ -447,6 +448,21 @@ def run_script(
         internal_token = auth_ctx.get("_internal_token")
         if internal_token is not None:
             subprocess_env["DEER_FLOW_INTERNAL_AUTH_VALUE"] = str(internal_token)
+
+    # Inject thread_id so the platform bridge can route docker exec into the
+    # correct sandbox container when running outside the sandbox.
+    run_ctx = context.get("run") if isinstance(context, dict) else None
+    if isinstance(run_ctx, dict):
+        thread_id = run_ctx.get("thread_id")
+        if thread_id is not None:
+            subprocess_env["DEER_FLOW_THREAD_ID"] = str(thread_id)
+
+    # Inject provider-driven env vars so scripts can detect platform mode.
+    if provider is not None:
+        if provider == "platform":
+            subprocess_env["USE_PLATFORM"] = "true"
+        else:
+            subprocess_env["USE_PROVIDER"] = provider
 
     started = time.time()
     try:
@@ -600,6 +616,7 @@ def run_data_steps_and_transforms(
                 registry=registry,
                 run_output_dir=run_output_dir,
                 context=ctx,
+                provider=step.get("provider"),
             )
             accumulated[step_id] = result.outputs
 

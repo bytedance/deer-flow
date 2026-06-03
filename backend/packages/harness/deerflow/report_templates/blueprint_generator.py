@@ -1,6 +1,6 @@
 """Generate blueprint definitions from builtin report templates.
 
-Reverse-engineers blueprints from the 8 shipped builtin templates by:
+Reverse-engineers blueprints from the 7 shipped builtin templates by:
 1. Loading the YAML DSL
 2. Extracting configurable field paths (form field defaults, descriptions)
 3. Collecting script references from data_steps and transforms
@@ -31,7 +31,6 @@ TEMPLATE_TO_CATEGORY: dict[str, BlueprintCategory] = {
     "daily-equipment": "daily_report",
     "weekly-equipment": "weekly_report",
     "monthly-equipment": "monthly_report",
-    "trend-equipment": "trend_analysis",
     "diagnosis-fault": "fault_diagnosis",
     "failure-analysis": "failure_analysis",
     "closure-summary": "closure_summary",
@@ -42,7 +41,6 @@ TEMPLATE_ICONS: dict[str, str] = {
     "daily-equipment": "calendar-day",
     "weekly-equipment": "calendar-week",
     "monthly-equipment": "calendar-month",
-    "trend-equipment": "trending-up",
     "diagnosis-fault": "stethoscope",
     "failure-analysis": "alert-triangle",
     "closure-summary": "check-circle",
@@ -147,7 +145,7 @@ def generate_blueprint(template_name: str) -> BlueprintDefinition:
 
 
 def generate_all_blueprints() -> list[BlueprintDefinition]:
-    """Generate blueprints for all 8 builtin templates."""
+    """Generate blueprints for all 7 builtin templates."""
     blueprints: list[BlueprintDefinition] = []
 
     for template_name in TEMPLATE_TO_CATEGORY:

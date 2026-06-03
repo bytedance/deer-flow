@@ -81,6 +81,13 @@ def _load_config_lenient(config_path: str | None = None) -> AppConfig:
 
     app_config = AppConfig.model_validate(stripped)
 
+    # AppConfig stores integrations as a raw dict (extra="allow").  Convert it
+    # to an IntegrationsConfig instance so the caller can use typed attributes.
+    from deerflow.integrations.config import IntegrationsConfig
+
+    if "integrations" in stripped and stripped["integrations"] is not None:
+        app_config.integrations = IntegrationsConfig.model_validate(stripped["integrations"])
+
     # Load RPC config into the global singleton (model_validate alone doesn't do this)
     if app_config.rpc is not None:
         from deerflow.config.rpc_config import load_rpc_config_from_dict

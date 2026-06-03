@@ -17,7 +17,6 @@ BlueprintCategory = Literal[
     "weekly_report",
     "monthly_report",
     "fault_diagnosis",
-    "trend_analysis",
     "failure_analysis",
     "closure_summary",
     "inspection",

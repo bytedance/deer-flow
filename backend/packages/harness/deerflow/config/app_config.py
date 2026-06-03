@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 from collections.abc import Mapping
@@ -455,13 +457,15 @@ class AppConfig(BaseModel):
             )
 
     @classmethod
-    def resolve_env_variables(cls, config: Any) -> Any:
+    def resolve_env_variables(cls, config: Any, strict: bool = True) -> Any:
         """Recursively resolve environment variables in the config.
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
 
         Args:
             config: The config to resolve environment variables in.
+            strict: If True (default), raise ValueError on unresolved env vars.
+                    If False, leave unresolved ``$VAR`` strings as-is.
 
         Returns:
             The config with environment variables resolved.
@@ -470,13 +474,15 @@ class AppConfig(BaseModel):
             if config.startswith("$"):
                 env_value = os.getenv(config[1:])
                 if env_value is None:
-                    raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
+                    if strict:
+                        raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
+                    return config
                 return env_value
             return config
         elif isinstance(config, dict):
-            return {k: cls.resolve_env_variables(v) for k, v in config.items()}
+            return {k: cls.resolve_env_variables(v, strict=strict) for k, v in config.items()}
         elif isinstance(config, list):
-            return [cls.resolve_env_variables(item) for item in config]
+            return [cls.resolve_env_variables(item, strict=strict) for item in config]
         return config
 
     def get_model_config(self, name: str) -> ModelConfig | None:
