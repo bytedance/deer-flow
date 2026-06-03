@@ -366,6 +366,25 @@ rpc:
 integrations:
   enabled: true
   systems:
+    ins_prod:
+      system_type: ins
+      display_name: "InS Production"
+      connector_ref: ins_http_main  # Reference to existing tenant connector
+      transport_type: http
+      base_url: "http://182.92.187.198/"
+      base_path: "/"
+      auth_type: bearer
+      auth_mode: user_token        # "static" uses secret_ref; "user_token" forwards current user's access_token
+      #secret_ref: "$INS_TOKEN"
+      timeout_seconds: 30
+      max_retries: 2
+      capabilities:
+        - asset.catalog
+        - asset.context
+        - monitoring.trend
+        - monitoring.waveform
+        - monitoring.orbit
+        - monitoring.alarm_history
     xsy_prod:
       system_type: xsy
       display_name: "销售易 CRM"
@@ -407,6 +426,7 @@ integrations:
         - health.risk_ranking
         - todo_stats.get
   routes:
+    monitoring.trend: ins_prod
     outbound.query:
       primary_system_key: xsy_prod
     outbound.statistics:
