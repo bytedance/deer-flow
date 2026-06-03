@@ -1,5 +1,3 @@
-"""知识问答 Dify 工作流 Tool。"""
-
 from typing import Annotated
 
 from langchain.tools import tool
@@ -13,15 +11,12 @@ def dify_knowledge_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
 ) -> str:
-    """知识问答工作流（需在 query 中包含"dify"或"知识库"关键词触发）。
+    """Dify 知识问答工具。
 
-    当用户显式要求查询知识库时调用本工具：
-    - 知识库检索 / 知识查询 / 文档查阅
-    - 产品说明 / 操作指南 / 业务介绍
-
-    注意：query 中需包含"dify"、"知识库"或"查询知识库"等关键词，模型才会触发本工具。
+    当用户明确要求使用 dify_knowledge 或调用 dify 知识问答工具时调用。
+    不要在普通聊天中提及 dify 时调用。
 
     Args:
-        query: 用户的知识性或百科类问题。
+        query: 用户在银行办公场景中的知识检索问题（如规章制度、操作流程、业务指引等）。
     """
     return invoke_workflow("dify_knowledge", query, config)

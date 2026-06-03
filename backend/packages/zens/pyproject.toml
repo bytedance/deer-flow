@@ -8,7 +8,6 @@ dependencies = [
     "duckdb>=1.4.4",
     "pandas>=2.0.0",
     "numpy>=1.26.0",
-    "polars>=1.0.0",
     "pyarrow>=14.0.0",
     "scipy>=1.11.0",
     "statsmodels>=0.14.0",

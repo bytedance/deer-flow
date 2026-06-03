@@ -71,3 +71,7 @@ package-lock.json
 skills.zip
 # Root package.json (EARENDIL project, not DeerFlow)
 package.json
+# Local packaging & cookie artifacts (do not commit)
+backend.zip
+deer-flow.zip
+cookies.txt

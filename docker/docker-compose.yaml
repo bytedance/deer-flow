@@ -5,6 +5,7 @@
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
 #   - gateway:     FastAPI Gateway API + agent runtime
+#   - postgres:    PostgreSQL 16 (pgvector)
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -16,6 +17,7 @@
 #   DEER_FLOW_DOCKER_SOCKET          — Docker socket path, default /var/run/docker.sock
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
+#   POSTGRES_USER/PASSWORD/DB/PORT   — PostgreSQL connection settings
 #
 # LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
 # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
@@ -23,6 +25,29 @@
 # Access: http://localhost:${PORT:-2026}
 
 services:
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    platform: linux/amd64
+    container_name: deer-flow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pgsql}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsql}
+      POSTGRES_DB: ${POSTGRES_DB:-pgsql}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - /Users/raidery/data/postgres15:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgsql} -d ${POSTGRES_DB:-pgsql}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deer-flow
+
   # ── Reverse Proxy ──────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
@@ -71,8 +96,11 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-postgres,pymupdf}
     container_name: deer-flow-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: >
-      sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
+      sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --reload"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -81,18 +109,8 @@ services:
       # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
-      - type: bind
-        source: ${HOME:-/root}/.claude
-        target: /root/.claude
-        read_only: true
-        bind:
-          create_host_path: true
-      - type: bind
-        source: ${HOME:-/root}/.codex
-        target: /root/.codex
-        read_only: true
-        bind:
-          create_host_path: true
+      # Dev: mount gateway source code for hot-reload
+      - ../backend/app/gateway:/app/backend/app/gateway
     working_dir: /app
     environment:
       - CI=true

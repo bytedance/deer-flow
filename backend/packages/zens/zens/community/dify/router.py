@@ -11,7 +11,7 @@ from langchain_core.tools import InjectedToolArg
 from zens.community.dify.dify_client import DifyAPIError, DifyClient
 
 from deerflow.config import get_app_config
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id
 
 _MAX_CONVERSATION_CACHE = 1000
 _conversation_ids: OrderedDict[str, str] = OrderedDict()
@@ -108,12 +108,18 @@ def invoke_workflow(
     cache_key = _get_cache_key(tool_name, config)
     conversation_id = _get_cached_conversation(cache_key)
     user_id = get_effective_user_id() or "anonymous"
-    user = f"deerflow_{user_id}"
+    current_user_info = get_current_user()
+    if current_user_info is not None:
+        # Use email for user identification to pass to Dify
+        user = str(current_user_info.email)
+    else:
+        user = f"deerflow_{user_id}"
 
     logger.info(
-        "invoke_workflow: tool=%s, query=%r, conversation_id=%r",
+        "invoke_workflow: tool=%s, query=%r, user=%r, conversation_id=%r",
         tool_name,
         query,
+        user,
         conversation_id,
     )
 

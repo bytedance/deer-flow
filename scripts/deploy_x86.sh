@@ -5,6 +5,7 @@
 # Commands:
 #   deploy.sh                    — build + start
 #   deploy.sh build              — build all images (mode-agnostic)
+#   deploy.sh build-gateway      — build only gateway image
 #   deploy.sh start              — start from pre-built images
 #   deploy.sh down               — stop and remove containers
 #
@@ -13,6 +14,7 @@
 # Examples:
 #   deploy.sh                    # build + start
 #   deploy.sh build              # build all images
+#   deploy.sh build-gateway      # build gateway image only
 #   deploy.sh start              # start pre-built images
 #   deploy.sh down               — stop and remove containers
 #
@@ -25,11 +27,11 @@ export DOCKER_BUILDKIT=1
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
 
 case "${1:-}" in
-    build|start|down)
+    build|build-gateway|start|down)
         CMD="$1"
         if [ -n "${2:-}" ]; then
             echo "Unknown argument: $2"
-            echo "Usage: deploy.sh [build|start|down]"
+            echo "Usage: deploy.sh [build|build-gateway|start|down]"
             exit 1
         fi
         ;;
@@ -38,7 +40,7 @@ case "${1:-}" in
         ;;
     *)
         echo "Unknown argument: $1"
-        echo "Usage: deploy.sh [build|start|down]"
+        echo "Usage: deploy.sh [build|build-gateway|start|down]"
         exit 1
         ;;
 esac
@@ -213,6 +215,32 @@ if [ "$CMD" = "build" ]; then
     echo ""
     echo "=========================================="
     echo "  ✓ Images built successfully"
+    echo "=========================================="
+    echo ""
+    echo "  Next: deploy.sh start"
+    echo ""
+    exit 0
+fi
+
+# ── build-gateway ─────────────────────────────────────────────────────────────
+# Build only the gateway image (useful for quick iteration during development)
+
+if [ "$CMD" = "build-gateway" ]; then
+    echo "=========================================="
+    echo "  DeerFlow — Building Gateway Image"
+    echo "=========================================="
+    echo ""
+
+    # Docker socket is needed for compose to parse volume specs
+    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
+        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
+    fi
+
+    "${COMPOSE_CMD[@]}" build gateway
+
+    echo ""
+    echo "=========================================="
+    echo "  ✓ Gateway image built successfully"
     echo "=========================================="
     echo ""
     echo "  Next: deploy.sh start"

@@ -13,11 +13,12 @@ def dify_general_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
 ) -> str:
-    """通用对话工作流。
+    """通用 Dify 对话工具。
 
-    适用于数据分析、日常对话、闲聊、通用问题解答等场景。
+    当用户明确要求使用 dify_general 或调用通用对话工具时调用。
+    不要在普通聊天中调用。
 
     Args:
-        query: 用户的通用问题或对话内容。
+        query: 用户的通用对话问题或任务描述。
     """
     return invoke_workflow("dify_general", query, config)

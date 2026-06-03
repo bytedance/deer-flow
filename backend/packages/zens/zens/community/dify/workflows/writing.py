@@ -1,4 +1,4 @@
-"""反洗钱（AML）Dify 工作流 Tool。"""
+"""AI 写作 Dify 工作流 Tool。"""
 
 from typing import Annotated
 
@@ -8,17 +8,17 @@ from langchain_core.tools import InjectedToolArg
 from zens.community.dify.router import invoke_workflow
 
 
-@tool("dify_aml", parse_docstring=True)
-def dify_aml_tool(
+@tool("dify_writing", parse_docstring=True)
+def dify_writing_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
 ) -> str:
-    """反洗钱（AML）工作流工具。
+    """AI 写作工具。
 
-    当用户明确要求使用 dify_aml 或调用反洗钱工具时调用。
+    当用户明确要求使用 dify_writing 或调用 AI 写作工具时调用。
     不要在普通聊天中调用。
 
     Args:
-        query: 用户的 AML 相关问题或交易描述。
+        query: 用户的写作需求或任务描述。
     """
-    return invoke_workflow("dify_aml", query, config)
+    return invoke_workflow("dify_writing", query, config)
