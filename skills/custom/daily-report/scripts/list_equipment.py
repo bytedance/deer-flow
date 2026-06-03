@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-"""Query equipment catalog for ai-report--daily agent.
+"""为 ai-report--daily agent 查询设备目录。
 
-Returns matched equipment list and available KPIs by equipment type,
-scope (all/area/specific), and optional filter.
+返回匹配的设备列表及每种设备类型的可用 KPI，
+支持按设备类型、范围（all/area/specific）和过滤条件筛选。
 
-Data source: Organize tree API (requires DEER_FLOW_EFFECTIVE_USER_ID).
-Returns an error when the API is unreachable or user context is missing.
+数据来源：Organize Tree API（需要 DEER_FLOW_EFFECTIVE_USER_ID）。
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ TYPE_DISPLAY = {
     "reciprocating_machinery": "往复机组",
 }
 
-# Map organize tree device type numbers → equipment type keys
+# Organize Tree 设备类型号 → 设备类型键
 _ORG_TYPE_MAP: dict[int, str] = {
     1: "rotating_machinery",
     4: "pump",
@@ -82,22 +81,26 @@ KPI_DEFINITIONS: dict[str, dict[str, str]] = {
     "kurtosis_index": {"name": "峭度指标", "unit": "—"},
 }
 
-# Per-type KPI name overrides (e.g. pump temperature is not necessarily bearing temp).
+# 逐类型 KPI 名称覆盖（如泵的温度不一定是轴承温度）
 KPI_NAME_OVERRIDES: dict[str, dict[str, str]] = {
     "pump": {"bearing_temp": "温度"},
 }
 
 # ---------------------------------------------------------------------------
-# Organize API data fetch (real data path)
+# Organize API 数据获取（真实数据路径）
 # ---------------------------------------------------------------------------
 
 
 def _get_gateway_url() -> str:
+    """获取 Gateway 服务地址。"""
     return os.environ.get("DEER_FLOW_GATEWAY_URL", "http://localhost:8001")
 
 
 def _collect_devices(node: dict, parent_area: str) -> list[dict]:
-    """Recursively collect type<10 device nodes from an organize tree node."""
+    """递归收集 Organize Tree 节点中 type<10 的设备节点。
+
+    所有层级节点的 area 由上层 type>=10 的节点标签决定。
+    """
     devices: list[dict] = []
     node_type = node.get("type", 0)
     node_label = node.get("label", "")
@@ -121,7 +124,10 @@ def _collect_devices(node: dict, parent_area: str) -> list[dict]:
 
 
 def _fetch_org_tree(user_id: str) -> list[dict] | None:
-    """Fetch the organize device tree from Gateway for the given user."""
+    """从 Gateway 获取指定用户的 Organize 设备树。
+
+    失败时打印错误到 stderr 并返回 None。
+    """
     global _last_org_api_error
     _last_org_api_error = None
     url = f"{_get_gateway_url()}/api/organize/tree?userId={user_id}&orgId=0&treeType=1"
@@ -168,24 +174,24 @@ def _query_from_org_tree(
     filter_str: str = "",
     limit: int = 50,
 ) -> dict | None:
-    """Query equipment from the organize tree API.
+    """从 Organize Tree API 查询设备列表。
 
-    Returns None when the API is unreachable (caller surfaces the error).
+    API 不可达时返回 None，调用方负责处理错误展示。
     """
     tree = _fetch_org_tree(user_id)
     if tree is None:
         return None
 
-    # Flatten tree: collect all type<10 device nodes.
+    # 扁平化树：收集所有 type<10 的设备节点
     all_devices: list[dict] = []
     for root_node in tree:
         all_devices.extend(_collect_devices(root_node, ""))
 
-    # Filter by equipment type.
+    # 按设备类型过滤
     if eq_type != "all":
         all_devices = [d for d in all_devices if d.get("org_type") == eq_type]
 
-    # Filter by scope.
+    # 按范围过滤
     filter_values = _parse_csv(filter_str)
     if scope == "area" and filter_values:
         area_set = set(filter_values)
@@ -228,11 +234,12 @@ def _query_from_org_tree(
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# 辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _build_available_kpis(eq_type: str) -> list[dict]:
+    """根据设备类型构建可用 KPI 定义列表（含名称、单位、是否为默认项）。"""
     kpi_keys = EQUIPMENT_TYPE_KPIS.get(eq_type, EQUIPMENT_TYPE_KPIS["all"])
     overrides = KPI_NAME_OVERRIDES.get(eq_type, {})
     result: list[dict] = []
@@ -251,24 +258,28 @@ def _build_available_kpis(eq_type: str) -> list[dict]:
 
 
 def _parse_csv(value: str | None) -> list[str]:
+    """解析逗号分隔字符串为列表。"""
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _validate_type(eq_type: str) -> str | None:
+    """校验 --type 参数，返回错误信息或 None。"""
     if eq_type not in VALID_TYPES:
         return f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}"
     return None
 
 
 def _validate_scope(scope: str) -> str | None:
+    """校验 --scope 参数，返回错误信息或 None。"""
     if scope not in VALID_SCOPES:
         return f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}"
     return None
 
 
 def _validate_filter(scope: str, filter_values: list[str]) -> str | None:
+    """校验 --filter 参数中各项格式（区域名或设备 ID），返回错误信息或 None。"""
     if scope == "area":
         invalid = [v for v in filter_values if not AREA_FILTER_PATTERN.fullmatch(v)]
         if invalid:
@@ -286,10 +297,9 @@ def query_equipment(
     filter_str: str = "",
     limit: int = 50,
 ) -> dict:
-    """Query equipment catalog. Returns result dict matching design doc §4.1.
+    """查询设备目录，返回匹配的设备列表及可用 KPI。
 
-    Returns an error dict when the Organize API is unreachable or user
-    context is missing.
+    Organize API 不可达或用户上下文缺失时返回错误字典。
     """
     user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID")
     if not user_id:
@@ -310,11 +320,13 @@ def query_equipment(
 
 
 def _error(message: str) -> int:
+    """输出 JSON 格式错误信息到 stdout。"""
     print(json.dumps({"error": message}, ensure_ascii=False))
     return 0
 
 
 def main() -> int:
+    """CLI 入口：解析参数、校验、查询设备、输出 JSON。"""
     parser = argparse.ArgumentParser(description="Query equipment catalog")
     parser.add_argument("--type", default="all", help="Equipment type")
     parser.add_argument("--scope", default="all", help="Scope: all/area/specific")

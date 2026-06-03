@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Query daily report data for ai-report--daily agent.
+"""为 ai-report--daily agent 查询日报数据。
 
-Output contract (design doc §6.1): writes JSON to
-``$DAILY_REPORT_OUTPUT_DIR/daily_data.json`` (default
-``/mnt/user-data/outputs/daily_data.json``) with shape::
+输出合约：写入 JSON 到 ``$DAILY_REPORT_OUTPUT_DIR/daily_data.json``
+（默认 ``/mnt/user-data/outputs/daily_data.json``），结构为::
 
     {
       "report_date": "2026-05-13",
@@ -14,18 +13,17 @@ Output contract (design doc §6.1): writes JSON to
       "current": {
         "kpis": {<key>: <value>},
         "kpi_units": {<key>: <unit>},
-        "hourly_runtime_rate": [24 floats],
+        "hourly_runtime_rate": [24 个浮点数],
         "alarms": [{time, equipment, level, message}],
-        "per_equipment": {<id>: {kpis, hourly_runtime_rate}} (only when >20 devices)
+        "per_equipment": {<id>: {kpis, hourly_runtime_rate}} (仅 >20 台设备时)
       },
-      "compare": <same as current> | null,
+      "compare": <同 current 结构> | null,
       "data_source": "ins",
       "data_notes": [],
     }
 
-Data is fetched from the registered platform provider. Any failure
-(``HttpProviderError`` from the platform bridge / KPI mapping gap /
-empty trend / auth) propagates as ``{"error": ...}`` on stdout.
+数据通过注册的平台提供者获取。任何失败（HttpProviderError / KPI 映射缺失 /
+空趋势 / 认证失败）以 ``{"error": ...}`` 格式输出到 stdout。
 """
 
 from __future__ import annotations
@@ -62,11 +60,12 @@ OUTPUT_FILENAME = "daily_data.json"
 
 
 def _output_dir() -> Path:
+    """获取日报输出目录路径。"""
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
 def _runtime_data_dir(output_dir: str | None) -> Path | None:
-    """Map runtime ``--output-dir`` roots to the platform's ``data/`` subdir."""
+    """将运行时 ``--output-dir`` 根路径映射到平台的 ``data/`` 子目录。"""
     if not output_dir:
         return None
     return Path(output_dir) / "data"
@@ -80,10 +79,9 @@ def fetch_day(
     include_per_equipment: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
-    """Return one-day payload via the registered platform provider.
+    """通过注册的平台提供者获取单日数据。
 
-    To capture ``data_source`` / ``data_notes`` use :func:`fetch_day_with_provenance`
-    instead.
+    如需同时获取数据来源和备注，请使用 ``fetch_day_with_provenance``。
     """
     data, _, _ = fetch_day_with_provenance(
         date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
@@ -99,12 +97,14 @@ def fetch_day_with_provenance(
     include_per_equipment: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> tuple[dict, str, list[str]]:
-    """Provider-aware variant of :func:`fetch_day`.
+    """带数据来源追踪的单日数据获取。
 
-    Calls the registered ``daily`` provider (``PlatformDailyProvider``) directly.
-    Any ``HttpProviderError`` propagates so the CLI surfaces it as
-    ``{"error": "HttpProviderError: ..."}`` instead of masking with demo
-    output.
+    直接调用已注册的 ``daily`` 提供者（``PlatformDailyProvider``）。
+    ``HttpProviderError`` 向上传播，CLI 层将其转为
+    ``{"error": "HttpProviderError: ..."}``，而非静默回退到 demo 数据。
+
+    Returns:
+        (数据字典, 数据来源标签, 备注列表)
     """
     dp = load_sibling_module("_data_providers")
 
@@ -123,6 +123,7 @@ def fetch_day_with_provenance(
 
 
 def _compare_date(date_str: str, compare: str) -> str | None:
+    """根据对比模式计算对比日期。"""
     if compare == "previous_day":
         return (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     if compare == "previous_week":
@@ -140,6 +141,7 @@ def build_result(
     is_scope_mode: bool = False,
     equipment_meta: dict[str, dict] | None = None,
 ) -> dict:
+    """构建完整的日报数据字典（current + compare 双块结构）。"""
     compare = compare or "none"
     current, current_src, current_notes = fetch_day_with_provenance(
         date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
@@ -179,6 +181,7 @@ def build_result(
 
 
 def write_payload(result: dict, output_dir: Path | None = None) -> Path:
+    """将日报数据写入 JSON 文件，返回输出路径。"""
     out_dir = output_dir or _output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / OUTPUT_FILENAME
@@ -187,6 +190,7 @@ def write_payload(result: dict, output_dir: Path | None = None) -> Path:
 
 
 def main() -> int:
+    """CLI 入口：解析参数、获取数据、写入 daily_data.json。"""
     parser = argparse.ArgumentParser(description="Query daily report data")
     parser.add_argument("--date", required=True, help="Report date YYYY-MM-DD")
     parser.add_argument("--equipment", default="", help="Comma-separated equipment ids")
@@ -238,8 +242,7 @@ def main() -> int:
             equipment_meta = {e["id"]: e for e in equipment_records}
             include_per_equipment = len(equipment_ids) > 20
             is_scope_mode = True
-            # When --type is all, derive eq_type from resolved equipment so
-            # per-type KPI mappings (e.g. pump → 2K) apply in scope mode too.
+            # 当 --type=all 时，从实际设备中推导统一类型，确保逐类型 KPI 映射生效
             if eq_type == "all" and equipment_records:
                 org_types = {e.get("org_type") for e in equipment_records if e.get("org_type")}
                 if len(org_types) == 1:
@@ -258,18 +261,16 @@ def main() -> int:
                 }
             include_per_equipment = False
             is_scope_mode = False
-            # When --type is not explicitly overridden, derive it from the org
-            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
+            # 当 --type 未显式覆盖时，从 Organize Tree 推导设备类型
             if getattr(args, "type") == "all":
                 detected = _detect_equipment_type(equipment_ids)
                 if detected != "all":
                     eq_type = detected
 
         kpi_keys = dedupe_preserve_order(parse_csv(args.kpis) or ["runtime_rate", "downtime_count", "alarm_count"])
-        # When --kpis is left at its argparse default and eq_type is a specific
-        # type, substitute type-appropriate KPIs.  This is load-bearing for pumps:
-        # the defaults (runtime_rate / downtime_count / alarm_count) only match
-        # 8K/9K position types, so 2K pump data returns empty without this swap.
+        # 当 --kpis 保持默认值且 eq_type 为具体类型时，替换为类型对应的默认 KPI。
+        # 这对泵类型至关重要：默认 KPI（runtime_rate/downtime_count/alarm_count）
+        # 只匹配 8K/9K 测点类型，2K 泵数据若无此替换将返回空。
         if kpi_keys == _ARGPARSE_DEFAULT_KPIS and eq_type != "all" and eq_type in _EQUIPMENT_TYPE_DEFAULT_KPIS:
             kpi_keys = list(_EQUIPMENT_TYPE_DEFAULT_KPIS[eq_type])
         kpi_error = validate_kpi_keys(kpi_keys, KPI_UNITS)
@@ -280,12 +281,12 @@ def main() -> int:
         out_path = write_payload(result, _runtime_data_dir(args.output_dir))
         print(json.dumps({"output": str(out_path), "report_date": result["report_date"]}, ensure_ascii=False))
         return 0
-    except Exception as exc:  # noqa: BLE001 - report to stdout per Skill convention
+    except Exception as exc:  # noqa: BLE001 - 按 Skill 约定输出到 stdout
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 0
 
 
-# Backward-compat alias for tests that monkeypatch the old local name
+# 旧测试 monkeypatch 兼容别名
 _detect_equipment_type = detect_equipment_type
 
 

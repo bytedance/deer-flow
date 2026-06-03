@@ -1,9 +1,7 @@
-"""Data connector for daily-report query script.
+"""日报查询脚本的数据连接器。
 
-A single ``DailyDataProvider`` Protocol with one concrete implementation
-(``PlatformDailyProvider``) that routes through the integrations platform bridge.
-
-The abstraction is **dependency-free** — only stdlib.
+提供 ``DailyDataProvider`` 协议及唯一实现 ``PlatformDailyProvider``，
+通过集成平台桥接获取数据。仅依赖标准库。
 """
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 # ---------------------------------------------------------------------------
-# Result envelope
+# 结果封装
 # ---------------------------------------------------------------------------
 
 DEMO_FALLBACK = "demo_fallback"
@@ -24,8 +22,11 @@ INS_SUCCESS = "ins"
 
 @dataclass(frozen=True)
 class ProviderResult:
-    """What every provider returns. ``data`` is the raw dict the script needs;
-    ``data_source`` is the tag that ends up in the script's JSON output."""
+    """数据提供者返回的结果封装。
+
+    ``data`` 是脚本所需的原始数据字典，
+    ``data_source`` 标记数据来源，写入脚本的 JSON 输出中。
+    """
 
     data: dict
     data_source: str = DEMO_FALLBACK
@@ -33,12 +34,12 @@ class ProviderResult:
 
 
 # ---------------------------------------------------------------------------
-# Protocol
+# 协议
 # ---------------------------------------------------------------------------
 
 
 class DailyDataProvider(Protocol):
-    """Provides one-day ``current``/``compare`` block payload for query_daily."""
+    """日报数据提供者协议，提供单日 ``current``/``compare`` 数据块。"""
 
     def fetch(
         self,
@@ -53,19 +54,19 @@ class DailyDataProvider(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# HttpProviderError
+# 异常
 # ---------------------------------------------------------------------------
 
 
 class HttpProviderError(RuntimeError):
-    """Raised by a provider when a backend call fails irrecoverably.
+    """后端调用不可恢复失败时抛出。
 
-    Caller decides whether to bubble up or fall back to the demo provider.
+    调用方决定是向上传播还是回退到 demo 提供者。
     """
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# 注册表
 # ---------------------------------------------------------------------------
 
 
@@ -75,21 +76,28 @@ _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
 
 
 def register_provider(source: str, mode: str, factory: Callable[[], Any]) -> None:
-    """Register a provider factory for (source, mode)."""
+    """注册数据提供者工厂。
+
+    Args:
+        source: 数据源标识，如 ``"daily"``
+        mode: 模式，如 ``"platform"`` / ``"demo"`` / ``"http"``
+        factory: 无参工厂函数，返回提供者实例
+    """
     if source not in _PROVIDER_FACTORIES:
         raise ValueError(f"unknown data source: {source!r}")
     _PROVIDER_FACTORIES[source][mode] = factory
 
 
 def get_provider(source: str, *, mode: str | None = None) -> Any:
-    """Resolve the active provider instance for ``source``.
+    """根据数据源和模式解析并返回提供者实例。
 
-    Mode resolution order:
-        1. Explicit ``mode`` argument.
-        2. ``DEER_FLOW_DATA_PROVIDER`` env var.
-        3. Default ``platform``.
+    模式解析优先级：
+        1. 显式传入的 ``mode`` 参数
+        2. ``DEER_FLOW_DATA_PROVIDER`` 环境变量
+        3. 默认 ``platform``
 
-    Raises ``KeyError`` if the requested mode has no registered provider.
+    Raises:
+        KeyError: 请求的模式未注册提供者
     """
     if source not in _PROVIDER_FACTORIES:
         raise ValueError(f"unknown data source: {source!r}")
@@ -108,12 +116,12 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
 
 
 def list_registered() -> dict[str, list[str]]:
-    """Inspection helper for tests: returns {source: [modes...]}."""
+    """返回已注册的数据源及模式列表，供测试检查用。"""
     return {k: sorted(v.keys()) for k, v in _PROVIDER_FACTORIES.items()}
 
 
 # ---------------------------------------------------------------------------
-# Fallback helper
+# 回退辅助
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +131,10 @@ def fetch_with_fallback(
     fetch_args: dict,
     mode: str | None = None,
 ) -> ProviderResult:
-    """Try the active provider; on ``HttpProviderError`` fall back to demo."""
+    """尝试主提供者，失败时回退到 demo 提供者。
+
+    ``data_source`` 标签会写入脚本 JSON 输出，供下游判断数据来源。
+    """
     primary = get_provider(source, mode=mode)
     try:
         result = primary.fetch(**fetch_args)
@@ -144,16 +155,15 @@ def fetch_with_fallback(
 
 
 # ---------------------------------------------------------------------------
-# PlatformDailyProvider — the one concrete implementation
+# PlatformDailyProvider — 唯一的日报数据提供者实现
 # ---------------------------------------------------------------------------
 
 
 class PlatformDailyProvider:
-    """Routes through the integrations platform bridge (capability + action).
+    """通过集成平台桥接获取日报数据（capability + action）。
 
-    On success returns a ``current``-block-shaped dict tagged
-    ``data_source="ins"``. Any failure raises ``HttpProviderError`` which the
-    query script propagates as ``{"error": "HttpProviderError: ..."}``.
+    成功时返回 ``current`` 块结构字典，标记 ``data_source="ins"``。
+    失败时抛出 ``HttpProviderError``，由查询脚本转为 ``{"error": ...}`` 输出。
     """
 
     def fetch(
@@ -166,6 +176,22 @@ class PlatformDailyProvider:
         include_per_equipment: bool = False,
         equipment_meta: dict[str, dict] | None = None,
     ) -> ProviderResult:
+        """获取单日日报数据。
+
+        先调用 ``monitoring.trend`` capability 获取原始趋势数据，
+        再调用 ``aggregate_kpi`` action 对趋势数据做 KPI 聚合。
+
+        Args:
+            date_str: 报告日期，格式 ``YYYY-MM-DD``
+            equipment_ids: 设备 ID 列表
+            kpi_keys: 需要查询的 KPI 键列表
+            eq_type: 设备类型过滤
+            include_per_equipment: 是否包含逐设备明细
+            equipment_meta: 设备元信息（id → {name, area}）
+
+        Returns:
+            包含 ``kpis``、``hourly_runtime_rate``、``alarms`` 的结果封装
+        """
         from _platform_bridge import call_capability, call_action
 
         try:

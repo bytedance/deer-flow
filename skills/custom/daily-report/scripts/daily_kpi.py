@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Compute KPI summary, trend chart, alarm table from query_daily output.
+"""从 query_daily 输出计算 KPI 摘要、趋势图和告警表。
 
-Reads ``$DAILY_REPORT_OUTPUT_DIR/daily_data.json`` and writes
-``$DAILY_REPORT_OUTPUT_DIR/daily_kpi.json`` matching design doc §6.2.
+读取 ``$DAILY_REPORT_OUTPUT_DIR/daily_data.json``，
+写入 ``$DAILY_REPORT_OUTPUT_DIR/daily_kpi.json``。
 
-Supports two modes:
-- **detail** (≤20 devices): per-device KPI cards and trends (original behavior)
-- **grouped** (>20 devices): aggregated KPIs (mean/min/max) + top_anomalies
+支持两种模式：
+- **detail** (≤20 台设备)：逐设备 KPI 卡片和趋势（原始行为）
+- **grouped** (>20 台设备)：聚合 KPI（均值/最小/最大）+ 异常设备排行
 """
 
 from __future__ import annotations
@@ -33,10 +33,12 @@ OUTPUT_FILENAME = "daily_kpi.json"
 
 
 def _output_dir() -> Path:
+    """获取日报输出目录路径。"""
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
 def _delta(current, previous):
+    """计算当前值与上一周期值的变化量。"""
     if previous is None or current is None:
         return None
     try:
@@ -46,12 +48,14 @@ def _delta(current, previous):
 
 
 def _direction(delta) -> str | None:
+    """根据变化量返回方向标签（up/down/flat）。"""
     if delta is None or delta == 0:
         return "flat" if delta == 0 else None
     return "up" if delta > 0 else "down"
 
 
 def _build_kpi_summary(current_kpis: dict, previous_kpis: dict | None, units: dict) -> list[dict]:
+    """构建 detail 模式的 KPI 摘要列表（每项含当前值、对比值、变化量、方向）。"""
     summary = []
     for key, value in current_kpis.items():
         previous = previous_kpis.get(key) if previous_kpis else None
@@ -77,7 +81,7 @@ def _build_aggregated_kpi_summary(
     units: dict,
     kpi_keys: list[str],
 ) -> list[dict]:
-    """Build KPI summary with min/max/mean from per-equipment data."""
+    """构建 grouped 模式的聚合 KPI 摘要（含均值/最小/最大）。"""
     summary = []
     for key in kpi_keys:
         values = []
@@ -116,11 +120,10 @@ def _build_trend_chart(
     equipment_count: int | None = None,
     per_equipment: dict | None = None,
 ) -> dict:
-    """Return a ready-to-render ECharts option object (see EChartBlock contract).
+    """构建可直接渲染的 ECharts option 对象。
 
-    When ``per_equipment`` is provided (grouped mode), builds per-area
-    series showing the average hourly runtime rate for each area,
-    replacing the single fleet-level line.
+    当提供 ``per_equipment``（grouped 模式）时，生成按区域分组的
+    多系列折线图，展示各区域平均小时运行率。
     """
     title_suffix = f"（{equipment_count}台均值）" if equipment_count else ""
     x_axis = [f"{h:02d}:00" for h in range(24)]
@@ -151,7 +154,7 @@ def _build_trend_chart(
 
 
 def _build_area_trend_series(per_equipment: dict, report_date: str) -> tuple[list[dict], list[str]]:
-    """Group per_equipment hourly data by area and build one series per area."""
+    """将逐设备小时数据按区域分组，每个区域生成一条均值折线。"""
     area_hours: dict[str, list[list[float]]] = {}
     for eq_data in per_equipment.values():
         area = eq_data.get("area", "未知")
@@ -186,7 +189,7 @@ def _build_area_trend_series(per_equipment: dict, report_date: str) -> tuple[lis
 
 
 def _compute_anomaly_score(eq_id: str, eq_kpis: dict) -> tuple[float, str]:
-    """Return (score, issue_description) for a single device. Higher = worse."""
+    """计算单台设备的异常评分和描述，返回值越高越严重。"""
     max_score = 0.0
     worst_issue = ""
     for kpi_key, (direction, threshold) in KPI_THRESHOLDS.items():
@@ -211,7 +214,7 @@ def _compute_anomaly_score(eq_id: str, eq_kpis: dict) -> tuple[float, str]:
 
 
 def _build_top_anomalies(per_equipment: dict, max_count: int = 10) -> list[dict]:
-    """Identify top anomalous devices from per_equipment data."""
+    """从逐设备数据中识别异常评分最高的 N 台设备。"""
     scored: list[tuple[str, float, str, dict]] = []
     for eq_id, eq_data in per_equipment.items():
         eq_kpis = eq_data.get("kpis", {})
@@ -234,11 +237,12 @@ def _build_top_anomalies(per_equipment: dict, max_count: int = 10) -> list[dict]
 
 
 def _severity_rank(score: float) -> int:
-    """Map score to severity category for primary sort (high=1 > warning=0)."""
+    """将评分映射到严重等级用于主排序（high=1 > warning=0）。"""
     return 1 if score > 1.0 else 0
 
 
 def _overall_status(kpi_summary: list[dict], alarms: list[dict], equipment_count: int | None = None) -> dict:
+    """根据 KPI 和告警生成整体运行状态（danger/warning/ok）和总结文字。"""
     high_alarms = [a for a in alarms if a.get("level") == "high"]
     runtime = next((item for item in kpi_summary if item["key"] == "runtime_rate"), None)
     count_note = f"{equipment_count}台设备" if equipment_count else "设备"
@@ -258,6 +262,7 @@ def _overall_status(kpi_summary: list[dict], alarms: list[dict], equipment_count
 
 
 def _recommendations(kpi_summary: list[dict], alarms: list[dict]) -> list[str]:
+    """根据 KPI 异常和告警生成建议列表。"""
     recs: list[str] = []
     for alarm in alarms:
         if alarm.get("level") == "high":
@@ -278,6 +283,12 @@ def _recommendations(kpi_summary: list[dict], alarms: list[dict]) -> list[str]:
 
 
 def compute(payload: dict) -> dict:
+    """从原始日报数据计算结构化 KPI 报告。
+
+    自动判断 detail/grouped 模式：
+    - per_equipment 存在且 >20 台 → grouped（聚合统计 + 异常排行）
+    - 否则 → detail（直接对比）
+    """
     current = payload.get("current") or {}
     compare = payload.get("compare")
     units = current.get("kpi_units") or {}
@@ -347,11 +358,13 @@ def compute(payload: dict) -> dict:
 
 
 def read_input(path: Path | None = None) -> dict:
+    """读取日报数据 JSON 文件。"""
     target = path or (_output_dir() / INPUT_FILENAME)
     return json.loads(target.read_text(encoding="utf-8"))
 
 
 def write_output(result: dict, path: Path | None = None) -> Path:
+    """将 KPI 计算结果写入 JSON 文件。"""
     out_path = path or (_output_dir() / OUTPUT_FILENAME)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -359,13 +372,14 @@ def write_output(result: dict, path: Path | None = None) -> Path:
 
 
 def main() -> int:
+    """CLI 入口：读取 daily_data.json，计算并输出 daily_kpi.json。"""
     parser = argparse.ArgumentParser(description="Compute daily KPI summary")
     parser.add_argument("--input", default=None, help="Input JSON path")
     parser.add_argument("--output", default=None, help="Output JSON path")
     args = parser.parse_args()
 
     try:
-        payload = read_input(Path(args.input)) if args.input else read_input()
+        payload = read_input(Path(args.input) if args.input else read_input())
     except FileNotFoundError as exc:
         print(json.dumps({"error": f"input not found: {exc}"}, ensure_ascii=False))
         return 0

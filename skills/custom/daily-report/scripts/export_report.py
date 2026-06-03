@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""Export daily KPI payload to a downloadable report file (Markdown only).
+"""将日报 KPI 数据导出为可下载的 Markdown 报表文件。
 
-Reads daily_kpi.json and writes daily_report.md.
+读取 daily_kpi.json，写入 daily_report.md。
+包含纯 Python 手绘 SVG 趋势图（无 ECharts 依赖）。
 """
 
 from __future__ import annotations
@@ -30,10 +31,12 @@ _SERIES_COLORS = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba27
 
 
 def _output_dir() -> Path:
+    """获取日报输出目录路径。"""
     return Path(os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
 
 
 def _svg_segments(data: list) -> list[list[tuple[int, float]]]:
+    """将数据按 None 值分割为连续线段。"""
     segments: list[list[tuple[int, float]]] = []
     current: list[tuple[int, float]] = []
     for i, v in enumerate(data):
@@ -49,6 +52,14 @@ def _svg_segments(data: list) -> list[list[tuple[int, float]]]:
 
 
 def trend_chart_to_svg(chart: dict, theme: str = "transparent") -> str:
+    """将 ECharts option 对象转换为内联 SVG 折线图。
+
+    纯 Python 绘制，无需 ECharts 运行时。支持 transparent / dark / light 主题。
+
+    Args:
+        chart: ECharts option 风格的趋势图配置
+        theme: 主题（"transparent" / "dark" / "light"）
+    """
     all_series = chart.get("series") or []
     if not all_series:
         return ""
@@ -177,10 +188,12 @@ def trend_chart_to_svg(chart: dict, theme: str = "transparent") -> str:
 
 
 def _svg_escape(text: str) -> str:
+    """转义 SVG 文本中的特殊字符。"""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _opacity_attr(theme: str, element: str) -> str:
+    """根据主题和元素类型返回 SVG 透明度属性。"""
     if theme == "transparent":
         if element == "text":
             return ' fill-opacity="0.55"'
@@ -190,6 +203,7 @@ def _opacity_attr(theme: str, element: str) -> str:
 
 
 def _format_number(value) -> str:
+    """格式化数值为显示字符串（None → —，浮点数 → 两位小数）。"""
     if value is None:
         return "—"
     if isinstance(value, float):
@@ -198,6 +212,7 @@ def _format_number(value) -> str:
 
 
 def _format_delta(item: dict) -> str:
+    """格式化 KPI 变化量（含箭头方向）。"""
     delta = item.get("delta")
     if delta is None:
         return "—"
@@ -206,10 +221,18 @@ def _format_delta(item: dict) -> str:
 
 
 def _table_cell(value) -> str:
+    """格式化 Markdown 表格单元格（转义管道符和换行）。"""
     return _format_number(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _embed_chart_image(svg_str: str, alt: str, thread_id: str | None = None) -> str:
+    """将 SVG 内嵌为 base64 Data URI (<50KB) 或写文件后引用。
+
+    Args:
+        svg_str: SVG 源码
+        alt: 图片 alt 文本
+        thread_id: 线程 ID，用于构建 artifact URL
+    """
     b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
     data_uri = f"data:image/svg+xml;base64,{b64}"
 
@@ -227,7 +250,10 @@ def _embed_chart_image(svg_str: str, alt: str, thread_id: str | None = None) -> 
 
 
 def render_markdown(payload: dict, chart_images: list[str] | None = None, thread_id: str | None = None) -> str:
-    """Render daily KPI payload as a Markdown report string."""
+    """将日报 KPI 数据渲染为 Markdown 报告。
+
+    包含：标题、概览、KPI 指标表、运行趋势图、异常排行、建议。
+    """
     aggregation_mode = payload.get("aggregation_mode", "detail")
     equipment_type = payload.get("equipment_type", "all")
     equipment_count = payload.get("equipment_count")
@@ -354,6 +380,7 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
 
 
 def write_report(payload: dict, path: Path | None = None) -> Path:
+    """将 Markdown 报告写入文件，返回输出路径。"""
     filename = "daily_report.md"
     out_path = path or (_output_dir() / filename)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,6 +390,7 @@ def write_report(payload: dict, path: Path | None = None) -> Path:
 
 
 def build_export_result(payload: dict, path: Path | None = None) -> dict:
+    """构建导出结果字典（包含格式、文件名和路径信息）。"""
     out_path = write_report(payload, path=path)
     filename = out_path.name
     virtual_path = f"/mnt/user-data/outputs/{filename}"
@@ -376,6 +404,7 @@ def build_export_result(payload: dict, path: Path | None = None) -> dict:
 
 
 def load_payload(path: Path | None = None) -> dict:
+    """加载日报 KPI JSON 文件。"""
     if path is not None:
         target = path
     else:
@@ -384,6 +413,7 @@ def load_payload(path: Path | None = None) -> dict:
 
 
 def main() -> int:
+    """CLI 入口：读取 daily_kpi.json，生成 daily_report.md。"""
     parser = argparse.ArgumentParser(description="Export daily report")
     parser.add_argument("--input", default=None, help="Input KPI JSON path")
     parser.add_argument("--output", default=None, help="Output file path")

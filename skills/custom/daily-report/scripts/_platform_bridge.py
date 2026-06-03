@@ -1,6 +1,6 @@
-"""Platform bridge — call integration CLI subprocess for daily report data.
+"""平台桥接层 — 通过子进程调用集成 CLI 获取日报数据。
 
-The bridge invokes::
+桥接调用方式::
 
     python -m deerflow.integrations.cli \\
         --capability <key> \\
@@ -8,21 +8,17 @@ The bridge invokes::
         --user-id <id> \\
         --params <json>
 
-and parses the JSON output. On failure, the caller falls back to the
-legacy provider path.
+并解析 JSON 输出。失败时调用方回退到旧路径。
 
-Execution environment
----------------------
-The CLI bridge requires ``features-tool`` (InS HTTP client), which is only
-available inside the sandbox Docker container (``/opt/features-tool``).
-When the query script runs on the host backend (where features-tool is
-not importable), this bridge automatically routes the CLI call into the
-sandbox container via ``docker exec``, using the container name derived
-from ``DEER_FLOW_THREAD_ID`` (same hashing logic as AioSandboxProvider).
+运行环境
+--------
+CLI 桥接依赖 ``features-tool``（InS HTTP 客户端），仅在 sandbox Docker 容器
+（``/opt/features-tool``）中可用。当查询脚本在宿主机后端运行时，桥接层自动通过
+``docker exec`` 将调用路由到 sandbox 容器，容器名由 ``DEER_FLOW_THREAD_ID``
+的 sha256 哈希派生（与 AioSandboxProvider 逻辑一致）。
 
-Architecture note: the CLI returns canonical model JSON (TrendSeries,
-HealthAssessment, etc.). This bridge returns the raw CLI output — callers are
-responsible for transforming the canonical shape into whatever the script expects.
+架构说明：CLI 返回规范模型 JSON（TrendSeries 等），桥接层原样返回原始 CLI 输出，
+调用方负责将规范格式转换为脚本所需的结构。
 """
 
 from __future__ import annotations
@@ -45,12 +41,12 @@ _DEFAULT_TIMEOUT = 60.0
 
 _CONTAINER_PREFIX = "deer-flow-sandbox"
 
-# Temp directory for params files — must be accessible from the container
+# 临时目录，用于存放 params 文件（需对容器可见）
 _PARAMS_DIR = tempfile.gettempdir()
 
 
 def _write_params_file(params_json: str) -> str:
-    """Write params JSON to a temp file and return its path."""
+    """将 params JSON 写入临时文件并返回路径。"""
     fd, path = tempfile.mkstemp(suffix=".json", prefix="deerflow_params_", dir=_PARAMS_DIR)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(params_json)
@@ -58,14 +54,14 @@ def _write_params_file(params_json: str) -> str:
 
 
 def _cleanup_params_file(path: str) -> None:
-    """Remove the temp params file (best-effort, never raises)."""
+    """删除临时 params 文件（尽力而为，不抛异常）。"""
     try:
         os.unlink(path)
     except OSError:
         pass
 
-# Environment variables that must be forwarded into the sandbox container
-# when routing via docker exec.
+
+# 通过 docker exec 路由时需要转发到容器内的环境变量
 _ENV_FORWARD_KEYS = (
     "DEER_FLOW_INTERNAL_AUTH_VALUE",
     "DEER_FLOW_EFFECTIVE_USER_ID",
@@ -83,19 +79,19 @@ _ENV_FORWARD_KEYS = (
 
 
 class PlatformBridgeError(Exception):
-    """Raised when the CLI subprocess fails or returns invalid output."""
+    """CLI 子进程失败或返回无效输出时抛出。"""
 
 
 def _is_in_sandbox() -> bool:
-    """Return True if this process is running inside the sandbox container."""
+    """判断当前进程是否运行在 sandbox 容器内。"""
     return Path("/opt/features-tool").is_dir()
 
 
 def _sandbox_container_name() -> str | None:
-    """Derive the sandbox container name from DEER_FLOW_THREAD_ID.
+    """根据 ``DEER_FLOW_THREAD_ID`` 派生 sandbox 容器名。
 
-    Mirrors AioSandboxProvider._deterministic_sandbox_id:
-    ``container_name = deer-flow-sandbox-{sha256(thread_id)[:8]}``
+    与 AioSandboxProvider._deterministic_sandbox_id 逻辑一致：
+    ``容器名 = deer-flow-sandbox-{sha256(thread_id)[:8]}``
     """
     thread_id = os.environ.get("DEER_FLOW_THREAD_ID")
     if not thread_id:
@@ -108,7 +104,7 @@ def _docker_exec_cmd(
     inner_cmd: list[str],
     container_name: str,
 ) -> list[str]:
-    """Wrap an inner CLI command in ``docker exec`` with env forwarding."""
+    """将内部 CLI 命令包装为 ``docker exec`` 命令，并转发环境变量。"""
     cmd = ["docker", "exec"]
     for key in _ENV_FORWARD_KEYS:
         value = os.environ.get(key)
@@ -120,9 +116,10 @@ def _docker_exec_cmd(
 
 
 def _docker_cp_params_file(host_path: str, container_name: str) -> str:
-    """Copy params file from host into container at a fixed path.
+    """将 params 文件从宿主机复制到容器内固定路径。
 
-    Returns the container-side path.
+    Returns:
+        容器内的文件路径
     """
     container_path = "/tmp/deerflow_params.json"
     subprocess.run(
@@ -134,10 +131,9 @@ def _docker_cp_params_file(host_path: str, container_name: str) -> str:
 
 
 def _python_executable() -> str:
-    """Resolve the Python interpreter to use for the subprocess.
+    """解析用于子进程的 Python 解释器路径。
 
-    Prefers the same interpreter running this process so packages
-    resolve identically.
+    优先使用当前进程的同一解释器，确保包解析一致。
     """
     return sys.executable
 
@@ -151,26 +147,24 @@ def call_capability(
     timeout: float = _DEFAULT_TIMEOUT,
     python_executable: str | None = None,
 ) -> dict[str, Any]:
-    """Invoke the integration CLI subprocess and return parsed JSON output.
+    """调用集成 CLI 子进程的能力接口并返回 JSON 输出。
 
-    When running on the host (outside the sandbox container), the CLI call
-    is automatically routed into the sandbox container via ``docker exec``
-    so that features-tool and other container-only dependencies are available.
+    当运行在宿主机（不在 sandbox 容器内）时，自动通过 ``docker exec``
+    路由到 sandbox 容器，确保 features-tool 等依赖可用。
 
     Args:
-        capability: Capability key, e.g. ``"monitoring.trend"``.
-        params: Query parameters as a dict (serialized to JSON for --params).
-        tenant_id: Tenant ID. Defaults to ``DEER_FLOW_TENANT_ID`` env var.
-        user_id: User ID. Defaults to ``DEER_FLOW_EFFECTIVE_USER_ID`` env var
-            or ``"cli-subprocess"``.
-        timeout: Subprocess timeout in seconds.
-        python_executable: Optional interpreter override.
+        capability: 能力键，如 ``"monitoring.trend"``
+        params: 查询参数字典（序列化为 JSON 后通过临时文件传递）
+        tenant_id: 租户 ID，默认取 ``DEER_FLOW_TENANT_ID`` 环境变量
+        user_id: 用户 ID，默认取 ``DEER_FLOW_EFFECTIVE_USER_ID`` 或 ``"cli-subprocess"``
+        timeout: 子进程超时秒数
+        python_executable: 可选解释器覆盖
 
     Returns:
-        Parsed JSON output dict from the CLI.
+        CLI 返回的 JSON 输出字典
 
     Raises:
-        PlatformBridgeError: On subprocess failure, timeout, or invalid JSON.
+        PlatformBridgeError: 子进程失败、超时或返回无效 JSON
     """
     if tenant_id is None:
         tenant_id = os.environ.get("DEER_FLOW_TENANT_ID", "default")
@@ -179,12 +173,12 @@ def call_capability(
 
     in_sandbox = _is_in_sandbox()
     if in_sandbox:
-        # sandbox base image ships python3.10, but deerflow-harness needs >=3.12
+        # sandbox 基础镜像自带 python3.10，deerflow-harness 需要 >=3.12
         interpreter = python_executable or "python3.12"
     else:
         interpreter = "python3"
 
-    # Write params to a temp file to avoid ARG_MAX limit on command-line args
+    # 通过临时文件传递参数，避免命令行 ARG_MAX 限制
     params_json = json.dumps(params, ensure_ascii=False)
     params_file = _write_params_file(params_json)
 
@@ -209,7 +203,7 @@ def call_capability(
                 raise PlatformBridgeError(
                     "Cannot route CLI to sandbox: DEER_FLOW_THREAD_ID not set"
                 )
-            # Copy params file into container for docker exec
+            # 将 params 文件复制到容器内供 docker exec 使用
             container_params_path = _docker_cp_params_file(params_file, container_name)
             inner_cmd[-1] = container_params_path
             cmd = _docker_exec_cmd(inner_cmd, container_name)
@@ -239,41 +233,28 @@ def call_action(
     timeout: float = _DEFAULT_TIMEOUT,
     python_executable: str | None = None,
 ) -> dict[str, Any]:
-    """Invoke the integration CLI in action mode for adapter-internal computation.
+    """以 action 模式调用集成 CLI，执行适配器内部计算。
 
-    Action mode bypasses CapabilityRouter and calls adapter-internal pure
-    functions directly. Used for InS-specific KPI aggregation and point
-    selection that understand the data model (position_types, endpoint_series).
+    Action 模式绕过 CapabilityRouter，直接调用适配器内部的纯函数。
+    用于 InS 特定的 KPI 聚合和测点选择，这些操作需要理解数据模型
+    （position_types、endpoint_series）。
 
-    When running on the host (outside the sandbox container), the CLI call
-    is automatically routed into the sandbox container via ``docker exec``.
+    当运行在宿主机时，自动通过 ``docker exec`` 路由到 sandbox 容器。
 
     Args:
-        action: Action name, e.g. ``"aggregate_kpi"`` or ``"select_points"``.
-        adapter: Adapter key, e.g. ``"ins_prod"``.
-        params: Action parameters as a dict (serialized to JSON for --params).
-        tenant_id: Tenant ID. Defaults to ``DEER_FLOW_TENANT_ID`` env var.
-        user_id: User ID. Defaults to ``DEER_FLOW_EFFECTIVE_USER_ID`` env var
-            or ``"cli-subprocess"``.
-        timeout: Subprocess timeout in seconds.
-        python_executable: Optional interpreter override.
+        action: action 名称，如 ``"aggregate_kpi"`` / ``"select_points"``
+        adapter: 适配器键，如 ``"ins_prod"``
+        params: action 参数字典
+        tenant_id: 租户 ID，默认取 ``DEER_FLOW_TENANT_ID`` 环境变量
+        user_id: 用户 ID，默认取 ``DEER_FLOW_EFFECTIVE_USER_ID`` 或 ``"cli-subprocess"``
+        timeout: 子进程超时秒数
+        python_executable: 可选解释器覆盖
 
     Returns:
-        Parsed JSON output dict from the CLI.
+        CLI 返回的 JSON 输出字典
 
     Raises:
-        PlatformBridgeError: On subprocess failure, timeout, or invalid JSON.
-
-    Example:
-        >>> result = call_action(
-        ...     action="aggregate_kpi",
-        ...     adapter="ins_prod",
-        ...     params={
-        ...         "trend_data": {"EQ1": [...]},
-        ...         "kpi_keys": ["runtime_rate"],
-        ...     },
-        ... )
-        >>> kpis = result["data"]["kpis"]["EQ1"]["runtime_rate"]
+        PlatformBridgeError: 子进程失败、超时或返回无效 JSON
     """
     if tenant_id is None:
         tenant_id = os.environ.get("DEER_FLOW_TENANT_ID", "default")
@@ -282,12 +263,12 @@ def call_action(
 
     in_sandbox = _is_in_sandbox()
     if in_sandbox:
-        # sandbox base image ships python3.10, but deerflow-harness needs >=3.12
+        # sandbox 基础镜像自带 python3.10，deerflow-harness 需要 >=3.12
         interpreter = python_executable or "python3.12"
     else:
         interpreter = "python3"
 
-    # Write params to a temp file to avoid ARG_MAX limit on command-line args
+    # 通过临时文件传递参数，避免命令行 ARG_MAX 限制
     params_json = json.dumps(params, ensure_ascii=False)
     params_file = _write_params_file(params_json)
 
@@ -314,7 +295,7 @@ def call_action(
                 raise PlatformBridgeError(
                     "Cannot route CLI to sandbox: DEER_FLOW_THREAD_ID not set"
                 )
-            # Copy params file into container for docker exec
+            # 将 params 文件复制到容器内供 docker exec 使用
             container_params_path = _docker_cp_params_file(params_file, container_name)
             inner_cmd[-1] = container_params_path
             cmd = _docker_exec_cmd(inner_cmd, container_name)
@@ -340,9 +321,9 @@ def _run_subprocess(
     timeout: float,
     label: str,
 ) -> dict[str, Any]:
-    """Execute the CLI subprocess and parse its JSON output.
+    """执行 CLI 子进程并解析其 JSON 输出。
 
-    Shared by ``call_capability`` and ``call_action``.
+    由 ``call_capability`` 和 ``call_action`` 共用。
     """
     try:
         completed = subprocess.run(
@@ -399,6 +380,6 @@ def _run_subprocess(
 
 
 def is_platform_mode() -> bool:
-    """Check if ``USE_PLATFORM`` env var is set to a truthy value."""
+    """检查 ``USE_PLATFORM`` 环境变量是否设为真值。"""
     value = os.environ.get("USE_PLATFORM", "").lower()
     return value in ("true", "1", "yes")

@@ -1,7 +1,6 @@
-"""Shared constants, utilities, and helpers for daily report scripts.
+"""日报脚本共享常量、校验工具和辅助函数。
 
-This module is a self-contained copy for the daily-report skill.
-It contains only constants and functions needed by daily report scripts.
+仅包含日报脚本所需的常量和函数。
 """
 
 from __future__ import annotations
@@ -15,14 +14,14 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Regex patterns
+# 正则模式
 # ---------------------------------------------------------------------------
 
 EQUIPMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
 
 # ---------------------------------------------------------------------------
-# Domain constants
+# 领域常量
 # ---------------------------------------------------------------------------
 
 VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
@@ -30,7 +29,7 @@ VALID_SCOPES = {"all", "area", "specific"}
 DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 
 # ---------------------------------------------------------------------------
-# KPI units
+# KPI 单位
 # ---------------------------------------------------------------------------
 
 KPI_UNITS: dict[str, str] = {
@@ -50,7 +49,7 @@ KPI_UNITS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# KPI display names — daily only (no monthly extensions)
+# KPI 中文名称
 # ---------------------------------------------------------------------------
 
 KPI_DISPLAY_NAMES: dict[str, str] = {
@@ -70,7 +69,7 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# KPI direction — "higher is better" set
+# KPI 方向 — 值越大越好的指标
 # ---------------------------------------------------------------------------
 
 KPI_BETTER_WHEN_HIGHER: set[str] = {
@@ -78,7 +77,7 @@ KPI_BETTER_WHEN_HIGHER: set[str] = {
 }
 
 # ---------------------------------------------------------------------------
-# KPI anomaly thresholds
+# KPI 异常阈值 — (方向, 阈值)
 # ---------------------------------------------------------------------------
 
 KPI_THRESHOLDS: dict[str, tuple[str, float]] = {
@@ -92,7 +91,7 @@ KPI_THRESHOLDS: dict[str, tuple[str, float]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Per-type default KPI keys
+# 每种设备类型的默认 KPI
 # ---------------------------------------------------------------------------
 
 _EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
@@ -106,17 +105,19 @@ _EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
 _ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 
 # ---------------------------------------------------------------------------
-# CSV / validation utilities
+# CSV / 校验工具
 # ---------------------------------------------------------------------------
 
 
 def parse_csv(value: str | None) -> list[str]:
+    """将逗号分隔字符串解析为去空白后的列表。"""
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def dedupe_preserve_order(values: list[str]) -> list[str]:
+    """列表去重，保持原有顺序。"""
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
@@ -127,6 +128,7 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
 
 
 def validate_equipment_ids(equipment_ids: list[str]) -> str | None:
+    """校验设备 ID 列表格式，返回错误信息或 None。"""
     if not equipment_ids:
         return "--equipment must be a non-empty CSV"
     invalid = [item for item in equipment_ids if not EQUIPMENT_ID_PATTERN.fullmatch(item)]
@@ -136,6 +138,7 @@ def validate_equipment_ids(equipment_ids: list[str]) -> str | None:
 
 
 def validate_kpi_keys(kpi_keys: list[str], kpi_units_map: dict[str, str] | None = None) -> str | None:
+    """校验 KPI 键列表格式和可支持性，返回错误信息或 None。"""
     if not kpi_keys:
         return "--kpis must include at least one KPI key"
     invalid_format = [item for item in kpi_keys if not KPI_KEY_PATTERN.fullmatch(item)]
@@ -149,16 +152,18 @@ def validate_kpi_keys(kpi_keys: list[str], kpi_units_map: dict[str, str] | None 
 
 
 def error_output(message: str) -> int:
+    """以 JSON 格式输出错误信息到 stdout，返回 0。"""
     print(json.dumps({"error": message}, ensure_ascii=False))
     return 0
 
 
 # ---------------------------------------------------------------------------
-# Math / direction helpers
+# 数学 / 方向辅助
 # ---------------------------------------------------------------------------
 
 
 def direction(delta: float | None, better_when_higher: bool) -> str:
+    """根据变化量和指标方向返回趋势方向字符串（up/down/flat）。"""
     if delta is None:
         return "flat"
     if abs(delta) < 1e-9:
@@ -169,13 +174,14 @@ def direction(delta: float | None, better_when_higher: bool) -> str:
 
 
 def safe_pct(numerator: float, denominator: float | None) -> float | None:
+    """安全计算百分比，分母为空或零时返回 None。"""
     if denominator is None or denominator == 0:
         return None
     return round(numerator / denominator, 4)
 
 
 # ---------------------------------------------------------------------------
-# Equipment meta helpers
+# 设备元信息辅助
 # ---------------------------------------------------------------------------
 
 
@@ -183,6 +189,7 @@ def build_equipment_meta_from_names(
     equipment_ids: list[str],
     equipment_names: list[str],
 ) -> dict[str, dict] | None:
+    """根据设备 ID 和名称列表构建元信息字典。"""
     if not equipment_names:
         return None
     return {
@@ -194,17 +201,22 @@ def build_equipment_meta_from_names(
 def build_equipment_names_from_meta(
     equipment_meta: dict[str, dict] | None,
 ) -> dict[str, str]:
+    """从设备元信息中提取 id → name 映射。"""
     if not equipment_meta:
         return {}
     return {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
 
 
 # ---------------------------------------------------------------------------
-# Module loader
+# 模块加载器
 # ---------------------------------------------------------------------------
 
 
 def load_sibling_module(name: str):
+    """动态加载同级目录下的 Python 模块，已加载则直接返回。
+
+    用于在脚本中按需加载其他脚本，避免循环导入。
+    """
     module = sys.modules.get(name)
     if module is not None:
         return module
@@ -227,6 +239,7 @@ def load_sibling_module(name: str):
 
 
 def load_sibling_module_required(name: str):
+    """加载同级模块，不存在时抛出 RuntimeError。"""
     module = load_sibling_module(name)
     if module is None:
         raise RuntimeError(f"required sibling module not found: {name}")
@@ -234,11 +247,15 @@ def load_sibling_module_required(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Equipment type detection
+# 设备类型检测
 # ---------------------------------------------------------------------------
 
 
 def detect_equipment_type(equipment_ids: list[str]) -> str:
+    """通过 Organize API 查询设备真实类型，所有设备同类型时返回该类型。
+
+    用于在 --type=all 时自动推导正确的逐类型 KPI 映射（如泵 → 2K）。
+    """
     if not equipment_ids:
         return "all"
     module = load_sibling_module("list_equipment")
@@ -263,6 +280,7 @@ def detect_equipment_type(equipment_ids: list[str]) -> str:
 
 
 def resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
+    """按设备类型和范围解析设备列表，返回设备记录列表。"""
     list_eq = load_sibling_module("list_equipment")
     if list_eq is None:
         return []

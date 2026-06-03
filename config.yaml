@@ -307,24 +307,6 @@ http_connectors:
       max_response_bytes: 524288
       cache_ttl_seconds: 300
       max_retries: 1
-    - name: fetch_dataset
-      description: "获取指定数据集的数据"
-      url: "http://data-platform.internal/api/v1/datasets/query"
-      method: POST
-      auth_type: bearer
-      auth_token_env: DATA_PLATFORM_TOKEN
-      timeout_seconds: 60
-      max_response_bytes: 1048576
-      max_retries: 1
-    - name: dataset_schema
-      description: "获取数据集的字段结构"
-      url: "http://data-platform.internal/api/v1/datasets/schema"
-      method: GET
-      auth_type: bearer
-      auth_token_env: DATA_PLATFORM_TOKEN
-      timeout_seconds: 15
-      max_response_bytes: 262144
-      max_retries: 1
 rate_limit:
   enabled: false
   backend: memory
