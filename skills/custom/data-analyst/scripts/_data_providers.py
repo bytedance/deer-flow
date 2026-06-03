@@ -1,6 +1,6 @@
 """DataConnector abstraction layer for query scripts.
 
-Sprint goal: keep the 5 query scripts (query_trend / query_fault_context /
+Sprint goal: keep the 4 query scripts (query_fault_context /
 query_failure_data / query_closure_items / query_inspection) decoupled from
 specific data backends. A future integration (CMMS / TSDB / Improvement Plan
 API / MCP data_catalog server) becomes a Provider implementation; the scripts
@@ -57,23 +57,6 @@ class ProviderResult:
 # ---------------------------------------------------------------------------
 # Protocols — one per query script
 # ---------------------------------------------------------------------------
-
-
-class TrendDataProvider(Protocol):
-    """Provides ``time_series[]`` + ``metadata`` for query_trend."""
-
-    def fetch(
-        self,
-        *,
-        metric_keys: list[str],
-        date_range: tuple[str, str],  # (start_iso, end_iso)
-        aggregation: str,  # "hourly" | "daily" | "weekly"
-        forecast_horizon: int,
-        equipment_ids: list[str] | None = None,
-        include_alarms: bool = False,
-        include_events: bool = False,
-        eq_type: str = "all",
-    ) -> ProviderResult: ...
 
 
 class FaultContextProvider(Protocol):
@@ -261,10 +244,9 @@ def call_http_endpoint(
 
 # Maps a *source kind* to the function the caller should invoke. Providers
 # register themselves here at module load time. Sources include the original
-# 5 (trend / fault_context / failure_data / closure_items / inspection) plus
+# 4 (fault_context / failure_data / closure_items / inspection) plus
 # 3 added for equipment reports (daily / weekly / monthly).
 _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
-    "trend": {},
     "fault_context": {},
     "failure_data": {},
     "closure_items": {},
@@ -274,22 +256,22 @@ _PROVIDER_FACTORIES: dict[str, dict[str, Callable[[], Any]]] = {
     "monthly": {},
 }
 
-INS_ONLY_SOURCES = {"daily", "weekly", "monthly", "trend"}
+# Equipment report sources that route through the integrations platform bridge
+# instead of the legacy InS direct path.
+PLATFORM_SOURCES = {"daily", "weekly", "monthly"}
 
 
 def _resolve_mode(source: str, mode: str | None) -> str:
     """Resolve the provider mode for ``source``.
 
     Equipment report sources (``daily`` / ``weekly`` / ``monthly``) are
-    pinned to the InS backend — they ignore ``DEER_FLOW_DATA_PROVIDER`` and
-    always resolve to ``ins``. The reverse is also enforced: non-INS sources
-    never resolve to ``ins`` (fall back to ``demo`` when the env var says
-    ``ins``, since those sources don't have an InS provider).
+    pinned to the platform bridge — they ignore ``DEER_FLOW_DATA_PROVIDER``
+    and always resolve to ``platform``.
     """
     if mode is not None:
         return mode.lower()
-    if source in INS_ONLY_SOURCES:
-        return "ins"
+    if source in PLATFORM_SOURCES:
+        return "platform"
     env_mode = (os.environ.get("DEER_FLOW_DATA_PROVIDER") or "").lower()
     if env_mode == "ins":
         return "demo"
@@ -314,13 +296,13 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
 
     Mode resolution order:
         1. Explicit ``mode`` argument.
-        2. For ``daily`` / ``weekly`` / ``monthly``: always ``ins``.
+        2. For ``daily`` / ``weekly`` / ``monthly``: always ``platform``.
         3. ``DEER_FLOW_DATA_PROVIDER`` env var.
         4. Default ``demo``.
 
     Equipment report sources (``daily`` / ``weekly`` / ``monthly``) are
-    pinned to the InS backend; ``DEER_FLOW_DATA_PROVIDER`` is ignored for
-    those sources.
+    pinned to the platform bridge; ``DEER_FLOW_DATA_PROVIDER`` is ignored
+    for those sources.
 
     Raises ``KeyError`` if the requested mode has no registered provider.
     """

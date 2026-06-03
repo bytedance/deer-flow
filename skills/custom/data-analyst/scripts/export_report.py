@@ -29,11 +29,9 @@ DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "daily_kpi.json"
 WEEKLY_INPUT_FILENAME = "weekly_kpi.json"
 MONTHLY_INPUT_FILENAME = "monthly_kpi.json"
-DIAGNOSIS_INPUT_FILENAME = "diagnosis_features.json"
 MONITORING_INPUT_FILENAME = "monitoring_features.json"
-TREND_INPUT_FILENAME = "trend_report_features.json"
 SUPPORTED_FORMATS = {"md", "pdf"}
-SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "diagnosis", "monitoring", "trend"}
+SUPPORTED_REPORT_TYPES = {"daily", "weekly", "monthly", "monitoring"}
 
 # Capability tier labels and analysis type labels
 TIER_LABELS = {"basic": "Basic", "pro": "Pro", "ultra": "Ultra"}
@@ -63,8 +61,6 @@ def _output_dir(report_type: str = "daily") -> Path:
     Weekly reports prefer ``WEEKLY_REPORT_OUTPUT_DIR`` but fall back to the
     daily var so a single sandbox configuration covers both. Monthly extends
     the chain to ``MONTHLY_REPORT_OUTPUT_DIR`` → weekly → daily.
-    Diagnosis prefers ``DIAGNOSIS_OUTPUT_DIR`` (matches query_diagnosis.py /
-    diagnosis_features.py in sandbox) and falls back to the daily var.
     """
     if report_type == "monthly":
         return Path(
@@ -83,24 +79,10 @@ def _output_dir(report_type: str = "daily") -> Path:
                 os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
             )
         )
-    if report_type == "diagnosis":
-        return Path(
-            os.environ.get(
-                "DIAGNOSIS_OUTPUT_DIR",
-                os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
-            )
-        )
     if report_type == "monitoring":
         return Path(
             os.environ.get(
                 "MONITORING_REPORT_OUTPUT_DIR",
-                os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
-            )
-        )
-    if report_type == "trend":
-        return Path(
-            os.environ.get(
-                "TREND_REPORT_OUTPUT_DIR",
                 os.environ.get("DAILY_REPORT_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
             )
         )
@@ -1130,315 +1112,6 @@ def render_monitoring_markdown(payload: dict, thread_id: str | None = None) -> s
     return "\n".join(lines)
 
 
-def _trend_direction_emoji(direction: str) -> str:
-    return {"increasing": "📈", "decreasing": "📉", "stable": "➡️"}.get(direction, "❓")
-
-
-def _trend_direction_text(direction: str) -> str:
-    return {"increasing": "上升趋势", "decreasing": "下降趋势", "stable": "平稳"}.get(direction, direction)
-
-
-def _trend_severity_color(severity: str) -> str:
-    return {"critical": "red", "warning": "yellow", "info": "green"}.get(severity, "green")
-
-
-def render_trend_markdown(payload: dict, thread_id: str | None = None) -> str:
-    """Render trend analysis report as Markdown.
-
-    Standard sections:
-      1. Title + metadata (capability tier, time range, equipment)
-      2. Executive summary (top 3 findings across devices)
-      3. Per-device trend detail (each device gets its own subsection)
-      4. Cross-device comparison (multi-device only)
-      5. Comparison analysis (wow/yoy mode only)
-      6. Degradation alerts
-      7. Forecasts
-      8. Maintenance recommendations
-
-    Pro adds: model comparison table, STL decomposition, changepoints, confidence interval.
-    Ultra adds: LSTM forecast table, co-trending groups, adaptive threshold, model confidence.
-    """
-    capability_tier = payload.get("capability_tier", "basic")
-    tier_label = TIER_LABELS.get(capability_tier, capability_tier)
-    model_fallback = payload.get("model_fallback", False)
-
-    per_device = payload.get("per_device", [])
-    cross_device = payload.get("cross_device_summary", {})
-    comparison = payload.get("comparison_summary", {})
-    degradation_alerts = payload.get("degradation_alerts", [])
-    forecasts = payload.get("forecasts", [])
-    recommendations = payload.get("recommendations", [])
-    data_quality = payload.get("data_quality", [])
-
-    # Title — detect scheduling source for label
-    schedule_label = payload.get("schedule_label", "")
-    if schedule_label:
-        title = f"# 趋势分析报告（{schedule_label}）"
-    else:
-        title = "# 趋势分析报告"
-
-    lines: list[str] = []
-    lines.append(title)
-    lines.append("")
-    lines.append(f"**能力等级**：{tier_label}{'（模型回退）' if model_fallback else ''}")
-    lines.append("")
-
-    # Section 2: Executive Summary
-    lines.append("## 执行摘要")
-    lines.append("")
-
-    all_findings = []
-    for device in per_device:
-        for m in device.get("metrics_summary", []):
-            all_findings.append({**m, "equipment_name": device.get("equipment_name", "")})
-
-    if all_findings:
-        top_findings = sorted(
-            all_findings,
-            key=lambda x: (
-                {"critical": 3, "warning": 2, "info": 1}.get(x.get("severity", "info"), 0),
-                abs(x.get("slope", 0)),
-            ),
-            reverse=True,
-        )[:3]
-        for i, f in enumerate(top_findings, 1):
-            emoji = _trend_direction_emoji(f.get("direction", "stable"))
-            lines.append(
-                f"{i}. {emoji} **{f.get('equipment_name', '')}** — "
-                f"{f.get('metric_key', '')}：{_trend_direction_text(f.get('direction', ''))}，"
-                f"变化率 {f.get('slope', 0):.4f}/天，置信度 {f.get('confidence', 0):.0%}"
-            )
-    else:
-        lines.append("监测期间未发现显著趋势变化。")
-    lines.append("")
-
-    # Section 3: Per-device trend detail
-    lines.append("## 逐设备趋势详析")
-    lines.append("")
-    for device in per_device:
-        eq_name = device.get("equipment_name", device.get("equipment_id", "?"))
-        lines.append(f"### {eq_name}")
-        lines.append("")
-        metrics = device.get("metrics_summary", [])
-        if metrics:
-            lines.append("| 指标 | 方向 | 变化率/天 | 波动率 | 置信度 | 说明 |")
-            lines.append("|------|------|-----------|--------|--------|------|")
-            for m in metrics:
-                emoji = _trend_direction_emoji(m.get("direction", "stable"))
-                lines.append(
-                    f"| {m.get('metric_key', '')} | {emoji} {_trend_direction_text(m.get('direction', ''))} | "
-                    f"{m.get('slope', 0):.4f} | {m.get('volatility', 0):.4f} | "
-                    f"{m.get('confidence', 0):.0%} | {m.get('description', '')} |"
-                )
-            lines.append("")
-
-        # Pro: Model comparison
-        if capability_tier in ("pro", "ultra"):
-            models = device.get("models", [])
-            if models:
-                lines.append("**多模型拟合对比**：")
-                lines.append("")
-                lines.append("| 模型 | R²_adj | 选中 |")
-                lines.append("|------|--------|------|")
-                for mod in models:
-                    selected = "✅" if mod.get("selected") else ""
-                    lines.append(f"| {mod.get('name', '')} | {mod.get('r2_adj', 0):.4f} | {selected} |")
-                lines.append("")
-
-            # Pro: STL decomposition
-            stl = device.get("stl_decomposition", {})
-            if stl:
-                lines.append("**STL 分解**：")
-                lines.append("")
-                trend_strength = stl.get("trend_strength", 0)
-                seasonal_strength = stl.get("seasonal_strength", 0)
-                lines.append(f"- 趋势分量强度：{trend_strength:.2f}")
-                lines.append(f"- 季节性分量强度：{seasonal_strength:.2f}")
-                lines.append(f"- 残差特征：{stl.get('residual_description', '随机分布')}")
-                lines.append("")
-
-            # Pro: Changepoints
-            changepoints = device.get("changepoints", [])
-            if changepoints:
-                lines.append("**PELT 变点检测**：")
-                lines.append("")
-                lines.append("| 变点时间 | 前斜率 | 后斜率 | 变化幅度 |")
-                lines.append("|----------|--------|--------|----------|")
-                for cp in changepoints[:5]:
-                    lines.append(
-                        f"| {cp.get('timestamp', '')} | {cp.get('slope_before', 0):.4f} | "
-                        f"{cp.get('slope_after', 0):.4f} | {cp.get('delta', 0):.4f} |"
-                    )
-                lines.append("")
-
-            # Pro: Confidence interval
-            ci = device.get("confidence_band", {})
-            if ci:
-                lines.append(
-                    f"**95% 置信区间**：[{ci.get('lower', 0):.2f}, {ci.get('upper', 0):.2f}]"
-                )
-                lines.append("")
-
-        # Ultra: LSTM forecast
-        if capability_tier == "ultra":
-            lstm = device.get("forecast_lstm", [])
-            if lstm:
-                lines.append("**LSTM 预测值**：")
-                lines.append("")
-                lines.append("| 日期 | 预测值 | 80% CI | 95% CI |")
-                lines.append("|------|--------|--------|--------|")
-                ci_80 = device.get("confidence_80", [])
-                ci_95 = device.get("confidence_95", [])
-                for j, val in enumerate(lstm[:7]):
-                    c80 = ci_80[j] if j < len(ci_80) else {}
-                    c95 = ci_95[j] if j < len(ci_95) else {}
-                    c80_str = f"[{c80.get('lower', '-')}, {c80.get('upper', '-')}]" if isinstance(c80, dict) else "—"
-                    c95_str = f"[{c95.get('lower', '-')}, {c95.get('upper', '-')}]" if isinstance(c95, dict) else "—"
-                    lines.append(f"| Day {j + 1} | {val:.2f} | {c80_str} | {c95_str} |")
-                lines.append("")
-
-            # Ultra: Co-trending groups
-            co_groups = device.get("co_trending_groups", [])
-            if co_groups:
-                lines.append("**协变组**：")
-                lines.append("")
-                for g in co_groups:
-                    members = ", ".join(g.get("members", []))
-                    lines.append(f"- {g.get('group_id', '')}：{members}（{g.get('direction', '')}）")
-                lines.append("")
-
-            # Ultra: Adaptive threshold
-            at = device.get("adaptive_threshold", {})
-            if at:
-                lines.append("**自适应阈值推荐**：")
-                lines.append("")
-                lines.append("| 指标 | Warning | Critical | 依据 |")
-                lines.append("|------|---------|----------|------|")
-                for metric_key, thresh in at.items():
-                    lines.append(
-                        f"| {metric_key} | {thresh.get('warning', '-')} | "
-                        f"{thresh.get('critical', '-')} | {thresh.get('rationale', '')} |"
-                    )
-                lines.append("")
-
-    # Section 4: Cross-device comparison (multi-device only)
-    if len(per_device) > 1:
-        lines.append("## 横向对比")
-        lines.append("")
-        degradation_priority = cross_device.get("degradation_priority", [])
-        if degradation_priority:
-            lines.append("**劣化优先级排序**：")
-            lines.append("")
-            lines.append("| 优先级 | 设备 | 指标 | 变化率/天 |")
-            lines.append("|--------|------|------|-----------|")
-            for dp in degradation_priority[:10]:
-                lines.append(
-                    f"| {dp.get('priority', '')} | {dp.get('equipment_name', '')} | "
-                    f"{dp.get('metric_key', '')} | {dp.get('slope', 0):.4f} |"
-                )
-            lines.append("")
-
-    # Section 5: Comparison analysis (wow/yoy)
-    compare_mode = comparison.get("mode", "none")
-    if compare_mode != "none":
-        mode_label = comparison.get("mode_label", compare_mode)
-        lines.append(f"## {mode_label}对比分析")
-        lines.append("")
-        comp_metrics = comparison.get("metrics", [])
-        if comp_metrics:
-            lines.append("| 指标 | 当前均值 | 对比均值 | 变化幅度 | 趋势 |")
-            lines.append("|------|----------|----------|----------|------|")
-            for cm in comp_metrics:
-                lines.append(
-                    f"| {cm.get('metric_key', '')} | {cm.get('current_avg', 0):.2f} | "
-                    f"{cm.get('compare_avg', 0):.2f} | {cm.get('change_pct', 0):+.1f}% | "
-                    f"{cm.get('trend', '')} |"
-                )
-            lines.append("")
-
-    # Section 6: Degradation alerts
-    if degradation_alerts:
-        lines.append("## 劣化预警")
-        lines.append("")
-        lines.append("| 设备 | 指标 | 变化率/天 | 置信度 | 严重等级 |")
-        lines.append("|------|------|-----------|--------|----------|")
-        for alert in degradation_alerts[:10]:
-            lines.append(
-                f"| {alert.get('equipment_name', '')} | {alert.get('metric_key', '')} | "
-                f"{alert.get('slope', 0):.4f} | {alert.get('confidence', 0):.0%} | "
-                f"{alert.get('severity', '')} |"
-            )
-        lines.append("")
-
-    # Section 7: Forecasts
-    if forecasts:
-        lines.append("## 预测")
-        lines.append("")
-        for fc in forecasts:
-            lines.append(f"### {fc.get('equipment_name', '')}（{fc.get('type', 'linear')} 预测）")
-            lines.append("")
-            vals = fc.get("values", [])
-            if vals:
-                preview = ", ".join(f"{v:.2f}" for v in vals[:7])
-                lines.append(f"未来 7 天预测值：{preview}")
-                lines.append("")
-
-    # Section 8: Maintenance recommendations
-    if recommendations:
-        lines.append("## 维护建议")
-        lines.append("")
-        for i, rec in enumerate(recommendations[:10], 1):
-            priority = rec.get("priority", "normal")
-            pri_label = {"urgent": "紧急", "important": "重要", "normal": "一般", "observe": "观察"}.get(priority, priority)
-            lines.append(f"{i}. [{pri_label}] {rec.get('action', '')}")
-        lines.append("")
-
-    # Data quality
-    if data_quality:
-        lines.append("## 数据质量说明")
-        lines.append("")
-        for dq in data_quality:
-            if isinstance(dq, dict):
-                lines.append(f"- {dq.get('description', json.dumps(dq, ensure_ascii=False))}")
-            else:
-                lines.append(f"- {dq}")
-        lines.append("")
-
-    # Ultra: Model confidence warning
-    if capability_tier == "ultra":
-        low_confidence_models = []
-        for device in per_device:
-            for m in device.get("metrics_summary", []):
-                if m.get("confidence", 1.0) < 0.6:
-                    low_confidence_models.append(
-                        f"{device.get('equipment_name', '')} / {m.get('metric_key', '')}"
-                    )
-        if low_confidence_models:
-            lines.append("> ⚠ 以下指标的模型置信度低于 0.6，建议结合人工判断：")
-            lines.append("> " + "、".join(low_confidence_models[:5]))
-            lines.append("")
-
-    return "\n".join(lines)
-
-
-def _trend_html(payload: dict) -> str:
-    """Minimal HTML wrapper for trend report PDF export."""
-    md = render_trend_markdown(payload)
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>趋势分析报告</title>
-<style>
-body {{ font-family: "Microsoft YaHei", "PingFang SC", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; }}
-h1 {{ border-bottom: 2px solid #5470C6; padding-bottom: 8px; }}
-h2 {{ color: #5470C6; margin-top: 24px; }}
-h3 {{ color: #333; margin-top: 16px; }}
-table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
-th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 14px; }}
-th {{ background: #f5f5f5; }}
-blockquote {{ border-left: 4px solid #FAC858; padding-left: 12px; color: #666; }}
-</style></head>
-<body>{md.replace(chr(10), "<br>")}</body></html>"""
-
 
 def write_report(
     payload: dict,
@@ -1454,32 +1127,12 @@ def write_report(
     filename = f"{report_type}_report.{fmt}"
     out_path = path or (_output_dir(report_type) / filename)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if report_type == "diagnosis":
-        # Lazy import to avoid module-load-time circular dependency
-        from export_diagnosis_report import (  # type: ignore[import-not-found]
-            render_diagnosis_html,
-            render_diagnosis_markdown,
-        )
-
-        if fmt == "pdf":
-            html = render_diagnosis_html(payload)
-            _write_pdf(html, out_path)
-        else:
-            content = render_diagnosis_markdown(payload)
-            out_path.write_text(content, encoding="utf-8")
-    elif report_type == "monitoring":
+    if report_type == "monitoring":
         if fmt == "pdf":
             html = _monitoring_html(payload)
             _write_pdf(html, out_path)
         else:
             content = render_monitoring_markdown(payload)
-            out_path.write_text(content, encoding="utf-8")
-    elif report_type == "trend":
-        if fmt == "pdf":
-            html = _trend_html(payload)
-            _write_pdf(html, out_path)
-        else:
-            content = render_trend_markdown(payload)
             out_path.write_text(content, encoding="utf-8")
     elif report_type == "monthly":
         if fmt == "pdf":
@@ -1532,12 +1185,8 @@ def load_payload(path: Path | None = None, report_type: str = "daily") -> dict:
             filename = MONTHLY_INPUT_FILENAME
         elif report_type == "weekly":
             filename = WEEKLY_INPUT_FILENAME
-        elif report_type == "diagnosis":
-            filename = DIAGNOSIS_INPUT_FILENAME
         elif report_type == "monitoring":
             filename = MONITORING_INPUT_FILENAME
-        elif report_type == "trend":
-            filename = TREND_INPUT_FILENAME
         else:
             filename = INPUT_FILENAME
         target = _output_dir(report_type) / filename

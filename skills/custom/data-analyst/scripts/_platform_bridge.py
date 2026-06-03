@@ -185,7 +185,8 @@ def call_capability(
 
     in_sandbox = _is_in_sandbox()
     if in_sandbox:
-        interpreter = python_executable or _python_executable()
+        # sandbox base image ships python3.10, but deerflow-harness needs >=3.12
+        interpreter = python_executable or "python3.12"
     else:
         interpreter = "python3"
 
@@ -287,7 +288,8 @@ def call_action(
 
     in_sandbox = _is_in_sandbox()
     if in_sandbox:
-        interpreter = python_executable or _python_executable()
+        # sandbox base image ships python3.10, but deerflow-harness needs >=3.12
+        interpreter = python_executable or "python3.12"
     else:
         interpreter = "python3"
 

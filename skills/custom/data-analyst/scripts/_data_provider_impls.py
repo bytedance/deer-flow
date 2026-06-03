@@ -8,8 +8,8 @@ Two categories of sources live in this module:
   run offline; ``fetch_with_fallback`` swaps in the demo path when the HTTP
   endpoint is unreachable.
 
-* ``trend`` and the AI report sources (``daily`` / ``weekly`` / ``monthly``)
-  register **only** their real-backed provider (HTTP or InS). There is no
+* The AI report sources (``daily`` / ``weekly`` / ``monthly``)
+  register **only** their real-backed provider (platform). There is no
   demo fallback — any ``HttpProviderError`` propagates so the failure is
   visible at the CLI as ``{"error": "HttpProviderError: ..."}`` instead of
   being masked by synthetic output.
@@ -42,122 +42,6 @@ from _data_providers import (
     call_http_endpoint,
     register_provider,
 )
-
-# ============================================================================
-# trend / query_trend.py
-# ============================================================================
-
-
-class HttpTrendProvider:
-    """POSTs to ``$DEERFLOW_TREND_URL`` with the parameters the script accepts.
-
-    Expected request body::
-
-        {
-          "metric_keys": ["runtime_rate", ...],
-          "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
-          "aggregation": "daily",
-          "forecast_horizon": 7,
-          "equipment_ids": ["P-001", ...],
-          "include_alarms": true,
-          "include_events": true
-        }
-
-    Expected response body::
-
-        {
-          "time_series": [
-            {
-              "metric_key": "runtime_rate",
-              "name": "运行率",
-              "unit": "%",
-              "timestamps": ["2026-04-01", ...],
-              "values": [0.92, ...],
-              "point_count": 30,
-              "better_when_higher": true
-            },
-            ...
-          ],
-          "alarms":    [{time, equipment, level, message}, ...],  // when include_alarms
-          "events":    [{time, equipment, type, description}, ...] // when include_events
-        }
-    """
-
-    def fetch(
-        self,
-        *,
-        metric_keys: list[str],
-        date_range: tuple[str, str],
-        aggregation: str,
-        forecast_horizon: int,
-        equipment_ids: list[str] | None = None,
-        include_alarms: bool = False,
-        include_events: bool = False,
-        eq_type: str = "all",
-    ) -> ProviderResult:
-        endpoint = HttpEndpoint.from_env("DEERFLOW_TREND")
-        if endpoint is None:
-            raise HttpProviderError("DEERFLOW_TREND_URL not set")
-        body = {
-            "metric_keys": metric_keys,
-            "date_range": {"start": date_range[0], "end": date_range[1]},
-            "aggregation": aggregation,
-            "forecast_horizon": forecast_horizon,
-            "equipment_ids": equipment_ids or [],
-            "include_alarms": include_alarms,
-            "include_events": include_events,
-        }
-        data = call_http_endpoint(endpoint, body)
-        if "time_series" not in data:
-            raise HttpProviderError("response missing required field: time_series")
-        if include_alarms and "alarms" not in data:
-            data["alarms"] = []
-        if include_events and "events" not in data:
-            data["events"] = []
-        return ProviderResult(data=data, data_source=HTTP_SUCCESS)
-
-
-register_provider("trend", "http", HttpTrendProvider)
-
-
-class InsTrendProvider:
-    """InS-backed trend provider. Reuses the daily/weekly/monthly data path."""
-
-    def fetch(
-        self,
-        *,
-        metric_keys: list[str],
-        date_range: tuple[str, str],
-        aggregation: str,
-        forecast_horizon: int,
-        equipment_ids: list[str] | None = None,
-        include_alarms: bool = False,
-        include_events: bool = False,
-        eq_type: str = "all",
-    ) -> ProviderResult:
-        ins = _load_script("_ins_provider")
-        try:
-            data = ins.fetch_trend_series_payload(
-                start_date=date_range[0],
-                end_date=date_range[1],
-                aggregation=aggregation,
-                equipment_ids=equipment_ids or [],
-                metric_keys=metric_keys,
-                eq_type=eq_type,
-                include_alarms=include_alarms,
-                include_events=include_events,
-            )
-        except ins.HttpProviderError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise HttpProviderError(
-                f"InS trend provider failed: {type(exc).__name__}: {exc}"
-            ) from exc
-        return ProviderResult(data=data, data_source=INS_SUCCESS)
-
-
-register_provider("trend", "ins", InsTrendProvider)
-
 
 # ============================================================================
 # fault_context / query_fault_context.py
@@ -533,12 +417,12 @@ register_provider("inspection", "http", HttpInspectionProvider)
 
 
 # ============================================================================
-# daily / query_daily.py — InS-backed equipment daily report
+# daily / query_daily.py — platform-backed equipment daily report
 # ============================================================================
 
 
-class InsDailyProvider:
-    """Calls ``_ins_provider.fetch_daily_payload`` against the InS platform.
+class PlatformDailyProvider:
+    """Routes through the integrations platform bridge (capability + action).
 
     On success returns a ``current``-block-shaped dict tagged
     ``data_source="ins"``. Any failure raises ``HttpProviderError`` which the
@@ -555,35 +439,57 @@ class InsDailyProvider:
         include_per_equipment: bool = False,
         equipment_meta: dict[str, dict] | None = None,
     ) -> ProviderResult:
-        ins = _load_script("_ins_provider")
+        from _platform_bridge import call_capability, call_action
+
         try:
-            data = ins.fetch_daily_payload(
-                date_str=date_str,
-                equipment_ids=equipment_ids,
-                kpi_keys=kpi_keys,
-                eq_type=eq_type,
-                include_per_equipment=include_per_equipment,
-                equipment_meta=equipment_meta,
-            )
-        except ins.HttpProviderError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - normalise to HttpProviderError
+            day_start = f"{date_str}T00:00:00"
+            day_end = f"{date_str}T23:59:59"
+
+            # Step 1: raw trend data via integrations capability
+            trend_result = call_capability("monitoring.trend", {
+                "equipment_ids": equipment_ids,
+                "start_time": day_start,
+                "end_time": day_end,
+                "eq_type": eq_type,
+            })
+
+            # Step 2: KPI aggregation via integrations action
+            kpi_result = call_action("aggregate_kpi", adapter="ins_prod", params={
+                "trend_data": trend_result["data"],
+                "kpi_keys": kpi_keys,
+                "eq_type": eq_type,
+            })
+
+        except Exception as exc:
             raise HttpProviderError(
-                f"InS daily provider failed: {type(exc).__name__}: {exc}"
+                f"Platform daily provider failed: {type(exc).__name__}: {exc}"
             ) from exc
-        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+        kpi_data = kpi_result["data"]
+        return ProviderResult(
+            data={
+                "kpis": kpi_data.get("kpis", {}),
+                "hourly_runtime_rate": kpi_data.get("hourly_runtime_rate", [0.0] * 24),
+                "alarms": [],
+            },
+            data_source=INS_SUCCESS,
+        )
 
 
-register_provider("daily", "ins", InsDailyProvider)
+register_provider("daily", "platform", PlatformDailyProvider)
 
 
 # ============================================================================
-# weekly / query_weekly.py — InS-backed equipment weekly report
+# weekly / query_weekly.py — platform-backed equipment weekly report
 # ============================================================================
 
 
-class InsWeeklyProvider:
-    """Calls ``_ins_provider.fetch_weekly_payload`` for a 7-day window."""
+class PlatformWeeklyProvider:
+    """Fetches a 7-day window of daily entries via the platform bridge.
+
+    Returns a list of ``{date, kpis, kpi_units, alarms}`` dicts — one per day.
+    The caller (query_weekly.py) owns aggregation into the weekly shape.
+    """
 
     def fetch(
         self,
@@ -597,38 +503,62 @@ class InsWeeklyProvider:
     ) -> ProviderResult:
         from datetime import datetime, timedelta
 
-        ins = _load_script("_ins_provider")
+        from _platform_bridge import call_capability, call_action
+
         start_dt = datetime.strptime(week_start, "%Y-%m-%d")
-        week_end = (start_dt + timedelta(days=6)).strftime("%Y-%m-%d")
+        day_count = 7
+        daily_entries: list[dict] = []
+
         try:
-            data = ins.fetch_weekly_payload(
-                week_start=week_start,
-                week_end=week_end,
-                equipment_ids=equipment_ids,
-                kpi_keys=kpi_keys,
-                eq_type=eq_type,
-                aggregate=aggregate,
-                equipment_meta=equipment_meta,
-            )
-        except ins.HttpProviderError:
-            raise
-        except Exception as exc:  # noqa: BLE001
+            for offset in range(day_count):
+                date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+                day_start = f"{date_str}T00:00:00"
+                day_end = f"{date_str}T23:59:59"
+
+                trend_result = call_capability("monitoring.trend", {
+                    "equipment_ids": equipment_ids,
+                    "start_time": day_start,
+                    "end_time": day_end,
+                    "eq_type": eq_type,
+                })
+
+                kpi_result = call_action("aggregate_kpi", adapter="ins_prod", params={
+                    "trend_data": trend_result["data"],
+                    "kpi_keys": kpi_keys,
+                    "eq_type": eq_type,
+                })
+
+                kpi_data = kpi_result["data"]
+                daily_entries.append({
+                    "date": date_str,
+                    "kpis": kpi_data.get("kpis", {}),
+                    "kpi_units": kpi_data.get("kpi_units", {}),
+                    "alarms": [],
+                })
+
+        except Exception as exc:
             raise HttpProviderError(
-                f"InS weekly provider failed: {type(exc).__name__}: {exc}"
+                f"Platform weekly provider failed: {type(exc).__name__}: {exc}"
             ) from exc
-        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+        return ProviderResult(data={"daily_entries": daily_entries}, data_source=INS_SUCCESS)
 
 
-register_provider("weekly", "ins", InsWeeklyProvider)
+register_provider("weekly", "platform", PlatformWeeklyProvider)
 
 
 # ============================================================================
-# monthly / query_monthly.py — InS-backed equipment monthly report
+# monthly / query_monthly.py — platform-backed equipment monthly report
 # ============================================================================
 
 
-class InsMonthlyProvider:
-    """Calls ``_ins_provider.fetch_monthly_payload`` for a calendar month window."""
+class PlatformMonthlyProvider:
+    """Fetches a calendar-month of daily entries via the platform bridge.
+
+    Returns a list of ``{date, kpis, kpi_units, alarms}`` dicts — one per day.
+    The caller (query_monthly.py) owns aggregation into weekly buckets and
+    the monthly shape.
+    """
 
     def fetch(
         self,
@@ -640,27 +570,50 @@ class InsMonthlyProvider:
         aggregate: bool = False,
         equipment_meta: dict[str, dict] | None = None,
     ) -> ProviderResult:
-        ins = _load_script("_ins_provider")
-        qm = _load_script("query_monthly")
-        year, month = qm._parse_report_month(report_month)
-        month_start, month_end, _ = qm._month_bounds(year, month)
+        import calendar
+        from datetime import datetime, timedelta
+
+        from _platform_bridge import call_capability, call_action
+
+        year, month = map(int, report_month.split("-"))
+        _, day_count = calendar.monthrange(year, month)
+        month_start = f"{year:04d}-{month:02d}-01"
+        start_dt = datetime.strptime(month_start, "%Y-%m-%d")
+        daily_entries: list[dict] = []
+
         try:
-            data = ins.fetch_monthly_payload(
-                month_start=month_start,
-                month_end=month_end,
-                equipment_ids=equipment_ids,
-                kpi_keys=kpi_keys,
-                eq_type=eq_type,
-                aggregate=aggregate,
-                equipment_meta=equipment_meta,
-            )
-        except ins.HttpProviderError:
-            raise
-        except Exception as exc:  # noqa: BLE001
+            for offset in range(day_count):
+                date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+                day_start = f"{date_str}T00:00:00"
+                day_end = f"{date_str}T23:59:59"
+
+                trend_result = call_capability("monitoring.trend", {
+                    "equipment_ids": equipment_ids,
+                    "start_time": day_start,
+                    "end_time": day_end,
+                    "eq_type": eq_type,
+                })
+
+                kpi_result = call_action("aggregate_kpi", adapter="ins_prod", params={
+                    "trend_data": trend_result["data"],
+                    "kpi_keys": kpi_keys,
+                    "eq_type": eq_type,
+                })
+
+                kpi_data = kpi_result["data"]
+                daily_entries.append({
+                    "date": date_str,
+                    "kpis": kpi_data.get("kpis", {}),
+                    "kpi_units": kpi_data.get("kpi_units", {}),
+                    "alarms": [],
+                })
+
+        except Exception as exc:
             raise HttpProviderError(
-                f"InS monthly provider failed: {type(exc).__name__}: {exc}"
+                f"Platform monthly provider failed: {type(exc).__name__}: {exc}"
             ) from exc
-        return ProviderResult(data=data, data_source=INS_SUCCESS)
+
+        return ProviderResult(data={"daily_entries": daily_entries}, data_source=INS_SUCCESS)
 
 
-register_provider("monthly", "ins", InsMonthlyProvider)
+register_provider("monthly", "platform", PlatformMonthlyProvider)

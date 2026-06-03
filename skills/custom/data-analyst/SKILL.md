@@ -1,6 +1,6 @@
 ---
 name: data-analyst
-description: Data source discovery and fetching scripts for the data-analyst agent. Provides list_datasets, fetch_dataset, and preview_dataset commands that connect to external data platforms via environment variables.
+description: Data analysis, diagnosis, failure, closure, and inspection scripts. Daily/weekly/monthly report scripts have been migrated to daily-report, weekly-report, and monthly-report skills. Monitoring analysis scripts have been migrated to monitoring-analysis skill.
 ---
 
 # Data Analyst Skill Scripts
@@ -48,42 +48,6 @@ python /mnt/skills/custom/data-analyst/scripts/preview_dataset.py --dataset-id I
 
 Output: `{"dataset_id": "...", "columns": [{"name": "...", "type": "...", ...}], "sample_rows": [...], "total_rows": N}`
 
-### query_daily.py — Query daily report data (ai-report--daily MVP)
-
-```bash
-python /mnt/skills/custom/data-analyst/scripts/query_daily.py \
-  --date YYYY-MM-DD \
-  --equipment "E001,E002" \
-  --kpis "runtime_rate,downtime_count,alarm_count" \
-  --compare previous_day|previous_week|none
-```
-
-Writes `/mnt/user-data/outputs/daily_data.json`. Falls back to deterministic
-demo data when no real data API is configured. See design doc §6.1 for the
-output contract.
-
-### daily_kpi.py — Compute KPI summary, trend chart and alarms
-
-```bash
-python /mnt/skills/custom/data-analyst/scripts/daily_kpi.py \
-  --input /mnt/user-data/outputs/daily_data.json \
-  --output /mnt/user-data/outputs/daily_kpi.json
-```
-
-Produces `kpi_summary`, `trend_chart` (ready-to-render ECharts option),
-`alarm_table`, `overall_status`, and `recommendations`. See design doc §6.2.
-
-### export_report.py — Export the daily KPI payload
-
-```bash
-python /mnt/skills/custom/data-analyst/scripts/export_report.py \
-  --input /mnt/user-data/outputs/daily_kpi.json \
-  --format md \
-  --output /mnt/user-data/outputs/daily_report.md
-```
-
-Currently supports Markdown only; PDF is deferred (Sprint plan Story 6).
-
 ### query_diagnosis.py — Query diagnosis trend features (fault-diagnosis MVP)
 
 ```bash
@@ -124,10 +88,9 @@ best-effort rule match against `--focus` codes, and writes
 `verdict ∈ {exceed, marginal, normal}`, `rule_matches`, ECharts options, demo
 historical cases, recommendations). Reciprocating kinds skip orbit charts.
 
-### export_report.py + export_diagnosis_report.py — Export diagnosis report
+### export_report.py + export_diagnosis_report.py — Export diagnosis/trend reports
 
-Diagnosis exports go through the existing `export_report.py` with
-`report_type="diagnosis"` (registered alongside daily/weekly/monthly):
+Diagnosis and trend exports go through the existing `export_report.py`:
 
 ```python
 # In-process import inside SOUL.md (preferred):
