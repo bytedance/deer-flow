@@ -7,12 +7,10 @@ import json
 import sys
 from pathlib import Path
 
-# 添加依赖路径：features-tool (ins模块) + pump-fault-diagnosis (2k脚本)
+# 添加 features-tool 到 sys.path（ins 模块 + tools 包）
 _FEATURES_TOOL_ROOT = Path(__file__).resolve().parent.parent
-_PUMP_SCRIPTS = Path("/mnt/skills/custom/pump-fault-diagnosis/scripts")
-for _p in [str(_FEATURES_TOOL_ROOT), str(_PUMP_SCRIPTS)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_FEATURES_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FEATURES_TOOL_ROOT))
 
 from ins import InsApiClient, load_dotenv_file, load_ins_settings
 from tools.device_analysis_2k_tool import _filter_node_by_series

@@ -8,11 +8,10 @@ import json
 import sys
 from pathlib import Path
 
-# 添加依赖路径：features-tool (ins模块) + rotating-fault-diagnosis (8k脚本)
+# 添加依赖路径：features-tool (ins模块 + 共享tools)
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 _FEATURES_TOOL_ROOT = Path("/mnt/skills/custom/features-tool")
-_ROTATING_SCRIPTS = Path("/mnt/skills/custom/rotating-fault-diagnosis/scripts")
-for _p in [str(_SKILL_ROOT), str(_FEATURES_TOOL_ROOT), str(_ROTATING_SCRIPTS)]:
+for _p in [str(_FEATURES_TOOL_ROOT), str(_SKILL_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

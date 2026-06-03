@@ -5,12 +5,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# 添加 features-tool 路径以导入 ins/agents 模块
-_SKILL_ROOT = Path(__file__).resolve().parent.parent
-_FEATURES_TOOL_ROOT = Path("/mnt/skills/custom/features-tool")
-for _p in [str(_SKILL_ROOT), str(_FEATURES_TOOL_ROOT)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# 添加 features-tool 到 sys.path（ins 模块 + tools 包）
+_FEATURES_TOOL_ROOT = Path(__file__).resolve().parent.parent
+if str(_FEATURES_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FEATURES_TOOL_ROOT))
 
 from agents import function_tool
 from pydantic import BaseModel, Field

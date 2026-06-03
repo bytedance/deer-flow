@@ -4,11 +4,10 @@ import json
 import sys
 from pathlib import Path
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-FEATURES_TOOL_ROOT = Path("/mnt/skills/custom/features-tool")
-for _p in [str(SKILL_ROOT), str(FEATURES_TOOL_ROOT)]:
-    if _p not in sys.path:
-            sys.path.insert(0, _p)
+# 添加 features-tool 到 sys.path（ins 模块 + tools 包）
+_FEATURES_TOOL_ROOT = Path(__file__).resolve().parent.parent
+if str(_FEATURES_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FEATURES_TOOL_ROOT))
 
 from ins import InsApiClient, load_dotenv_file, load_ins_settings
 
