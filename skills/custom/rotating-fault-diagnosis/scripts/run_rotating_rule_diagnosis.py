@@ -12,8 +12,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _skill_root() -> Path:
+    """Return the skill root directory where diagnosis_rule is located."""
+    # scripts/ is at /mnt/skills/custom/rotating-fault-diagnosis/scripts/
+    return Path(__file__).resolve().parent.parent
+
+
 def _features_tool_root() -> Path:
-    root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool"))
+    root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool"))
     if not root.exists():
         raise FileNotFoundError(f"features-tool directory not found: {root}")
     return root
@@ -49,16 +55,23 @@ def _list_cache_files(cache_dir: Path) -> list[str]:
 
 def _runtime_info(features_tool_root: str | None = None) -> dict[str, object]:
     return {
-        "features_tool_root": features_tool_root or os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool"),
+        "features_tool_root": features_tool_root or os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool"),
         "python_version": platform.python_version(),
     }
 
 
 async def _run(device_id: str, sub_device_id: str, diagnosis_time: str) -> dict[str, object]:
-    root = _features_tool_root()
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
+    # Add skill root to sys.path for diagnosis_rule import
+    skill_root = _skill_root()
+    skill_root_str = str(skill_root)
+    if skill_root_str not in sys.path:
+        sys.path.insert(0, skill_root_str)
+
+    # Add features-tool root for ins/agents imports
+    features_root = _features_tool_root()
+    features_root_str = str(features_root)
+    if features_root_str not in sys.path:
+        sys.path.insert(0, features_root_str)
 
     from diagnosis_rule import close_all_clients, run_diagnosis
 
@@ -79,7 +92,7 @@ async def _run(device_id: str, sub_device_id: str, diagnosis_time: str) -> dict[
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "runtime": {
                 "entrypoint": "diagnosis_rule.run_diagnosis",
-                **_runtime_info(root_str),
+                **_runtime_info(features_root_str),
             },
             "artifacts": {
                 "cache_dir": str(cache_dir),

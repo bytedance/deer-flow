@@ -23,13 +23,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _skill_root() -> Path:
+    """Return the skill root directory where reciprocating_rule is located."""
+    # scripts/ is at /mnt/skills/custom/reciprocating-fault-diagnosis/scripts/
+    return Path(__file__).resolve().parent.parent
+
+
 def _features_tool_root() -> Path:
-    root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool"))
+    root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool"))
     if not root.exists():
-        repo_root = Path(__file__).resolve().parents[4]
-        local = repo_root / "docker" / "sandbox" / "features-tool"
-        if local.exists():
-            return local
         raise FileNotFoundError(f"features-tool directory not found: {root}")
     return root
 
@@ -93,10 +95,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     _validate_id(args.machine_id, "machineId")
     timestamp_ms = _parse_timestamp(args.diagnosis_time)
 
-    root = _features_tool_root()
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
+    # Add skill root to sys.path for reciprocating_rule import
+    skill_root = _skill_root()
+    skill_root_str = str(skill_root)
+    if skill_root_str not in sys.path:
+        sys.path.insert(0, skill_root_str)
+
+    # Add features-tool root for ins/agents imports
+    features_root = _features_tool_root()
+    features_root_str = str(features_root)
+    if features_root_str not in sys.path:
+        sys.path.insert(0, features_root_str)
 
     from reciprocating_rule import close_all_clients, run_diagnosis, self_check
 
@@ -115,7 +124,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             "timestamp_ms": timestamp_ms,
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
-            "runtime": {**_runtime_info(root_str), "self_check": self_check()},
+            "runtime": {**_runtime_info(features_root_str), "self_check": self_check()},
             "artifacts": {"cache_dir": str(_cache_dir()), "cache_files": _list_cache_files()},
             **result.to_dict(),
         }

@@ -190,7 +190,7 @@ python /mnt/skills/custom/reciprocating-fault-diagnosis/scripts/build_reciprocat
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
+sys.path.insert(0, "/mnt/skills/custom/reciprocating-fault-diagnosis/scripts")
 from export_report import write_report
 from export_diagnosis_report import render_diagnosis_markdown
 
@@ -236,7 +236,7 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 1. **真实规则运行时**：使用 `/mnt/skills/custom/reciprocating-fault-diagnosis/scripts/run_reciprocating_rule_diagnosis.py` 作为唯一诊断入口。
 2. **报告 payload 映射**：使用 `build_reciprocating_report_payload.py` 把规则结果转成 `diagnosis_features.json`。
 3. **演示数据回退**：无真实 InS 时由受管规则运行时返回空数据或警告（`warnings` 包含"未获取到趋势数据"），SOUL 必须在最终报告顶部明确说明（往复机场景的强调警告，详见步骤 2）。
-4. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + diagnosis_features.py` MVP 链路。
+4. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + /opt/features-tool/tools/diagnosis_features.py` MVP 链路。
 
 ## 异常处理
 

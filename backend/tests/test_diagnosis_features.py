@@ -1,4 +1,4 @@
-"""Tests for skills/custom/data-analyst/scripts/diagnosis_features.py."""
+"""Tests for docker/sandbox/features-tool/tools/diagnosis_features.py."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "diagnosis_features.py"
+SCRIPT_PATH = REPO_ROOT / "docker" / "sandbox" / "features-tool" / "tools" / "diagnosis_features.py"
 SKILLS_ROOT = REPO_ROOT / "skills" / "custom"
 
 

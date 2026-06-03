@@ -179,7 +179,7 @@ python /mnt/skills/custom/pump-fault-diagnosis/scripts/build_pump_report_payload
 ```python
 import json
 import sys
-sys.path.insert(0, "/mnt/skills/custom/data-analyst/scripts")
+sys.path.insert(0, "/mnt/skills/custom/pump-fault-diagnosis/scripts")
 from export_report import write_report
 from export_diagnosis_report import render_diagnosis_markdown
 

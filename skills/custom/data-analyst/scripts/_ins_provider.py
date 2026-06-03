@@ -49,7 +49,7 @@ from typing import Any
 # unit tests outside the sandbox can still import this module.
 # ---------------------------------------------------------------------------
 
-_FEATURES_TOOL_ROOT = os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool")
+_FEATURES_TOOL_ROOT = os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool")
 if _FEATURES_TOOL_ROOT and _FEATURES_TOOL_ROOT not in sys.path:
     sys.path.insert(0, _FEATURES_TOOL_ROOT)
 

@@ -12,11 +12,6 @@ exclude_tools: []
 skills:
   - data-analyst
   - reciprocating-fault-diagnosis
-  - ins-device-analysis
-  - ins-get-trend-data
-  - ins-get-waveform-data
-  - ins-extract-trend-features
-  - ins-extract-spectral-waveform-features
 mcp_servers: null
 tags:
   - diagnosis

@@ -868,7 +868,9 @@ scripts:
     max_output_bytes: 20971520
 
   diagnosis_features:
-    entry: scripts/diagnosis_features.py
+    # NOTE: 物理文件已迁移到 skills/custom/features-tool/tools/diagnosis_features.py
+    # 沙箱容器内路径为 /mnt/skills/custom/features-tool/tools/
+    entry: ../features-tool/tools/diagnosis_features.py
     kind: [transform]
     description: "生成诊断特征（证据链、规则匹配、候选根因）"
     args_schema:

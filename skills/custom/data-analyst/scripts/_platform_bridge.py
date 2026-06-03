@@ -18,7 +18,7 @@ legacy provider path.
 Execution environment
 ---------------------
 The CLI bridge requires ``features-tool`` (InS HTTP client), which is only
-available inside the sandbox Docker container (``/opt/features-tool``).
+available inside the sandbox Docker container (``/mnt/skills/custom/features-tool``).
 When the query script runs on the host backend (where features-tool is
 not importable), this bridge automatically routes the CLI call into the
 sandbox container via ``docker exec``, using the container name derived
@@ -94,7 +94,7 @@ class PlatformBridgeError(Exception):
 
 def _is_in_sandbox() -> bool:
     """Return True if this process is running inside the sandbox container."""
-    return Path("/opt/features-tool").is_dir()
+    return Path("/mnt/skills/custom/features-tool").is_dir()
 
 
 def _sandbox_container_name() -> str | None:

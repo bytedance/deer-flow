@@ -1,0 +1,26 @@
+# Sandbox 容器依赖
+# 包含：
+# - deerflow.integrations.cli 需要的依赖
+# - features-tool 工具脚本需要的依赖
+
+# Core (deerflow CLI)
+httpx>=0.28.0
+pydantic>=2.12.5
+pyyaml>=6.0.3
+python-dotenv>=0.9.9
+tenacity>=9.0.0
+
+# InS 客户端和工具
+cryptography
+protobuf
+numpy
+
+# Pro tier
+scikit-learn
+statsmodels
+ruptures
+
+# Ultra tier
+onnxruntime
+scipy
+PyEMD

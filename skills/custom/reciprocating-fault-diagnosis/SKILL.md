@@ -46,6 +46,26 @@ Use this skill to diagnose reciprocating-machinery faults with the user's rule b
    - operation advice
    - maintenance advice
 
+## Scripts
+
+Authoritative runtime entrypoints:
+
+- `scripts/run_reciprocating_rule_diagnosis.py` — 规则运行时入口
+- `scripts/build_reciprocating_report_payload.py` — 构建报告 payload
+- `scripts/export_report.py` — 报告导出（md/pdf）
+- `scripts/export_diagnosis_report.py` — 诊断报告 Markdown 渲染
+
+### 9K 系列数据工具（往复机/高端旋转）
+
+- `scripts/device_analysis_9k_tool.py` — 往复机设备树分析 (positionType 91..99)
+- `scripts/get_trend_data_9k_tool.py` — 往复机趋势数据获取
+- `scripts/extract_trend_features_9k_tool.py` — 往复机趋势特征提取
+
+## Dependencies
+
+- `features-tool` skill — 提供 `ins/` (InS API 客户端)、`agents/` (function_tool) 等公共模块
+- `rotating-fault-diagnosis` skill — 9K 脚本依赖 8K 脚本的函数
+
 ## Required diagnostic style
 
 - Prefer evidence-based language.

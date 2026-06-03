@@ -183,46 +183,9 @@ print(f'ABNORMAL_ID={handoff.get(\"abnormal_id\", \"\")}')
    - `name`（子设备名称）
    - `type`（子设备类型）
 
-2. 执行严格的子设备校验（**必须使用 Python 硬判定，不可靠 LLM 猜测**）：
+2. 将 `machineId`、`componentId`、子设备名称记入内存，后续步骤使用。
 
-   将提取出的 `machineId` 和 `componentId` 写入临时校验文件：
-   
-   ```bash
-   echo '{"machineId":"MACHINE_ID_VALUE","componentId":"COMPONENT_ID_VALUE"}' > /mnt/user-data/outputs/_validate_input.json
-   ```
-   （将 `MACHINE_ID_VALUE` 和 `COMPONENT_ID_VALUE` 替换为实际提取的值）
-   
-   然后用 Python 执行校验：
-   
-   ```bash
-   python -c "
-import json, re
-with open('/mnt/user-data/outputs/_validate_input.json') as f:
-    d = json.load(f)
-mid = d.get('machineId', '')
-cid = d.get('componentId', '')
-pat = r'^[A-Za-z0-9_-]+$'
-errs = []
-if not mid or not re.match(pat, mid): errs.append('machineId无效')
-if not cid or not re.match(pat, cid): errs.append('componentId无效')
-if mid and cid and mid == cid: errs.append('选中的是父设备本身（ID相同）')
-if errs: print('INVALID: ' + '; '.join(errs))
-else: print('VALID')
-"
-   ```
-
-   清理临时文件：
-   
-   ```bash
-   rm -f /mnt/user-data/outputs/_validate_input.json
-   ```
-
-   - 输出 `VALID` → 通过校验，进入第 3 步。
-   - 输出 `INVALID: ...` → 渲染 `markdown` 提示具体错误，让用户重新选择，停止后续步骤。
-
-3. 将 `machineId`、`componentId`、子设备名称记入内存，后续步骤使用。
-
-4. 渲染诊断时间表单：
+3. 渲染诊断时间表单：
 
 ```json
 {
@@ -449,7 +412,7 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 
 1. **真实规则运行时**：使用 `/mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_diagnosis.py` 作为唯一诊断入口。
 2. **报告 payload 映射**：使用 `build_rotating_report_payload.py` 把规则结果和缓存图谱转成 `diagnosis_features.json`。
-3. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + diagnosis_features.py` MVP 链路。
+3. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + /opt/features-tool/tools/diagnosis_features.py` MVP 链路。
 
 ## 异常处理
 

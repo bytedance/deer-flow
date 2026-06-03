@@ -14,7 +14,7 @@ metadata:
 把下面两类输入：
 
 - `machine_service.get_machine_info_by_ids` 返回的设备详情
-- `python /opt/features-tool/tools/device_analysis.py "{macId}" --output /mnt/user-data/outputs/device_tree_raw.json` 生成的原始设备树
+- `python /mnt/skills/custom/features-tool/tools/device_analysis.py “{macId}” --output /mnt/user-data/outputs/device_tree_raw.json` 生成的原始设备树
 
 推理成一个标准 JSON 产物：
 
@@ -25,8 +25,8 @@ metadata:
 ## 强制约束
 
 - 本 skill 采用**白名单动作**：只允许 `read_file` 读取输入与模板、以及直接写出最终 `/mnt/user-data/outputs/device_context.json`。除这两类动作外，其他实现性动作一律禁止。
-- 除读取已有输入文件外，禁止为本步骤编写、生成或执行任何新的 Python / shell / 其他脚本来“构建设备树”或“构建 device_context.json”。
-- `python /opt/features-tool/tools/device_analysis.py ...` 的职责仅限于生成原始 `device_tree_raw.json`；它不是 `device_context.json` 的生成器。
+- 除读取已有输入文件外，禁止为本步骤编写、生成或执行任何新的 Python / shell / 其他脚本来”构建设备树”或”构建 device_context.json”。
+- `python /mnt/skills/custom/features-tool/tools/device_analysis.py ...` 的职责仅限于生成原始 `device_tree_raw.json`；它不是 `device_context.json` 的生成器。
 - 当前 Agent 必须直接阅读 `device_tree_raw.json` 和模板，然后按本 skill 的规则直接推理并写出最终 JSON。
 - 不要输出或执行类似 “Build device_context.json with proper tree structure” 这类会把任务转成代码实现的计划；这里要求的是直接推理写 JSON，不是再开发一个转换脚本。
 - 当输出 JSON 很长时，不要使用 `cat <<'EOF' ... EOF` 之类的 heredoc 方式直接整段写文件；应优先基于模板使用文件编辑工具直接写入，必要时分块完成，避免因长度、转义或截断导致写文件失败。

@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILTIN_DIR = REPO_ROOT / "agents" / "builtin"
 SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts"
 SKILLS_ROOT = REPO_ROOT / "skills" / "custom"
+# diagnosis_features.py 已迁移到 sandbox
+SANDBOX_TOOLS_DIR = REPO_ROOT / "docker" / "sandbox" / "features-tool" / "tools"
 
 SUB_AGENTS = [
     "fault-diagnosis--pump",
@@ -404,7 +406,7 @@ def _run_query_diagnosis(
 def _run_diagnosis_features(
     smoke_dir: Path, focus_codes: list[str], rules_skill: str
 ) -> dict:
-    spec = importlib.util.spec_from_file_location("diagnosis_features", SCRIPT_DIR / "diagnosis_features.py")
+    spec = importlib.util.spec_from_file_location("diagnosis_features", SANDBOX_TOOLS_DIR / "diagnosis_features.py")
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules["diagnosis_features"] = mod

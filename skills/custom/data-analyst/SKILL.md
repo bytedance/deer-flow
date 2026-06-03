@@ -105,8 +105,11 @@ orbit are not pulled here — the LLM handles those sparsely as Stage 2 against 
 
 ### diagnosis_features.py — Compute diagnosis features + rule matches
 
+> **注意**：脚本已迁移到 sandbox（`/mnt/skills/custom/features-tool/tools/diagnosis_features.py`），
+> 旧路径 `/mnt/skills/custom/data-analyst/scripts/diagnosis_features.py` 不再有效。
+
 ```bash
-python /mnt/skills/custom/data-analyst/scripts/diagnosis_features.py \
+python /mnt/skills/custom/features-tool/tools/diagnosis_features.py \
   --input /mnt/user-data/outputs/query_diagnosis.json \
   --focus "unbalance,cavitation,min_flow_violation" \
   --rules-skill pump-fault-diagnosis \

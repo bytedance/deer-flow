@@ -208,7 +208,7 @@ for eq_id in equipment_ids:
         --focus-codes "$(join , focus_codes)" \
         --output-dir /mnt/user-data/outputs
 
-    python diagnosis_features.py \
+    python /opt/features-tool/tools/diagnosis_features.py \
         --input /mnt/user-data/outputs/fault_context.json \
         --rules-skill "$(get_rules_skill $kind)" \
         --output-dir /mnt/user-data/outputs
@@ -225,7 +225,7 @@ python diagnosis_report_transform.py \
 ```bash
 for eq_id in equipment_ids:
     python query_diagnosis.py ...
-    python diagnosis_features.py ...
+    python /opt/features-tool/tools/diagnosis_features.py ...
     python diagnosis_analysis.py \
         --input /mnt/user-data/outputs/diagnosis_features.json \
         --output-dir /mnt/user-data/outputs
@@ -245,7 +245,7 @@ python diagnosis_report_transform.py \
 ```bash
 for eq_id in equipment_ids:
     python query_diagnosis.py ...
-    python diagnosis_features.py ...
+    python /opt/features-tool/tools/diagnosis_features.py ...
     python diagnosis_analysis.py ...
     python ultra_anomaly.py \
         --input /mnt/user-data/outputs/diagnosis_analysis.json \

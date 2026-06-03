@@ -7,7 +7,7 @@ This script implements the **first stage** of the fault-diagnosis data pipeline
 - aggregate trend feature pull via the InS skill chain
   (``ins-extract-trend-features``)
 - write a single ``query_diagnosis.json`` consumed by the second stage
-  (``diagnosis_features.py``)
+  (``diagnosis_features.py``, now at ``docker/sandbox/features-tool/tools/``)
 
 Waveform / spectrum / orbit are NOT pulled here — they are sparse and handled
 by the LLM in the second stage (only for points that show anomaly_time_ms).
@@ -167,7 +167,7 @@ def _has_ins_toolchain() -> bool:
     Tests can force-disable by clearing both env vars.
     """
     run_sh = _ins_skill_root() / "ins-extract-trend-features" / "scripts" / "run.sh"
-    features_root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool"))
+    features_root = Path(os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool"))
     return run_sh.exists() and features_root.exists()
 
 

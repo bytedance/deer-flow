@@ -15,6 +15,19 @@ Authoritative runtime entrypoints:
 
 - `scripts/run_pump_rule_diagnosis.py`
 - `scripts/build_pump_report_payload.py`
+- `scripts/export_report.py` — 报告导出（md/pdf）
+- `scripts/export_diagnosis_report.py` — 诊断报告 Markdown 渲染
+
+### 2K 系列数据工具（机泵）
+
+- `scripts/device_analysis_2k_tool.py` — 机泵设备树分析 (positionType 22..30)
+- `scripts/get_trend_data_2k_tool.py` — 机泵趋势数据获取
+- `scripts/extract_trend_features_2k_tool.py` — 机泵趋势特征提取
+
+## Dependencies
+
+- `features-tool` skill — 提供 `ins/` (InS API 客户端)、`agents/` (function_tool) 等公共模块
+- `rotating-fault-diagnosis` skill — 2K 脚本依赖 8K 脚本的函数
 
 **IMPORTANT: CLI argument rules**
 
@@ -34,8 +47,8 @@ python /mnt/skills/custom/pump-fault-diagnosis/scripts/run_pump_rule_diagnosis.p
 
 Runtime package:
 
-- `/opt/features-tool/pump_rule` in sandbox
-- `docker/sandbox/features-tool/pump_rule` in the repository
+- `/mnt/skills/custom/features-tool/pump_rule` in sandbox
+- `skills/custom/features-tool/pump_rule` in the repository
 
 Required runtime environment:
 

@@ -3,13 +3,12 @@ FROM ${BASE_IMAGE}
 
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-COPY features-tool/requirements.txt /tmp/features-tool-requirements.txt
-
-RUN mkdir -p /opt/features-tool/models
+# 安装沙箱容器依赖
+COPY docker/sandbox/requirements.txt /tmp/sandbox-requirements.txt
 
 RUN python3 -m pip install --no-cache-dir \
     ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
-    -r /tmp/features-tool-requirements.txt \
- && rm -f /tmp/features-tool-requirements.txt
+    -r /tmp/sandbox-requirements.txt \
+ && rm -f /tmp/sandbox-requirements.txt
 
-COPY features-tool /opt/features-tool
+# features-tool 代码直接从 /mnt/skills/custom/features-tool 加载（沙箱启动时挂载）
