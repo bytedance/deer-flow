@@ -678,6 +678,7 @@ SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace a
 Rules:
 - Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
 - Only pass the fields that should change. Omit the others to preserve them.
+- Never pass literal strings like `"null"`, `"none"`, or `"undefined"` for unchanged fields.
 - Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
 - After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
 </self_update>
