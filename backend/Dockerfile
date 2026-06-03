@@ -64,7 +64,7 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-EXPOSE 8001 2024
+EXPOSE 8001
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
 
@@ -94,8 +94,8 @@ WORKDIR /app
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
 
-# Expose ports (gateway: 8001, langgraph: 2024)
-EXPOSE 8001 2024
+# Expose Gateway API port.
+EXPOSE 8001
 
 # Default command (can be overridden in docker-compose)
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]

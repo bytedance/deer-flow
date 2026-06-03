@@ -43,6 +43,20 @@ def test_service_launchers_always_use_gateway_runtime():
         assert "LANGGRAPH_REWRITE" not in content, path
 
 
+def test_backend_container_only_exposes_gateway_port():
+    dockerfile = _read("backend/Dockerfile")
+
+    assert not re.search(r"^EXPOSE\s+.*\b2024\b", dockerfile, re.M)
+    assert "langgraph: 2024" not in dockerfile
+    assert re.search(r"^EXPOSE\s+8001\b", dockerfile, re.M)
+
+
+def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
+    makefile = _read("Makefile")
+
+    assert ".langgraph_api" not in makefile
+
+
 def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
     for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
         content = _read(path)
