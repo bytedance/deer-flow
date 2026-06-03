@@ -202,14 +202,19 @@ def _build_fake_daily_entry(date_str: str, kpi_keys: list[str]) -> dict:
 
 
 def test_fetch_month_batch_30_day(pipeline, monkeypatch):
-    """fetch_month_with_provenance calls fetch_daily_series_payload with correct 30-day params."""
+    """fetch_month_with_provenance calls the monthly provider with correct params."""
     qm = pipeline["qm"]
 
-    fake_ins = MagicMock()
-    fake_ins.fetch_daily_series_payload.return_value = [
+    fake_daily = [
         _build_fake_daily_entry("2026-04-%02d" % d, ["runtime_rate"]) for d in range(1, 31)
     ]
-    monkeypatch.setattr(qm, "_load_ins_provider", lambda: fake_ins)
+    fake_provider = MagicMock()
+    fake_provider.fetch.return_value = qm.load_sibling_module("_data_providers").ProviderResult(
+        data={"daily_entries": fake_daily}, data_source="ins"
+    )
+    monkeypatch.setattr(
+        qm.load_sibling_module("_data_providers"), "get_provider", lambda source, mode=None: fake_provider
+    )
 
     current, source, notes = qm.fetch_month_with_provenance(
         report_month="2026-04",
@@ -217,10 +222,9 @@ def test_fetch_month_batch_30_day(pipeline, monkeypatch):
         kpi_keys=["runtime_rate"],
     )
 
-    fake_ins.fetch_daily_series_payload.assert_called_once()
-    call_kwargs = fake_ins.fetch_daily_series_payload.call_args.kwargs
-    assert call_kwargs["start_date"] == "2026-04-01"
-    assert call_kwargs["day_count"] == 30
+    fake_provider.fetch.assert_called_once()
+    call_kwargs = fake_provider.fetch.call_args.kwargs
+    assert call_kwargs["report_month"] == "2026-04"
     assert call_kwargs["equipment_ids"] == ["RM-001"]
     assert call_kwargs["kpi_keys"] == ["runtime_rate"]
     assert source == "ins"
@@ -229,14 +233,19 @@ def test_fetch_month_batch_30_day(pipeline, monkeypatch):
 
 
 def test_fetch_month_batch_leap_year_february(pipeline, monkeypatch):
-    """fetch_month_with_provenance calls fetch_daily_series_payload with day_count=29 for 2024-02."""
+    """fetch_month_with_provenance handles February in leap years (day_count=29)."""
     qm = pipeline["qm"]
 
-    fake_ins = MagicMock()
-    fake_ins.fetch_daily_series_payload.return_value = [
+    fake_daily = [
         _build_fake_daily_entry("2024-02-%02d" % d, ["runtime_rate"]) for d in range(1, 30)
     ]
-    monkeypatch.setattr(qm, "_load_ins_provider", lambda: fake_ins)
+    fake_provider = MagicMock()
+    fake_provider.fetch.return_value = qm.load_sibling_module("_data_providers").ProviderResult(
+        data={"daily_entries": fake_daily}, data_source="ins"
+    )
+    monkeypatch.setattr(
+        qm.load_sibling_module("_data_providers"), "get_provider", lambda source, mode=None: fake_provider
+    )
 
     current, source, notes = qm.fetch_month_with_provenance(
         report_month="2024-02",
@@ -244,7 +253,6 @@ def test_fetch_month_batch_leap_year_february(pipeline, monkeypatch):
         kpi_keys=["runtime_rate"],
     )
 
-    fake_ins.fetch_daily_series_payload.assert_called_once()
-    call_kwargs = fake_ins.fetch_daily_series_payload.call_args.kwargs
-    assert call_kwargs["start_date"] == "2024-02-01"
-    assert call_kwargs["day_count"] == 29
+    fake_provider.fetch.assert_called_once()
+    call_kwargs = fake_provider.fetch.call_args.kwargs
+    assert call_kwargs["report_month"] == "2024-02"

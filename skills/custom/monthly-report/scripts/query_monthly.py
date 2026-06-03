@@ -68,18 +68,17 @@ from _report_common import (
     parse_csv,
     parse_report_month,
     resolve_equipment_by_scope,
-    validate_equipment_ids,
     validate_equipment_ids_length,
     validate_kpi_keys,
 )
 
-# Backward-compat aliases for tests and _data_provider_impls
+# Backward-compat aliases for tests
 _parse_report_month = parse_report_month
 _month_bounds = month_bounds
 _validate_equipment_ids = validate_equipment_ids_length
 
 # ---------------------------------------------------------------------------
-# Default target thresholds for达标率 computation.
+# Default target thresholds for 达标率 computation.
 # These are reference configuration values (not per-run demo data).
 # ---------------------------------------------------------------------------
 
@@ -145,11 +144,6 @@ BUCKET_DAYS = 7
 DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 # Special KPI keys that monthly always supports as derived metrics.
 SPECIAL_KPIS = {"mtbf", "mttr", "target_rate"}
-
-
-def _load_ins_provider():
-    """Backward-compat wrapper for tests that monkeypatch this name."""
-    return load_sibling_module_required("_ins_provider")
 
 
 def _output_dir() -> Path:

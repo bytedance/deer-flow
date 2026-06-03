@@ -1,7 +1,7 @@
 """日报查询脚本的数据连接器。
 
-提供 ``DailyDataProvider`` 协议及唯一实现 ``PlatformDailyProvider``，
-通过集成平台桥接获取数据。仅依赖标准库。
+提供唯一实现 ``InsDailyProvider``，通过 features-tool 直接获取 InS 数据并本地聚合 KPI。
+仅依赖标准库 + features-tool。
 """
 
 from __future__ import annotations
@@ -9,14 +9,13 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 结果封装
 # ---------------------------------------------------------------------------
 
 DEMO_FALLBACK = "demo_fallback"
-HTTP_SUCCESS = "http"
 INS_SUCCESS = "ins"
 
 
@@ -31,26 +30,6 @@ class ProviderResult:
     data: dict
     data_source: str = DEMO_FALLBACK
     notes: list[str] = field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# 协议
-# ---------------------------------------------------------------------------
-
-
-class DailyDataProvider(Protocol):
-    """日报数据提供者协议，提供单日 ``current``/``compare`` 数据块。"""
-
-    def fetch(
-        self,
-        *,
-        date_str: str,
-        equipment_ids: list[str],
-        kpi_keys: list[str],
-        eq_type: str,
-        include_per_equipment: bool,
-        equipment_meta: dict[str, dict] | None,
-    ) -> ProviderResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +59,7 @@ def register_provider(source: str, mode: str, factory: Callable[[], Any]) -> Non
 
     Args:
         source: 数据源标识，如 ``"daily"``
-        mode: 模式，如 ``"platform"`` / ``"demo"`` / ``"http"``
+        mode: 模式，如 ``"ins"`` / ``"demo"`` / ``"http"``
         factory: 无参工厂函数，返回提供者实例
     """
     if source not in _PROVIDER_FACTORIES:
@@ -94,7 +73,7 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
     模式解析优先级：
         1. 显式传入的 ``mode`` 参数
         2. ``DEER_FLOW_DATA_PROVIDER`` 环境变量
-        3. 默认 ``platform``
+        3. 默认 ``ins``
 
     Raises:
         KeyError: 请求的模式未注册提供者
@@ -105,7 +84,7 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
         chosen = mode.lower()
     else:
         env_mode = (os.environ.get("DEER_FLOW_DATA_PROVIDER") or "").lower()
-        chosen = env_mode or "platform"
+        chosen = env_mode or "ins"
     factories = _PROVIDER_FACTORIES[source]
     if chosen not in factories:
         raise KeyError(
@@ -115,52 +94,34 @@ def get_provider(source: str, *, mode: str | None = None) -> Any:
     return factories[chosen]()
 
 
-def list_registered() -> dict[str, list[str]]:
-    """返回已注册的数据源及模式列表，供测试检查用。"""
-    return {k: sorted(v.keys()) for k, v in _PROVIDER_FACTORIES.items()}
-
-
 # ---------------------------------------------------------------------------
-# 回退辅助
+# InsDailyProvider — 唯一的日报数据提供者实现
 # ---------------------------------------------------------------------------
 
 
-def fetch_with_fallback(
-    *,
-    source: str,
-    fetch_args: dict,
-    mode: str | None = None,
-) -> ProviderResult:
-    """尝试主提供者，失败时回退到 demo 提供者。
+def _aggregate_across_equipment(
+    equipment_kpis: dict[str, dict[str, Any]],
+    kpi_keys: list[str],
+) -> dict[str, Any]:
+    """Aggregate per-equipment KPI dicts into a single flat KPI dict.
 
-    ``data_source`` 标签会写入脚本 JSON 输出，供下游判断数据来源。
+    For each KPI key, computes the mean across equipment that have a non-None value.
     """
-    primary = get_provider(source, mode=mode)
-    try:
-        result = primary.fetch(**fetch_args)
-        if not isinstance(result, ProviderResult):
-            raise TypeError(f"{source} provider returned non-ProviderResult: {type(result)}")
-        return result
-    except HttpProviderError as exc:
-        demo = get_provider(source, mode="demo")
-        fallback = demo.fetch(**fetch_args)
-        notes = list(fallback.notes) + [f"HTTP provider failed, fell back to demo: {exc}"]
-        return ProviderResult(
-            data=fallback.data,
-            data_source=DEMO_FALLBACK,
-            notes=notes,
-        )
-    except Exception:
-        raise
+    result: dict[str, Any] = {}
+    for key in kpi_keys:
+        values = [
+            v for eq_kpis in equipment_kpis.values()
+            if (v := eq_kpis.get(key)) is not None
+        ]
+        if values:
+            result[key] = round(sum(values) / len(values), 4)
+        else:
+            result[key] = None
+    return result
 
 
-# ---------------------------------------------------------------------------
-# PlatformDailyProvider — 唯一的日报数据提供者实现
-# ---------------------------------------------------------------------------
-
-
-class PlatformDailyProvider:
-    """通过集成平台桥接获取日报数据（capability + action）。
+class InsDailyProvider:
+    """通过 features-tool 直接获取 InS 日报数据。
 
     成功时返回 ``current`` 块结构字典，标记 ``data_source="ins"``。
     失败时抛出 ``HttpProviderError``，由查询脚本转为 ``{"error": ...}`` 输出。
@@ -176,10 +137,7 @@ class PlatformDailyProvider:
         include_per_equipment: bool = False,
         equipment_meta: dict[str, dict] | None = None,
     ) -> ProviderResult:
-        """获取单日日报数据。
-
-        先调用 ``monitoring.trend`` capability 获取原始趋势数据，
-        再调用 ``aggregate_kpi`` action 对趋势数据做 KPI 聚合。
+        """获取单日日报数据 — 直接调用 features-tool + 本地 KPI 聚合。
 
         Args:
             date_str: 报告日期，格式 ``YYYY-MM-DD``
@@ -192,39 +150,64 @@ class PlatformDailyProvider:
         Returns:
             包含 ``kpis``、``hourly_runtime_rate``、``alarms`` 的结果封装
         """
-        from _platform_bridge import call_capability, call_action
+        from _ins_client import fetch_alarm_events, fetch_trend_data, is_available
+        from _kpi_aggregator import (
+            aggregate_equipment_kpis,
+            compute_hourly_runtime_rate,
+        )
+
+        if not is_available():
+            from _ins_client import get_availability_reason
+            raise HttpProviderError(
+                f"features-tool not available: {get_availability_reason()}"
+            )
 
         try:
             day_start = f"{date_str}T00:00:00"
             day_end = f"{date_str}T23:59:59"
 
-            trend_result = call_capability("monitoring.trend", {
-                "equipment_ids": equipment_ids,
-                "start_time": day_start,
-                "end_time": day_end,
-                "eq_type": eq_type,
-            })
+            trend_data = fetch_trend_data(
+                equipment_ids, day_start, day_end, eq_type,
+            )
 
-            kpi_result = call_action("aggregate_kpi", adapter="ins_prod", params={
-                "trend_data": trend_result["data"],
-                "kpi_keys": kpi_keys,
-                "eq_type": eq_type,
-            })
+            kpis_by_eq, union_speed = aggregate_equipment_kpis(
+                trend_data, kpi_keys, {},
+            )
+            hourly = compute_hourly_runtime_rate(union_speed)
+
+            alarms = fetch_alarm_events(
+                equipment_ids, day_start, day_end, eq_type,
+            )
 
         except Exception as exc:
             raise HttpProviderError(
-                f"Platform daily provider failed: {type(exc).__name__}: {exc}"
+                f"Ins daily provider failed: {type(exc).__name__}: {exc}"
             ) from exc
 
-        kpi_data = kpi_result["data"]
+        equipment_kpis = kpis_by_eq or {}
+
+        if include_per_equipment and equipment_kpis:
+            per_equipment = {
+                eq_id: {
+                    "kpis": kpis,
+                    "hourly_runtime_rate": hourly,
+                }
+                for eq_id, kpis in equipment_kpis.items()
+            }
+        else:
+            per_equipment = None
+
+        aggregated_kpis = _aggregate_across_equipment(equipment_kpis, kpi_keys)
+
         return ProviderResult(
             data={
-                "kpis": kpi_data.get("kpis", {}),
-                "hourly_runtime_rate": kpi_data.get("hourly_runtime_rate", [0.0] * 24),
-                "alarms": [],
+                "kpis": aggregated_kpis,
+                "hourly_runtime_rate": hourly,
+                "alarms": alarms,
+                "per_equipment": per_equipment,
             },
             data_source=INS_SUCCESS,
         )
 
 
-register_provider("daily", "platform", PlatformDailyProvider)
+register_provider("daily", "ins", InsDailyProvider)

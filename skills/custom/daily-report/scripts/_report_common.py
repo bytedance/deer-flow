@@ -26,8 +26,6 @@ KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
 
 VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
 VALID_SCOPES = {"all", "area", "specific"}
-DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
-
 # ---------------------------------------------------------------------------
 # KPI 单位
 # ---------------------------------------------------------------------------
@@ -158,56 +156,6 @@ def error_output(message: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 数学 / 方向辅助
-# ---------------------------------------------------------------------------
-
-
-def direction(delta: float | None, better_when_higher: bool) -> str:
-    """根据变化量和指标方向返回趋势方向字符串（up/down/flat）。"""
-    if delta is None:
-        return "flat"
-    if abs(delta) < 1e-9:
-        return "flat"
-    if better_when_higher:
-        return "up" if delta > 0 else "down"
-    return "down" if delta > 0 else "up"
-
-
-def safe_pct(numerator: float, denominator: float | None) -> float | None:
-    """安全计算百分比，分母为空或零时返回 None。"""
-    if denominator is None or denominator == 0:
-        return None
-    return round(numerator / denominator, 4)
-
-
-# ---------------------------------------------------------------------------
-# 设备元信息辅助
-# ---------------------------------------------------------------------------
-
-
-def build_equipment_meta_from_names(
-    equipment_ids: list[str],
-    equipment_names: list[str],
-) -> dict[str, dict] | None:
-    """根据设备 ID 和名称列表构建元信息字典。"""
-    if not equipment_names:
-        return None
-    return {
-        eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
-        for i, eid in enumerate(equipment_ids)
-    }
-
-
-def build_equipment_names_from_meta(
-    equipment_meta: dict[str, dict] | None,
-) -> dict[str, str]:
-    """从设备元信息中提取 id → name 映射。"""
-    if not equipment_meta:
-        return {}
-    return {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
-
-
-# ---------------------------------------------------------------------------
 # 模块加载器
 # ---------------------------------------------------------------------------
 
@@ -235,14 +183,6 @@ def load_sibling_module(name: str):
         if sys.modules.get(name) is module:
             del sys.modules[name]
         raise
-    return module
-
-
-def load_sibling_module_required(name: str):
-    """加载同级模块，不存在时抛出 RuntimeError。"""
-    module = load_sibling_module(name)
-    if module is None:
-        raise RuntimeError(f"required sibling module not found: {name}")
     return module
 
 

@@ -29,32 +29,6 @@ KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
 
 VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
 VALID_SCOPES = {"all", "area", "specific"}
-DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
-
-# ---------------------------------------------------------------------------
-# KPI units
-# ---------------------------------------------------------------------------
-
-KPI_UNITS: dict[str, str] = {
-    "runtime_rate": "%",
-    "downtime_count": "次",
-    "alarm_count": "条",
-    "output": "件",
-    "corrosion_rate": "mm/a",
-    "thickness_loss": "mm",
-    "vibration_level": "mm/s",
-    "bearing_temp": "℃",
-    "flow_rate": "m³/h",
-    "outlet_pressure": "MPa",
-    "valve_temp": "℃",
-    "vibration_velocity_rms": "mm/s",
-    "vibration_acceleration_peak": "m/s²",
-    "kurtosis_index": "—",
-    "mtbf": "小时",
-    "mttr": "小时",
-    "target_rate": "%",
-}
-
 # ---------------------------------------------------------------------------
 # KPI display names
 # ---------------------------------------------------------------------------
@@ -83,34 +57,6 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
 KPI_BETTER_WHEN_HIGHER: set[str] = {
     "runtime_rate", "output", "flow_rate", "outlet_pressure",
 }
-
-# ---------------------------------------------------------------------------
-# KPI anomaly thresholds
-# ---------------------------------------------------------------------------
-
-KPI_THRESHOLDS: dict[str, tuple[str, float]] = {
-    "runtime_rate": ("below", 0.85),
-    "corrosion_rate": ("above", 0.3),
-    "thickness_loss": ("above", 1.5),
-    "vibration_level": ("above", 10.0),
-    "bearing_temp": ("above", 75.0),
-    "valve_temp": ("above", 100.0),
-    "downtime_count": ("above", 5),
-}
-
-# ---------------------------------------------------------------------------
-# Per-type default KPI keys
-# ---------------------------------------------------------------------------
-
-_EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
-    "all": ["runtime_rate", "downtime_count", "alarm_count"],
-    "static_equipment": ["runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss"],
-    "rotating_machinery": ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count"],
-    "pump": ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index"],
-    "reciprocating_machinery": ["runtime_rate", "vibration_level", "valve_temp", "downtime_count", "alarm_count"],
-}
-
-_ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 
 # ---------------------------------------------------------------------------
 # CSV / validation utilities
@@ -186,31 +132,6 @@ def safe_pct(numerator: float, denominator: float | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def build_equipment_meta_from_names(
-    equipment_ids: list[str],
-    equipment_names: list[str],
-) -> dict[str, dict] | None:
-    if not equipment_names:
-        return None
-    return {
-        eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
-        for i, eid in enumerate(equipment_ids)
-    }
-
-
-def build_equipment_names_from_meta(
-    equipment_meta: dict[str, dict] | None,
-) -> dict[str, str]:
-    if not equipment_meta:
-        return {}
-    return {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
-
-
-# ---------------------------------------------------------------------------
-# Module loader
-# ---------------------------------------------------------------------------
-
-
 def load_sibling_module(name: str):
     module = sys.modules.get(name)
     if module is not None:
@@ -230,13 +151,6 @@ def load_sibling_module(name: str):
         if sys.modules.get(name) is module:
             del sys.modules[name]
         raise
-    return module
-
-
-def load_sibling_module_required(name: str):
-    module = load_sibling_module(name)
-    if module is None:
-        raise RuntimeError(f"required sibling module not found: {name}")
     return module
 
 

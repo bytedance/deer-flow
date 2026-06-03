@@ -98,34 +98,6 @@ KPI_BETTER_WHEN_HIGHER_MONTHLY: set[str] = (
 )
 
 # ---------------------------------------------------------------------------
-# KPI anomaly thresholds
-# ---------------------------------------------------------------------------
-
-KPI_THRESHOLDS: dict[str, tuple[str, float]] = {
-    "runtime_rate": ("below", 0.85),
-    "corrosion_rate": ("above", 0.3),
-    "thickness_loss": ("above", 1.5),
-    "vibration_level": ("above", 10.0),
-    "bearing_temp": ("above", 75.0),
-    "valve_temp": ("above", 100.0),
-    "downtime_count": ("above", 5),
-}
-
-# ---------------------------------------------------------------------------
-# Per-type default KPI keys
-# ---------------------------------------------------------------------------
-
-_EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
-    "all": ["runtime_rate", "downtime_count", "alarm_count"],
-    "static_equipment": ["runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss"],
-    "rotating_machinery": ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count"],
-    "pump": ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index"],
-    "reciprocating_machinery": ["runtime_rate", "vibration_level", "valve_temp", "downtime_count", "alarm_count"],
-}
-
-_ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
-
-# ---------------------------------------------------------------------------
 # CSV / validation utilities
 # ---------------------------------------------------------------------------
 
@@ -144,15 +116,6 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
-
-
-def validate_equipment_ids(equipment_ids: list[str]) -> str | None:
-    if not equipment_ids:
-        return "--equipment must be a non-empty CSV"
-    invalid = [item for item in equipment_ids if not EQUIPMENT_ID_PATTERN.fullmatch(item)]
-    if invalid:
-        return "--equipment contains invalid equipment id(s): " + ",".join(invalid)
-    return None
 
 
 def validate_equipment_ids_length(equipment_ids: list[str]) -> str | None:
@@ -205,31 +168,6 @@ def safe_pct(numerator: float, denominator: float | None) -> float | None:
     if denominator is None or denominator == 0:
         return None
     return round(numerator / denominator, 4)
-
-
-# ---------------------------------------------------------------------------
-# Equipment meta helpers
-# ---------------------------------------------------------------------------
-
-
-def build_equipment_meta_from_names(
-    equipment_ids: list[str],
-    equipment_names: list[str],
-) -> dict[str, dict] | None:
-    if not equipment_names:
-        return None
-    return {
-        eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
-        for i, eid in enumerate(equipment_ids)
-    }
-
-
-def build_equipment_names_from_meta(
-    equipment_meta: dict[str, dict] | None,
-) -> dict[str, str]:
-    if not equipment_meta:
-        return {}
-    return {eid: meta.get("name", eid) for eid, meta in equipment_meta.items() if meta}
 
 
 # ---------------------------------------------------------------------------

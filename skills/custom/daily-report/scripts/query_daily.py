@@ -99,7 +99,7 @@ def fetch_day_with_provenance(
 ) -> tuple[dict, str, list[str]]:
     """带数据来源追踪的单日数据获取。
 
-    直接调用已注册的 ``daily`` 提供者（``PlatformDailyProvider``）。
+    直接调用已注册的 ``daily`` 提供者（``InsDailyProvider``）。
     ``HttpProviderError`` 向上传播，CLI 层将其转为
     ``{"error": "HttpProviderError: ..."}``，而非静默回退到 demo 数据。
 
