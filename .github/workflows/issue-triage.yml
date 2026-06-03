@@ -1,0 +1,44 @@
+name: Issue Triage
+
+# Ensures every newly opened issue carries `needs-triage`, even blank or
+# API-created ones that bypass the issue templates. Creates the label if it is
+# somehow missing, so the workflow is self-healing.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  needs-triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add needs-triage label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+
+            const current = (context.payload.issue.labels || []).map(l => l.name);
+            if (current.includes('needs-triage')) {
+              core.info('Issue already has needs-triage; nothing to do.');
+              return;
+            }
+
+            // Self-heal: create the label if it does not exist yet.
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: 'needs-triage', color: 'fef2c0',
+                description: 'Awaiting maintainer triage',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = already exists
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: ['needs-triage'],
+            });
+            core.info(`Added needs-triage to #${issue_number}.`);

@@ -7,7 +7,6 @@ from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
-from deerflow.tools.builtins.tool_search import get_deferred_registry
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -127,57 +126,13 @@ def get_available_tools(
                 if mcp_tools:
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # When tool_search is enabled, register MCP tools in the
-                    # deferred registry and add tool_search to builtin tools.
-                    if config.tool_search.enabled:
-                        from deerflow.tools.builtins.tool_search import DeferredToolRegistry, set_deferred_registry
-                        from deerflow.tools.builtins.tool_search import tool_search as tool_search_tool
-
-                        # Reuse the existing registry if one is already set for
-                        # this async context. ``get_available_tools`` is
-                        # re-entered whenever a subagent is spawned
-                        # (``task_tool`` calls it to build the child agent's
-                        # toolset), and previously we used to unconditionally
-                        # rebuild the registry — wiping out the parent agent's
-                        # tool_search promotions. The
-                        # ``DeferredToolFilterMiddleware`` then re-hid those
-                        # tools from subsequent model calls, leaving the agent
-                        # able to see a tool's name but unable to invoke it
-                        # (issue #2884). ``contextvars`` already gives us the
-                        # lifetime semantics we want: a fresh request / graph
-                        # run starts in a new asyncio task with the
-                        # ContextVar at its default of ``None``, so reuse is
-                        # only triggered for re-entrant calls inside one run.
-                        #
-                        # Intentionally NOT reconciling against the current
-                        # ``mcp_tools`` snapshot. The MCP cache only refreshes
-                        # on ``extensions_config.json`` mtime changes, which
-                        # in practice happens between graph runs — not inside
-                        # one. And even if a refresh did happen mid-run, the
-                        # already-built lead agent's ``ToolNode`` still holds
-                        # the *previous* tool set (LangGraph binds tools at
-                        # graph construction time), so a brand-new MCP tool
-                        # couldn't actually be invoked anyway. The
-                        # ``DeferredToolRegistry`` doesn't retain the names
-                        # of previously-promoted tools (``promote()`` drops
-                        # the entry entirely), so re-syncing the registry
-                        # against a fresh ``mcp_tools`` list would
-                        # mis-classify those promotions as new tools and
-                        # re-register them as deferred — exactly the bug
-                        # this fix exists to prevent.
-                        existing_registry = get_deferred_registry()
-                        if existing_registry is None:
-                            registry = DeferredToolRegistry()
-                            for t in mcp_tools:
-                                registry.register(t)
-                            set_deferred_registry(registry)
-                            logger.info(f"Tool search active: {len(mcp_tools)} tools deferred")
-                        else:
-                            mcp_tool_names = {t.name for t in mcp_tools}
-                            still_deferred = len(existing_registry)
-                            promoted_count = max(0, len(mcp_tool_names) - still_deferred)
-                            logger.info(f"Tool search active (preserved promotions): {still_deferred} tools deferred, {promoted_count} already promoted")
-                        builtin_tools.append(tool_search_tool)
+                    # Tag MCP-sourced tools so deferred-tool assembly (done at
+                    # the agent construction site, AFTER tool-policy filtering)
+                    # can identify them. No ContextVar / registry is built here;
+                    # the deferred catalog + tool_search tool are assembled per
+                    # agent from the policy-filtered tool list.
+                    for t in mcp_tools:
+                        t.metadata = {**(t.metadata or {}), "deerflow_mcp": True}
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
