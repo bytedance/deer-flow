@@ -82,9 +82,8 @@ def fetch_day(
 ) -> dict:
     """Return one-day payload via the registered platform provider.
 
-    Backward-compatible signature for weekly/monthly aggregators and tests
-    that treat the return value as a flat dict. To capture ``data_source``
-    / ``data_notes`` use :func:`fetch_day_with_provenance` instead.
+    To capture ``data_source`` / ``data_notes`` use :func:`fetch_day_with_provenance`
+    instead.
     """
     data, _, _ = fetch_day_with_provenance(
         date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
@@ -108,7 +107,6 @@ def fetch_day_with_provenance(
     output.
     """
     dp = load_sibling_module("_data_providers")
-    load_sibling_module("_data_provider_impls")
 
     provider = dp.get_provider("daily")
     result = provider.fetch(

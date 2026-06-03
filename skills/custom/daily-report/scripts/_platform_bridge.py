@@ -1,8 +1,4 @@
-"""Platform bridge — call integration CLI subprocess for report data.
-
-When ``USE_PLATFORM=true`` is set, query scripts (query_daily.py /
-query_weekly.py / query_monthly.py) route through this module instead
-of the direct ``_ins_provider.py`` path.
+"""Platform bridge — call integration CLI subprocess for daily report data.
 
 The bridge invokes::
 
@@ -25,10 +21,8 @@ sandbox container via ``docker exec``, using the container name derived
 from ``DEER_FLOW_THREAD_ID`` (same hashing logic as AioSandboxProvider).
 
 Architecture note: the CLI returns canonical model JSON (TrendSeries,
-HealthAssessment, etc.), which has a different shape than the
-KPI-aggregated dicts produced by ``_ins_provider.py``. This bridge
-returns the raw CLI output — callers are responsible for transforming
-the canonical shape into whatever the script expects.
+HealthAssessment, etc.). This bridge returns the raw CLI output — callers are
+responsible for transforming the canonical shape into whatever the script expects.
 """
 
 from __future__ import annotations
