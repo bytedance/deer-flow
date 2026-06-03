@@ -5,7 +5,7 @@ from deerflow.models.patched_minimax import PatchedChatMiniMax
 
 def _make_model(**kwargs) -> PatchedChatMiniMax:
     return PatchedChatMiniMax(
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         api_key="test-key",
         base_url="https://example.com/v1",
         **kwargs,
@@ -42,7 +42,7 @@ def test_create_chat_result_maps_reasoning_details_to_reasoning_content():
                 "finish_reason": "stop",
             }
         ],
-        "model": "MiniMax-M2.5",
+        "model": "MiniMax-M3",
     }
 
     result = model._create_chat_result(response)
@@ -65,7 +65,7 @@ def test_create_chat_result_strips_inline_think_tags():
                 "finish_reason": "stop",
             }
         ],
-        "model": "MiniMax-M2.5",
+        "model": "MiniMax-M3",
     }
 
     result = model._create_chat_result(response)
@@ -133,7 +133,7 @@ def test_convert_chunk_to_generation_chunk_preserves_reasoning_deltas():
                     "finish_reason": "stop",
                 }
             ],
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M3",
         },
         AIMessageChunk,
         {},
