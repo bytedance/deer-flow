@@ -1,16 +1,46 @@
-# Sandbox Image
+# Sandbox Image For `features-tool`
 
-沙箱容器镜像，安装 Python 依赖。代码通过挂载方式从 `skills/custom/` 加载。
+This image extends DeerFlow's default AIO sandbox image, copies
+`docker/sandbox/features-tool` into the image, and preinstalls the Python
+dependencies it requires.
 
-## 构建
+## Included dependency source
 
-从仓库根目录执行：
+- `docker/sandbox/features-tool/`
+- `docker/sandbox/features-tool/requirements.txt`
+
+## Build
+
+From the repository root (build context is the project root so the Dockerfile
+can copy `backend/packages/harness`):
 
 ```bash
-docker build -f docker/sandbox/Dockerfile -t deer-flow-sandbox:latest .
+docker build \
+  -f docker/sandbox/Dockerfile \
+  -t deer-flow-sandbox-features-tool:latest \
+  .
 ```
 
-## 文件来源
+If you need a custom Python package mirror:
 
-- `docker/sandbox/requirements.txt` — Python 依赖
-- 代码从 `/mnt/skills/custom/` 挂载加载（沙箱启动时自动挂载）
+```bash
+docker build \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  -f docker/sandbox/Dockerfile \
+  -t deer-flow-sandbox-features-tool:latest \
+  .
+```
+
+## Use
+
+`config.yaml` is configured to use:
+
+```yaml
+sandbox:
+  image: deer-flow-sandbox-features-tool:latest
+  environment:
+    FEATURES_TOOL_ROOT: /opt/features-tool
+```
+
+If you run DeerFlow on another machine or registry, retag and push the image,
+then replace the image name in `config.yaml`.

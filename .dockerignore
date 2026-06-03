@@ -60,7 +60,6 @@ tests/
 # Backend build only needs backend/
 scripts/
 logs/
-docker/
 skills/
 frontend/.next
 frontend/node_modules
