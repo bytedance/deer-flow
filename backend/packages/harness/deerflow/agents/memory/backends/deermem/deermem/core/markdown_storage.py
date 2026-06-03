@@ -11,8 +11,9 @@ backward compatibility, but its loader is *tolerant*:
 * a corrupt or partially written summary no longer crashes the agent;
 * a Markdown summary is accepted only through its fenced ```` ```memory-json ````
   block, which is parsed losslessly;
-* when the on-disk file is unreadable (neither valid JSON nor a Markdown
-  summary with a usable fenced block), it is *quarantined* as
+* when the on-disk file is unreadable — it cannot be decoded
+  (``OSError`` / ``UnicodeError``), or it is neither valid JSON nor a
+  Markdown summary with a usable fenced block — it is *quarantined* as
   ``memory.json.corrupt-<timestamp>`` before the loader returns ``None``.
   Quarantining keeps the content recoverable: returning ``None`` alone would
   make the next :meth:`save` rebuild the manifest from scratch (revision
