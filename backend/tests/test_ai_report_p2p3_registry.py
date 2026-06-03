@@ -30,14 +30,11 @@ def registry_doc():
 @pytest.mark.parametrize(
     "script_name,expected_args",
     [
-        ("query_trend", {"metric_keys", "date_range", "aggregation", "forecast_horizon"}),
-        ("trend_analysis", {"input"}),
         (
             "query_fault_context",
             {"fault_time", "equipment_id", "symptom", "include_related_equipment"},
         ),
         ("build_fault_timeline", {"input"}),
-        ("diagnosis_analysis", {"input", "timeline"}),
         (
             "query_failure_data",
             {"asset_id", "failure_mode", "analysis_method", "evidence_range"},
@@ -71,7 +68,7 @@ def test_registry_args_cover_cli_flags(registry_doc, script_name, expected_args)
 
 @pytest.mark.parametrize(
     "template_name",
-    ["trend-equipment", "diagnosis-fault", "failure-analysis", "closure-summary", "inspection"],
+    ["failure-analysis", "closure-summary", "inspection"],
 )
 def test_template_references_only_registered_scripts(registry_doc, template_name):
     """No DSL template should reference a script not in the registry."""
@@ -96,7 +93,7 @@ def test_template_references_only_registered_scripts(registry_doc, template_name
 
 @pytest.mark.parametrize(
     "template_name",
-    ["trend-equipment", "diagnosis-fault", "failure-analysis", "closure-summary", "inspection"],
+    ["failure-analysis", "closure-summary", "inspection"],
 )
 def test_template_passes_dsl_validator(template_name):
     """Sprint plan S6 acceptance — all 5 P2/P3 templates pass validate_dsl."""

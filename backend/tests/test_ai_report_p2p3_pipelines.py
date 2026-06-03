@@ -1,15 +1,15 @@
-"""End-to-end pipeline tests for the 5 P2/P3 report types.
+"""End-to-end pipeline tests for the 3 remaining P2/P3 report types.
 
-Sprint S6 — single file covers query→transform→DSL validate for all 5
-report types (trend / diagnosis / failure-analysis / closure / inspection)
-to keep test discovery fast. Per-report deep contract tests live in the
-dedicated test files.
+Sprint S6 — single file covers query→transform→DSL validate for the 3
+remaining report types (failure-analysis / closure / inspection) to keep
+test discovery fast. Per-report deep contract tests live in the dedicated
+test files.
 
 For each report:
 1. Run query script → produces source JSON
 2. Run transform script(s) → produces analysis JSON
 3. Load the corresponding builtin DSL template + validate against the registry
-4. Assert §13.2 contract holds where applicable (trend / diagnosis / failure-analysis)
+4. Assert §13.2 contract holds where applicable (failure-analysis)
 """
 
 from __future__ import annotations
@@ -93,70 +93,6 @@ def _validate_template(validator_bundle, template_name):
     validate_dsl, registry = validator_bundle
     doc = yaml.safe_load((TEMPLATES_DIR / template_name / "default.yaml").read_text(encoding="utf-8"))
     return validate_dsl(doc, registry=registry)
-
-
-# --- Trend pipeline -----------------------------------------------------------
-def test_trend_pipeline(tmp_path, validator_bundle):
-    qm = _load("query_trend", SCRIPTS_DIR / "query_trend.py")
-    tr = _load("trend_analysis", SCRIPTS_DIR / "trend_analysis.py")
-
-    sys.argv = [
-        "query_trend.py",
-        "--metric-keys", "runtime_rate,vibration_level,alarm_count",
-        "--date-range", "2026-04-01..2026-04-30",
-        "--aggregation", "daily",
-        "--forecast-horizon", "7",
-        "--output-dir", str(tmp_path),
-    ]
-    assert qm.main() == 0
-    sys.argv = ["trend_analysis.py", "--input", str(tmp_path / "data" / "trend_data.json"), "--output-dir", str(tmp_path)]
-    assert tr.main() == 0
-
-    analysis = json.loads((tmp_path / "data" / "trend_analysis.json").read_text(encoding="utf-8"))
-    # §13.2 contract
-    assert analysis["human_review_required"] is True
-    assert "summary_markdown" not in analysis
-    assert analysis["findings"] and analysis["evidence"]
-
-    # DSL validate
-    report = _validate_template(validator_bundle, "trend-equipment")
-    assert report.valid, f"trend-equipment errors: {[e.message for e in report.errors]}"
-
-
-# --- Diagnosis pipeline -------------------------------------------------------
-def test_diagnosis_pipeline(tmp_path, validator_bundle):
-    qm = _load("query_fault_context", SCRIPTS_DIR / "query_fault_context.py")
-    tl = _load("build_fault_timeline", SCRIPTS_DIR / "build_fault_timeline.py")
-    da = _load("diagnosis_analysis", SCRIPTS_DIR / "diagnosis_analysis.py")
-
-    sys.argv = [
-        "query_fault_context.py",
-        "--fault-time", "2026-05-15",
-        "--equipment-id", "P-001",
-        "--symptom", "vibration high",
-        "--include-related-equipment",
-        "--output-dir", str(tmp_path),
-    ]
-    assert qm.main() == 0
-    sys.argv = ["build_fault_timeline.py", "--input", str(tmp_path / "data" / "fault_context.json"), "--output-dir", str(tmp_path)]
-    assert tl.main() == 0
-    sys.argv = [
-        "diagnosis_analysis.py",
-        "--input", str(tmp_path / "data" / "fault_context.json"),
-        "--timeline", str(tmp_path / "data" / "fault_timeline.json"),
-        "--output-dir", str(tmp_path),
-    ]
-    assert da.main() == 0
-
-    analysis = json.loads((tmp_path / "data" / "diagnosis_analysis.json").read_text(encoding="utf-8"))
-    assert analysis["human_review_required"] is True
-    assert "summary_markdown" not in analysis
-    # Diagnosis-specific S2 strict requirements
-    src_types = {e["source_type"] for e in analysis["evidence"]}
-    assert len({"timeseries", "alarm", "work_order", "maintenance_record"} & src_types) >= 3
-
-    report = _validate_template(validator_bundle, "diagnosis-fault")
-    assert report.valid, f"diagnosis-fault errors: {[e.message for e in report.errors]}"
 
 
 # --- Failure-analysis pipeline (all 3 methods) --------------------------------

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 _SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "data-analyst" / "scripts")
+_DAILY_SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "daily-report" / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
@@ -191,6 +192,11 @@ class TestCallCapabilityErrors:
 
 class TestScriptPlatformFallback:
     """Verify query scripts fall back to legacy when platform bridge fails."""
+
+    @pytest.fixture(autouse=True)
+    def _add_daily_path(self):
+        if _DAILY_SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, _DAILY_SCRIPTS_DIR)
 
     def test_daily_fallback_on_platform_error(self, monkeypatch):
         """When USE_PLATFORM=true and platform bridge raises, daily falls through."""

@@ -22,10 +22,56 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 _SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "data-analyst" / "scripts")
+_DAILY_SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "daily-report" / "scripts")
+_WEEKLY_SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "weekly-report" / "scripts")
+_MONTHLY_SCRIPTS_DIR = str(Path(__file__).resolve().parents[2] / "skills" / "custom" / "monthly-report" / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 import _platform_bridge as pb  # type: ignore[import-not-found]
+
+# Shared module names that exist in multiple per-skill directories.
+# Tests must evict these from sys.modules before switching skill contexts
+# so each per-skill script loads its own copy.
+_SHARED_MODULE_NAMES = [
+    "_report_common",
+    "_data_providers",
+    "_data_provider_impls",
+    "_platform_bridge",
+    "query_daily",
+    "query_weekly",
+    "query_monthly",
+    "_ins_provider",
+]
+
+
+_PER_SKILL_DIRS = [_DAILY_SCRIPTS_DIR, _WEEKLY_SCRIPTS_DIR, _MONTHLY_SCRIPTS_DIR]
+
+
+def _clear_shared_modules():
+    """Remove cached shared modules so the next import picks up the correct per-skill copy.
+
+    ``_platform_bridge`` is preserved — it must stay as the data-analyst copy
+    imported at module top so ``patch.object(pb, ...)`` works across all tests.
+    """
+    saved_bridge = sys.modules.get("_platform_bridge")
+    for name in _SHARED_MODULE_NAMES:
+        sys.modules.pop(name, None)
+    if saved_bridge is not None:
+        sys.modules["_platform_bridge"] = saved_bridge
+
+
+def _reset_skill_path(target_dir: str):
+    """Ensure ``target_dir`` is first in ``sys.path`` among per-skill dirs.
+
+    Removes all per-skill directories from ``sys.path``, clears cached shared
+    modules, then inserts ``target_dir`` at position 0.
+    """
+    for d in _PER_SKILL_DIRS:
+        while d in sys.path:
+            sys.path.remove(d)
+    _clear_shared_modules()
+    sys.path.insert(0, target_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -38,64 +84,69 @@ def _mock_daily_cli_response() -> dict:
     return {
         "ok": True,
         "data": {
-            "kpis": {"runtime_rate": 0.95, "downtime_count": 1, "alarm_count": 3},
-            "kpi_units": {"runtime_rate": "%", "downtime_count": "次", "alarm_count": "次"},
-            "alarms": [
-                {"time": "2026-05-20T10:30:00", "equipment": "E001", "level": "warning", "message": "high temp"}
-            ],
+            "series": {},  # raw trend data passed to aggregate_kpi
         },
         "source_system_keys": ["ins"],
         "partial_failures": [],
     }
 
 
-def _mock_weekly_cli_response() -> dict:
-    """Minimal CLI response for monitoring.trend (weekly) — list of daily entries."""
+def _mock_daily_kpi_response() -> dict:
+    """Minimal CLI response for aggregate_kpi action (daily)."""
     return {
         "ok": True,
-        "data": [
-            {
-                "date": "2026-05-11",
-                "kpis": {"runtime_rate": 0.94, "downtime_count": 0, "alarm_count": 2},
-                "kpi_units": {"runtime_rate": "%", "downtime_count": "次", "alarm_count": "次"},
-                "alarms": [],
-            },
-            {
-                "date": "2026-05-12",
-                "kpis": {"runtime_rate": 0.96, "downtime_count": 1, "alarm_count": 1},
-                "kpi_units": {"runtime_rate": "%", "downtime_count": "次", "alarm_count": "次"},
-                "alarms": [{"time": "2026-05-12T14:00:00", "equipment": "E001", "level": "info", "message": "ok"}],
-            },
-        ],
+        "data": {
+            "kpis": {"runtime_rate": 0.95, "downtime_count": 1, "alarm_count": 3},
+            "kpi_units": {"runtime_rate": "%", "downtime_count": "次", "alarm_count": "次"},
+            "hourly_runtime_rate": [0.9] * 24,
+            "alarms": [],
+        },
+    }
+
+
+def _mock_weekly_trend_response() -> dict:
+    """Minimal CLI response for monitoring.trend (weekly) — raw series data."""
+    return {
+        "ok": True,
+        "data": {
+            "series": {},
+        },
         "source_system_keys": ["ins"],
         "partial_failures": [],
     }
 
 
-def _mock_monthly_cli_response() -> dict:
-    """Minimal CLI response for monitoring.trend (monthly) — list of weekly buckets."""
+def _mock_weekly_kpi_response() -> dict:
+    """Minimal CLI response for aggregate_kpi action (weekly) — per-day KPI data."""
     return {
         "ok": True,
-        "data": [
-            {
-                "week_start": "2026-05-01",
-                "week_end": "2026-05-07",
-                "kpis_mean": {"runtime_rate": 0.93},
-                "kpis_max": {"runtime_rate": 0.98},
-                "kpis_min": {"runtime_rate": 0.88},
-                "alarms": [],
-            },
-            {
-                "week_start": "2026-05-08",
-                "week_end": "2026-05-14",
-                "kpis_mean": {"runtime_rate": 0.95},
-                "kpis_max": {"runtime_rate": 0.99},
-                "kpis_min": {"runtime_rate": 0.90},
-                "alarms": [],
-            },
-        ],
+        "data": {
+            "kpis": {"runtime_rate": 0.95, "downtime_count": 1, "alarm_count": 3},
+            "kpi_units": {"runtime_rate": "%", "downtime_count": "次", "alarm_count": "次"},
+        },
+    }
+
+
+def _mock_monthly_trend_response() -> dict:
+    """Minimal CLI response for monitoring.trend (monthly) — raw series data."""
+    return {
+        "ok": True,
+        "data": {
+            "series": {},
+        },
         "source_system_keys": ["ins"],
         "partial_failures": [],
+    }
+
+
+def _mock_monthly_kpi_response() -> dict:
+    """Minimal CLI response for aggregate_kpi action (monthly) — per-day KPI data."""
+    return {
+        "ok": True,
+        "data": {
+            "kpis": {"runtime_rate": 0.93},
+            "kpi_units": {"runtime_rate": "%"},
+        },
     }
 
 
@@ -105,11 +156,16 @@ def _mock_monthly_cli_response() -> dict:
 
 
 class TestDailyRegressionPlatform:
+    @pytest.fixture(autouse=True)
+    def _add_daily_path(self):
+        _reset_skill_path(_DAILY_SCRIPTS_DIR)
+
     def test_output_shape_with_use_platform(self, monkeypatch):
         """USE_PLATFORM=true: daily output has expected top-level keys."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_daily_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_daily_cli_response()), \
+             patch.object(pb, "call_action", return_value=_mock_daily_kpi_response()):
             import query_daily as qd  # type: ignore[import-not-found]
 
             result = qd.build_result(
@@ -133,7 +189,8 @@ class TestDailyRegressionPlatform:
         """data_source reflects the CLI bridge origin."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_daily_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_daily_cli_response()), \
+             patch.object(pb, "call_action", return_value=_mock_daily_kpi_response()):
             import query_daily as qd
 
             result = qd.build_result(
@@ -152,11 +209,16 @@ class TestDailyRegressionPlatform:
 
 
 class TestWeeklyRegressionPlatform:
+    @pytest.fixture(autouse=True)
+    def _add_weekly_path(self):
+        _reset_skill_path(_WEEKLY_SCRIPTS_DIR)
+
     def test_output_shape_with_use_platform(self, monkeypatch):
         """USE_PLATFORM=true: weekly output has expected top-level keys."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_weekly_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_weekly_trend_response()), \
+             patch.object(pb, "call_action", return_value=_mock_weekly_kpi_response()):
             import query_weekly as qw  # type: ignore[import-not-found]
 
             result = qw.build_result(
@@ -180,7 +242,8 @@ class TestWeeklyRegressionPlatform:
         """report_period carries week_start, week_end, day_count."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_weekly_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_weekly_trend_response()), \
+             patch.object(pb, "call_action", return_value=_mock_weekly_kpi_response()):
             import query_weekly as qw
 
             result = qw.build_result(
@@ -202,11 +265,16 @@ class TestWeeklyRegressionPlatform:
 
 
 class TestMonthlyRegressionPlatform:
+    @pytest.fixture(autouse=True)
+    def _add_monthly_path(self):
+        _reset_skill_path(_MONTHLY_SCRIPTS_DIR)
+
     def test_output_shape_with_use_platform(self, monkeypatch):
         """USE_PLATFORM=true: monthly output has expected top-level keys."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_monthly_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_monthly_trend_response()), \
+             patch.object(pb, "call_action", return_value=_mock_monthly_kpi_response()):
             import query_monthly as qm  # type: ignore[import-not-found]
 
             result = qm.build_result(
@@ -227,7 +295,8 @@ class TestMonthlyRegressionPlatform:
         """Monthly report_period has month, month_start, month_end."""
         monkeypatch.setenv("USE_PLATFORM", "true")
 
-        with patch.object(pb, "call_capability", return_value=_mock_monthly_cli_response()):
+        with patch.object(pb, "call_capability", return_value=_mock_monthly_trend_response()), \
+             patch.object(pb, "call_action", return_value=_mock_monthly_kpi_response()):
             import query_monthly as qm
 
             result = qm.build_result(
@@ -273,6 +342,17 @@ class TestLegacyPathUnchanged:
 
 
 class TestFallbackBehavior:
+    @pytest.fixture(autouse=True)
+    def _add_report_paths(self):
+        # Weekly _report_common is a superset of daily's — put it first so both
+        # test_daily_falls_back and test_weekly_falls_back resolve imports correctly.
+        for p in (_WEEKLY_SCRIPTS_DIR, _DAILY_SCRIPTS_DIR):
+            while p in sys.path:
+                sys.path.remove(p)
+        _clear_shared_modules()
+        sys.path.insert(0, _WEEKLY_SCRIPTS_DIR)
+        sys.path.insert(1, _DAILY_SCRIPTS_DIR)
+
     def test_daily_falls_back_when_bridge_fails(self, monkeypatch):
         """When platform bridge raises, daily falls through to legacy provider."""
         monkeypatch.setenv("USE_PLATFORM", "true")
@@ -331,3 +411,18 @@ class TestFallbackBehavior:
             # The warning should have been emitted
             stderr_output = stderr_buf.getvalue()
             assert "WARNING" in stderr_output or "falling back" in stderr_output.lower() or True  # fallback attempted
+
+
+# ---------------------------------------------------------------------------
+# Module-level cleanup: prevent sys.path leakage into other test modules
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _cleanup_skill_paths():
+    """Remove per-skill directories from sys.path after all tests finish."""
+    yield
+    for d in _PER_SKILL_DIRS:
+        while d in sys.path:
+            sys.path.remove(d)
+    _clear_shared_modules()

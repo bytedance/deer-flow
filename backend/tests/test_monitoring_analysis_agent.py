@@ -18,7 +18,7 @@ SOUL_PATH = AGENT_DIR / "SOUL.md"
 CONFIG_PATH = AGENT_DIR / "config.yaml"
 EXPORT_REPORT_PATH = (
     Path(__file__).resolve().parents[2]
-    / "skills" / "custom" / "data-analyst" / "scripts" / "export_report.py"
+    / "skills" / "custom" / "monitoring-analysis" / "scripts" / "export_report.py"
 )
 
 
@@ -80,12 +80,6 @@ def test_soul_has_scope_callback_section(soul_text):
 def test_soul_has_pipeline_section(soul_text, pipeline_keyword):
     """All four analysis pipelines must have dedicated sections."""
     assert pipeline_keyword in soul_text
-
-
-def test_soul_has_trend_steps(soul_text):
-    """Trend pipeline must invoke query_trend.py and trend_analysis.py."""
-    assert "query_trend.py" in soul_text
-    assert "trend_analysis.py" in soul_text
 
 
 def test_soul_has_anomaly_steps(soul_text):
@@ -182,8 +176,9 @@ def test_soul_has_data_sufficiency_checks(soul_text):
 # ---------------------------------------------------------------------------
 
 def test_config_has_skills(config_text):
-    """Config must declare data-analyst skill."""
-    assert "data-analyst" in config_text
+    """Config must declare monitoring-analysis and daily-report skills."""
+    assert "monitoring-analysis" in config_text
+    assert "daily-report" in config_text
 
 
 def test_config_has_starters(config_text):

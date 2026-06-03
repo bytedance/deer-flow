@@ -1,9 +1,8 @@
 """Tests for the DataConnector abstraction layer.
 
-Sprint goal: verify the 5 query scripts can be redirected to an HTTP backend
+Sprint goal: verify the 4 query scripts can be redirected to an HTTP backend
 via the registry, and that fetch_with_fallback() degrades gracefully to demo
-data when the HTTP path fails. Trend is InS-only (like daily/weekly/monthly)
-— it registers http (escape hatch) + ins (default), with no demo fallback.
+data when the HTTP path fails.
 """
 
 from __future__ import annotations
@@ -56,11 +55,6 @@ def test_registry_has_all_4_demo_sources_with_2_modes(providers):
         assert source in registered, f"source {source!r} missing from registry"
         assert "demo" in registered[source], f"source {source!r} missing demo provider"
         assert "http" in registered[source], f"source {source!r} missing http provider"
-    # trend registers http (escape hatch) + ins (default), no demo
-    assert "trend" in registered
-    assert "http" in registered["trend"]
-    assert "ins" in registered["trend"]
-    assert "demo" not in registered["trend"]
 
 
 def test_provider_result_envelope_exposes_data_source(providers):
@@ -75,11 +69,6 @@ def test_provider_result_envelope_exposes_data_source(providers):
 
 def _invoke_demo(provider, source: str):
     """Call provider.fetch with reasonable defaults for the source."""
-    if source == "trend":
-        return provider.fetch(
-            metric_keys=["runtime_rate"], date_range=("2026-04-01", "2026-04-30"),
-            aggregation="daily", forecast_horizon=7,
-        )
     if source == "fault_context":
         return provider.fetch(
             fault_time="2026-05-15", equipment_id="P-001",
@@ -114,13 +103,6 @@ def test_default_mode_is_demo(providers, monkeypatch):
         assert "Demo" in type(p).__name__
 
 
-def test_trend_default_mode_is_ins(providers, monkeypatch):
-    """trend defaults to ins, same as daily/weekly/monthly."""
-    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
-    p = providers.get_provider("trend")
-    assert "Ins" in type(p).__name__
-
-
 def test_env_var_routes_to_http(providers, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
     p = providers.get_provider("fault_context")
@@ -149,89 +131,36 @@ def test_unknown_source_raises_value_error(providers):
 
 
 # ---------------------------------------------------------------------------
-# Daily / Weekly / Monthly are InS-only (DEER_FLOW_DATA_PROVIDER ignored)
+# Daily / Weekly / Monthly are platform-only (DEER_FLOW_DATA_PROVIDER ignored)
 # ---------------------------------------------------------------------------
 
 
-def test_daily_weekly_monthly_only_register_ins(providers):
+def test_daily_weekly_monthly_only_register_platform(providers):
     registered = providers.list_registered()
     for source in ("daily", "weekly", "monthly"):
         assert source in registered, f"source {source!r} missing from registry"
-        assert registered[source] == ["ins"], (
-            f"source {source!r} has modes {registered[source]}, expected ['ins']"
+        assert registered[source] == ["platform"], (
+            f"source {source!r} has modes {registered[source]}, expected ['platform']"
         )
 
 
-def test_daily_weekly_monthly_trend_ignore_env_var_demo(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect daily/weekly/monthly/trend."""
-    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "demo")
-    for source in ("daily", "weekly", "monthly", "trend"):
-        p = providers.get_provider(source)
-        assert "Ins" in type(p).__name__, (
-            f"get_provider({source!r}) returned {type(p).__name__}, expected Ins*Provider"
-        )
+def test_daily_weekly_monthly_pinned_to_platform_regardless_of_env(providers, monkeypatch):
+    """daily/weekly/monthly are platform-pinned regardless of env var."""
+    for env_val in ("demo", "http", "ins"):
+        monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", env_val)
+        for source in ("daily", "weekly", "monthly"):
+            p = providers.get_provider(source)
+            assert "Platform" in type(p).__name__, (
+                f"DEER_FLOW_DATA_PROVIDER={env_val} → get_provider({source!r}) "
+                f"returned {type(p).__name__}, expected Platform*Provider"
+            )
 
 
-def test_daily_weekly_monthly_trend_reject_explicit_demo_mode(providers):
-    for source in ("daily", "weekly", "monthly", "trend"):
+def test_daily_weekly_monthly_reject_explicit_demo_mode(providers):
+    """Explicit mode='demo' is rejected for daily/weekly/monthly (platform-only)."""
+    for source in ("daily", "weekly", "monthly"):
         with pytest.raises(KeyError, match="demo"):
             providers.get_provider(source, mode="demo")
-
-
-def test_daily_weekly_monthly_trend_ignore_env_var_http(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=http must NOT affect daily/weekly/monthly/trend."""
-    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
-    for source in ("daily", "weekly", "monthly", "trend"):
-        p = providers.get_provider(source)
-        assert "Ins" in type(p).__name__
-
-
-# ---------------------------------------------------------------------------
-# Trend is ins-preferred (registers http + ins, defaults to ins)
-# ---------------------------------------------------------------------------
-
-
-def test_trend_registers_http_and_ins(providers):
-    """trend registers http (escape hatch) + ins (default), no demo."""
-    registered = providers.list_registered()
-    assert "trend" in registered
-    assert "http" in registered["trend"]
-    assert "ins" in registered["trend"]
-    assert "demo" not in registered["trend"]
-
-
-def test_trend_default_is_ins(providers, monkeypatch):
-    """get_provider('trend') returns InsTrendProvider by default."""
-    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
-    p = providers.get_provider("trend")
-    assert "Ins" in type(p).__name__
-
-
-def test_trend_ignores_env_demo(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=demo must NOT affect trend."""
-    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "demo")
-    p = providers.get_provider("trend")
-    assert "Ins" in type(p).__name__
-
-
-def test_trend_ignores_env_http(providers, monkeypatch):
-    """DEER_FLOW_DATA_PROVIDER=http must NOT affect trend."""
-    monkeypatch.setenv("DEER_FLOW_DATA_PROVIDER", "http")
-    p = providers.get_provider("trend")
-    assert "Ins" in type(p).__name__
-
-
-def test_trend_explicit_http_mode(providers, monkeypatch):
-    """Explicit mode='http' still returns HttpTrendProvider (escape hatch)."""
-    monkeypatch.delenv("DEER_FLOW_DATA_PROVIDER", raising=False)
-    p = providers.get_provider("trend", mode="http")
-    assert "Http" in type(p).__name__
-
-
-def test_trend_rejects_demo_mode(providers):
-    """Explicit mode='demo' raises KeyError — no demo provider for trend."""
-    with pytest.raises(KeyError, match="demo"):
-        providers.get_provider("trend", mode="demo")
 
 
 # ---------------------------------------------------------------------------
