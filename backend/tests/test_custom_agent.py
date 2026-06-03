@@ -554,6 +554,31 @@ class TestAgentsAPI:
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
 
+    def test_delete_discards_pending_memory_updates_for_agent(self, agent_client):
+        from deerflow.agents.memory.queue import get_memory_queue, reset_memory_queue
+        from deerflow.config.memory_config import MemoryConfig
+
+        reset_memory_queue()
+        try:
+            queue = get_memory_queue()
+            with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(queue, "_reset_timer"):
+                queue.add(thread_id="thread-1", messages=["delete me"], agent_name="remove-me", user_id="test-user-autouse")
+                queue.add(thread_id="thread-2", messages=["keep me"], agent_name="other-agent", user_id="test-user-autouse")
+                queue.add(thread_id="thread-3", messages=["keep other user"], agent_name="remove-me", user_id="other-user")
+
+            agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})
+
+            response = agent_client.delete("/api/agents/remove-me")
+
+            assert response.status_code == 204
+            assert queue.pending_count == 2
+            assert {(context.thread_id, context.agent_name, context.user_id) for context in queue._queue} == {
+                ("thread-2", "other-agent", "test-user-autouse"),
+                ("thread-3", "remove-me", "other-user"),
+            }
+        finally:
+            reset_memory_queue()
+
     def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
         """An unmigrated legacy agent must still block name collision so that
         running the migration script later won't shadow the legacy entry."""

@@ -163,6 +163,25 @@ class MemoryUpdateQueue:
         self._timer.daemon = True
         self._timer.start()
 
+    def discard_agent_updates(self, agent_name: str, *, user_id: str | None = None) -> int:
+        """Discard pending updates for a deleted per-agent memory target."""
+        with self._lock:
+            original_count = len(self._queue)
+            self._queue = [context for context in self._queue if not (context.agent_name == agent_name and context.user_id == user_id)]
+            discarded_count = original_count - len(self._queue)
+
+            if not self._queue and self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+        if discarded_count:
+            logger.info(
+                "Discarded %d pending memory update(s) for deleted agent %s",
+                discarded_count,
+                agent_name,
+            )
+        return discarded_count
+
     def _process_queue(self) -> None:
         """Process all queued conversation contexts."""
         # Import here to avoid circular dependency
@@ -197,6 +216,7 @@ class MemoryUpdateQueue:
                         correction_detected=context.correction_detected,
                         reinforcement_detected=context.reinforcement_detected,
                         user_id=context.user_id,
+                        context_timestamp=context.timestamp,
                     )
                     if success:
                         logger.info("Memory updated successfully for thread %s", context.thread_id)

@@ -77,3 +77,22 @@ def test_add_nowait_keeps_different_users_separate():
 
     assert q.pending_count == 2
     assert [context.user_id for context in q._queue] == ["alice", "bob"]
+
+
+def test_discard_agent_updates_removes_all_matching_threads_for_user():
+    q = MemoryUpdateQueue()
+
+    with patch("deerflow.agents.memory.queue.get_memory_config", return_value=MemoryConfig(enabled=True)), patch.object(q, "_reset_timer"):
+        q.add(thread_id="thread-1", messages=["delete me 1"], agent_name="researcher", user_id="alice")
+        q.add(thread_id="thread-2", messages=["delete me 2"], agent_name="researcher", user_id="alice")
+        q.add(thread_id="thread-3", messages=["keep other agent"], agent_name="writer", user_id="alice")
+        q.add(thread_id="thread-4", messages=["keep other user"], agent_name="researcher", user_id="bob")
+
+    discarded = q.discard_agent_updates("researcher", user_id="alice")
+
+    assert discarded == 2
+    assert q.pending_count == 2
+    assert {(context.thread_id, context.agent_name, context.user_id) for context in q._queue} == {
+        ("thread-3", "writer", "alice"),
+        ("thread-4", "researcher", "bob"),
+    }

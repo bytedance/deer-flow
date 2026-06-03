@@ -438,9 +438,35 @@ async def delete_agent(name: str) -> None:
             )
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
+    memory_delete_marked = False
+    try:
+        from deerflow.agents.memory.storage import mark_agent_memory_deleted
+
+        mark_agent_memory_deleted(name, user_id=user_id)
+        memory_delete_marked = True
+    except Exception as e:
+        logger.warning("Failed to mark memory state for deleted agent '%s': %s", name, e, exc_info=True)
+
     try:
         shutil.rmtree(agent_dir)
-        logger.info(f"Deleted agent '{name}' from {agent_dir}")
     except Exception as e:
+        if memory_delete_marked:
+            try:
+                from deerflow.agents.memory.storage import clear_deleted_agent_memory_mark
+
+                clear_deleted_agent_memory_mark(name, user_id=user_id)
+            except Exception:
+                logger.warning("Failed to clear memory deletion mark for agent '%s'", name, exc_info=True)
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
+
+    try:
+        from deerflow.agents.memory.queue import get_memory_queue
+        from deerflow.agents.memory.storage import discard_memory_cache
+
+        get_memory_queue().discard_agent_updates(name, user_id=user_id)
+        discard_memory_cache(name, user_id=user_id)
+    except Exception as e:
+        logger.warning("Failed to clear memory state for deleted agent '%s': %s", name, e, exc_info=True)
+
+    logger.info(f"Deleted agent '{name}' from {agent_dir}")

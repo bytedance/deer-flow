@@ -21,7 +21,10 @@ from deerflow.agents.memory.queue import (
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
     MemoryStorage,
+    clear_deleted_agent_memory_mark,
+    discard_memory_cache,
     get_memory_storage,
+    mark_agent_memory_deleted,
 )
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
@@ -47,6 +50,9 @@ __all__ = [
     "MemoryStorage",
     "FileMemoryStorage",
     "get_memory_storage",
+    "clear_deleted_agent_memory_mark",
+    "discard_memory_cache",
+    "mark_agent_memory_deleted",
     # Updater
     "MemoryUpdater",
     "clear_memory_data",

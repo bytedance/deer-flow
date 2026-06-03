@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import uuid
+from datetime import datetime
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
@@ -18,6 +19,7 @@ from deerflow.agents.memory.prompt import (
 from deerflow.agents.memory.storage import (
     create_empty_memory,
     get_memory_storage,
+    save_memory_data,
     utc_now_iso_z,
 )
 from deerflow.config.memory_config import get_memory_config
@@ -45,7 +47,7 @@ def _create_empty_memory() -> dict[str, Any]:
 
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
     """Backward-compatible wrapper around the configured memory storage save path."""
-    return get_memory_storage().save(memory_data, agent_name, user_id=user_id)
+    return save_memory_data(memory_data, agent_name, user_id=user_id, storage=get_memory_storage())
 
 
 def get_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -73,7 +75,7 @@ def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = Non
         OSError: If persisting the imported memory fails.
     """
     storage = get_memory_storage()
-    if not storage.save(memory_data, agent_name, user_id=user_id):
+    if not save_memory_data(memory_data, agent_name, user_id=user_id, storage=storage):
         raise OSError("Failed to save imported memory data")
     return storage.load(agent_name, user_id=user_id)
 
@@ -455,6 +457,7 @@ class MemoryUpdater:
         thread_id: str | None,
         agent_name: str | None,
         user_id: str | None = None,
+        context_timestamp: datetime | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
@@ -462,7 +465,13 @@ class MemoryUpdater:
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return get_memory_storage().save(updated_memory, agent_name, user_id=user_id)
+        return save_memory_data(
+            updated_memory,
+            agent_name,
+            user_id=user_id,
+            context_timestamp=context_timestamp,
+            storage=get_memory_storage(),
+        )
 
     async def aupdate_memory(
         self,
@@ -472,6 +481,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        context_timestamp: datetime | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -489,6 +499,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            context_timestamp=context_timestamp,
         )
 
     def _do_update_memory_sync(
@@ -499,6 +510,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        context_timestamp: datetime | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -528,6 +540,7 @@ class MemoryUpdater:
                 thread_id=thread_id,
                 agent_name=agent_name,
                 user_id=user_id,
+                context_timestamp=context_timestamp,
             )
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -544,6 +557,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        context_timestamp: datetime | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -582,6 +596,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
+                    context_timestamp=context_timestamp,
                 )
                 return future.result()
             except Exception:
@@ -595,6 +610,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            context_timestamp=context_timestamp,
         )
 
     def _apply_updates(
@@ -691,6 +707,7 @@ def update_memory_from_conversation(
     correction_detected: bool = False,
     reinforcement_detected: bool = False,
     user_id: str | None = None,
+    context_timestamp: datetime | None = None,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -706,4 +723,12 @@ def update_memory_from_conversation(
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)
+    return updater.update_memory(
+        messages,
+        thread_id,
+        agent_name,
+        correction_detected,
+        reinforcement_detected,
+        user_id=user_id,
+        context_timestamp=context_timestamp,
+    )
