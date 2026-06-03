@@ -101,6 +101,7 @@ class DeerFlowProductionEngine:
             "plan_mode": False,
             "subagent_enabled": False,
             "thinking_enabled": True,
+            "recursion_limit": 1000,
         }
 
         # ------------------------------------------------------------------
@@ -891,25 +892,49 @@ class DeerFlowProductionEngine:
             session_id = self.create_session()
 
         self.store.sessions[session_id]["last_active"] = time.time()
+        # Use runtime setting for recursion_limit if not specified
+        if "recursion_limit" not in kwargs:
+            kwargs["recursion_limit"] = self._runtime_settings.get("recursion_limit", 1000)
         stream_kwargs = {"thread_id": session_id, **kwargs}
 
         full_response = ""
         tool_calls = 0
         total_tokens = 0
 
+        tool_call_history: list[dict] = []
+
         client = self._get_or_create_client(session_id)
-        for event in client.stream(message, **stream_kwargs):
-            if event.type == "messages-tuple":
-                d = event.data
-                if d.get("type") == "ai" and d.get("content"):
-                    content = d["content"]
-                    full_response += content
-                    yield content
-                if d.get("tool_calls"):
-                    tool_calls += len(d["tool_calls"])
-            elif event.type == "end":
-                usage = event.data.get("usage", {})
-                total_tokens = usage.get("total_tokens", 0)
+        try:
+            for event in client.stream(message, **stream_kwargs):
+                if event.type == "messages-tuple":
+                    d = event.data
+                    if d.get("type") == "ai" and d.get("content"):
+                        content = d["content"]
+                        full_response += content
+                        yield content
+                    if d.get("tool_calls"):
+                        tool_calls += len(d["tool_calls"])
+                        for tc in d["tool_calls"]:
+                            tool_call_history.append({
+                                "name": tc.get("name"),
+                                "args": tc.get("args"),
+                                "id": tc.get("id"),
+                            })
+                elif event.type == "end":
+                    usage = event.data.get("usage", {})
+                    total_tokens = usage.get("total_tokens", 0)
+        except Exception as stream_error:
+            print(f"\n\n[Stream Error | 流错误] {type(stream_error).__name__}: {stream_error}")
+            print(f"\n[Tool Call Summary | 工具调用摘要]")
+            print(f"  Total tool calls: {len(tool_call_history)}")
+            from collections import Counter
+            tool_counts = Counter(tc["name"] for tc in tool_call_history)
+            for tool_name, count in tool_counts.most_common():
+                print(f"    {tool_name}: {count} calls")
+            print(f"\n[Tool Call History | 工具调用历史] (最近5次)")
+            for tc in tool_call_history[-5:]:
+                print(f"  - {tc['name']}: {tc.get('args', {})}")
+            raise
 
         self.store.session_metrics[session_id]["turns"] += 1
         self.store.session_metrics[session_id]["tool_calls"] += tool_calls
@@ -931,6 +956,21 @@ class DeerFlowProductionEngine:
         self.store.save_async(session_id)
 
         yield f"\n\n[Metrics] Tokens: {total_tokens} | Tool Calls: {tool_calls}"
+
+        # Check checkpoint count and warn if approaching recursion limit
+        if thread_data and thread_data.get("checkpoints"):
+            checkpoint_count = len(thread_data["checkpoints"])
+            recursion_limit = self._runtime_settings.get("recursion_limit", 1000)
+            warning_threshold = int(recursion_limit * 0.8)  # Warn at 80% of limit
+            critical_threshold = int(recursion_limit * 0.9)  # Critical warning at 90%
+
+            if checkpoint_count >= critical_threshold:
+                yield f"\n\n⚠️  [CRITICAL] Checkpoints: {checkpoint_count}/{recursion_limit} - Approaching recursion limit!"
+                client = self._get_or_create_client(session_id)
+                if hasattr(client, '_subagent_enabled') and client._subagent_enabled:
+                    yield f" Subagent is enabled - consider disabling with: !subagent off"
+            elif checkpoint_count >= warning_threshold:
+                yield f"\n\n[WARNING] Checkpoints: {checkpoint_count}/{recursion_limit} - Getting close to limit"
 
     # ------------------------------------------------------------------
     # File upload
@@ -1065,6 +1105,43 @@ class DeerFlowProductionEngine:
         print(f"[Model] Switched to: {model_name}")
         return True
 
+    # ------------------------------------------------------------------
+    # Runtime controls (apply to current client + persist for new sessions)
+    # ------------------------------------------------------------------
+
+    def show_status(self):
+        """Display current session status and runtime settings."""
+        client = self.client
+        if client is None:
+            print("[Error] No active session")
+            return
+
+        print(f"\n[Session Status | 会话状态]")
+        print(f"  Session ID: {self.current_session_id}")
+
+        # Get client runtime settings
+        model_name = getattr(client, '_model_name', None) or self._runtime_settings.get("model_name")
+        plan_mode = getattr(client, '_plan_mode', None) if hasattr(client, '_plan_mode') else self._runtime_settings.get("plan_mode")
+        subagent_enabled = getattr(client, '_subagent_enabled', None) if hasattr(client, '_subagent_enabled') else self._runtime_settings.get("subagent_enabled")
+        thinking_enabled = getattr(client, '_thinking_enabled', None) if hasattr(client, '_thinking_enabled') else self._runtime_settings.get("thinking_enabled")
+
+        print(f"\n[Runtime Settings | 运行时配置]")
+        print(f"  Model: {model_name or 'default'}")
+        print(f"  Subagent: {'✓ Enabled' if subagent_enabled else '✗ Disabled'}")
+        print(f"  Plan Mode: {'✓ Enabled' if plan_mode else '✗ Disabled'}")
+        print(f"  Thinking: {'✓ Enabled' if thinking_enabled else '✗ Disabled'}")
+
+        # Get checkpoint info
+        thread_data = client.get_thread(self.current_session_id)
+        checkpoints = thread_data.get("checkpoints", [])
+        print(f"\n[Session Metrics | 会话指标]")
+        print(f"  Checkpoints: {len(checkpoints)}")
+        recursion_limit = self._runtime_settings.get("recursion_limit", 1000)
+        print(f"  Recursion Limit: {recursion_limit}")
+        if len(checkpoints) > int(recursion_limit * 0.8):
+            print(f"  ⚠️  Approaching recursion limit ({len(checkpoints)}/{recursion_limit})")
+        print()
+
     def enable_plan_mode(self):
         """Enable plan mode for the agent and persist the setting."""
         client = self.client
@@ -1100,3 +1177,153 @@ class DeerFlowProductionEngine:
         client._subagent_enabled = False
         self._runtime_settings["subagent_enabled"] = False
         print("[Mode] Subagent delegation disabled")
+
+    def set_recursion_limit(self, limit: int):
+        """
+        Set the recursion limit for agent execution and persist the setting.
+
+        Args:
+            limit: Maximum number of graph steps LangGraph will execute.
+
+        Returns:
+            bool: True if limit was set successfully.
+        """
+        if not isinstance(limit, int) or limit < 1:
+            print("[Error] Recursion limit must be a positive integer")
+            return False
+
+        self._runtime_settings["recursion_limit"] = limit
+        print(f"[Config] Recursion limit set to: {limit}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def diagnose_tool_calls(self, session_id=None):
+        """
+        Analyze tool call patterns from checkpoint history to identify loops.
+
+        Args:
+            session_id: Session ID, uses current session if None.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            print("[Error] No active session")
+            return
+
+        from collections import Counter
+
+        client = self._get_or_create_client(session_id)
+        thread_data = client.get_thread(session_id)
+        checkpoints = thread_data.get("checkpoints", [])
+
+        if not checkpoints:
+            print("[Diagnostics] No checkpoints found")
+            return
+
+        print(f"\n[Tool Call Diagnostics | 工具调用诊断]")
+        print(f"  Session: {session_id}")
+        print(f"  Total checkpoints: {len(checkpoints)}")
+        print()
+
+        # Collect tool calls - both WITH and WITHOUT deduplication for comparison
+        # Each checkpoint's messages contain full history, so we need to track seen IDs
+
+        # 1. Raw collection (WITH duplicates - counts every occurrence across checkpoints)
+        raw_tool_calls: list[dict] = []
+        for cp in checkpoints:
+            messages = cp["values"].get("messages", [])
+            for msg in messages:
+                if msg.get("type") == "ai" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        raw_tool_calls.append({
+                            "name": tc.get("name"),
+                            "args": tc.get("args"),
+                            "checkpoint_id": cp.get("checkpoint_id"),
+                            "tool_call_id": tc.get("id"),
+                        })
+
+        # 2. Deduplicated collection (unique tool calls only)
+        seen_message_ids: set[str] = set()
+        unique_tool_calls: list[dict] = []
+        for cp in checkpoints:
+            messages = cp["values"].get("messages", [])
+            for msg in messages:
+                msg_id = msg.get("id")
+                # Generate fallback id if message has no id
+                if msg_id is None:
+                    msg_id = f"__no_id__:{msg.get('type', '')}:{str(msg.get('content', ''))[:100]}"
+                # Only process new messages
+                if msg_id not in seen_message_ids:
+                    seen_message_ids.add(msg_id)
+                    if msg.get("type") == "ai" and msg.get("tool_calls"):
+                        for tc in msg["tool_calls"]:
+                            unique_tool_calls.append({
+                                "name": tc.get("name"),
+                                "args": tc.get("args"),
+                                "checkpoint_id": cp.get("checkpoint_id"),
+                                "tool_call_id": tc.get("id"),
+                            })
+
+        if not unique_tool_calls:
+            print("  No tool calls found in history")
+            return
+
+        # Comparison: Raw (with duplicates) vs Unique (deduplicated)
+        raw_counts = Counter(tc["name"] for tc in raw_tool_calls)
+        unique_counts = Counter(tc["name"] for tc in unique_tool_calls)
+
+        print(f"[Tool Call Frequency Comparison | 工具调用频率对比]")
+        print(f"  {'Tool Name':<40} | {'Unique':<8} | {'Raw (with dup)':<15} | {'Ratio':<8}")
+        print(f"  {'-'*40}-+-{'-'*8}-+-{'-'*15}-+-{'-'*8}")
+
+        all_tool_names = set(raw_counts.keys()) | set(unique_counts.keys())
+        for tool_name in sorted(all_tool_names, key=lambda x: -unique_counts[x]):
+            unique_cnt = unique_counts.get(tool_name, 0)
+            raw_cnt = raw_counts.get(tool_name, 0)
+            ratio = raw_cnt / unique_cnt if unique_cnt > 0 else 0
+            ratio_str = f"{ratio:.1f}x"
+            print(f"  {tool_name:<40} | {unique_cnt:<8} | {raw_cnt:<15} | {ratio_str:<8}")
+        print()
+
+        # Checkpoint density analysis
+        print(f"[Checkpoint Density Analysis | 检查点密度分析]")
+        print(f"  Unique tool calls: {len(unique_tool_calls)}")
+        print(f"  Raw occurrences across all checkpoints: {len(raw_tool_calls)}")
+        if len(checkpoints) > 0:
+            density = len(raw_tool_calls) / max(len(unique_tool_calls), 1)
+            print(f"  Average duplications per unique call: {density:.1f}x")
+            if density > 3:
+                print(f"  ⚠️  High duplication - each tool call appears in many checkpoints")
+                print(f"      This is normal for long-running sessions with subagents")
+        print()
+
+        # Detect potential loops - consecutive same-tool calls (using unique data)
+        print(f"[Potential Loop Detection | 潜在循环检测]")
+        consecutive_count: dict[str, int] = {}
+        current_tool = None
+        current_count = 0
+
+        for tc in unique_tool_calls:
+            tool_name = tc["name"]
+            if tool_name == current_tool:
+                current_count += 1
+            else:
+                if current_tool:
+                    consecutive_count[current_tool] = max(consecutive_count.get(current_tool, 0), current_count)
+                current_tool = tool_name
+                current_count = 1
+        if current_tool:
+            consecutive_count[current_tool] = max(consecutive_count.get(current_tool, 0), current_count)
+
+        for tool_name, count in sorted(consecutive_count.items(), key=lambda x: -x[1]):
+            if count > 2:
+                print(f"  ⚠️  {tool_name}: {count} consecutive calls (potential loop)")
+
+        print()
+        print(f"[Recent Tool Call History | 最近工具调用历史] (last 10 unique)")
+        for tc in unique_tool_calls[-10:]:
+            args_preview = str(tc.get("args", {}))[:60]
+            print(f"  - {tc['name']}: {args_preview}...")
+        print()

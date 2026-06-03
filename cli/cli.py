@@ -9,6 +9,7 @@ License: MIT
 """
 
 import sys
+import traceback
 from engine import DeerFlowProductionEngine
 
 
@@ -116,6 +117,7 @@ def main():
                 print("  Debugging | 诊断流程:")
                 print("    !steps             Show current session steps | 查看当前会话步骤")
                 print("    !steps_all         Show all checkpoints (de‑duplicated) | 查看全部检查点（去重）")
+                print("    !diagnose          Analyze tool call patterns for loops | 分析工具调用模式检测循环")
                 # print("    !back <N>          Go back to step N | 回退到第N步")
                 # print("    !back_cp <N>       Go back to checkpoint N (from !steps_all) | 回退到第N个检查点")
                 print("  File Management | 文件管理:")
@@ -129,6 +131,8 @@ def main():
                 print("    !enable <skill>    Enable skill | 启用技能")
                 print("    !disable <skill>   Disable skill | 禁用技能")
                 print("  Runtime Modes | 运行模式:")
+                print("    !status            Show current session status and settings | 显示当前会话状态")
+                print("    !recursion_limit <N> Set recursion limit (default: 1000) | 设置递归限制")
                 print("    !plan on/off       Enable/disable plan mode | 开启/关闭计划模式")
                 print("    !subagent on/off   Enable/disable subagent delegation | 开启/关闭子代理")
                 print("  Memory System | 记忆系统:")
@@ -233,6 +237,10 @@ def main():
                     new_flag = "✓ New content | 有新内容" if cp["has_new_content"] else "✗ No new content | 无新增"
                     print(f"  [{idx}] {cp['checkpoint_id'][:8]}... | ts:{ts_display} | {new_flag}")
                 print()
+                continue
+
+            if user_input.lower() == "!diagnose":
+                engine.diagnose_tool_calls()
                 continue
 
             # TODO: Rollback commands — checkpoint_id passthrough to DeerFlowClient is not yet implemented.
@@ -351,6 +359,10 @@ def main():
                 engine.disable_skill(parts[1])
                 continue
 
+            if user_input.lower() == "!status":
+                engine.show_status()
+                continue
+
             if user_input.lower().startswith("!plan"):
                 parts = user_input.split()
                 if len(parts) < 2 or parts[1] not in ["on", "off"]:
@@ -371,6 +383,18 @@ def main():
                     engine.enable_subagent()
                 else:
                     engine.disable_subagent()
+                continue
+
+            if user_input.lower().startswith("!recursion_limit"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !recursion_limit <value> | 用法: !recursion_limit <数值>")
+                    continue
+                try:
+                    limit = int(parts[1])
+                    engine.set_recursion_limit(limit)
+                except ValueError:
+                    print("[Error] Recursion limit must be an integer | 递归限制必须是整数")
                 continue
 
             if user_input.lower() == "!memory":
@@ -399,8 +423,39 @@ def main():
         except KeyboardInterrupt:
             engine.shutdown()
             break
+        except RecursionError as e:
+            print(f"\n\n[Critical Error | 严重错误] RecursionError: {str(e)}")
+            print("\n[Traceback | 堆栈跟踪]")
+            traceback.print_exc()
+
+            # Show current status to help diagnose
+            print("\n[Session Status at Error | 错误发生时的会话状态]")
+            try:
+                client = engine.client
+                if client:
+                    subagent_enabled = getattr(client, '_subagent_enabled', False)
+                    plan_mode = getattr(client, '_plan_mode', False)
+                    print(f"  Subagent: {'✓ Enabled' if subagent_enabled else '✗ Disabled'}")
+                    print(f"  Plan Mode: {'✓ Enabled' if plan_mode else '✗ Disabled'}")
+            except Exception:
+                print("  (Unable to retrieve status)")
+
+            print("\n[Debug Info | 调试信息]")
+            print(f"  Current Session: {engine.current_session_id}")
+            print(f"  Checkpoint DB: {engine._get_checkpoint_path(engine.current_session_id)}")
+            print("\n[Troubleshooting | 故障排除]")
+            print("  1. 使用 !status 查看完整会话状态")
+            print("  2. 使用 !diagnose 分析工具调用模式")
+            print("  3. 使用 !steps_all 查看已保存的检查点")
+            print("  4. 使用 !export_all 导出完整检查点历史")
+            if engine.client and getattr(engine.client, '_subagent_enabled', False):
+                print("  5. Subagent 当前已启用 - 尝试关闭: !subagent off")
+            print()
+            print()
         except Exception as e:
-            print(f"\n\n[Error | 错误] {str(e)}")
+            print(f"\n\n[Error | 错误] {type(e).__name__}: {str(e)}")
+            print("\n[Traceback | 堆栈跟踪]")
+            traceback.print_exc()
             print()
 
 
