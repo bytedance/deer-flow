@@ -1,4 +1,4 @@
-"""Tests for skills/custom/data-analyst/scripts/weekly_kpi.py.
+"""Tests for skills/custom/weekly-report/scripts/weekly_kpi.py.
 
 Verifies design doc §6.2 output shape and key calculation invariants:
 - Weekly KPI summary fields use ``current_mean / current_peak / current_trough``
@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEEKLY_KPI_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "weekly_kpi.py"
-QUERY_WEEKLY_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "query_weekly.py"
+WEEKLY_KPI_PATH = REPO_ROOT / "skills" / "custom" / "weekly-report" / "scripts" / "weekly_kpi.py"
+QUERY_WEEKLY_PATH = REPO_ROOT / "skills" / "custom" / "weekly-report" / "scripts" / "query_weekly.py"
 
 
 def _load(path: Path, name: str):

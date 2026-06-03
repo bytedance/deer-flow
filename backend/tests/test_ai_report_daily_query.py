@@ -1,4 +1,4 @@
-"""Tests for skills/custom/data-analyst/scripts/query_daily.py.
+"""Tests for skills/custom/daily-report/scripts/query_daily.py.
 
 After the demo data path was removed, every data fetch goes through the
 InS-backed provider. These tests pin the script's CLI / validation / output
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "query_daily.py"
+SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "daily-report" / "scripts" / "query_daily.py"
 
 
 def _load_module():

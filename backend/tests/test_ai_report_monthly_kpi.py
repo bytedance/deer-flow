@@ -1,4 +1,4 @@
-"""Tests for skills/custom/data-analyst/scripts/monthly_kpi.py.
+"""Tests for skills/custom/monthly-report/scripts/monthly_kpi.py.
 
 Covers sprint plan M2/M7 acceptance items:
 - Weekly day_count-weighted month mean
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "monthly_kpi.py"
+SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "monthly-report" / "scripts" / "monthly_kpi.py"
 
 
 def _load_module():

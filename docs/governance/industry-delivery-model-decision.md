@@ -232,7 +232,7 @@ deer-flow/                         deer-flow/
 **变更内容**：
 1. 新建 `backend/packages/industry/` 目录，按行业分子目录
 2. `skills/custom/` 下的 `ins-*` 和诊断 Skill 迁移到 `skills/industry/{industry}/`
-3. `skills/custom/data-analyst` 保留在 custom（通用）
+3. `skills/custom/daily-report` 保留在 custom（通用）
 4. 前端新增 `workspace/industry/` 路由组
 5. 行业包各自的 `pyproject.toml` / `package.json`，声明独立的版本号和对 Core 的依赖版本范围
 

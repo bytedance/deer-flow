@@ -182,7 +182,7 @@ routes:
 
 ## Report Script Integration
 
-Report query scripts (`skills/custom/data-analyst/scripts/`) use the integration layer via a CLI bridge:
+Report query scripts (`skills/custom/daily-report/scripts/`) use the integration layer via a CLI bridge:
 
 1. Script checks `USE_PLATFORM=true` env var
 2. If set, calls `_platform_bridge.call_capability()` which invokes `integration-cli` subprocess

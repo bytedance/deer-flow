@@ -132,7 +132,7 @@ http_connector(connector_name="dataset_schema", params={"dataset_id": "ds_001"})
 - 快速验证集成，无需部署额外进程
 - 简单的 GET/POST 调用场景
 
-**优先级链（data-analyst SOUL.md 中定义）：**
+**优先级链（daily-report SOUL.md 中定义）：**
 
 1. **MCP tools**（如 `data_catalog.list_datasets`）— 最优先，功能最完整
 2. **http_connector** — 配置驱动，无需额外代码
@@ -174,7 +174,7 @@ WARN  http_connector retry connector_name=list_datasets tenant_id=default status
 
 ## 设备日/周/月报真数据（InS）
 
-设备日报、周报、月报通过 InS（神固云）实时拉取数据。该链路只在 data-analyst 脚本内生效，不会改变其它 `http_connector` 的调用方式。
+设备日报、周报、月报通过 InS（神固云）实时拉取数据。该链路只在设备报告脚本内生效，不会改变其它 `http_connector` 的调用方式。
 
 ### 配置方式
 

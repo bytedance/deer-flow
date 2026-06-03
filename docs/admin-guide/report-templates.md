@@ -184,7 +184,7 @@ agents/builtin/report-templates/          # builtin（随仓库版本控制，�
 "skill_unavailable": {
   "total": 2,
   "by_skill_action": [
-    {"skill_name": "data-analyst", "action": "disabled_after_publish", "count": 1},
+    {"skill_name": "daily-report", "action": "disabled_after_publish", "count": 1},
     {"skill_name": "ops-skill", "action": "registry_load_failed", "count": 1}
   ]
 }
@@ -309,7 +309,7 @@ V2 立项时会写迁移脚本 `migrate_report_templates.py`：扫描所有 `use
 | 看 fallback 30 天总数 | `grep '"type":"fallback_triggered"' {DEER_FLOW_HOME}/report-templates/.telemetry.log \| wc -l` |
 | 重新加载 builtin 模板 | 重启 Gateway（Python 进程） |
 | 禁用某个 skill | 关掉 `extensions_config.json` → `skills.{name}.enabled = false`；下次 registry 刷新生效 |
-| 测试 daily fallback 路径 | 把 `data-analyst` skill 临时禁用，跑一次 ai-report--daily → 应触发 fallback 并写入 telemetry |
+| 测试 daily fallback 路径 | 把 `daily-report` skill 临时禁用，跑一次 ai-report--daily → 应触发 fallback 并写入 telemetry |
 | 跑所有报告模板测试 | `cd backend && PYTHONPATH=. uv run pytest tests/test_report_template_*.py tests/test_builtin_report_templates.py tests/test_ai_report_*.py` |
 
 ---

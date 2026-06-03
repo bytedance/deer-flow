@@ -1,0 +1,148 @@
+# Report Script Registry — daily-report
+# Contract surface for the AI Report Custom Template platform
+# (see docs/plans/2026-05-14-ai-report-custom-template-design.md §9.1.1).
+#
+# - Each entry below is the canonical declaration of one report script's
+#   CLI args, output files, and resource limits.
+# - The platform's Script Registry loader discovers this file at skill
+#   enablement time, validates it, and exposes the scripts to DSL templates
+#   under the namespace "daily-report/{script_name}" (e.g. "daily-report/query_daily").
+# - When a DSL data_step / transform references one of these scripts, the
+#   runtime resolves {run_output_dir} to the ReportRun's scoped output
+#   directory and injects it into the script invocation environment
+#   (currently via DAILY_REPORT_OUTPUT_DIR).
+
+schema_version: "1"
+
+scripts:
+  query_daily:
+    entry: scripts/query_daily.py
+    kind: [data_step]
+    description: "查询单日运行数据（设备 KPI + 告警事件 + 同期对比）"
+    args_schema:
+      date:
+        type: date
+        required: true
+        description: "日报日期 YYYY-MM-DD"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型过滤"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 1000
+        description: "设备 ID 列表（与 scope 二选一）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 1000
+        description: "设备名称列表（与 --equipment 一一对应；缺省时按 ID 渲染）"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        description: "设备查询模式"
+      scope_filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件"
+      kpis:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        description: "关注的 KPI key 列表"
+      compare:
+        type: enum
+        values: [previous_day, previous_week, none]
+        default: previous_day
+        description: "对比基准"
+      aggregate:
+        type: flag
+        description: "聚合模式（仅返回日聚合统计）"
+    output_files:
+      - id: daily_data
+        path: "{run_output_dir}/data/daily_data.json"
+        description: "日报原始数据（design doc daily schema）"
+    timeout_seconds: 120
+    max_output_bytes: 52428800   # 50 MB
+
+  daily_kpi:
+    entry: scripts/daily_kpi.py
+    kind: [transform]
+    description: "计算日 KPI / 24h 趋势 / 异常 TopN / 处置建议"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径（query_daily 输出）"
+      output:
+        type: file_path
+        description: "输出 daily_kpi.json 路径（runtime 注入）"
+    output_files:
+      - id: daily_kpi
+        path: "{run_output_dir}/data/daily_kpi.json"
+        description: "日 KPI 与渲染就绪数据"
+    timeout_seconds: 60
+    max_output_bytes: 10485760   # 10 MB
+
+  list_equipment:
+    entry: scripts/list_equipment.py
+    kind: [form_options]
+    description: "查询设备目录、区域分组、可用 KPI（用于动态 options_source）"
+    args_schema:
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        default: all
+        description: "查询模式"
+      filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件（CSV）"
+      limit:
+        type: integer
+        min: 1
+        max: 10000
+        default: 50
+        description: "返回设备数量上限"
+    output_files:
+      - id: list_equipment
+        path: "{run_output_dir}/data/list_equipment.json"
+        description: "设备列表 + available_kpis（供 options_source 引用）"
+    outputs_schema:
+      equipment:
+        type: array
+        description: "设备列表，每条含 id/name/area/type"
+      available_kpis:
+        type: array
+        description: "可用 KPI 描述符列表"
+      area_counts:
+        type: object
+        description: "按 area 聚合的设备数量"
+    timeout_seconds: 30
+    max_output_bytes: 10485760   # 10 MB
+
+  export_report:
+    entry: scripts/export_report.py
+    kind: [transform]
+    description: "将 daily_kpi.json 导出为 Markdown 日报文件"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_kpi.json 路径"
+      output:
+        type: file_path
+        description: "输出 daily_report.md 路径"
+    output_files:
+      - id: daily_report
+        path: "{run_output_dir}/daily_report.md"
+        description: "日报 Markdown 文件"
+    timeout_seconds: 30
+    max_output_bytes: 10485760   # 10 MB

@@ -1,0 +1,164 @@
+# Report Script Registry — monthly-report
+# Contract surface for the AI Report Custom Template platform
+# (see docs/plans/2026-05-14-ai-report-custom-template-design.md §9.1.1).
+#
+# - Each entry below is the canonical declaration of one report script's
+#   CLI args, output files, and resource limits.
+# - The platform's Script Registry loader discovers this file at skill
+#   enablement time, validates it, and exposes the scripts to DSL templates
+#   under the namespace "monthly-report/{script_name}" (e.g. "monthly-report/query_monthly").
+# - When a DSL data_step / transform references one of these scripts, the
+#   runtime resolves {run_output_dir} to the ReportRun's scoped output
+#   directory and injects it into the script invocation environment
+#   (currently via MONTHLY_REPORT_OUTPUT_DIR, falling back to WEEKLY_REPORT_OUTPUT_DIR
+#   and DAILY_REPORT_OUTPUT_DIR).
+
+schema_version: "1"
+
+scripts:
+  query_monthly:
+    entry: scripts/query_monthly.py
+    kind: [data_step]
+    description: "查询月度运行数据（KPI + 维修 + 缺陷，含环比/同比）"
+    # alias map: DSL templates may use the short names ``mom``/``yoy`` for
+    # ``compare``. The platform's Script Registry loader MUST translate them to
+    # the canonical long names below before invoking the script — the script
+    # itself only accepts ``previous_month`` / ``previous_year_month`` / ``none``
+    # (matches design doc §3.3 + sprint plan M6).
+    args_aliases:
+      compare:
+        mom: previous_month
+        yoy: previous_year_month
+    args_schema:
+      report_month:
+        type: string
+        required: true
+        pattern: "^\\d{4}-\\d{2}$"
+        description: "月份 YYYY-MM"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 10000
+        description: "设备 ID 列表（与 scope 二选一）"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 10000
+        description: "设备名称列表（与 --equipment 一一对应；缺省时按 ID 渲染）"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        description: "设备查询模式（与 --equipment 二选一）"
+      scope_filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件"
+      kpis:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        description: "关注的 KPI key 列表（含月度专属 mtbf/mttr/target_rate）"
+      compare:
+        type: csv
+        # Long-name canonical enum; DSL ``mom``/``yoy`` short names are mapped
+        # via ``args_aliases`` above.
+        items: {pattern: "^(previous_month|previous_year_month|none)$"}
+        default: "previous_month"
+        description: "对比基准（CSV 多选；none 必须独立。DSL 短名 mom/yoy 由 args_aliases 翻译）"
+      aggregate:
+        type: flag
+        description: "聚合模式（跳过每桶告警明细，仅返回聚合 + 月级统计）"
+      include_daily:
+        type: flag
+        description: "保留每日序列（MVP 默认关闭，预留给 V2 趋势分析）"
+    output_files:
+      - id: monthly_data
+        path: "{run_output_dir}/data/monthly_data.json"
+        description: "月度运行数据（design doc §6.1 schema）"
+    timeout_seconds: 180
+    max_output_bytes: 104857600   # 100 MB
+
+  monthly_kpi:
+    entry: scripts/monthly_kpi.py
+    kind: [transform]
+    description: "计算月度 KPI / MTBF / MTTR / 周维度趋势 / 月环比+同比 / 重大事件 / 改进跟踪 / 下月计划"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "monthly_data.json 路径（query_monthly 输出）"
+      output:
+        type: file_path
+        description: "输出 monthly_kpi.json 路径（runtime 注入）"
+    output_files:
+      - id: monthly_kpi
+        path: "{run_output_dir}/data/monthly_kpi.json"
+        description: "月度 KPI 与渲染就绪数据（design doc §6.2 schema；不含 summary_markdown，全文渲染交给 export_report.render_markdown）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760   # 10 MB
+
+  list_equipment:
+    entry: scripts/list_equipment.py
+    kind: [form_options]
+    description: "查询设备目录、区域分组、可用 KPI（用于动态 options_source）"
+    args_schema:
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: all
+        description: "设备类型"
+      scope:
+        type: enum
+        values: [all, area, specific]
+        default: all
+        description: "查询模式"
+      filter:
+        type: string
+        max_length: 200
+        description: "区域名称或设备 ID 过滤条件（CSV）"
+      limit:
+        type: integer
+        min: 1
+        max: 10000
+        default: 50
+        description: "返回设备数量上限"
+    output_files:
+      - id: list_equipment
+        path: "{run_output_dir}/data/list_equipment.json"
+        description: "设备列表 + available_kpis（供 options_source 引用）"
+    outputs_schema:
+      equipment:
+        type: array
+        description: "设备列表，每条含 id/name/area/type"
+      available_kpis:
+        type: array
+        description: "可用 KPI 描述符列表"
+      area_counts:
+        type: object
+        description: "按 area 聚合的设备数量"
+    timeout_seconds: 30
+    max_output_bytes: 10485760   # 10 MB
+
+  export_report:
+    entry: scripts/export_report.py
+    kind: [transform]
+    description: "将 monthly_kpi.json 导出为 Markdown 月报文件"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "monthly_kpi.json 路径"
+      output:
+        type: file_path
+        description: "输出 monthly_report.md 路径"
+    output_files:
+      - id: monthly_report
+        path: "{run_output_dir}/monthly_report.md"
+        description: "月报 Markdown 文件"
+    timeout_seconds: 30
+    max_output_bytes: 10485760   # 10 MB

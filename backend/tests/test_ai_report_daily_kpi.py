@@ -1,4 +1,4 @@
-"""Tests for skills/custom/data-analyst/scripts/daily_kpi.py."""
+"""Tests for skills/custom/daily-report/scripts/daily_kpi.py."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "daily_kpi.py"
+SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "daily-report" / "scripts" / "daily_kpi.py"
 
 
 def _load_module():

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts"
+SCRIPTS_DIR = REPO_ROOT / "skills" / "custom" / "monthly-report" / "scripts"
 
 
 def _load(name: str):

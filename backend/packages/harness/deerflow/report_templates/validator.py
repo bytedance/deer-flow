@@ -571,7 +571,7 @@ def _require_registered(
                 path=f"{path}.name",
                 message=(
                     f"script name {qualified_name!r} must be namespaced as 'skill/script' "
-                    "(e.g. 'data-analyst/query_daily')"
+                    "(e.g. 'daily-report/query_daily')"
                 ),
             )
         )

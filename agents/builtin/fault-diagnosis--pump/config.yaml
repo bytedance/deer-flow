@@ -10,7 +10,6 @@ tool_groups:
   - bash
 exclude_tools: []
 skills:
-  - data-analyst
   - pump-fault-diagnosis
 mcp_servers: null
 tags:

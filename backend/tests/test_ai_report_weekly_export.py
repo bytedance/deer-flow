@@ -1,5 +1,5 @@
 """Tests for the weekly export branch in
-skills/custom/data-analyst/scripts/export_report.py.
+skills/custom/weekly-report/scripts/export_report.py.
 
 Key contracts:
 - ``report_type="daily"`` is the default and behaves exactly as before
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXPORT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "export_report.py"
+EXPORT_PATH = REPO_ROOT / "skills" / "custom" / "weekly-report" / "scripts" / "export_report.py"
 
 
 def _load_export():

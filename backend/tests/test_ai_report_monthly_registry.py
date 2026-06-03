@@ -1,4 +1,4 @@
-"""Monthly contract tests for ``skills/custom/data-analyst/report_scripts.yaml``.
+"""Monthly contract tests for ``skills/custom/monthly-report/report_scripts.yaml``.
 
 Mirrors test_ai_report_weekly_registry.py but focuses on the monthly entries
 introduced by Sprint M6:
@@ -23,7 +23,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SKILL_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst"
+SKILL_DIR = REPO_ROOT / "skills" / "custom" / "monthly-report"
 REGISTRY_PATH = SKILL_DIR / "report_scripts.yaml"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 

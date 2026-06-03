@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-_SCRIPTS_PATH = Path(__file__).parent.parent.parent / "skills" / "custom" / "data-analyst" / "scripts"
+_SCRIPTS_PATH = Path(__file__).parent.parent.parent / "skills" / "custom" / "daily-report" / "scripts"
 
 
 def _load_script_module(name: str):

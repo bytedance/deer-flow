@@ -1,4 +1,4 @@
-"""Contract tests for ``skills/custom/data-analyst/report_scripts.yaml``.
+"""Contract tests for ``skills/custom/weekly-report/report_scripts.yaml``.
 
 The YAML is the **contract surface** between this skill and the AI Report
 Custom Template platform (design §9.1.1). These tests verify three invariants
@@ -6,7 +6,7 @@ that would silently break the contract if drifted:
 
 1. The YAML parses and follows the schema_version=1 shape.
 2. Every script declared in YAML actually exists on disk under
-   ``skills/custom/data-analyst/scripts/`` and its CLI accepts every
+   ``skills/custom/weekly-report/scripts/`` and its CLI accepts every
    declared arg.
 3. Field names align with the weekly DSL draft in
    ``docs/plans/2026-05-14-ai-report-custom-template-design.md`` §13.3
@@ -26,7 +26,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SKILL_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst"
+SKILL_DIR = REPO_ROOT / "skills" / "custom" / "weekly-report"
 REGISTRY_PATH = SKILL_DIR / "report_scripts.yaml"
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 WEEKLY_TEMPLATE_DIR = REPO_ROOT / "agents" / "builtin" / "report-templates" / "weekly-equipment"

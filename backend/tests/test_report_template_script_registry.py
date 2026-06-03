@@ -72,18 +72,18 @@ def _write_skill(tmp_path: Path, skill_name: str, manifest: dict | None) -> Path
 
 class TestLoadRegistry:
     def test_loads_valid_manifest(self, tmp_path: Path):
-        skill_dir = _write_skill(tmp_path, "data-analyst", VALID_MANIFEST)
-        reg = _build_registry_from_skills([("data-analyst", skill_dir, True)])
+        skill_dir = _write_skill(tmp_path, "daily-report", VALID_MANIFEST)
+        reg = _build_registry_from_skills([("daily-report", skill_dir, True)])
         assert sorted(reg.scripts.keys()) == [
-            "data-analyst/list_equipment",
-            "data-analyst/query_daily",
+            "daily-report/list_equipment",
+            "daily-report/query_daily",
         ]
 
     def test_descriptor_fields_populated(self, tmp_path: Path):
-        skill_dir = _write_skill(tmp_path, "data-analyst", VALID_MANIFEST)
-        reg = _build_registry_from_skills([("data-analyst", skill_dir, True)])
-        d = reg.scripts["data-analyst/query_daily"]
-        assert d.skill_name == "data-analyst"
+        skill_dir = _write_skill(tmp_path, "daily-report", VALID_MANIFEST)
+        reg = _build_registry_from_skills([("daily-report", skill_dir, True)])
+        d = reg.scripts["daily-report/query_daily"]
+        assert d.skill_name == "daily-report"
         assert d.script_name == "query_daily"
         assert d.entry == "scripts/query_daily.py"
         assert d.kinds == ("data_step",)
@@ -251,17 +251,17 @@ class TestRegistryAccessors:
 
 class TestCachedLoad:
     def test_load_registry_uses_skill_storage(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-        skill_dir = _write_skill(tmp_path, "data-analyst", VALID_MANIFEST)
+        skill_dir = _write_skill(tmp_path, "daily-report", VALID_MANIFEST)
 
         from deerflow.report_templates import script_registry as sr
 
         monkeypatch.setattr(
             sr,
             "_discover_skills",
-            lambda *, enabled_only: [("data-analyst", skill_dir, True)],
+            lambda *, enabled_only: [("daily-report", skill_dir, True)],
         )
         reg = load_registry()
-        assert "data-analyst/list_equipment" in reg.scripts
+        assert "daily-report/list_equipment" in reg.scripts
 
     def test_load_registry_handles_no_skills(self, monkeypatch: pytest.MonkeyPatch):
         from deerflow.report_templates import script_registry as sr

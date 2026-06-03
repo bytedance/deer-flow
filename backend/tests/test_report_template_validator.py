@@ -32,7 +32,7 @@ from deerflow.report_templates.validator import validate_dsl
 
 @pytest.fixture
 def registry(tmp_path: Path):
-    skill_dir = tmp_path / "data-analyst"
+    skill_dir = tmp_path / "daily-report"
     skill_dir.mkdir()
     manifest = {
         "schema_version": "1",
@@ -77,7 +77,7 @@ def registry(tmp_path: Path):
     (skill_dir / REPORT_SCRIPTS_FILE).write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
     )
-    return _build_registry_from_skills([("data-analyst", skill_dir, True)])
+    return _build_registry_from_skills([("daily-report", skill_dir, True)])
 
 
 def _good_dsl() -> dict[str, Any]:
@@ -111,7 +111,7 @@ def _good_dsl() -> dict[str, Any]:
                 "before_step": {
                     "id": "equipment_catalog",
                     "kind": "script",
-                    "name": "data-analyst/list_equipment",
+                    "name": "daily-report/list_equipment",
                     "args": {"type": "{{ $.form.scope.equipment_type }}", "scope": "all", "limit": 100},
                 },
                 "fields": [
@@ -135,7 +135,7 @@ def _good_dsl() -> dict[str, Any]:
             {
                 "id": "data1",
                 "kind": "script",
-                "name": "data-analyst/query_daily",
+                "name": "daily-report/query_daily",
                 "args": {
                     "date": "{{ $.form.scope.report_date }}",
                     "equipment_type": "{{ $.form.scope.equipment_type }}",
@@ -149,7 +149,7 @@ def _good_dsl() -> dict[str, Any]:
             {
                 "id": "kpi1",
                 "kind": "script",
-                "name": "data-analyst/daily_kpi",
+                "name": "daily-report/daily_kpi",
                 "args": {"input": "data1.daily_data"},
                 "outputs": {"daily_kpi": "daily_kpi.json"},
             }
@@ -312,7 +312,7 @@ class TestSectionSource:
 class TestRegistryPass:
     def test_unknown_script(self, registry):
         dsl = _good_dsl()
-        dsl["data_steps"][0]["name"] = "data-analyst/no_such_script"
+        dsl["data_steps"][0]["name"] = "daily-report/no_such_script"
         report = validate_dsl(dsl, registry=registry)
         assert any(e.code == "UNKNOWN_SCRIPT" for e in report.errors)
 
@@ -350,7 +350,7 @@ class TestRegistryPass:
 
     def test_before_step_validated(self, registry):
         dsl = _good_dsl()
-        dsl["form_steps"][1]["before_step"]["name"] = "data-analyst/missing_script"
+        dsl["form_steps"][1]["before_step"]["name"] = "daily-report/missing_script"
         report = validate_dsl(dsl, registry=registry)
         assert any(
             e.code == "UNKNOWN_SCRIPT" and "before_step" in e.path
@@ -455,7 +455,7 @@ def _spec_52_dsl() -> dict[str, Any]:
                 "before_step": {
                     "id": "equipment_catalog",
                     "kind": "script",
-                    "name": "data-analyst/list_equipment",
+                    "name": "daily-report/list_equipment",
                     "args": {
                         "type": "{{ $.form.scope.equipment_type }}",
                         "scope": "all",
@@ -506,7 +506,7 @@ def _spec_52_dsl() -> dict[str, Any]:
             {
                 "id": "daily_data",
                 "kind": "script",
-                "name": "data-analyst/query_daily",
+                "name": "daily-report/query_daily",
                 "args": {
                     "date": "{{ $.form.scope.report_date }}",
                     "equipment_type": "{{ $.form.scope.equipment_type }}",
@@ -521,7 +521,7 @@ def _spec_52_dsl() -> dict[str, Any]:
             {
                 "id": "daily_kpi",
                 "kind": "script",
-                "name": "data-analyst/daily_kpi",
+                "name": "daily-report/daily_kpi",
                 "args": {"input": "daily_data.daily_data"},
                 "outputs": {"daily_kpi": "daily_kpi.json"},
             }

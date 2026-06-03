@@ -1222,7 +1222,7 @@ curl http://localhost:8001/api/agents
 | --- | --- | --- |
 | `researcher` | `agents/builtin/researcher/` | 深度信息检索、文献分析、研究报告 |
 | `code-reviewer` | `agents/builtin/code-reviewer/` | 代码审查、质量分析 |
-| `data-analyst` | `agents/builtin/data-analyst/` | 数据分析、可视化建议 |
+| `data-analyst` | `agents/builtin/daily-report/` | 数据分析、可视化建议 |
 | `writer` | `agents/builtin/writer/` | 文案撰写、内容编辑、翻译 |
 
 #### 4.15.5 MCP Server 过滤机制

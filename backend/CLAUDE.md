@@ -374,7 +374,7 @@ Tools are thin shells (≤50 lines each) that unpack args, call a `runtime/` mod
 
 **Script registry** (skill-contributed):
 
-Each skill may ship a `report_scripts.yaml` at its root. The registry scans enabled skills and exposes scripts namespaced as `{skill_name}/{script_name}` (e.g. `data-analyst/query_daily`). DSL `data_steps[].name` must use the qualified name. `ScriptDescriptorYaml` supports `args_aliases: dict[str, dict[str, str]]` for translating short DSL names to canonical script enum values (consumed by `runtime/data_runner.py`).
+Each skill may ship a `report_scripts.yaml` at its root. The registry scans enabled skills and exposes scripts namespaced as `{skill_name}/{script_name}` (e.g. `daily-report/query_daily`). DSL `data_steps[].name` must use the qualified name. `ScriptDescriptorYaml` supports `args_aliases: dict[str, dict[str, str]]` for translating short DSL names to canonical script enum values (consumed by `runtime/data_runner.py`).
 
 **Section components**: `markdown`, `card`, `card_group`, `echart`, `table`, `image`. Validator warns when a `section.source` tail doesn't look like the component's expected payload (e.g. `echart` should point at something ending in `chart`/`option`).
 
@@ -434,7 +434,7 @@ Each skill may ship a `report_scripts.yaml` at its root. The registry scans enab
 - **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
-- **Data-analyst InS reports**: `skills/custom/data-analyst/scripts/query_daily.py`, `query_weekly.py`, and `query_monthly.py` always run through the InS provider — there is no demo-fallback path. Output carries top-level `data_source="ins"` and `data_notes=[]` so downstream KPI/export steps can preserve provenance. Any InS-side failure (network/auth/missing point/features-tool unavailable) emits `{"error": "HttpProviderError: ..."}` to stdout; the SOUL must surface that error to the user instead of generating a fake report. The InS adapter handles four endpoint series — `2k` (legacy vibration, nested name-based payload), `6k` (corrosion monitoring, nested key-based payload), `8k` (default rotating machinery, flat payload), and `9k` (high-end rotating / reciprocating, flat payload). See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for failure handling and 2k threshold semantics.
+- **Data-analyst InS reports**: `skills/custom/daily-report/scripts/query_daily.py`, `query_weekly.py`, and `query_monthly.py` always run through the InS provider — there is no demo-fallback path. Output carries top-level `data_source="ins"` and `data_notes=[]` so downstream KPI/export steps can preserve provenance. Any InS-side failure (network/auth/missing point/features-tool unavailable) emits `{"error": "HttpProviderError: ..."}` to stdout; the SOUL must surface that error to the user instead of generating a fake report. The InS adapter handles four endpoint series — `2k` (legacy vibration, nested name-based payload), `6k` (corrosion monitoring, nested key-based payload), `8k` (default rotating machinery, flat payload), and `9k` (high-end rotating / reciprocating, flat payload). See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for failure handling and 2k threshold semantics.
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 

@@ -6,7 +6,7 @@ Markdown document. The MVP target is section types ``markdown`` and ``table``;
 prototype can later evolve in Phase 4 without changing this surface.
 
 This module is intentionally **independent** of
-``skills/custom/data-analyst/scripts/export_report.py`` so that:
+``export_report.py`` so that:
 
 1. The Phase 0 spike does not touch the production daily-report renderer.
 2. Phase 4 can either inline the production version or call back into this
@@ -306,7 +306,7 @@ def _render_confidence_badge(props: dict[str, Any]) -> list[str]:
 
 def _render_echart_placeholder(props: dict[str, Any]) -> list[str]:
     # Phase 0 prototype: do not invoke trend_chart_to_svg yet (lives in
-    # data-analyst skill). Just record that the chart is present.
+    # report skill). Just record that the chart is present.
     chart_type = ""
     option = props.get("option")
     if isinstance(option, dict):

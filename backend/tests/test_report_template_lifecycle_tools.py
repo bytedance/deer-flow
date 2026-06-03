@@ -49,8 +49,8 @@ def repo(runtime_root: Path) -> FileSystemReportTemplateRepository:
 
 @pytest.fixture
 def script_registry(tmp_path: Path):
-    """Build a registry equivalent to the data-analyst manifest used by §5.2."""
-    skill_dir = tmp_path / "data-analyst"
+    """Build a registry equivalent to the daily-report manifest used by §5.2."""
+    skill_dir = tmp_path / "daily-report"
     skill_dir.mkdir()
     import yaml
 
@@ -78,7 +78,7 @@ def script_registry(tmp_path: Path):
     (skill_dir / REPORT_SCRIPTS_FILE).write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
     )
-    return _build_registry_from_skills([("data-analyst", skill_dir, True)])
+    return _build_registry_from_skills([("daily-report", skill_dir, True)])
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ GOOD_DSL: dict[str, Any] = {
         {
             "id": "data1",
             "kind": "script",
-            "name": "data-analyst/query_daily",
+            "name": "daily-report/query_daily",
             "args": {"date": "{{ $.form.scope.report_date }}"},
             "outputs": {"daily_data": "daily_data.json"},
         }
@@ -145,7 +145,7 @@ GOOD_DSL: dict[str, Any] = {
         {
             "id": "kpi1",
             "kind": "script",
-            "name": "data-analyst/daily_kpi",
+            "name": "daily-report/daily_kpi",
             "args": {"input": "data1.daily_data"},
             "outputs": {"daily_kpi": "daily_kpi.json"},
         }
@@ -310,7 +310,7 @@ class TestValidate:
 
     def test_unknown_script_reported(self, repo, patched_runtime):
         bad = copy.deepcopy(GOOD_DSL)
-        bad["data_steps"][0]["name"] = "data-analyst/no_such"
+        bad["data_steps"][0]["name"] = "daily-report/no_such"
         out = _payload(rt.report_template_validate_tool.invoke({"dsl": bad}))
         assert any(e["code"] == "UNKNOWN_SCRIPT" for e in out["errors"])
 

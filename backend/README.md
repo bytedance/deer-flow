@@ -315,7 +315,7 @@ MCP servers and skill states in a single file:
 
 ### InS-backed equipment reports
 
-The data-analyst daily / weekly / monthly equipment report scripts always go through the InS provider — there is no demo-data fallback.
+The daily/weekly/monthly equipment report scripts always go through the InS provider — there is no demo-data fallback.
 
 - The provider for these three reports is fixed to `ins` and ignores the `DEER_FLOW_DATA_PROVIDER` env var.
 - Set `INS_FACTORY_ID` only when the downstream InS deployment requires a factory-scoped `factoryId` parameter.

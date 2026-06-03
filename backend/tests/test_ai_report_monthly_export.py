@@ -1,4 +1,4 @@
-"""Tests for monthly export path in skills/custom/data-analyst/scripts/export_report.py.
+"""Tests for monthly export path in skills/custom/monthly-report/scripts/export_report.py.
 
 Covers sprint plan M3/M7 acceptance items:
 - write_report(report_type='monthly') writes monthly_report.{md,pdf} filenames
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts" / "export_report.py"
+SCRIPT_PATH = REPO_ROOT / "skills" / "custom" / "monthly-report" / "scripts" / "export_report.py"
 
 
 def _load_module():

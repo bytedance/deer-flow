@@ -323,7 +323,7 @@ if __name__ == "__main__":
 }
 ```
 
-配置后，data-analyst Agent 会自动通过 MCP 协议调用 `data_catalog.*` 工具（优先级高于 http_connector）。
+配置后，设备报告 Agent 会自动通过 MCP 协议调用 `data_catalog.*` 工具（优先级高于 http_connector）。
 
 ## 安全要求
 

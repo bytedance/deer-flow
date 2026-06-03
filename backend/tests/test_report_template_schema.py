@@ -49,7 +49,7 @@ def _minimal_dsl_dict() -> dict[str, Any]:
             {
                 "id": "data1",
                 "kind": "script",
-                "name": "data-analyst/query_daily",
+                "name": "daily-report/query_daily",
                 "args": {"date": "{{ $.form.scope.report_date }}"},
                 "outputs": {"daily_data": "daily_data.json"},
             }
@@ -58,7 +58,7 @@ def _minimal_dsl_dict() -> dict[str, Any]:
             {
                 "id": "kpi1",
                 "kind": "script",
-                "name": "data-analyst/daily_kpi",
+                "name": "daily-report/daily_kpi",
                 "input": "data1.daily_data",
                 "outputs": {"daily_kpi": "daily_kpi.json"},
             }
@@ -249,7 +249,7 @@ class TestFormStep:
                 "before_step": {
                     "id": "catalog",
                     "kind": "script",
-                    "name": "data-analyst/list_equipment",
+                    "name": "daily-report/list_equipment",
                     "args": {"type": "pump"},
                 },
                 "fields": [{"name": "ids", "label": "IDs", "type": "text"}],

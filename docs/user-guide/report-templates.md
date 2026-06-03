@@ -117,7 +117,7 @@ form_steps:                # ← 第 1 块：多步表单
 data_steps:                # ← 第 2 块：拉数据
   - id: daily_data
     kind: script
-    name: data-analyst/query_daily
+    name: daily-report/query_daily
     args:
       date: "{{ $.form.scope.report_date }}"   # ← JSONPath 占位符
     outputs:
@@ -126,7 +126,7 @@ data_steps:                # ← 第 2 块：拉数据
 transforms:                # ← 第 3 块:转换/聚合
   - id: daily_kpi
     kind: script
-    name: data-analyst/daily_kpi
+    name: daily-report/daily_kpi
     input: daily_data.daily_data
     outputs:
       daily_kpi: daily_kpi.json
@@ -166,7 +166,7 @@ export:                    # ← 第 5 块:导出
   before_step:                          # 进入这步前先跑一个脚本
     id: equipment_catalog
     kind: script
-    name: data-analyst/list_equipment
+    name: daily-report/list_equipment
     args:
       type: "{{ $.form.scope.equipment_type }}"   # 引用上一步的字段
   fields:

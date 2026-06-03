@@ -161,7 +161,7 @@ class TestPayloadBuilderIntegration:
                 {
                     "id": "demo_data",
                     "kind": "script",
-                    "name": "data-analyst/list_equipment",
+                    "name": "daily-report/list_equipment",
                     "args": {"type": "all"},
                     "outputs": {"chart": "demo_data.json"},
                 }

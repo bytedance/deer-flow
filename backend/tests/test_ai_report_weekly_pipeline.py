@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "data-analyst" / "scripts"
+SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "weekly-report" / "scripts"
 
 
 def _load_module(name: str):

@@ -1,0 +1,317 @@
+# Report Script Registry — monitoring-analysis
+# Contract surface for the AI Report Custom Template platform
+# (see docs/plans/2026-05-14-ai-report-custom-template-design.md §9.1.1).
+#
+# - Each entry below is the canonical declaration of one report script's
+#   CLI args, output files, and resource limits.
+# - The platform's Script Registry loader discovers this file at skill
+#   enablement time, validates it, and exposes the scripts to DSL templates
+#   under the namespace "monitoring-analysis/{script_name}".
+# - Pro and Ultra tier scripts are registered as stubs; their implementations
+#   are referenced by the monitoring-analysis agent SOUL.md but not yet built.
+
+schema_version: "1"
+
+scripts:
+  query_trend:
+    entry: scripts/query_trend.py
+    kind: [data_step]
+    description: "查询时间序列趋势数据（设备 KPI 时序 + 告警/事件可选）"
+    args_schema:
+      metric_keys:
+        type: csv
+        items: {pattern: "^[a-z_]+$"}
+        max_items: 50
+        required: true
+        description: "指标 key 列表（CSV）"
+      date_range:
+        type: string
+        required: true
+        max_length: 50
+        description: "日期范围 YYYY-MM-DD..YYYY-MM-DD"
+      aggregation:
+        type: enum
+        values: [hourly, daily, weekly]
+        default: daily
+        description: "聚合粒度"
+      forecast_horizon:
+        type: integer
+        min: 0
+        max: 90
+        default: 7
+        description: "预测天数"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 1000
+        description: "设备 ID 列表（CSV）"
+      include_alarms:
+        type: flag
+        description: "包含告警事件序列"
+      include_events:
+        type: flag
+        description: "包含启停事件序列"
+    output_files:
+      - id: trend_data
+        path: "{run_output_dir}/data/trend_data.json"
+        description: "趋势原始数据"
+    timeout_seconds: 120
+    max_output_bytes: 52428800
+
+  trend_analysis:
+    entry: scripts/trend_analysis.py
+    kind: [transform]
+    description: "趋势分析：线性回归、移动平均、预测、§13.2 证据链"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: trend_analysis
+        path: "{run_output_dir}/data/trend_analysis.json"
+        description: "趋势分析结果（findings/evidence/forecast/trend_chart）"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  data_quality:
+    entry: scripts/data_quality.py
+    kind: [transform]
+    description: "数据质量评估：缺失值检测、±5σ 异常点标记、完整率计算（Pro）；三维质量评分、线性插值（Ultra）"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      tier:
+        type: enum
+        values: [pro, ultra]
+        default: pro
+        description: "能力等级"
+    output_files:
+      - id: data_quality
+        path: "{run_output_dir}/data/data_quality.json"
+        description: "数据质量评估结果"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  export_report:
+    entry: scripts/export_report.py
+    kind: [transform]
+    description: "将 monitoring_features.json 导出为 Markdown/PDF 监测报告"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "monitoring_features.json 路径"
+      output:
+        type: file_path
+        description: "输出报告路径"
+    output_files:
+      - id: monitoring_report
+        path: "{run_output_dir}/monitoring_report.md"
+        description: "监测报告 Markdown 文件"
+    timeout_seconds: 30
+    max_output_bytes: 10485760
+
+  # ── Pro Tier Scripts (monitoring:pro tool group) ──
+
+  pro_trend:
+    entry: scripts/pro_trend.py
+    kind: [transform]
+    description: "Pro 趋势分析：多模型回归（线性/多项式/指数）、R²_adj 选优、STL 分解、PELT 变点检测、预测置信区间"
+    dependencies: [scikit-learn, statsmodels, ruptures]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      forecast_horizon:
+        type: integer
+        min: 1
+        max: 90
+        default: 14
+    output_files:
+      - id: pro_trend_analysis
+        path: "{run_output_dir}/data/pro_trend_analysis.json"
+        description: "Pro 趋势分析结果"
+    timeout_seconds: 120
+    max_output_bytes: 20971520
+
+  pro_anomaly:
+    entry: scripts/pro_anomaly.py
+    kind: [transform]
+    description: "Pro 异常检测：Isolation Forest、DBSCAN 聚类、自适应滚动阈值"
+    dependencies: [scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: pro_anomaly_result
+        path: "{run_output_dir}/data/pro_anomaly_result.json"
+        description: "Pro 异常检测结果"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  pro_kpi:
+    entry: scripts/pro_kpi.py
+    kind: [transform]
+    description: "Pro KPI 健康评估：健康评分趋势、同类设备百分位对比、加权综合评分"
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径"
+    output_files:
+      - id: pro_kpi_result
+        path: "{run_output_dir}/data/pro_kpi_result.json"
+        description: "Pro KPI 健康评估结果"
+    timeout_seconds: 60
+    max_output_bytes: 10485760
+
+  pro_correlation:
+    entry: scripts/pro_correlation.py
+    kind: [transform]
+    description: "Pro 关联分析：Spearman/Kendall 系数、时滞互相关(lag -7~+7)、偏相关"
+    dependencies: [scipy, scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: pro_correlation_result
+        path: "{run_output_dir}/data/pro_correlation_result.json"
+        description: "Pro 关联分析结果"
+    timeout_seconds: 90
+    max_output_bytes: 20971520
+
+  pro_spectrum:
+    entry: scripts/pro_spectrum.py
+    kind: [transform]
+    description: "Pro 图谱分析：Hilbert 包络谱、倒谱、轴承故障频率匹配、边带检测"
+    dependencies: [scipy]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "waveform_data.json 路径"
+      features:
+        type: file_path
+        required: true
+        description: "spectrum_features.json 路径"
+      equipment_type:
+        type: string
+        max_length: 100
+        description: "设备类型"
+    output_files:
+      - id: pro_spectrum_result
+        path: "{run_output_dir}/data/pro_spectrum_result.json"
+        description: "Pro 图谱分析结果"
+    timeout_seconds: 120
+    max_output_bytes: 31457280
+
+  # ── Ultra Tier Scripts (monitoring:ultra tool group) ──
+
+  ultra_trend:
+    entry: scripts/ultra_trend.py
+    kind: [transform]
+    description: "Ultra 趋势分析：ONNX LSTM 预测、80%/95% 置信区间、协变组检测、自适应阈值推荐"
+    dependencies: [scikit-learn, statsmodels, ruptures]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+      forecast_horizon:
+        type: integer
+        min: 1
+        max: 90
+        default: 14
+    output_files:
+      - id: ultra_trend_result
+        path: "{run_output_dir}/data/ultra_trend_result.json"
+        description: "Ultra 趋势分析结果"
+    timeout_seconds: 180
+    max_output_bytes: 31457280
+
+  ultra_anomaly:
+    entry: scripts/ultra_anomaly.py
+    kind: [transform]
+    description: "Ultra 异常检测：Autoencoder 评分、多传感器交叉验证、故障签名根因排序"
+    dependencies: [scikit-learn]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: ultra_anomaly_result
+        path: "{run_output_dir}/data/ultra_anomaly_result.json"
+        description: "Ultra 异常检测结果"
+    timeout_seconds: 180
+    max_output_bytes: 31457280
+
+  ultra_kpi:
+    entry: scripts/ultra_kpi.py
+    kind: [transform]
+    description: "Ultra KPI 健康评估：预测性健康评分、风险排序、风险矩阵数据"
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "daily_data.json 路径"
+    output_files:
+      - id: ultra_kpi_result
+        path: "{run_output_dir}/data/ultra_kpi_result.json"
+        description: "Ultra KPI 健康评估结果"
+    timeout_seconds: 90
+    max_output_bytes: 10485760
+
+  ultra_correlation:
+    entry: scripts/ultra_correlation.py
+    kind: [transform]
+    description: "Ultra 关联分析：Granger 因果检验(lag 1-7)、传递熵、Graphical Lasso 因果图"
+    dependencies: [scipy, scikit-learn]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "trend_data.json 路径"
+    output_files:
+      - id: ultra_correlation_result
+        path: "{run_output_dir}/data/ultra_correlation_result.json"
+        description: "Ultra 关联分析结果"
+    timeout_seconds: 120
+    max_output_bytes: 20971520
+
+  ultra_spectrum:
+    entry: scripts/ultra_spectrum.py
+    kind: [transform]
+    description: "Ultra 图谱分析：CNN 分类、CNN+规则综合裁决、故障演化追踪"
+    dependencies: [scipy]
+    optional_dependencies: [onnxruntime]
+    args_schema:
+      input:
+        type: file_path
+        required: true
+        description: "waveform_data.json 路径"
+      features:
+        type: file_path
+        required: true
+        description: "spectrum_features.json 路径"
+      equipment_type:
+        type: string
+        max_length: 100
+        description: "设备类型"
+    output_files:
+      - id: ultra_spectrum_result
+        path: "{run_output_dir}/data/ultra_spectrum_result.json"
+        description: "Ultra 图谱分析结果"
+    timeout_seconds: 180
+    max_output_bytes: 52428800

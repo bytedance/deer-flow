@@ -76,7 +76,7 @@ class TestProviderEnvInjection:
             try:
                 data_runner.run_script(
                     step_id="s1",
-                    script_qualified_name="data-analyst/query_daily",
+                    script_qualified_name="daily-report/query_daily",
                     args={},
                     registry=reg,
                     run_output_dir=tmp_path,
@@ -107,7 +107,7 @@ class TestProviderEnvInjection:
             try:
                 data_runner.run_script(
                     step_id="s1",
-                    script_qualified_name="data-analyst/query_daily",
+                    script_qualified_name="daily-report/query_daily",
                     args={},
                     registry=reg,
                     run_output_dir=tmp_path,
@@ -138,7 +138,7 @@ class TestProviderEnvInjection:
             try:
                 data_runner.run_script(
                     step_id="s1",
-                    script_qualified_name="data-analyst/query_daily",
+                    script_qualified_name="daily-report/query_daily",
                     args={},
                     registry=reg,
                     run_output_dir=tmp_path,
@@ -177,14 +177,14 @@ class TestRunDataStepsProviderPassthrough:
                 {
                     "id": "s1",
                     "kind": "script",
-                    "name": "data-analyst/query_daily",
+                    "name": "daily-report/query_daily",
                     "args": {},
                     "provider": "platform",
                 },
                 {
                     "id": "s2",
                     "kind": "script",
-                    "name": "data-analyst/query_weekly",
+                    "name": "daily-report/query_weekly",
                     "args": {},
                 },
             ],

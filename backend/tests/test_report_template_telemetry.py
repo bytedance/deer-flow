@@ -127,7 +127,7 @@ class TestCollectorPrimitives:
         ]
 
     def test_skill_unavailable_counter(self, fresh_telemetry):
-        fresh_telemetry.record_skill_unavailable(skill_name="data-analyst", action="disabled_after_publish")
+        fresh_telemetry.record_skill_unavailable(skill_name="daily-report", action="disabled_after_publish")
         s = fresh_telemetry.summary()
         assert s["skill_unavailable"]["total"] == 1
 
@@ -223,7 +223,7 @@ class TestValidatorHook:
                 {
                     "id": "demo_data",
                     "kind": "script",
-                    "name": "data-analyst/list_equipment",
+                    "name": "daily-report/list_equipment",
                     "args": {"type": "all"},
                     "outputs": {"payload": "demo_data.json"},
                 }
@@ -273,10 +273,10 @@ class TestDataRunnerSkillHook:
 
         empty_registry = ScriptRegistry(scripts={})
         with pytest.raises(UnknownScriptError):
-            _resolve_descriptor("data-analyst/missing_script", empty_registry)
+            _resolve_descriptor("daily-report/missing_script", empty_registry)
         s = fresh_telemetry.summary()
         agg = {(row["skill_name"], row["action"]): row["count"] for row in s["skill_unavailable"]["by_skill_action"]}
-        assert agg[("data-analyst", "disabled_after_publish")] == 1
+        assert agg[("daily-report", "disabled_after_publish")] == 1
 
 
 # ---------------------------------------------------------------------------

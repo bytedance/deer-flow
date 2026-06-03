@@ -233,14 +233,10 @@ trend / diagnosis / failure-analysis 三类是 §13.2 解释性报告：
 
 可用脚本通过 `report_template_validate(dsl)` 自动校验（registry 在后端检查），常用脚本：
 
-- `data-analyst/list_equipment` — 设备目录 + 可用 KPI（用于 `before_step` 或 `options_source`）
-- `data-analyst/query_daily` / `query_weekly` / `query_monthly` — 数据查询
-- `data-analyst/daily_kpi` / `weekly_kpi` / `monthly_kpi` — 指标转换
-- `data-analyst/query_trend` / `trend_analysis` — 趋势分析（§13.2）
-- `data-analyst/query_fault_context` / `build_fault_timeline` / `diagnosis_analysis` — 诊断（§13.2）
-- `data-analyst/query_failure_data` / `failure_analysis` — 失效分析（§13.2，三种 method）
-- `data-analyst/query_closure_items` / `closure_summary` — 闭环（事实性）
-- `data-analyst/query_inspection` / `inspection_summary` / `inspection_attachment_summary` — 巡检（事实性）
+- `daily-report/list_equipment` — 设备目录 + 可用 KPI（用于 `before_step` 或 `options_source`）
+- `daily-report/query_daily` / `weekly-report/query_weekly` / `monthly-report/query_monthly` — 数据查询
+- `daily-report/daily_kpi` / `weekly-report/weekly_kpi` / `monthly-report/monthly_kpi` — 指标转换
+- `monitoring-analysis/query_trend` / `monitoring-analysis/trend_analysis` — 趋势分析（§13.2）
 
 ### 第四步：保存草稿
 
@@ -303,7 +299,7 @@ form_steps:        # 多步表单（必须至少 1 步）
     before_step:   # 渲染本表单前先调脚本（可选）
       id: equipment_catalog
       kind: script
-      name: data-analyst/list_equipment
+      name: daily-report/list_equipment
       args: {type: "{{ $.form.scope.equipment_type }}", scope: all, limit: 10000}
     fields:
       - name: equipment_ids
@@ -315,7 +311,7 @@ form_steps:        # 多步表单（必须至少 1 步）
 data_steps:        # 报告生成阶段执行的数据脚本（可选）
   - id: daily_data
     kind: script
-    name: data-analyst/query_daily
+    name: daily-report/query_daily
     args:
       date: "{{ $.form.scope.report_date }}"
       equipment_ids: "{{ $.form.equipment.equipment_ids }}"
@@ -324,7 +320,7 @@ data_steps:        # 报告生成阶段执行的数据脚本（可选）
 transforms:        # 数据转换（可选）
   - id: daily_kpi
     kind: script
-    name: data-analyst/daily_kpi
+    name: daily-report/daily_kpi
     input: daily_data.daily_data
     outputs: {daily_kpi: daily_kpi.json}
 

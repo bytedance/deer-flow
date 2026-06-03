@@ -17,8 +17,8 @@ def _descriptor(
     args_aliases: dict | None = None,
 ) -> ScriptDescriptor:
     return ScriptDescriptor(
-        qualified_name="data-analyst/demo",
-        skill_name="data-analyst",
+        qualified_name="daily-report/demo",
+        skill_name="daily-report",
         script_name="demo",
         skill_dir=Path("."),
         entry="scripts/demo.py",

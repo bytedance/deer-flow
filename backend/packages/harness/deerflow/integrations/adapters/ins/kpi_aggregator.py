@@ -3,7 +3,7 @@
 Extracts trend rows into KPI scalars and hourly runtime rates.
 All functions are pure (no I/O) — accept pre-fetched data, return computed values.
 
-Ported from skills/custom/data-analyst/scripts/_ins_provider.py to make
+Ported from the InS provider to make
 aggregation logic available through CLI action mode.
 """
 
