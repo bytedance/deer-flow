@@ -52,7 +52,7 @@ form_steps:
     before_step:
       id: kpi_catalog
       kind: script
-      name: data-analyst/list_equipment
+      name: monthly-report/list_equipment
       args:
         type: "{{ $.form.scope.equipment_type }}"
         scope: all
@@ -73,7 +73,8 @@ form_steps:
 data_steps:
   - id: monthly_data
     kind: script
-    name: data-analyst/query_monthly
+    name: monthly-report/query_monthly
+    provider: platform
     args:
       report_month: "{{ $.form.scope.report_month }}"
       type: "{{ $.form.scope.equipment_type }}"
@@ -87,7 +88,7 @@ data_steps:
 transforms:
   - id: monthly_kpi
     kind: script
-    name: data-analyst/monthly_kpi
+    name: monthly-report/monthly_kpi
     input: monthly_data.monthly_data
     outputs:
       monthly_kpi: monthly_kpi.json
