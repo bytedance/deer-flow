@@ -554,6 +554,20 @@ class TestAgentsAPI:
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
 
+    def test_delete_discards_pending_memory_updates(self, agent_client):
+        """Deleting an agent must cancel its pending memory writes so a lagging
+        debounced write cannot recreate the directory (issue #3364)."""
+        agent_client.post("/api/agents", json={"name": "race-agent", "soul": "hi"})
+
+        with patch("deerflow.agents.memory.queue.get_memory_queue") as get_queue:
+            queue = get_queue.return_value
+            response = agent_client.delete("/api/agents/race-agent")
+
+        assert response.status_code == 204
+        queue.discard.assert_called_once()
+        _, kwargs = queue.discard.call_args
+        assert kwargs["agent_name"] == "race-agent"
+
     def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
         """An unmigrated legacy agent must still block name collision so that
         running the migration script later won't shadow the legacy entry."""

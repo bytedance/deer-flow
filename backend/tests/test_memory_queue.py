@@ -246,3 +246,118 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
             ),
         ]
     )
+
+
+def test_discard_removes_pending_updates_for_agent() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="t1", messages=["agent-a"], agent_name="agent-a", user_id="alice")
+        queue.add(thread_id="t2", messages=["agent-a-2"], agent_name="agent-a", user_id="alice")
+        queue.add(thread_id="t3", messages=["agent-b"], agent_name="agent-b", user_id="alice")
+
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+
+    assert removed == 2
+    assert [context.agent_name for context in queue._queue] == ["agent-b"]
+
+
+def test_discard_is_scoped_by_user_id() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="t1", messages=["alice"], agent_name="shared", user_id="alice")
+        queue.add(thread_id="t1", messages=["bob"], agent_name="shared", user_id="bob")
+
+    removed = queue.discard(user_id="alice", agent_name="shared")
+
+    assert removed == 1
+    assert [(context.user_id, context.agent_name) for context in queue._queue] == [("bob", "shared")]
+
+
+def test_discard_skips_inflight_update_already_dequeued() -> None:
+    """The core issue #3364 race: a worker copies the queue out, then the agent
+    is deleted (discard) before update_memory runs. _process_queue must skip the
+    write so it cannot recreate the deleted agent's directory.
+    """
+    queue = MemoryUpdateQueue()
+    queue._queue = [
+        ConversationContext(
+            thread_id="t1",
+            messages=["conversation"],
+            agent_name="agent-a",
+            user_id="alice",
+        )
+    ]
+
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+
+    # By the time _process_queue builds the updater it has already
+    # snapshotted+cleared the queue and set _processing=True. Deleting the
+    # agent here mirrors discard() racing with that in-flight run.
+    def delete_agent_mid_flight(*args, **kwargs):
+        queue.discard(user_id="alice", agent_name="agent-a")
+        return mock_updater
+
+    with (
+        patch("deerflow.agents.memory.updater.MemoryUpdater", side_effect=delete_agent_mid_flight),
+        patch("deerflow.agents.memory.queue.time.sleep"),
+    ):
+        queue._process_queue()
+
+    mock_updater.update_memory.assert_not_called()
+    # Tombstones are cleared once the run finishes, so the set never leaks.
+    assert queue._deleted_agents == set()
+
+
+def test_discard_without_inflight_run_records_no_tombstone() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="t1", messages=["first"], agent_name="agent-a", user_id="alice")
+
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+
+    assert removed == 1
+    assert queue._deleted_agents == set()
+
+
+def test_recreated_agent_after_discard_writes_memory() -> None:
+    queue = MemoryUpdateQueue()
+
+    with (
+        patch("deerflow.agents.memory.queue.get_memory_config", return_value=_memory_config(enabled=True)),
+        patch.object(queue, "_reset_timer"),
+    ):
+        queue.add(thread_id="t1", messages=["first"], agent_name="agent-a", user_id="alice")
+        queue.discard(user_id="alice", agent_name="agent-a")
+        # A same-named agent recreated and used again must not be suppressed.
+        queue.add(thread_id="t1", messages=["second"], agent_name="agent-a", user_id="alice")
+
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+
+    with (
+        patch("deerflow.agents.memory.updater.MemoryUpdater", return_value=mock_updater),
+        patch("deerflow.agents.memory.queue.time.sleep"),
+    ):
+        queue.flush()
+
+    mock_updater.update_memory.assert_called_once_with(
+        messages=["second"],
+        thread_id="t1",
+        agent_name="agent-a",
+        correction_detected=False,
+        reinforcement_detected=False,
+        user_id="alice",
+    )

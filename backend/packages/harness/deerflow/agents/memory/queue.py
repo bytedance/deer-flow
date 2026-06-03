@@ -39,6 +39,13 @@ class MemoryUpdateQueue:
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
+        # (user_id, agent_name) tombstones for agents deleted while a
+        # _process_queue run already holds an in-flight snapshot of the queue.
+        # Without this an update copied out before discard() ran would still
+        # call save() and recreate the deleted agent's directory (issue #3364).
+        # Checked per-context in _process_queue and cleared when that run ends,
+        # so the set never grows unbounded.
+        self._deleted_agents: set[tuple[str | None, str | None]] = set()
 
     @staticmethod
     def _queue_key(
@@ -189,6 +196,15 @@ class MemoryUpdateQueue:
 
             for context in contexts_to_process:
                 try:
+                    with self._lock:
+                        deleted = (context.user_id, context.agent_name) in self._deleted_agents
+                    if deleted:
+                        logger.info(
+                            "Skipping memory update for deleted agent %s (thread %s)",
+                            context.agent_name,
+                            context.thread_id,
+                        )
+                        continue
                     logger.info("Updating memory for thread %s", context.thread_id)
                     success = updater.update_memory(
                         messages=context.messages,
@@ -212,6 +228,9 @@ class MemoryUpdateQueue:
         finally:
             with self._lock:
                 self._processing = False
+                # This in-flight snapshot is fully processed; tombstones have
+                # served their purpose and must not leak into future runs.
+                self._deleted_agents.clear()
 
     def flush(self) -> None:
         """Force immediate processing of the queue.
@@ -232,6 +251,32 @@ class MemoryUpdateQueue:
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
 
+    def discard(self, *, user_id: str | None = None, agent_name: str | None = None) -> int:
+        """Drop pending updates targeting a specific agent (any thread).
+
+        Called when an agent is deleted so a debounced memory write cannot fire
+        after deletion and recreate the agent's directory (issue #3364). If a
+        _process_queue run is already in flight (it copied the queue out before
+        this call), an agent-level tombstone is recorded so the in-flight write
+        is skipped before it reaches save().
+
+        Returns the number of pending contexts removed from the queue.
+        """
+        with self._lock:
+            matching = [context for context in self._queue if context.user_id == user_id and context.agent_name == agent_name]
+            self._queue = [context for context in self._queue if not (context.user_id == user_id and context.agent_name == agent_name)]
+            removed = len(matching)
+            # Only needed when a worker already holds a snapshot; the tombstone
+            # is consumed and cleared at the end of that run.
+            if self._processing:
+                self._deleted_agents.add((user_id, agent_name))
+            if not self._queue and self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        if removed:
+            logger.info("Discarded %d pending memory update(s) for agent %s (user %s)", removed, agent_name, user_id)
+        return removed
+
     def clear(self) -> None:
         """Clear the queue without processing.
 
@@ -242,6 +287,7 @@ class MemoryUpdateQueue:
                 self._timer.cancel()
                 self._timer = None
             self._queue.clear()
+            self._deleted_agents.clear()
             self._processing = False
 
     @property

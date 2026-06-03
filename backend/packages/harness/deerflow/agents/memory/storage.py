@@ -163,7 +163,21 @@ class FileMemoryStorage(MemoryStorage):
         cache_key = self._cache_key(agent_name, user_id=user_id)
 
         try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
+            if agent_name is not None:
+                # A per-agent memory directory is created when the agent is
+                # created and removed (rmtree) when it is deleted. Never
+                # recreate it here: a debounced / in-flight memory write that
+                # lands after the agent was deleted must not resurrect the
+                # directory, otherwise a same-named agent can no longer be
+                # created (issue #3364). If the directory is already gone, give
+                # up the write. Even if it is removed between this check and the
+                # open() below, open() fails cleanly with OSError (handled
+                # below) and never recreates the directory.
+                if not file_path.parent.exists():
+                    logger.info("Skipping memory save for missing agent directory %s", file_path.parent)
+                    return False
+            else:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
             # Shallow-copy before adding lastUpdated so the caller's dict is not
             # mutated as a side-effect, and the cache reference is not silently
             # updated before the file write succeeds.

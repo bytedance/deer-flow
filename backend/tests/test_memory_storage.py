@@ -110,6 +110,56 @@ class TestFileMemoryStorage:
                 assert result is True
                 assert memory_file.exists()
 
+    def test_save_skips_when_agent_dir_missing(self, tmp_path):
+        """Per-agent save must not recreate a deleted agent's directory (#3364).
+
+        A debounced / in-flight memory write that lands after the agent was
+        deleted must give up rather than mkdir the directory back into
+        existence, which would block recreating a same-named agent.
+        """
+        agent_dir = tmp_path / "agents" / "ghost-agent"
+        memory_file = agent_dir / "memory.json"
+        # Agent directory intentionally does NOT exist (agent was deleted).
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.user_agent_memory_file.return_value = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            storage = FileMemoryStorage()
+            result = storage.save(
+                {"version": "1.0", "facts": [{"content": "late write"}]},
+                "ghost-agent",
+                user_id="alice",
+            )
+
+        assert result is False
+        assert not memory_file.exists()
+        assert not agent_dir.exists(), "save() must not recreate the deleted agent directory"
+
+    def test_save_writes_when_agent_dir_exists(self, tmp_path):
+        """Per-agent save still works normally when the directory exists."""
+        agent_dir = tmp_path / "agents" / "live-agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        memory_file = agent_dir / "memory.json"
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.user_agent_memory_file.return_value = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            storage = FileMemoryStorage()
+            result = storage.save(
+                {"version": "1.0", "facts": [{"content": "ok"}]},
+                "live-agent",
+                user_id="alice",
+            )
+
+        assert result is True
+        assert memory_file.exists()
+
     def test_save_does_not_mutate_caller_dict(self, tmp_path):
         """save() must not mutate the caller's dict (lastUpdated side-effect)."""
         memory_file = tmp_path / "memory.json"

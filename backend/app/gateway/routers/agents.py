@@ -439,6 +439,17 @@ async def delete_agent(name: str) -> None:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     try:
+        # Cancel any pending debounced memory writes for this agent before
+        # removing the directory. Otherwise a lagging write can recreate the
+        # agent dir (with a stray memory.json) and block recreating a
+        # same-named agent (issue #3364).
+        try:
+            from deerflow.agents.memory.queue import get_memory_queue
+
+            get_memory_queue().discard(user_id=user_id, agent_name=name)
+        except Exception as e:
+            logger.warning(f"Failed to discard pending memory updates for agent '{name}': {e}")
+
         shutil.rmtree(agent_dir)
         logger.info(f"Deleted agent '{name}' from {agent_dir}")
     except Exception as e:
