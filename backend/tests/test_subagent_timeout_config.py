@@ -325,7 +325,24 @@ class TestRegistryGetSubagentConfig:
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
-        assert config.max_turns == 100
+        assert config.max_turns == 1000
+
+    def test_builtin_subagents_default_to_deep_budget(self):
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        app_config = SubagentsAppConfig()
+
+        assert get_subagent_config("general-purpose", app_config=app_config).max_turns == 1000
+        assert get_subagent_config("bash", app_config=app_config).max_turns == 1000
+
+    def test_subagents_global_max_turns_override_still_wins(self):
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        app_config = SubagentsAppConfig(max_turns=120)
+
+        assert get_subagent_config("general-purpose", app_config=app_config).max_turns == 120
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config

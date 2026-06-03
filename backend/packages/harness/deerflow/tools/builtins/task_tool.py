@@ -142,6 +142,20 @@ def _summarize_usage(records: list[dict] | None) -> dict | None:
     }
 
 
+def _subagent_diagnostics(result: Any) -> dict:
+    diagnostics = getattr(result, "diagnostics", None)
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def _initial_subagent_diagnostics(config: Any) -> dict:
+    return {
+        "subagent_name": config.name,
+        "recursion_limit": config.max_turns,
+        "tool_call_count": 0,
+        "recent_tools": [],
+    }
+
+
 def _report_subagent_usage(runtime: Any, result: Any) -> None:
     """Report subagent token usage to the parent RunJournal, if available.
 
@@ -326,7 +340,15 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({"type": "task_started", "task_id": task_id, "description": description})
+    writer(
+        {
+            "type": "task_started",
+            "task_id": task_id,
+            "description": description,
+            "subagent_type": subagent_type,
+            "diagnostics": _initial_subagent_diagnostics(config),
+        }
+    )
 
     try:
         while True:
@@ -334,7 +356,14 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                writer(
+                    {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": "Task disappeared from background tasks",
+                        "diagnostics": _initial_subagent_diagnostics(config),
+                    }
+                )
                 cleanup_background_task(task_id)
                 return f"Error: Task {task_id} disappeared from background tasks"
 
@@ -357,6 +386,7 @@ async def task_tool(
                             "message": message,
                             "message_index": i + 1,  # 1-based index for display
                             "total_messages": current_message_count,
+                            "diagnostics": _subagent_diagnostics(result),
                         }
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
@@ -367,28 +397,28 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage})
+                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage, "diagnostics": _subagent_diagnostics(result)})
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 return f"Task Succeeded. Result: {result.result}"
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage})
+                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage, "diagnostics": _subagent_diagnostics(result)})
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage})
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage, "diagnostics": _subagent_diagnostics(result)})
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage})
+                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage, "diagnostics": _subagent_diagnostics(result)})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task timed out. Error: {result.error}"
@@ -406,7 +436,7 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
-                writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
+                writer({"type": "task_timed_out", "task_id": task_id, "usage": usage, "diagnostics": _subagent_diagnostics(result)})
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.

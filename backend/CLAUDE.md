@@ -311,8 +311,10 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
+**Runtime budgets**: Built-in subagents default to `max_turns=1000`; explicit `subagents.max_turns`, per-agent `max_turns`, and request-level `recursion_limit` overrides still win.
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
-**Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
+**Loop safety**: Subagent graphs include `LoopDetectionMiddleware` with per-task `run_id` context (`subagent:{task_id}`), so true repetitive loops stop with explicit loop behavior before opaque recursion-limit failures.
+**Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_cancelled`/`task_timed_out`; task events carry lightweight diagnostics (`subagent_name`, `recursion_limit`, `tool_call_count`, `recent_tools`) and `RunJournal` persists only `task_*` custom events as progress records.
 
 ### Tool System (`packages/harness/deerflow/tools/`)
 

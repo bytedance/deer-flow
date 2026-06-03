@@ -34,6 +34,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TASK_EVENT_TYPES = {
+    "task_started",
+    "task_running",
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+    "task_timed_out",
+}
+
 
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
@@ -350,6 +359,26 @@ class RunJournal(BaseCallbackHandler):
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
             logger.debug("Tool end for node %s", run_id)
+
+    def on_custom_event(
+        self,
+        name: str,
+        data: Any,
+        *,
+        run_id: UUID,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if name not in _TASK_EVENT_TYPES:
+            return
+        content = data if isinstance(data, dict) else {"data": data}
+        self._put(
+            event_type=name,
+            category="progress",
+            content=content,
+            metadata={"caller": self._identify_caller(tags), **(metadata or {})},
+        )
 
     # -- Internal methods --
 

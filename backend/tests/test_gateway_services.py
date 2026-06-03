@@ -177,6 +177,32 @@ def test_build_run_config_basic():
     assert config["recursion_limit"] == 100
 
 
+def test_build_run_config_subagent_context_uses_deep_default():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"subagent_enabled": True}},
+        None,
+        assistant_id="lead_agent",
+    )
+
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_explicit_recursion_limit_precedence_for_subagents():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"recursion_limit": 55, "context": {"subagent_enabled": True}},
+        None,
+        assistant_id="lead_agent",
+    )
+
+    assert config["recursion_limit"] == 55
+
+
 def test_build_run_config_with_overrides():
     from app.gateway.services import build_run_config
 

@@ -60,6 +60,7 @@ def _make_result(
     result: str | None = None,
     error: str | None = None,
     token_usage_records: list[dict] | None = None,
+    diagnostics: dict | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
@@ -67,6 +68,7 @@ def _make_result(
         result=result,
         error=error,
         token_usage_records=token_usage_records or [],
+        diagnostics=diagnostics or {},
         usage_reported=False,
     )
 
@@ -199,11 +201,16 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # Simulate two polling rounds: first running (with one message), then completed.
     responses = iter(
         [
-            _make_result(FakeSubagentStatus.RUNNING, ai_messages=[{"id": "m1", "content": "phase-1"}]),
+            _make_result(
+                FakeSubagentStatus.RUNNING,
+                ai_messages=[{"id": "m1", "content": "phase-1"}],
+                diagnostics={"subagent_name": "general-purpose", "recursion_limit": 50, "tool_call_count": 1, "recent_tools": ["read_file"]},
+            ),
             _make_result(
                 FakeSubagentStatus.COMPLETED,
                 ai_messages=[{"id": "m1", "content": "phase-1"}, {"id": "m2", "content": "phase-2"}],
                 result="all done",
+                diagnostics={"subagent_name": "general-purpose", "recursion_limit": 50, "tool_call_count": 2, "recent_tools": ["read_file", "bash"]},
             ),
         ]
     )
@@ -240,6 +247,15 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert events[0]["diagnostics"] == {
+        "subagent_name": "general-purpose",
+        "recursion_limit": 50,
+        "tool_call_count": 0,
+        "recent_tools": [],
+    }
+    assert events[1]["diagnostics"]["tool_call_count"] == 1
+    assert events[2]["diagnostics"]["recent_tools"] == ["read_file", "bash"]
+    assert events[-1]["diagnostics"]["tool_call_count"] == 2
     assert events[-1]["result"] == "all done"
 
 

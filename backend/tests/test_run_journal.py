@@ -234,14 +234,34 @@ class TestToolCallbacks:
 
 class TestCustomEvents:
     @pytest.mark.anyio
-    async def test_on_custom_event_not_implemented(self, journal_setup):
-        """RunJournal does not implement on_custom_event — no crash expected."""
+    async def test_on_custom_event_persists_task_progress(self, journal_setup):
         j, store = journal_setup
-        # BaseCallbackHandler.on_custom_event is a no-op by default
-        j.on_custom_event("task_running", {"task_id": "t1"}, run_id=uuid4())
+        j.on_custom_event(
+            "task_running",
+            {
+                "type": "task_running",
+                "task_id": "task-1",
+                "diagnostics": {"tool_call_count": 2, "recent_tools": ["read_file"]},
+            },
+            run_id=uuid4(),
+            tags=["subagent:general-purpose"],
+        )
         await j.flush()
         events = await store.list_events("t1", "r1")
-        assert isinstance(events, list)
+        assert len(events) == 1
+        assert events[0]["event_type"] == "task_running"
+        assert events[0]["category"] == "progress"
+        assert events[0]["content"]["task_id"] == "task-1"
+        assert events[0]["content"]["diagnostics"]["tool_call_count"] == 2
+        assert events[0]["metadata"]["caller"] == "subagent:general-purpose"
+
+    @pytest.mark.anyio
+    async def test_on_custom_event_ignores_non_task_events(self, journal_setup):
+        j, store = journal_setup
+        j.on_custom_event("debug_ping", {"ok": True}, run_id=uuid4())
+        await j.flush()
+        events = await store.list_events("t1", "r1")
+        assert events == []
 
 
 class TestBufferFlush:
