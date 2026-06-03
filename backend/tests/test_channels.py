@@ -1787,6 +1787,51 @@ class TestChannelManager:
         _run(go())
 
 
+class TestResolveRunParamsUserId:
+    """Regression for PR #3294: channel identity must reach ``run_context``
+    while staying safe for user-scoped filesystem buckets.
+    """
+
+    def _manager(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        return ChannelManager(bus=bus, store=store)
+
+    def test_safe_user_id_is_passed_through(self):
+        manager = self._manager()
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="123456", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "123456"
+        assert run_context["channel_user_id"] == "123456"
+
+    def test_unsafe_user_id_is_normalized_but_raw_preserved(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        manager = self._manager()
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == make_safe_user_id(raw)
+        assert run_context["user_id"] != raw
+        assert run_context["channel_user_id"] == raw
+
+    @pytest.mark.parametrize("raw_user_id", ["", None])
+    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id):
+        manager = self._manager()
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw_user_id, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert "user_id" not in run_context
+        assert "channel_user_id" not in run_context
+
+
 # ---------------------------------------------------------------------------
 # ChannelService tests
 # ---------------------------------------------------------------------------

@@ -1,14 +1,17 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "vitest";
 
 import {
   buildRunMessagesUrl,
+  findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
+  MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   runMessagesPageHasMore,
+  shouldAutoContinueOnEmptyRun,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
@@ -324,4 +327,162 @@ test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", ()
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
   );
+});
+
+test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set())).toBe(0);
+});
+
+test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next newest unloaded run", () => {
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+  ] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set(["R6"]))).toBe(1);
+});
+
+test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
+  const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
+  expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {
+  // Simulate backend list_by_thread returning newest first.
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  const runIdToContent: Record<string, string> = {
+    R1: "A",
+    R2: "B",
+    R3: "C",
+    R4: "D",
+    R5: "E",
+    R6: "F",
+  };
+
+  const loaded = new Set<string>();
+  let messages: Message[] = [];
+
+  while (true) {
+    const index = findLatestUnloadedRunIndex(runs, loaded);
+    if (index === -1) break;
+    const run = runs[index]!;
+    const pageMessages = [
+      {
+        id: run.run_id,
+        type: "human",
+        content: runIdToContent[run.run_id],
+      } as Message,
+    ];
+    // Mirror loadMessages: prepend new page to existing messages.
+    messages = [...pageMessages, ...messages];
+    loaded.add(run.run_id);
+  }
+
+  expect(messages.map((m) => m.content)).toEqual([
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+  ]);
+});
+
+test("shouldAutoContinueOnEmptyRun does not continue when the run produced messages", () => {
+  expect(shouldAutoContinueOnEmptyRun(3, 0)).toBe(false);
+  expect(shouldAutoContinueOnEmptyRun(1, 4)).toBe(false);
+});
+
+test("shouldAutoContinueOnEmptyRun continues when an empty run is below the safety cap", () => {
+  expect(shouldAutoContinueOnEmptyRun(0, 0)).toBe(true);
+  expect(
+    shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS - 1),
+  ).toBe(true);
+});
+
+test("shouldAutoContinueOnEmptyRun stops once consecutive empty loads reach the cap", () => {
+  expect(shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS)).toBe(
+    false,
+  );
+  expect(
+    shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS + 1),
+  ).toBe(false);
+});
+
+test("shouldAutoContinueOnEmptyRun honors a custom safety cap when provided", () => {
+  expect(shouldAutoContinueOnEmptyRun(0, 0, 1)).toBe(true);
+  expect(shouldAutoContinueOnEmptyRun(0, 1, 1)).toBe(false);
+});
+
+test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {
+  const runs = [
+    { run_id: "R6" },
+    { run_id: "R5" },
+    { run_id: "R4" },
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  const runIdToMessages: Record<string, Message[]> = {
+    R6: [{ id: "R6", type: "human", content: "F" } as Message],
+    R5: [{ id: "R5", type: "human", content: "E" } as Message],
+    R4: [],
+    R3: [],
+    R2: [],
+    R1: [{ id: "R1", type: "human", content: "A" } as Message],
+  };
+
+  const loaded = new Set<string>();
+  let messages: Message[] = [];
+
+  loaded.add("R6");
+  loaded.add("R5");
+  messages = [...runIdToMessages.R5!, ...runIdToMessages.R6!];
+
+  let consecutiveEmptyLoads = 0;
+  let visited = 0;
+  const visitedRunIds: string[] = [];
+  while (true) {
+    const index = findLatestUnloadedRunIndex(runs, loaded);
+    if (index === -1) break;
+    const run = runs[index]!;
+    visited += 1;
+    visitedRunIds.push(run.run_id);
+    const pageMessages = runIdToMessages[run.run_id] ?? [];
+    messages = [...pageMessages, ...messages];
+    loaded.add(run.run_id);
+    if (
+      !shouldAutoContinueOnEmptyRun(pageMessages.length, consecutiveEmptyLoads)
+    ) {
+      consecutiveEmptyLoads = 0;
+      break;
+    }
+    consecutiveEmptyLoads += 1;
+  }
+
+  expect(visitedRunIds).toEqual(["R4", "R3", "R2", "R1"]);
+  expect(visited).toBe(4);
+  expect(messages.map((m) => m.content)).toEqual(["A", "E", "F"]);
+});
+
+test("shouldAutoContinueOnEmptyRun input must use the post-filter visible count, not the raw page size (middleware-only runs should still trigger auto-continue)", () => {
+  const filteredVisibleCount = 0;
+  const rawPageSize = 3; // pretend the raw page had 3 middleware-only entries
+  expect(shouldAutoContinueOnEmptyRun(filteredVisibleCount, 0)).toBe(true);
+  expect(shouldAutoContinueOnEmptyRun(rawPageSize, 0)).toBe(false);
 });
