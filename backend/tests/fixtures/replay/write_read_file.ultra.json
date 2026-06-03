@@ -1,0 +1,224 @@
+{
+  "scenario": "write_read_file",
+  "mode": "ultra",
+  "model": "gpt-5.5",
+  "prompt": "Using your own file tools directly, create the file /mnt/user-data/outputs/note.txt with exactly this content: hi from replay. Then read that same file back and reply with its exact contents. Do NOT delegate to a subagent and do NOT use the task tool — do it yourself. Do not ask any clarifying questions.",
+  "context": {
+    "is_bootstrap": false,
+    "mode": "ultra",
+    "thinking_enabled": true,
+    "is_plan_mode": true,
+    "subagent_enabled": true
+  },
+  "turns": [
+    {
+      "input_hash": "686cd44a9f17fadc0398768731324f3980480a027593a475fad4583581df677f",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "tool_calls",
+            "model_name": "gpt-5.5",
+            "model_provider": "openai"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--019e8c60-8d4b-79a1-8d77-0a67fc360ce4",
+          "tool_calls": [
+            {
+              "name": "write_file",
+              "args": {
+                "description": "Create requested note file",
+                "path": "/mnt/user-data/outputs/note.txt",
+                "content": "hi from replay"
+              },
+              "id": "call_UdIzq5Vyx7pu1Usnj4wPCC6G",
+              "type": "tool_call"
+            }
+          ],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 3285,
+            "output_tokens": 66,
+            "total_tokens": 3351,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 21
+            }
+          }
+        }
+      }
+    },
+    {
+      "input_hash": "3598aeb87e221ca8f554e4d61ce6d5e8801754606fa5c95a89c38bd6cb623045",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "File Creation and Verification",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "stop",
+            "model_name": "gpt-5.5",
+            "model_provider": "openai"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--019e8c60-9c18-72c1-95e8-f6a240747395",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 104,
+            "output_tokens": 53,
+            "total_tokens": 157,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 39
+            }
+          }
+        }
+      }
+    },
+    {
+      "input_hash": "92430ba866abe577c86d2e67eb5158b10f3f19ec306aa9de235bb06736320d70",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "tool_calls",
+            "model_name": "gpt-5.5",
+            "model_provider": "openai"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--019e8c60-b036-7710-8db9-717ab54e5805",
+          "tool_calls": [
+            {
+              "name": "read_file",
+              "args": {
+                "description": "Read requested note file",
+                "path": "/mnt/user-data/outputs/note.txt"
+              },
+              "id": "call_0BFNns0FkRb3n2LR0PRrfbIJ",
+              "type": "tool_call"
+            }
+          ],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 3334,
+            "output_tokens": 33,
+            "total_tokens": 3367,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "input_hash": "8ab757aa51f9d556adcea07c0221445a2b791cc882ef11922babf7f2865d1913",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "hi from replay",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "stop",
+            "model_name": "gpt-5.5",
+            "model_provider": "openai"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--019e8c60-bef3-7201-a30a-cbc5f45920ba",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 3380,
+            "output_tokens": 7,
+            "total_tokens": 3387,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "input_hash": "fd67723cc8810ce79b4785fec4c251a272a91d677a216c735b23b5f6d3dec0c3",
+      "output": {
+        "type": "ai",
+        "data": {
+          "content": "[\"Can you append another line to the file?\",\"Can you show the file path again?\",\"Can you delete the file now?\"]",
+          "additional_kwargs": {
+            "refusal": null
+          },
+          "response_metadata": {
+            "token_usage": {
+              "completion_tokens": 71,
+              "prompt_tokens": 224,
+              "total_tokens": 295,
+              "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "reasoning_tokens": 33,
+                "rejected_prediction_tokens": 0
+              },
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cached_tokens": 0
+              },
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "input_tokens_details": null
+            },
+            "model_provider": "openai",
+            "model_name": "gpt-5.5",
+            "system_fingerprint": null,
+            "id": "chatcmpl-DmaI5yVqQ39LRWyugoCEPalKw0gBR",
+            "finish_reason": "stop",
+            "logprobs": null
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--019e8c60-d025-7fd2-9cc9-8b4fb8fe1a82-0",
+          "tool_calls": [],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 224,
+            "output_tokens": 71,
+            "total_tokens": 295,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 33
+            }
+          }
+        }
+      }
+    }
+  ]
+}
