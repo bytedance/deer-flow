@@ -306,8 +306,16 @@ class InsApiClient:
     async def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         token = await self.ensure_token()
         response = await self._get_with_retry(path, params, token)
+
+        # 调试日志：打印完整请求 URL
+        import logging
+        logger = logging.getLogger(__name__)
+        full_url = str(response.request.url)
+        logger.info(f"InS Request: {response.request.method} {full_url}")
+
         if response.is_error:
             detail = _safe_error_detail(response)
+            logger.error(f"InS Response: {response.status_code}, detail: {detail}")
             raise RuntimeError(
                 f"InS {response.request.method} {response.request.url} "
                 f"→ {response.status_code}{f': {detail}' if detail else ''}"

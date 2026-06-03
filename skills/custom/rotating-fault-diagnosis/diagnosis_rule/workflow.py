@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import json
 import math
@@ -892,14 +893,23 @@ async def _resolve_waveform_times(
 
 
 async def _collect_waveform_results(target_info: dict[str, Any], times_ms: list[str], config: dict[str, Any]) -> list[dict[str, Any]]:
+    import asyncio
     waveform_probe_ids = [str(item) for item in (target_info.get("waveform_probe_ids") or [])]
     results: list[dict[str, Any]] = []
+
+    # 构建所有提取任务
+    tasks = []
     for component_id in waveform_probe_ids:
         for time_ms in times_ms:
-            try:
-                results.append(await cached_extract_waveform(component_id=component_id, time_ms=time_ms))
-            except Exception as exc:
-                print(f"[waveform.fail] component_id={component_id} time_ms={time_ms} error={exc}")
+            tasks.append(cached_extract_waveform(component_id=component_id, time_ms=time_ms))
+
+    # 并行执行
+    if tasks:
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in task_results:
+            if not isinstance(result, Exception):
+                results.append(result)
+
     return results
 
 
@@ -926,28 +936,40 @@ async def _collect_orbit_results(
         return [], []
     results: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+
+    # 构建所有 (bearing_id, time_ms) 组合的提取任务
+    extraction_tasks = []
+    task_metadata = []  # 用于记录每个任务对应的 metadata
     for bearing_id in bearing_ids[:max_points]:
         probe_ids = _bearing_waveform_probe_ids(context, bearing_id)
         for time_ms in times_ms:
-            try:
-                results.append(
-                    await cached_extract_orbit(
-                        root_device_id=root_device_id,
-                        bearing_id=bearing_id,
-                        time_ms=time_ms,
-                        probe_ids=probe_ids,
-                    )
+            extraction_tasks.append(
+                cached_extract_orbit(
+                    root_device_id=root_device_id,
+                    bearing_id=bearing_id,
+                    time_ms=time_ms,
+                    probe_ids=probe_ids,
                 )
-            except Exception as exc:
+            )
+            task_metadata.append((bearing_id, time_ms, probe_ids))
+
+    # 并行执行所有提取任务
+    if extraction_tasks:
+        task_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
+        for (bearing_id, time_ms, probe_ids), result in zip(task_metadata, task_results):
+            if isinstance(result, Exception):
                 failures.append(
                     {
                         "bearing_id": bearing_id,
                         "time_ms": time_ms,
                         "probe_ids": ",".join(probe_ids),
-                        "error": str(exc),
+                        "error": str(result),
                     }
                 )
-                print(f"[orbit.fail] machine_id={root_device_id} bearing_id={bearing_id} time_ms={time_ms} error={exc}")
+                print(f"[orbit.fail] machine_id={root_device_id} bearing_id={bearing_id} time_ms={time_ms} error={result}")
+            else:
+                results.append(result)
+
     return results, failures
 
 
@@ -3359,22 +3381,45 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
     waveform_results: list[dict[str, Any]] = []
     all_waveform_times: list[str] = []
     waveform_failures: list[dict[str, str]] = []
-    for probe_id in waveform_probe_ids:
-        probe_times = await _resolve_waveform_times([probe_id], trends, time_ms, config)
-        for t in probe_times:
+
+    # 第一步：并行获取所有探头的时间戳
+    probe_times_tasks = [
+        _resolve_waveform_times([probe_id], trends, time_ms, config)
+        for probe_id in waveform_probe_ids
+    ]
+    probe_times_results = await asyncio.gather(*probe_times_tasks, return_exceptions=True)
+
+    # 收集所有唯一时间点
+    for result in probe_times_results:
+        if isinstance(result, Exception):
+            continue
+        for t in result:
             if t not in all_waveform_times:
                 all_waveform_times.append(t)
-            try:
-                waveform_results.append(await _extract_spectral_waveform_features_impl(component_id=probe_id, time_ms=t))
-            except Exception as exc:
+
+    # 第二步：并行提取所有 (probe_id, time) 组合的波形特征
+    extraction_tasks = []
+    for probe_id in waveform_probe_ids:
+        for t in all_waveform_times:
+            extraction_tasks.append((probe_id, t, _extract_spectral_waveform_features_impl(component_id=probe_id, time_ms=t)))
+
+    if extraction_tasks:
+        # 使用 asyncio.gather 并行执行所有提取任务
+        results = await asyncio.gather(*[task for _, _, task in extraction_tasks], return_exceptions=True)
+
+        for (probe_id, t, _), result in zip(extraction_tasks, results):
+            if isinstance(result, Exception):
                 waveform_failures.append(
                     {
                         "component_id": probe_id,
                         "time_ms": t,
-                        "error": str(exc),
+                        "error": str(result),
                     }
                 )
-                print(f"[waveform.fail] component_id={probe_id} time_ms={t} error={exc}")
+                print(f"[waveform.fail] component_id={probe_id} time_ms={t} error={result}")
+            else:
+                waveform_results.append(result)
+
     all_waveform_times.sort(key=lambda t: int(t), reverse=True)
     orbit_results, orbit_failures = await _collect_orbit_results(
         diagnosis_target.root_device_id,

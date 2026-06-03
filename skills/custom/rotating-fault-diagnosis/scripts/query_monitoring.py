@@ -37,7 +37,7 @@ _token = os.environ.get("INS_ACCESS_TOKEN", "")
 TREND_PATH = "/ins-os-view/sg8kData/getTrendDataHis"
 WAVEFORM_PATH = "/ins-os-view/sg8kData/getWaveDataHis"
 
-FEATURES = "pp_value,rms,1x,2x,remain_freq,speed,gap"
+FEATURES = "pp_value,rms,one_freq_x,one_freq_y,two_freq_x,two_freq_y,remain_freq,speed,gap"
 INCLUDE_FILTER = "history,startstop,blackbox,alarm"
 
 

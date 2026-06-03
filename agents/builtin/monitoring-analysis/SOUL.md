@@ -359,7 +359,7 @@ Pro 趋势输出包含：
 ```bash
 python /mnt/skills/custom/monitoring-analysis/scripts/ultra_trend.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
-  --model-path /opt/features-tool/models/trend_forecaster.onnx \
+  --model-path /mnt/skills/custom/features-tool/models/trend_forecaster.onnx \
   --output-dir /mnt/user-data/outputs/
 ```
 
@@ -608,7 +608,7 @@ Pro 异常输出包含：
 ```bash
 python /mnt/skills/custom/monitoring-analysis/scripts/ultra_anomaly.py \
   --input /mnt/user-data/outputs/data/trend_data.json \
-  --model-path /opt/features-tool/models/anomaly_autoencoder.onnx \
+  --model-path /mnt/skills/custom/features-tool/models/anomaly_autoencoder.onnx \
   --output-dir /mnt/user-data/outputs/
 ```
 
@@ -794,7 +794,7 @@ Pro KPI 输出包含：
 ```bash
 python /mnt/skills/custom/monitoring-analysis/scripts/ultra_kpi.py \
   --input /mnt/user-data/outputs/daily_data.json \
-  --model-path /opt/features-tool/models/health_predictor.onnx \
+  --model-path /mnt/skills/custom/features-tool/models/health_predictor.onnx \
   --output-dir /mnt/user-data/outputs/
 ```
 
@@ -1346,7 +1346,7 @@ python /mnt/skills/custom/monitoring-analysis/scripts/ultra_spectrum.py \
   --input /mnt/user-data/outputs/waveform_data.json \
   --features /mnt/user-data/outputs/spectrum_features.json \
   --pro-result /mnt/user-data/outputs/pro_spectrum_result.json \
-  --model-path /opt/features-tool/models/spectrum_classifier.onnx \
+  --model-path /mnt/skills/custom/features-tool/models/spectrum_classifier.onnx \
   --equipment-type "{equipment_type}" \
   --output-dir /mnt/user-data/outputs/
 ```
@@ -1709,7 +1709,7 @@ compare_period: none | wow (环比) | yoy (同比)
 
 Ultra 对比分析支持：
 1. **同类设备基准**：计算同类型所有设备的指标均值和标准差作为基准线
-2. **行业参考线**：如果配置了行业基准数据（`/opt/features-tool/industry_baselines.json`），在图表中叠加行业 P50/P95 参考线
+2. **行业参考线**：如果配置了行业基准数据（`/mnt/skills/custom/features-tool/industry_baselines.json`），在图表中叠加行业 P50/P95 参考线
 3. **偏离度排序**：按偏离同类设备基准的程度排序，标注异常偏离设备
 
 ---

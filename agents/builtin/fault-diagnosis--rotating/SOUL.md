@@ -259,7 +259,7 @@ print(f'ABNORMAL_ID={handoff.get(\"abnormal_id\", \"\")}')
 调用底层原始设备树脚本：
 
 ```bash
-python /opt/features-tool/tools/device_analysis.py "{machineId}" --output /mnt/user-data/outputs/device_tree_raw.json
+python /mnt/skills/custom/features-tool/tools/device_analysis.py "{machineId}" --output /mnt/user-data/outputs/device_tree_raw.json
 ```
 
 然后用固化脚本构建 `device_context.json`（自动遍历树、分组测点、分析轴系）：
@@ -412,7 +412,7 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 
 1. **真实规则运行时**：使用 `/mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_diagnosis.py` 作为唯一诊断入口。
 2. **报告 payload 映射**：使用 `build_rotating_report_payload.py` 把规则结果和缓存图谱转成 `diagnosis_features.json`。
-3. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + /opt/features-tool/tools/diagnosis_features.py` MVP 链路。
+3. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + /mnt/skills/custom/features-tool/tools/diagnosis_features.py` MVP 链路。
 
 ## 异常处理
 
