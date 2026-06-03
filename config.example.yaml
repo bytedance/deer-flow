@@ -1216,3 +1216,30 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# Redaction Middleware Configuration
+# ============================================================================
+# Used to strip sensitive information from LLM interactions to prevent data leakage.
+# By default, redaction is disabled. When enabled, any text matching the
+# defined regex patterns will be replaced with the specified string.
+#
+# This is useful for:
+# - Preventing API keys or secrets from leaking to the LLM provider
+# - Ensuring PII doesn't end up in local memory or conversation logs
+
+# redaction:
+#   # Enable or disable the redaction middleware (default: false)
+#   enabled: false
+#   
+#   # String used to replace matched sensitive tokens (default: "[REDACTED]")
+#   redact_string: "[REDACTED]"
+#
+#   # List of regex patterns to identify sensitive data
+#   patterns:
+#     - '(?i)bearer\s+[A-Za-z0-9\-\._~\+/]+'
+#     - '(?i)api[_-]?key\s*[:=]\s*[''"]?[A-Za-z0-9\-\._]+[''"]?'
+#     - '(?i)sk-[a-zA-Z0-9]{32,}'
+#     - 'gh[po]_[a-zA-Z0-9]{36}'
+#     - '(?i)password\s*[:=]\s*[''"]?[^''"]+[''"]?'
+#     - 'eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*'
