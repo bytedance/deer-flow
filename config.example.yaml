@@ -477,6 +477,18 @@ tools:
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web search tool (uses Keenable — no API key required for the free tier)
+  # Keenable is a web-search engine built for AI agents: low-latency results, a page-to-markdown
+  # fetch API, and per-query filters (site, date ranges, realtime mode).
+  # Sign up for a key at https://keenable.ai/console — or omit it to use the free public tier.
+  # NOTE: Keenable returns a fixed result set; there is no max_results / limit parameter.
+  # NOTE: Comment out the active web_search entry above before enabling this one.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.keenable.tools:web_search_tool
+  #   # api_key: $KEENABLE_API_KEY  # optional — omit to use the free keyless public tier
+  #   timeout: 15
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -507,6 +519,15 @@ tools:
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+
+  # Web fetch tool (uses Keenable — pairs with the Keenable web_search entry above)
+  # Fetches any web page and returns its content as markdown via GET /v1/fetch?url=...
+  # Inherits the API key from the web_search tool config (no separate key field needed).
+  # NOTE: Comment out the active web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.keenable.tools:web_fetch_tool
+  #   timeout: 15
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
