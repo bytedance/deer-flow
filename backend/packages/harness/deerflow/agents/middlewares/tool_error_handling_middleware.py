@@ -143,6 +143,12 @@ def _build_runtime_middlewares(
 
         middlewares.append(DanglingToolCallMiddleware())
 
+    # Fix invalid tool calls where args is a JSON string instead of dict
+    # (some LLM providers like DeepSeek return args as strings)
+    from deerflow.agents.middlewares.invalid_tool_call_fix_middleware import InvalidToolCallFixMiddleware
+
+    middlewares.append(InvalidToolCallFixMiddleware())
+
     middlewares.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
     # Guardrail middleware (if configured)

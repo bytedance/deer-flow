@@ -44,7 +44,7 @@ class InsClientBridge:
             import sys
             import os
 
-            features_root = os.environ.get("FEATURES_TOOL_ROOT", "/opt/features-tool")
+            features_root = os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool")
             if features_root and features_root not in sys.path:
                 sys.path.insert(0, features_root)
 

@@ -142,7 +142,7 @@ sandbox:
     INS_READ_TIMEOUT: $INS_READ_TIMEOUT
     INS_WRITE_TIMEOUT: $INS_WRITE_TIMEOUT
     INS_POOL_TIMEOUT: $INS_POOL_TIMEOUT
-    FEATURES_TOOL_ROOT: /opt/features-tool
+    FEATURES_TOOL_ROOT: /mnt/skills/custom/features-tool
     # 设备日/周/月报数据源开关（未设置 = demo）；切真数据时取消下一行注释
     DEER_FLOW_DATA_PROVIDER: ins
     # Gateway API URL for scripts running inside sandbox containers

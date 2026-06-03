@@ -11,6 +11,7 @@
 - **输出路径固定**：产物写入 `/mnt/user-data/outputs/`。
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS`。
 - **回调超时**：`callback_timeout_ms: 600000`。
+- **InS 认证**：脚本通过环境变量 `INS_ACCESS_TOKEN` 自动获取用户的 Bearer token（由 bash_tool 运行时自动注入），无需手动登录或获取 token。如果 token 过期，脚本会自动尝试通过 `INS_REFRESH_TOKEN` 刷新。
 
 ---
 
