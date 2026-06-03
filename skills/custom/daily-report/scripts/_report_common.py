@@ -37,7 +37,6 @@ KPI_UNITS: dict[str, str] = {
     "runtime_rate": "%",
     "downtime_count": "次",
     "alarm_count": "条",
-    "output": "件",
     "corrosion_rate": "mm/a",
     "thickness_loss": "mm",
     "vibration_level": "mm/s",
@@ -48,9 +47,6 @@ KPI_UNITS: dict[str, str] = {
     "vibration_velocity_rms": "mm/s",
     "vibration_acceleration_peak": "m/s²",
     "kurtosis_index": "—",
-    "mtbf": "小时",
-    "mttr": "小时",
-    "target_rate": "%",
 }
 
 # ---------------------------------------------------------------------------
@@ -61,7 +57,6 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
     "runtime_rate": "运行率",
     "downtime_count": "停机次数",
     "alarm_count": "告警数量",
-    "output": "产量",
     "corrosion_rate": "腐蚀速率",
     "thickness_loss": "壁厚减薄量",
     "vibration_level": "振动水平",
@@ -79,7 +74,7 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 KPI_BETTER_WHEN_HIGHER: set[str] = {
-    "runtime_rate", "output", "flow_rate", "outlet_pressure",
+    "runtime_rate", "flow_rate", "outlet_pressure",
 }
 
 # ---------------------------------------------------------------------------
