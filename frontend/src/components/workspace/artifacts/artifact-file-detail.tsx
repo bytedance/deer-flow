@@ -38,6 +38,7 @@ import {
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill } from "@/core/skills/api";
@@ -237,14 +238,20 @@ export function ArtifactFileDetail({
                 icon={CopyIcon}
                 label={t.clipboard.copyToClipboard}
                 disabled={!content}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(visibleContent ?? "");
+                onClick={() => {
+                  void (async () => {
+                    const didCopy = await writeTextToClipboard(
+                      visibleContent ?? "",
+                    );
+                    if (!didCopy) {
+                      toast.error(t.clipboard.failedToCopyToClipboard);
+                      return;
+                    }
+
                     toast.success(t.clipboard.copiedToClipboard);
-                  } catch (error) {
-                    toast.error("Failed to copy to clipboard");
-                    console.error(error);
-                  }
+                  })().catch(() => {
+                    toast.error(t.clipboard.failedToCopyToClipboard);
+                  });
                 }}
                 tooltip={t.clipboard.copyToClipboard}
               />
