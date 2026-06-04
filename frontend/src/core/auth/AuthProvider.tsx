@@ -10,6 +10,8 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { type User, buildLoginUrl } from "./types";
@@ -61,8 +63,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     try {
       setIsLoading(true);
-      const res = await fetch("/api/v1/auth/me", {
-        credentials: "include",
+      // refreshUser handles 401 itself (clear local state, redirect only on
+      // protected routes), so opt out of the wrapper's auto-redirect.
+      const res = await fetchWithAuth("/api/v1/auth/me", {
+        redirectOnUnauthorized: false,
       });
 
       if (res.ok) {
@@ -98,9 +102,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     }
 
     try {
-      await fetch("/api/v1/auth/logout", {
+      // POST is a state-changing method, so it must carry the X-CSRF-Token
+      // header injected by the shared fetcher; a raw fetch would be rejected
+      // by the gateway's CSRFMiddleware with 403. The session is already
+      // expiring here, so don't auto-redirect on a 401 from logout itself.
+      await fetchWithAuth("/api/v1/auth/logout", {
         method: "POST",
-        credentials: "include",
+        redirectOnUnauthorized: false,
       });
     } catch (err) {
       console.error("Logout request failed:", err);
