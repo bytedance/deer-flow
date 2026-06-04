@@ -645,6 +645,61 @@ class RunManager:
             self._runs.pop(run_id, None)
         logger.debug("Run record %s cleaned up", run_id)
 
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Cancel and bounded-await all in-flight runs on process shutdown.
+
+        Chat runs execute in fire-and-forget background ``asyncio`` tasks that
+        write checkpoints through a shared checkpointer. On shutdown the
+        checkpointer's resources (e.g. the postgres connection pool owned by the
+        gateway's ``AsyncExitStack``) are torn down; if a run task is still
+        mid-graph at that point, langgraph's
+        ``AsyncPregelLoop._checkpointer_put_after_previous`` runs its
+        ``finally: await checkpointer.aput(...)`` against the closed pool. Because
+        that put runs in a langgraph-internal task (not on ``run_agent``'s call
+        stack), the resulting ``psycopg_pool.PoolClosed`` is not catchable by the
+        worker and surfaces as an unhandled exception during ``asyncio.run()``
+        shutdown (bytedance/deer-flow issue #3373).
+
+        Draining in-flight runs *before* the checkpointer is closed lets each
+        run that settles within ``timeout`` flush its final checkpoint while
+        resources are still open. The drain is bounded by ``timeout`` so a run
+        stuck in cleanup cannot hang worker shutdown — the precondition for the
+        signal-reentrancy deadlock guarded by
+        ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs that do not
+        settle in time are logged and may still race teardown. The trailing
+        interrupted-status persistence is best-effort and assumed fast while the
+        persistence engine is still open.
+        """
+        async with self._lock:
+            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            for record in inflight:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                record.task.cancel()  # type: ignore[union-attr]  # filtered above
+                record.status = RunStatus.interrupted
+                record.updated_at = _now_iso()
+
+        if not inflight:
+            return
+
+        tasks = [record.task for record in inflight]
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in tasks:
+            if task in pending or task.cancelled():
+                continue
+            # Retrieve any surfaced exception so it is not reported as
+            # "Task exception was never retrieved" after the drain.
+            task.exception()
+        if pending:
+            logger.warning(
+                "Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown",
+                timeout,
+                len(pending),
+            )
+        for record in inflight:
+            await self._persist_status(record, RunStatus.interrupted)
+        logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+
 
 class ConflictError(Exception):
     """Raised when multitask_strategy=reject and thread has inflight runs."""
