@@ -272,22 +272,26 @@ async def test_real_stdio_tool_is_cross_task_safe():
 
     loop = asyncio.get_running_loop()
     unhandled: list[dict] = []
+    old_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _l, ctx: unhandled.append(ctx))
+    try:
+        wrapped = _make_per_call_mcp_tool(_stub_tool("repro_echo"), "repro", _REAL_CONNECTION)
 
-    wrapped = _make_per_call_mcp_tool(_stub_tool("repro_echo"), "repro", _REAL_CONNECTION)
+        async def call(text: str) -> str:
+            result, _artifact = await asyncio.wait_for(wrapped.coroutine(runtime=None, text=text), timeout=30)
+            # content blocks -> first text
+            return result[0]["text"] if result else ""
 
-    async def call(text: str) -> str:
-        result, _artifact = await asyncio.wait_for(wrapped.coroutine(runtime=None, text=text), timeout=30)
-        # content blocks -> first text
-        return result[0]["text"] if result else ""
+        # Distinct tasks, exactly like LangGraph's parallel tool execution.
+        outputs = await asyncio.gather(call("one"), call("two"), call("three"))
+        assert outputs == ["echo: one", "echo: two", "echo: three"]
 
-    # Distinct tasks, exactly like LangGraph's parallel tool execution.
-    outputs = await asyncio.gather(call("one"), call("two"), call("three"))
-    assert outputs == ["echo: one", "echo: two", "echo: three"]
+        # Force finalization of any lingering async generators; give the loop a tick.
+        gc.collect()
+        await asyncio.sleep(0.3)
 
-    # Force finalization of any lingering async generators; give the loop a tick.
-    gc.collect()
-    await asyncio.sleep(0.3)
-
-    cancel_scope_errors = [ctx for ctx in unhandled if "cancel scope" in str(ctx.get("exception") or ctx.get("message", ""))]
-    assert not cancel_scope_errors, f"cross-task cancel-scope error leaked: {cancel_scope_errors}"
+        cancel_scope_errors = [ctx for ctx in unhandled if "cancel scope" in str(ctx.get("exception") or ctx.get("message", ""))]
+        assert not cancel_scope_errors, f"cross-task cancel-scope error leaked: {cancel_scope_errors}"
+    finally:
+        # Restore the original handler so this test cannot leak into others.
+        loop.set_exception_handler(old_handler)
