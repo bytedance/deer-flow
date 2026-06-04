@@ -24,6 +24,8 @@ _TEXT_HEADER_LIMIT = 16
 _TEXT_EXCERPT_CHARS = 420
 _CODE_IMPORT_LIMIT = 12
 _CODE_SYMBOL_LIMIT = 24
+_JSON_STRUCTURE_LIMIT = 24
+_JSON_STRUCTURE_DEPTH = 4
 
 _CODE_HINTS = (
     re.compile(r"^\s*(?:from\s+\S+\s+import|import\s+\S+)", re.MULTILINE),
@@ -133,6 +135,7 @@ def render_tool_output_preview(
     lines.append("")
     lines.append("Access:")
     lines.append(f"- Use read_file on {virtual_path} with start_line and end_line to inspect the raw output.")
+    lines.append("- Start near the line hints above when present; byte offsets are approximate anchors into the saved file.")
     return "\n".join(lines)
 
 
@@ -199,6 +202,74 @@ def _json_shape(value: Any, *, depth: int = 0) -> str:
     return _type_name(value)
 
 
+def _json_path(parent: str, key: Any) -> str:
+    key_text = str(key)
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key_text):
+        return f"{parent}.{key_text}"
+    return f"{parent}[{json.dumps(key_text, ensure_ascii=False)}]"
+
+
+def _json_container_description(value: Any) -> str:
+    if isinstance(value, dict):
+        keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
+        suffix = f"; keys {', '.join(keys)}" if keys else ""
+        return f"object keys {len(value)}{suffix}"
+    if isinstance(value, list):
+        detail = f"array length {len(value)}"
+        if value:
+            detail += f"; first item {_type_name(value[0])}"
+        return detail
+    return _type_name(value)
+
+
+def _json_path_location(content: str, key_parts: list[Any]) -> str:
+    """Return an approximate source location for a JSON object path."""
+    if not key_parts:
+        return ""
+
+    search_from = 0
+    pos = -1
+    for key in key_parts:
+        quoted = json.dumps(str(key), ensure_ascii=False)
+        pos = content.find(quoted, search_from)
+        if pos < 0:
+            return ""
+        search_from = pos + len(quoted)
+
+    line = content.count("\n", 0, pos) + 1
+    byte_offset = len(content[:pos].encode("utf-8"))
+    return f" (line {line}, byte offset {byte_offset})"
+
+
+def _json_container_paths(content: str, value: Any, *, limit: int = _JSON_STRUCTURE_LIMIT) -> list[str]:
+    """Summarize nested JSON container paths with approximate locations."""
+    paths: list[str] = []
+
+    def walk(node: Any, current_path: str, key_parts: list[Any], depth: int) -> None:
+        if len(paths) >= limit or depth >= _JSON_STRUCTURE_DEPTH:
+            return
+        if isinstance(node, dict):
+            for key, child in list(node.items())[:_KEY_LIMIT]:
+                if len(paths) >= limit:
+                    break
+                next_parts = [*key_parts, key]
+                next_path = _json_path(current_path, key)
+                if isinstance(child, (dict, list)):
+                    paths.append(
+                        f"{next_path}: {_json_container_description(child)}"
+                        f"{_json_path_location(content, next_parts)}"
+                    )
+                    walk(child, next_path, next_parts, depth + 1)
+            return
+        if isinstance(node, list) and node:
+            first = node[0]
+            if isinstance(first, (dict, list)):
+                walk(first, f"{current_path}[]", key_parts, depth + 1)
+
+    walk(value, "$", [], 0)
+    return paths
+
+
 def _scalar_examples(value: Any, *, path: str = "$", limit: int = _SCALAR_LIMIT) -> list[str]:
     examples: list[str] = []
 
@@ -223,7 +294,8 @@ def _scalar_examples(value: Any, *, path: str = "$", limit: int = _SCALAR_LIMIT)
     return examples
 
 
-def _try_json(stripped: str) -> ToolOutputSynopsis | None:
+def _try_json(content: str) -> ToolOutputSynopsis | None:
+    stripped = content.strip()
     if not stripped.startswith(("{", "[")):
         return None
     try:
@@ -235,22 +307,12 @@ def _try_json(stripped: str) -> ToolOutputSynopsis | None:
     trailing = len(stripped[end:].strip())
     summary: list[str] = []
     structure: list[str] = [f"shape: {_json_shape(value)}"]
+    structure.extend(_json_container_paths(content, value))
     notable = _scalar_examples(value)
     if isinstance(value, dict):
         keys = [str(key) for key in value.keys()]
         summary.append(f"JSON object with {len(keys)} top-level keys.")
         summary.append(f"Top-level keys: {', '.join(keys[:_KEY_LIMIT]) or '(none)'}")
-        for key, child in list(value.items())[:_KEY_LIMIT]:
-            if isinstance(child, dict):
-                child_keys = ", ".join(str(child_key) for child_key in list(child.keys())[:_KEY_LIMIT])
-                structure.append(f"{key}: object keys {child_keys or '(none)'}")
-            elif isinstance(child, list):
-                detail = f"{key}: array length {len(child)}"
-                if child:
-                    detail += f"; first item {_type_name(child[0])}"
-                structure.append(detail)
-            else:
-                structure.append(f"{key}: {_type_name(child)}")
     elif isinstance(value, list):
         summary.append(f"JSON array with {len(value)} items.")
         if value:

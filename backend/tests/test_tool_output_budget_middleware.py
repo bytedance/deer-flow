@@ -8,6 +8,7 @@ sync/async code paths.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from types import SimpleNamespace
@@ -267,6 +268,30 @@ class TestBuildPreview:
         assert "$.meta.source: \"unit\"" in preview
         assert not preview.startswith('{"meta"')
         assert "SHOULD_NOT_NEED_TAIL" not in preview
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        assert "line " in preview
+        assert "byte offset " in preview
+        assert "Start near the line hints above" in preview
 
     def test_table_preview_extracts_columns(self):
         content = "name,score\nAda,98\nGrace,99\n"
