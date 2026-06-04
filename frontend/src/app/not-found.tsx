@@ -1,18 +1,32 @@
 import Link from "next/link";
 
+import { Button } from "@/components/ui/button";
+import { CompassIcon } from "@/components/ui/icons";
+
 export default function NotFound() {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-4 text-center">
-      <h1 className="text-6xl font-bold tracking-tight text-muted-foreground">
+    <div className="bg-background text-foreground relative flex min-h-dvh w-full flex-col items-center justify-center gap-6 text-center">
+      <div className="noise-overlay" />
+      <div className="text-[140px] leading-none font-bold text-primary/10 select-none">
         404
-      </h1>
-      <p className="text-lg text-muted-foreground">页面未找到</p>
-      <Link
-        href="/"
-        className="text-primary hover:underline text-sm"
-      >
-        返回首页
-      </Link>
+      </div>
+      <div className="space-y-2">
+        <h1 className="text-xl font-semibold tracking-tight">页面未找到</h1>
+        <p className="text-muted-foreground text-sm max-w-sm text-balance">
+          您访问的页面不存在或已被移除。请检查链接是否正确，或返回工作台。
+        </p>
+      </div>
+      <div className="flex gap-3">
+        <Button variant="outline" size="sm" asChild>
+          <Link href="/">
+            <CompassIcon className="size-4" />
+            返回首页
+          </Link>
+        </Button>
+        <Button size="sm" asChild>
+          <Link href="/workspace">进入工作台</Link>
+        </Button>
+      </div>
     </div>
   );
 }

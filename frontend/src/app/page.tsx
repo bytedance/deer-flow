@@ -3,13 +3,14 @@ import Link from "next/link";
 
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
+import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { cn } from "@/lib/utils";
 
 export default function LandingPage() {
   return (
-    <div className="bg-background text-foreground relative min-h-screen w-full">
+    <div className="bg-background text-foreground relative min-h-dvh w-full">
       <div className="noise-overlay" />
       <Header />
       <main
@@ -46,9 +47,9 @@ export default function LandingPage() {
               />
             </div>
             <div className="relative z-10 flex flex-col items-center gap-3">
-              <div className="text-[120px] leading-none font-bold text-primary/10 select-none">
-                ⚙
-              </div>
+              <span className="text-[100px] leading-none font-bold select-none">
+                <AuroraText speed={0.8}>EHM</AuroraText>
+              </span>
               <p className="text-muted-foreground/40 text-xs tracking-widest uppercase">
                 Equipment Health Management
               </p>
@@ -56,7 +57,7 @@ export default function LandingPage() {
           </div>
         </section>
 
-        <section className="flex flex-col gap-4 py-16">
+        <section className="flex flex-col gap-4 pt-24 pb-32">
           <FeatureCard
             icon={<Activity className="size-5" />}
             title="实时监测"
