@@ -60,7 +60,7 @@ export default function ConfirmBlock({ block }: ConfirmBlockProps) {
   }
 
   const confirmButtonClass = variant === "destructive"
-    ? "bg-red-600 text-white hover:bg-red-700"
+    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
     : "bg-primary text-primary-foreground hover:bg-primary/90";
 
   return (

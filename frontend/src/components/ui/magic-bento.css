@@ -1,12 +1,6 @@
 :root {
   --hue: 27;
   --sat: 69%;
-  --white: hsl(0, 0%, 100%);
-  --purple-primary: rgba(132, 0, 255, 1);
-  --purple-glow: rgba(132, 0, 255, 0.2);
-  --purple-border: rgba(132, 0, 255, 0.8);
-  --border-color: #392e4e;
-  --background-dark: #060010;
   color-scheme: light dark;
 }
 
@@ -29,8 +23,8 @@
   max-width: 100%;
   padding: 1.25em;
   border-radius: 20px;
-  border: 1px solid var(--border-color);
-  background: var(--background-dark);
+  border: 1px solid var(--border);
+  background: var(--card);
   font-weight: 300;
   overflow: hidden;
   transition: all 0.3s ease;
@@ -43,14 +37,14 @@
 
 .magic-bento-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow);
 }
 
 .magic-bento-card__header,
 .magic-bento-card__content {
   display: flex;
   position: relative;
-  color: var(--white);
+  color: var(--foreground);
 }
 
 .magic-bento-card__header {
@@ -151,18 +145,18 @@
   padding: 6px;
   background: radial-gradient(
     var(--glow-radius) circle at var(--glow-x) var(--glow-y),
-    rgba(132, 0, 255, calc(var(--glow-intensity) * 0.8)) 0%,
-    rgba(132, 0, 255, calc(var(--glow-intensity) * 0.4)) 30%,
+    oklch(from var(--ring) l c h / calc(var(--glow-intensity) * 0.8)) 0%,
+    oklch(from var(--ring) l c h / calc(var(--glow-intensity) * 0.4)) 30%,
     transparent 60%
   );
   border-radius: inherit;
   -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
+    linear-gradient(var(--background, #fff) 0 0) content-box,
+    linear-gradient(var(--background, #fff) 0 0);
   -webkit-mask-composite: xor;
   mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
+    linear-gradient(var(--background, #fff) 0 0) content-box,
+    linear-gradient(var(--background, #fff) 0 0);
   mask-composite: exclude;
   pointer-events: none;
   opacity: 1;
@@ -176,8 +170,8 @@
 
 .magic-bento-card--border-glow:hover {
   box-shadow:
-    0 4px 20px rgba(46, 24, 78, 0.4),
-    0 0 30px var(--purple-glow);
+    0 4px 20px var(--shadow),
+    0 0 30px oklch(from var(--ring) l c h / 0.2);
 }
 
 .particle-container {
@@ -192,15 +186,15 @@
   left: -2px;
   right: -2px;
   bottom: -2px;
-  background: rgba(132, 0, 255, 0.2);
+  background: oklch(from var(--ring) l c h / 0.15);
   border-radius: 50%;
   z-index: -1;
 }
 
 .particle-container:hover {
   box-shadow:
-    0 4px 20px rgba(46, 24, 78, 0.2),
-    0 0 30px var(--purple-glow);
+    0 4px 20px var(--shadow),
+    0 0 30px oklch(from var(--ring) l c h / 0.15);
 }
 
 /* Global spotlight styles */

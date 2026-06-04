@@ -98,7 +98,7 @@ export function IndustrialBackdrop() {
       <div className="relative flex h-full flex-col justify-between p-10 xl:p-14">
         <div className="flex items-center gap-2">
           <span
-            className="bg-primary inline-flex h-8 w-8 items-center justify-center rounded text-sm font-bold text-white"
+            className="bg-primary inline-flex h-8 w-8 items-center justify-center rounded text-sm font-bold text-primary-foreground"
             aria-hidden="true"
           >
             E

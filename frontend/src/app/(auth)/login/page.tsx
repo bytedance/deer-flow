@@ -130,14 +130,14 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="bg-background grid min-h-screen lg:grid-cols-[3fr_2fr]">
+    <div className="bg-background grid min-h-dvh lg:grid-cols-[3fr_2fr]">
       <IndustrialBackdrop />
 
       <main className="flex min-h-dvh items-center justify-center px-6 py-12 lg:px-12">
         <div className="w-full max-w-sm space-y-8">
           <div className="space-y-2 lg:hidden">
             <span
-              className="bg-primary inline-flex h-8 w-8 items-center justify-center rounded text-sm font-bold text-white"
+              className="bg-primary inline-flex h-8 w-8 items-center justify-center rounded text-sm font-bold text-primary-foreground"
               aria-hidden="true"
             >
               E
