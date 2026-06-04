@@ -1,11 +1,16 @@
 import { afterEach, expect, test, vi } from "vitest";
 
-import { writeTextToClipboard } from "@/core/clipboard";
+import {
+  installClipboardFallback,
+  writeTextToClipboard,
+} from "@/core/clipboard";
 
 const originalNavigator = globalThis.navigator;
 const hadOriginalNavigator = "navigator" in globalThis;
 const originalDocument = globalThis.document;
 const hadOriginalDocument = "document" in globalThis;
+const originalClipboardItem = globalThis.ClipboardItem;
+const hadOriginalClipboardItem = "ClipboardItem" in globalThis;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -24,6 +29,15 @@ afterEach(() => {
     Object.defineProperty(globalThis, "document", {
       configurable: true,
       value: originalDocument,
+    });
+  }
+
+  if (!hadOriginalClipboardItem) {
+    Reflect.deleteProperty(globalThis, "ClipboardItem");
+  } else {
+    Object.defineProperty(globalThis, "ClipboardItem", {
+      configurable: true,
+      value: originalClipboardItem,
     });
   }
 });
@@ -143,4 +157,81 @@ test("returns false when Clipboard API rejects", async () => {
   });
 
   await expect(writeTextToClipboard("hello")).resolves.toBe(false);
+});
+
+test("installs a writeText fallback when Clipboard API is unavailable", async () => {
+  const textarea = {
+    remove: vi.fn(),
+    select: vi.fn(),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+  const appendChild = vi.fn();
+  const execCommand = vi.fn().mockReturnValue(true);
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild,
+      },
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand,
+    },
+  });
+
+  installClipboardFallback();
+
+  await expect(globalThis.navigator.clipboard.writeText("hello")).resolves.toBe(
+    undefined,
+  );
+  expect(textarea.value).toBe("hello");
+  expect(appendChild).toHaveBeenCalledWith(textarea);
+  expect(textarea.select).toHaveBeenCalled();
+  expect(execCommand).toHaveBeenCalledWith("copy");
+  expect(textarea.remove).toHaveBeenCalled();
+});
+
+test("installs a write fallback for ClipboardItem text/plain payloads", async () => {
+  const textarea = {
+    remove: vi.fn(),
+    select: vi.fn(),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+  const execCommand = vi.fn().mockReturnValue(true);
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand,
+    },
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+
+  const item = new globalThis.ClipboardItem({
+    "text/html": new Blob(["<table></table>"], { type: "text/html" }),
+    "text/plain": "| A |\n| B |",
+  });
+  await expect(globalThis.navigator.clipboard.write([item])).resolves.toBe(
+    undefined,
+  );
+  expect(textarea.value).toBe("| A |\n| B |");
+  expect(execCommand).toHaveBeenCalledWith("copy");
 });
