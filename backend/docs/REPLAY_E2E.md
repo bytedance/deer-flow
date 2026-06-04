@@ -22,6 +22,31 @@ so contract drift turns the build red instead.
   auto-title and a follow-up suggestion render in the browser. Guards semantic
   *render*. (Complementary to Layer 1 — neither subsumes the other.)
 
+Layer 2 also hosts **cross-stack contract scenarios** — the dangerous class
+where a backend change silently breaks a frontend assumption and *both sides'
+unit tests stay green*. See below.
+
+## Cross-stack scenario: multi-run render order (`multi-run-order.spec.ts`)
+
+Regression guard for issue **#3352** (after context compression, refreshing a
+thread rendered history out of order). Root cause was a front-back desync:
+backend `RunManager.list_by_thread` returns runs **newest-first** (PR #2932),
+while the frontend (`core/threads/hooks.ts`) iterated runs and **prepended** each
+loaded page — inverting chronological order once the checkpoint no longer held
+the older messages. The backend ordering test was green throughout, and the
+frontend regression unit test hardcodes "backend returns newest-first" in a mock,
+so only a *real frontend against a real backend* catches the desync.
+
+This scenario does **not** record a conversation. It uses a **test-only seeder**
+(`tests/seed_runs_router.py`, mounted on the replay gateway only when
+`DEERFLOW_ENABLE_TEST_SEED=1`) to stand up a thread with ≥2 runs and per-run
+message events — and deliberately **no checkpoint**, which is the #3352
+precondition: it forces the frontend's per-run reload path to be the sole source
+of truth so the ordering bug becomes observable. The seeder writes through the
+gateway's own run/event stores using the request's auth context, so the real
+`list_by_thread` → `/runs/{id}/messages` → prepend path runs live. Reverting the
+#3354 frontend fix turns this spec red.
+
 ## How replay works
 
 `tests/replay_provider.py::ReplayChatModel` returns recorded assistant turns keyed

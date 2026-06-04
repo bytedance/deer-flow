@@ -48,8 +48,22 @@ def main() -> int:
 
     import uvicorn
 
+    target: str | object = "app.gateway.app:app"
+    # Test-only: attach the run/message seeder used by the multi-run render-order
+    # e2e (#3352). Imported from tests/ and mounted here only — never in the
+    # production app. Pass the app object (not the import string) so the extra
+    # router is registered before uvicorn serves it.
+    if os.environ.get("DEERFLOW_ENABLE_TEST_SEED") == "1":
+        from seed_runs_router import router as seed_router
+
+        from app.gateway.app import app as gateway_app
+
+        gateway_app.include_router(seed_router)
+        target = gateway_app
+        print("[replay-gw] test-only seed router mounted at /api/test-only/seed-runs", flush=True)
+
     print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
-    uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 

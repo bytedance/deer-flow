@@ -35,6 +35,10 @@ export default defineConfig({
       timeout: 180_000,
       stdout: "pipe",
       stderr: "pipe",
+      // Mount the test-only run/message seeder used by multi-run-order.spec.ts
+      // (#3352). The endpoint exists only on this replay gateway, never in the
+      // production app.
+      env: { DEERFLOW_ENABLE_TEST_SEED: "1" },
     },
     {
       command: "pnpm build && pnpm start",
