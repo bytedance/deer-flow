@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +16,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   applyResolvedAuthError,
   resolveAuthError,
@@ -203,7 +206,25 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
 
   if (isLoading) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">{t.common.loading}</div>
+      <div className="flex h-full flex-col gap-4 p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-20 rounded" />
+            <Skeleton className="h-7 w-48 rounded" />
+            <Skeleton className="h-3 w-64 rounded" />
+          </div>
+          <div className="flex gap-2">
+            <Skeleton className="h-9 w-16 rounded" />
+            <Skeleton className="h-9 w-16 rounded" />
+            <Skeleton className="h-9 w-20 rounded" />
+            <Skeleton className="h-9 w-14 rounded" />
+          </div>
+        </div>
+        <div className="grid flex-1 grid-cols-[200px_1fr] gap-4 overflow-hidden">
+          <Skeleton className="h-full rounded" />
+          <Skeleton className="h-full rounded" />
+        </div>
+      </div>
     );
   }
 
@@ -240,75 +261,82 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
           </div>
           {marketplaceSource && (
             <div className="mt-1.5 flex items-center gap-2">
-              <Link
-                href={`/workspace/template-marketplace/${marketplaceSource.listing_id}`}
-                className="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-500/20"
+              <Badge
+                variant="outline"
+                className="rounded-sm border-blue-500/30 bg-blue-500/10 text-[10px] text-blue-600 hover:bg-blue-500/20"
+                asChild
               >
-                <Store className="h-3 w-3" />
-                {t.reportTemplates.installedFromMarketplace}
-              </Link>
+                <Link
+                  href={`/workspace/template-marketplace/${marketplaceSource.listing_id}`}
+                >
+                  <Store className="h-3 w-3" />
+                  {t.reportTemplates.installedFromMarketplace}
+                </Link>
+              </Badge>
               {upstreamListing &&
                 upstreamListing.template_version >
                   marketplaceSource.source_version && (
-                  <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600">
+                  <Badge
+                    variant="outline"
+                    className="rounded-sm border-amber-500/30 bg-amber-500/10 text-[10px] text-amber-600"
+                  >
                     {t.reportTemplates.updateAvailable} (
                     v{upstreamListing.template_version})
-                  </span>
+                  </Badge>
                 )}
             </div>
           )}
         </div>
         <div className="flex gap-2">
-          <button
-            type="button"
-            className="rounded border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleValidate}
             disabled={validate.isPending}
           >
             {validate.isPending
               ? t.editor.validating
               : t.reportTemplates.validateDsl}
-          </button>
-          <button
-            type="button"
-            className="rounded border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleSave}
             disabled={!canEdit || update.isPending}
           >
             {update.isPending ? t.editor.saving : t.reportTemplates.saveDraft}
-          </button>
-          <button
-            type="button"
-            className="rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          </Button>
+          <Button
+            size="sm"
             onClick={handlePublish}
             disabled={!canEdit || publish.isPending}
           >
             {publish.isPending
               ? t.editor.publishing
               : t.reportTemplates.publishNewVersion}
-          </button>
-          <button
-            type="button"
-            className="rounded border px-3 py-1.5 text-sm text-muted-foreground hover:bg-accent"
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={handleArchive}
           >
             {t.reportTemplates.archive}
-          </button>
+          </Button>
           {isArchived && (
-            <button
-              type="button"
-              className="rounded border border-destructive/30 px-3 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+            <Button
+              variant="destructive"
+              size="sm"
               onClick={() => setShowDeleteDialog(true)}
             >
-              <Trash2 className="mr-1 inline h-3.5 w-3.5" />
+              <Trash2 />
               {t.common.delete}
-            </button>
+            </Button>
           )}
         </div>
       </header>
 
       <div className="grid flex-1 grid-cols-[200px_1fr] gap-4 overflow-hidden">
-        <aside className="overflow-y-auto rounded border bg-card p-3">
+        <aside className="overflow-y-auto rounded-xl bg-muted/30 p-3">
           <h2 className="mb-2 text-sm font-medium">
             {t.reportTemplates.versions}
           </h2>
@@ -336,7 +364,7 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
           </ul>
         </aside>
 
-        <main className="flex flex-col gap-3 overflow-hidden rounded border bg-card p-3">
+        <main className="flex flex-col gap-3 overflow-hidden rounded-xl bg-muted/30 p-3">
           {parseError && (
             <div className="rounded border border-destructive bg-destructive/10 p-2 text-xs">
               {t.reportTemplates.jsonParseFailed}: {parseError}
@@ -382,24 +410,24 @@ export function ReportTemplateDetailPage({ templateId }: Props) {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <button
-              type="button"
-              className="rounded border px-3 py-1.5 text-sm hover:bg-accent"
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleteTemplate.isPending}
             >
               {t.common.cancel}
-            </button>
-            <button
-              type="button"
-              className="rounded bg-destructive px-3 py-1.5 text-sm text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50"
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
               onClick={handleDelete}
               disabled={deleteTemplate.isPending}
             >
               {deleteTemplate.isPending
                 ? t.reportTemplates.deleting
                 : t.reportTemplates.deletePermanently}
-            </button>
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -42,9 +42,9 @@ export default async function WorkspaceLayout({
     <AuthProvider initialUser={initialUser}>
       <QueryClientProvider>
         <TenantGuardWrapper>
-          <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
+          <SidebarProvider className="min-h-dvh" defaultOpen={initialSidebarOpen}>
             <WorkspaceSidebar />
-            <SidebarInset className="min-w-0">{children}</SidebarInset>
+            <SidebarInset id="main-content" className="min-w-0">{children}</SidebarInset>
           </SidebarProvider>
           <CommandPalette />
           <IndustrialMigrationDialog />
