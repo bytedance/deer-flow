@@ -68,7 +68,7 @@
 @source inline("bg-{background,muted,primary,secondary,accent}");
 @source inline("border-{border,input}");
 
-@custom-variant dark (&:is(.dark *, .industrial-dark *));
+@custom-variant dark (&:is(.dark *, .industrial-dark *, .industrial-blue *));
 
 @theme {
   --font-sans:
@@ -358,6 +358,59 @@
   --sidebar-accent-foreground: oklch(0.20 0 0);
   --sidebar-border: oklch(0.78 0 0);
   --sidebar-ring: oklch(0.45 0.15 230);
+}
+
+.industrial-blue {
+  --radius: 0.375rem;
+  --background: oklch(0.23 0.022 252);
+  --foreground: oklch(0.91 0.005 250);
+  --card: oklch(0.27 0.022 252);
+  --card-foreground: oklch(0.91 0.005 250);
+  --popover: oklch(0.27 0.022 252);
+  --popover-foreground: oklch(0.91 0.005 250);
+  --primary: oklch(0.62 0.18 252);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.31 0.018 252);
+  --secondary-foreground: oklch(0.91 0.005 250);
+  --muted: oklch(0.29 0.018 252);
+  --muted-foreground: oklch(0.63 0.01 250);
+  --accent: oklch(0.34 0.03 260);
+  --accent-foreground: oklch(0.91 0.005 250);
+  --destructive: oklch(0.62 0.24 25);
+  --border: oklch(0.35 0.018 252);
+  --input: oklch(0.32 0.012 252);
+  --ring: oklch(0.62 0.18 252);
+  --chart-1: oklch(0.62 0.18 252);
+  --chart-2: oklch(0.65 0.15 185);
+  --chart-3: oklch(0.70 0.16 90);
+  --chart-4: oklch(0.65 0.18 30);
+  --chart-5: oklch(0.60 0.12 310);
+  --sidebar: oklch(0.20 0.022 252);
+  --sidebar-foreground: oklch(0.91 0.005 250);
+  --sidebar-primary: oklch(0.62 0.18 252);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.27 0.022 252);
+  --sidebar-accent-foreground: oklch(0.91 0.005 250);
+  --sidebar-border: oklch(0.35 0.018 252);
+  --sidebar-ring: oklch(0.62 0.18 252);
+  font-weight: 400;
+
+  --shadow: 0 1px 3px 0 oklch(0 0 0 / 25%), 0 1px 2px -1px oklch(0 0 0 / 25%);
+
+  --alarm-critical: oklch(0.55 0.22 320);
+  --alarm-high: oklch(0.65 0.24 25);
+  --alarm-medium: oklch(0.82 0.18 90);
+  --alarm-low: oklch(0.70 0.22 350);
+  --alarm-journal: oklch(0.70 0.16 230);
+  --alarm-foreground: oklch(0.985 0 0);
+
+  --status-running: oklch(0.62 0.12 145);
+  --status-stopped: oklch(0.65 0.00 0);
+  --status-maint: oklch(0.70 0.16 60);
+  --status-standby: oklch(0.70 0.12 230);
+  --status-fault: oklch(0.62 0.24 25);
+  --status-comm-loss: oklch(0.55 0.06 260);
+  --status-foreground: oklch(0.985 0 0);
 }
 
 @layer base {

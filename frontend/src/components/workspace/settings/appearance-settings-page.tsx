@@ -3,9 +3,7 @@
 import {
   FactoryIcon,
   GaugeIcon,
-  MonitorSmartphoneIcon,
-  MoonIcon,
-  SunIcon,
+  PaletteIcon,
 } from "@/components/ui/icons";
 import { useTheme } from "next-themes";
 import { useMemo, type ComponentType, type SVGProps } from "react";
@@ -29,20 +27,21 @@ const languageOptions: { value: Locale; label: string }[] = [
   { value: "zh-CN", label: zhCN.locale.localName },
 ];
 
-type ThemeId =
-  | "system"
-  | "light"
-  | "dark"
-  | "industrial-light"
-  | "industrial-dark";
+type ThemeId = "industrial-light" | "industrial-dark" | "industrial-blue";
 
 export function AppearanceSettingsPage() {
   const { t, locale, changeLocale } = useI18n();
-  const { theme, setTheme, systemTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const currentTheme = (theme ?? "industrial-dark") as ThemeId;
 
   const themeOptions = useMemo(
     () => [
+      {
+        id: "industrial-blue" as const,
+        label: "工业蓝",
+        description: "蓝色底调深色工业主题，营造控制室冷光质感",
+        icon: PaletteIcon,
+      },
       {
         id: "industrial-dark" as const,
         label: t.settings.appearance.industrialDark,
@@ -55,36 +54,12 @@ export function AppearanceSettingsPage() {
         description: t.settings.appearance.industrialLightDescription,
         icon: GaugeIcon,
       },
-      {
-        id: "system" as const,
-        label: t.settings.appearance.system,
-        description: t.settings.appearance.systemDescription,
-        icon: MonitorSmartphoneIcon,
-      },
-      {
-        id: "light" as const,
-        label: t.settings.appearance.light,
-        description: t.settings.appearance.lightDescription,
-        icon: SunIcon,
-      },
-      {
-        id: "dark" as const,
-        label: t.settings.appearance.dark,
-        description: t.settings.appearance.darkDescription,
-        icon: MoonIcon,
-      },
     ],
     [
-      t.settings.appearance.dark,
-      t.settings.appearance.darkDescription,
       t.settings.appearance.industrialDark,
       t.settings.appearance.industrialDarkDescription,
       t.settings.appearance.industrialLight,
       t.settings.appearance.industrialLightDescription,
-      t.settings.appearance.light,
-      t.settings.appearance.lightDescription,
-      t.settings.appearance.system,
-      t.settings.appearance.systemDescription,
     ],
   );
 
@@ -103,7 +78,6 @@ export function AppearanceSettingsPage() {
               description={option.description}
               active={currentTheme === option.id}
               mode={option.id}
-              systemTheme={systemTheme}
               onSelect={(value) => setTheme(value)}
             />
           ))}
@@ -146,7 +120,6 @@ function ThemePreviewCard({
   description,
   active,
   mode,
-  systemTheme,
   onSelect,
 }: {
   icon: ComponentType<SVGProps<SVGSVGElement>>;
@@ -154,27 +127,16 @@ function ThemePreviewCard({
   description: string;
   active: boolean;
   mode: ThemeId;
-  systemTheme?: string;
   onSelect: (mode: ThemeId) => void;
 }) {
-  const isDarkPreview =
-    mode === "dark" ||
-    mode === "industrial-dark" ||
-    (mode === "system" && systemTheme === "dark");
-  const isIndustrial =
-    mode === "industrial-light" || mode === "industrial-dark";
-  const previewBg = isIndustrial
-    ? isDarkPreview
+  const isDarkPreview = mode === "industrial-dark" || mode === "industrial-blue";
+  const isBlue = mode === "industrial-blue";
+  const previewBg = isBlue
+    ? "border-blue-900/50 bg-blue-950/60 text-blue-100"
+    : isDarkPreview
       ? "border-neutral-700 bg-neutral-800 text-neutral-100"
-      : "border-neutral-300 bg-neutral-100 text-neutral-900"
-    : isDarkPreview
-      ? "border-neutral-800 bg-neutral-900 text-neutral-200"
-      : "border-slate-200 bg-white text-slate-900";
-  const previewAccent = isIndustrial
-    ? "bg-sky-500"
-    : isDarkPreview
-      ? "bg-sky-400"
-      : "bg-sky-500";
+      : "border-neutral-300 bg-neutral-100 text-neutral-900";
+  const previewAccent = isBlue ? "bg-blue-500" : "bg-sky-500";
   return (
     <button
       type="button"

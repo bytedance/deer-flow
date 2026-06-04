@@ -47,3 +47,16 @@ The system SHALL present industrial intelligence use cases as the primary narrat
 - **WHEN** a user hovers over an industrial skill in the skill selector
 - **THEN** the tooltip describes the industrial use case and typical workflow, with no mention of "alternative foundation tools"
 
+### Requirement: Industrial-only theme options
+The system SHALL only offer industrial theme options for user selection. The appearance settings SHALL NOT display the next-themes generic "light" and "dark" themes. Available themes SHALL be limited to: Industrial Blue (industrial-blue), Industrial Dark (industrial-dark), Industrial Light (industrial-light).
+
+#### Scenario: Appearance theme list
+- **WHEN** user opens the appearance settings page
+- **THEN** only three theme preview cards are shown: Industrial Blue, Industrial Dark, Industrial Light
+- **AND** "Light" and "Dark" options are not displayed
+
+#### Scenario: Legacy theme value fallback
+- **WHEN** a user's localStorage contains "light" or "dark" as the theme preference
+- **THEN** next-themes automatically falls back to the default theme industrial-dark
+- **AND** the user does not see a white screen or missing styles
+
