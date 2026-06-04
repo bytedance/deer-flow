@@ -392,6 +392,22 @@ class TestMarkdownMemoryStorage:
         assert len(quarantined) == 1
         assert quarantined[0].read_text(encoding="utf-8") == truncated
 
+    def test_non_utf8_summary_is_quarantined_before_rebuild(self, tmp_path):
+        """A summary that cannot even be *read* as UTF-8 (e.g. UTF-16 BOM,
+        invalid bytes) hits the ``except (OSError, UnicodeError)`` branch:
+        it must be quarantined there too, not silently rebuilt over by the
+        next save (same contract as the decode/fence path below)."""
+        memory_file = tmp_path / "memory.json"
+        original = json.dumps(create_empty_memory(), ensure_ascii=False).encode("utf-16")
+        memory_file.write_bytes(original)
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "a non-UTF-8 summary must be quarantined, not silently rebuilt over"
+        assert quarantined[0].read_bytes() == original
+
     def test_fenced_block_containing_backticks_parses_losslessly(self):
         """Remembered code snippets must not terminate the JSON block."""
         manifest = create_empty_memory()
