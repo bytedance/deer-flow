@@ -155,6 +155,10 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* Tinted shadow — carries the foreground hue instead of pure black. */
+  --color-shadow: var(--shadow);
+  --shadow: 0 1px 3px 0 oklch(0.145 0 0 / 4%), 0 1px 2px -1px oklch(0.145 0 0 / 4%);
+
   /* Alarm priority colors — used by bg-alarm-*, text-alarm-* utilities. */
   --color-alarm-critical: var(--alarm-critical);
   --color-alarm-high: var(--alarm-high);
@@ -259,6 +263,8 @@
   --sidebar-ring: oklch(0.556 0 0);
   font-weight: 300;
 
+  --shadow: 0 1px 3px 0 oklch(0 0 0 / 25%), 0 1px 2px -1px oklch(0 0 0 / 25%);
+
   /* Alarm priority palette tuned for dark surfaces. */
   --alarm-critical: oklch(0.55 0.22 320);
   --alarm-high: oklch(0.65 0.24 25);
@@ -355,6 +361,9 @@
 }
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
   * {
     @apply border-border outline-ring/50;
   }
@@ -440,6 +449,15 @@
     @media (width >= 80rem) {
       max-width: 80rem;
     }
+  }
+
+  .noise-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
   }
 }
 

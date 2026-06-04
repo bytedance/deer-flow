@@ -173,8 +173,8 @@ function ThemePreviewCard({
   const previewAccent = isIndustrial
     ? "bg-sky-500"
     : isDarkPreview
-      ? "bg-emerald-400"
-      : "bg-emerald-500";
+      ? "bg-sky-400"
+      : "bg-sky-500";
   return (
     <button
       type="button"
