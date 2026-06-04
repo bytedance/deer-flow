@@ -126,8 +126,10 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   `asyncio.to_thread` offload around `LocalSkillStorage.load_skills`, fix
   for #1917); `test_sqlite_lifespan.py` (locks the offload around
   SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
-  and `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
-  API offloading its file IO via `asyncio.to_thread`, fix #3084).
+  `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
+  API offloading its file IO via `asyncio.to_thread`, fix #3084); and
+  `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
+  offloading the uploads-directory scan off the event loop).
 - `test_gate_smoke.py` is a meta-test asserting the gate actually catches
   unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
   opt-out works.
@@ -206,7 +208,7 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 12. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
 13. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 14. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
-15. **DeferredToolFilterMiddleware** - Hides deferred tool schemas from the bound model until tool search is enabled (optional)
+15. **DeferredToolFilterMiddleware** - Hides deferred (MCP) tool schemas from the bound model using a build-time deferred-name set + catalog hash, reading per-thread promotions from `ThreadState.promoted` (hash-scoped, no ContextVar); a tool becomes bound on subsequent turns after `tool_search` returns its schema (optional, if `tool_search.enabled`)
 16. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if `subagent_enabled`)
 17. **LoopDetectionMiddleware** - Detects repeated tool-call loops; hard-stop responses clear both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer
 18. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)

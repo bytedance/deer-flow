@@ -19,6 +19,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -140,7 +141,14 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
-    see issue #2677)."""
+    see issue #2677).
+
+    ``user_id`` is intentionally propagated into ``config['context']`` in addition to
+    the whitelisted keys, so non-web callers (e.g. IM channels) that supply identity in
+    ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
+    ``setdefault`` so a server-authenticated id stamped by
+    :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+    """
     if not context:
         return
     configurable = config.setdefault("configurable", {})
@@ -151,6 +159,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    if "user_id" in context and isinstance(runtime_context, dict):
+        runtime_context.setdefault("user_id", context["user_id"])
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
@@ -164,6 +174,9 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
     if user_id is None:
+        return
+
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
         return
 
     runtime_context = config.setdefault("context", {})
