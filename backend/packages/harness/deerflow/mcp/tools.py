@@ -167,7 +167,7 @@ def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
     connection: dict[str, Any],
-    extensions_config: ExtensionsConfig,
+    extensions_config: ExtensionsConfig | None = None,
     tool_interceptors: list[Any] | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
@@ -186,6 +186,7 @@ def _make_session_pool_tool(
         original_name = original_name[len(prefix) :]
 
     pool = get_session_pool()
+    resolved_extensions_config = extensions_config or ExtensionsConfig()
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
@@ -194,7 +195,7 @@ def _make_session_pool_tool(
         resolved_connection, scope_key = await _resolve_connection_for_runtime(
             server_name,
             connection,
-            extensions_config,
+            resolved_extensions_config,
             runtime,
         )
         session = await pool.get_session(server_name, scope_key, resolved_connection)
