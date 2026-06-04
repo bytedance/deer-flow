@@ -367,8 +367,8 @@ present_files(["/mnt/user-data/outputs/daily_report.md"])
 
 ## 数据源
 
-- Skill 脚本 `query_daily.py` 通过 integrations 平台层拉取真实运行数据。
-- 若数据接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
+- Skill 脚本 `query_daily.py` 通过数据提供者模式（`InsDailyProvider`）直接调用 features-tool 的 `InsApiClient` 拉取 InS 真实运行数据，不依赖 integrations 平台层。
+- 若 features-tool 不可用或数据接口异常，脚本会以 `{"error": "<ExceptionType>: <message>"}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
 
 ## 异常处理
 
