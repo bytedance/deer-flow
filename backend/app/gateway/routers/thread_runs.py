@@ -22,10 +22,11 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, serialize_channel_values
+from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+_ACTIVE_RUN_STATUSES = frozenset({RunStatus.pending, RunStatus.running})
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +204,17 @@ async def cancel_run(
 
     cancelled = await run_mgr.cancel(run_id, action=action)
     if not cancelled:
+        # ``thread.stop()`` first aborts the client stream, then posts
+        # ``/cancel``. If the run finishes in that window, treat the follow-up
+        # cancel as an idempotent no-op instead of surfacing a 409.
+        if record.status not in _ACTIVE_RUN_STATUSES:
+            if wait and record.task is not None and not record.task.done():
+                try:
+                    await record.task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return Response(status_code=204)
+            return Response(status_code=204 if wait else 202)
         raise HTTPException(
             status_code=409,
             detail=f"Run {run_id} is not cancellable (status: {record.status.value})",
