@@ -147,7 +147,22 @@ def reset_mcp_tools_cache() -> None:
         from deerflow.mcp.session_pool import get_session_pool
 
         pool = get_session_pool()
-        pool.close_all_sync()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is not None:
+            # Inside a running loop, close_all_sync() can only *signal* teardown
+            # of sessions owned by this loop and would complete asynchronously.
+            # Drive a deterministic close on a separate thread so sessions are
+            # fully torn down before reset_session_pool() drops the pool.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(asyncio.run, pool.close_all()).result()
+        else:
+            pool.close_all_sync()
     except Exception:
         logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
 
