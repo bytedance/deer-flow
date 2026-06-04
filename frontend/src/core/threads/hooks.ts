@@ -106,17 +106,30 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
-function findLatestUnloadedRunIndex(
+export function findLatestUnloadedRunIndex(
   runs: Run[],
   loadedRunIds: ReadonlySet<string>,
 ): number {
-  for (let i = runs.length - 1; i >= 0; i--) {
+  for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
     if (run && !loadedRunIds.has(run.run_id)) {
       return i;
     }
   }
   return -1;
+}
+
+export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
+
+export function shouldAutoContinueOnEmptyRun(
+  fetchedMessageCount: number,
+  consecutiveEmptyLoads: number,
+  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+): boolean {
+  return (
+    fetchedMessageCount === 0 &&
+    consecutiveEmptyLoads < maxConsecutiveEmptyLoads
+  );
 }
 
 type RunMessagesPageResponse = {
@@ -156,12 +169,24 @@ export function buildRunMessagesUrl(
   runId: string,
   beforeSeq?: number,
 ) {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
-  const url = `${baseUrl.replace(/\/+$/, "")}${path}`;
-  if (beforeSeq !== undefined) {
-    return `${url}?${new URLSearchParams({ before_seq: String(beforeSeq) })}`;
+  const isAbsoluteUrl = /^[a-z][a-z\d+\-.]*:\/\//i.test(normalizedBaseUrl);
+  if (!isAbsoluteUrl) {
+    const url = `${normalizedBaseUrl}${path}`;
+    if (beforeSeq !== undefined) {
+      return `${url}?${new URLSearchParams({ before_seq: String(beforeSeq) })}`;
+    }
+    return url;
   }
-  return url;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
+  if (beforeSeq !== undefined) {
+    url.searchParams.set("before_seq", String(beforeSeq));
+  }
+  return url.toString();
 }
 
 export function mergeMessages(
@@ -870,6 +895,7 @@ export function useThreadHistory(threadId: string) {
     setLoading(true);
 
     try {
+      let consecutiveEmptyLoads = 0;
       do {
         pendingLoadRef.current = false;
 
@@ -915,6 +941,7 @@ export function useThreadHistory(threadId: string) {
         );
         if (typeof nextBeforeSeq === "number") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
+          pendingLoadRef.current = true;
         } else if (nextBeforeSeq === undefined) {
           console.warn(
             `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
@@ -922,6 +949,17 @@ export function useThreadHistory(threadId: string) {
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
           loadedRunIdsRef.current.add(run.run_id);
+          if (
+            shouldAutoContinueOnEmptyRun(
+              _messages.length,
+              consecutiveEmptyLoads,
+            )
+          ) {
+            consecutiveEmptyLoads += 1;
+            pendingLoadRef.current = true;
+          } else {
+            consecutiveEmptyLoads = 0;
+          }
         }
         indexRef.current = findLatestUnloadedRunIndex(
           runsRef.current,
