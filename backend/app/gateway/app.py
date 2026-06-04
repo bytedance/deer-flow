@@ -40,6 +40,7 @@ from app.gateway.routers import (
     knowledge_bases,
     machine,
     marketplace,
+    point,
     mcp,
     memory,
     models,
@@ -770,6 +771,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Organize tree & Machine API (proxy to ins-bus-rpc)
     app.include_router(organize.router)
     app.include_router(machine.router)
+
+    # Point API (proxy to ins-bus-rpc /pointModel)
+    app.include_router(point.router)
 
     # Abnormal (SMS) proxy for A2UI components
     app.include_router(abnormal.router)

@@ -8,6 +8,7 @@ from .closure_ticket_tools import (
 )
 from .http_connector_tool import http_connector_tool
 from .present_file_tool import present_file_tool
+from .render_charts_batch import render_charts_file
 from .render_ui_tool import render_ui_tool
 from .report_template_runtime_tools import (
     REPORT_TEMPLATE_RUNTIME_TOOLS,
@@ -47,6 +48,7 @@ __all__ = [
     "http_connector_tool",
     "list_closure_tickets_tool",
     "present_file_tool",
+    "render_charts_file",
     "render_ui_tool",
     "report_template_assemble_payload_tool",
     "report_template_export_tool",

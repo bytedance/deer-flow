@@ -185,4 +185,21 @@ export const A2UI_DEBUG_DEFAULT_PROPS: Record<string, string> = {
     null,
     2,
   ),
+  "point-selector": JSON.stringify(
+    {
+      title: "选择测点",
+      queryParams: { userId: "1", orgId: 0, treeType: 1 },
+    },
+    null,
+    2,
+  ),
+  "point-selector-multi": JSON.stringify(
+    {
+      title: "选择测点（可多选）",
+      maxSelect: 10,
+      queryParams: { userId: "1", orgId: 0, treeType: 1 },
+    },
+    null,
+    2,
+  ),
 };

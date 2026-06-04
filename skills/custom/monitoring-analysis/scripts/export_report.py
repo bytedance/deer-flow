@@ -948,12 +948,144 @@ def _write_pdf(html: str, out_path: Path) -> None:
     WeasyprintHTML(string=html).write_pdf(str(out_path))
 
 
+def _render_monitoring_v2(payload: dict, thread_id: str | None = None) -> str:
+    """Render monitoring analysis report for v2.0 format (schema_version: 2.0).
+
+    Input: monitoring_features.json from extract_monitoring_features.py
+    """
+    lines: list[str] = []
+
+    # Title
+    overall_status = payload.get("overall_status", "unknown")
+    status_icon = {"normal": "✅", "warning": "⚠️", "critical": "🔴"}.get(overall_status, "❓")
+    status_cn = {"normal": "正常", "warning": "预警", "critical": "报警"}.get(overall_status, "未知")
+
+    lines.append(f"# 监测分析报告 {status_icon}")
+    lines.append("")
+    lines.append(f"**整体状态**：{status_cn} | **分析测点**：{payload.get('points_analyzed', 0)} 个")
+    lines.append(f"**分析时间**：{payload.get('analysis_time', 'N/A')}")
+    lines.append("")
+
+    # Overall summary
+    overall_summary = payload.get("overall_summary", "")
+    if overall_summary:
+        lines.append("## 分析结论")
+        lines.append("")
+        lines.append(overall_summary)
+        lines.append("")
+
+    # Point features detail
+    point_features = payload.get("point_features", [])
+    if point_features:
+        lines.append("## 测点详情")
+        lines.append("")
+
+        for pf in point_features:
+            point_name = pf.get("point_name", pf.get("point_id", "未知测点"))
+            health = pf.get("health_status", "unknown")
+            h_icon = {"normal": "✅", "warning": "⚠️", "critical": "🔴"}.get(health, "❓")
+            category = pf.get("category", "")
+            series = pf.get("endpoint_series", "")
+
+            lines.append(f"### {h_icon} {point_name}")
+            lines.append("")
+            lines.append(f"- **类别**：{category} | **数据系列**：{series}")
+            lines.append(f"- **状态**：{health}")
+            lines.append("")
+
+            # Summary
+            summary = pf.get("summary", "")
+            if summary:
+                lines.append(f"**摘要**：{summary}")
+                lines.append("")
+
+            # Trend features
+            trend = pf.get("trend_features")
+            if trend:
+                lines.append("**趋势特征**：")
+                lines.append("")
+                feature_stats = trend.get("feature_stats", {})
+                for fname, detail in list(feature_stats.items())[:3]:  # 最多显示3个特征
+                    current = detail.get("current", "N/A")
+                    mean = detail.get("mean", "N/A")
+                    std = detail.get("std", "N/A")
+                    lines.append(f"- {fname}: 当前值 {current}, 均值 {mean}, 标准差 {std}")
+
+                # Rising periods
+                for fname, detail in feature_stats.items():
+                    rising = detail.get("rising_periods", [])
+                    if rising:
+                        for rp in rising[:2]:
+                            lines.append(
+                                f"- ⬆️ **{fname} 上升趋势**：{rp.get('duration_days', '?')}天内变化 "
+                                f"{rp.get('amplitude', '?')}（置信度 {rp.get('confidence', 0):.0%}）"
+                            )
+                lines.append("")
+
+            # Spectral features
+            spectral = pf.get("spectral_features")
+            if spectral:
+                lines.append("**频谱特征**：")
+                lines.append("")
+                for finding in spectral.get("spectral_findings", [])[:3]:
+                    lines.append(f"- {finding}")
+                for finding in spectral.get("waveform_findings", [])[:3]:
+                    lines.append(f"- {finding}")
+                for fault in spectral.get("suspected_faults", []):
+                    lines.append(f"- 🔍 **疑似故障**：{fault}")
+                lines.append("")
+
+            # Anomalies
+            anomalies = pf.get("anomalies", [])
+            if anomalies:
+                lines.append("**检测到异常**：")
+                lines.append("")
+                for a in anomalies[:5]:
+                    sev = a.get("severity", "info")
+                    sev_icon = {"critical": "🔴", "warning": "🟡"}.get(sev, "ℹ️")
+                    lines.append(f"- {sev_icon} [{sev.upper()}] {a.get('description', '')}")
+                lines.append("")
+
+    # Recommendations
+    recommendations = payload.get("recommendations", [])
+    if recommendations:
+        lines.append("## 建议措施")
+        lines.append("")
+        for i, rec in enumerate(recommendations[:5], 1):
+            priority = rec.get("priority", "normal")
+            pri_icon = {"critical": "🔴", "warning": "🟡", "normal": "🔵"}.get(priority, "⚪")
+            lines.append(f"{i}. {pri_icon} {rec.get('action', '')}")
+        lines.append("")
+
+    # Data quality
+    data_quality = payload.get("data_quality", {})
+    if data_quality:
+        lines.append("## 数据质量")
+        lines.append("")
+        completeness = data_quality.get("completeness_pct", 100)
+        lines.append(f"- 数据完整度：{completeness}%")
+        notes = data_quality.get("notes", [])
+        if notes:
+            for note in notes[:5]:
+                lines.append(f"- ⚠️ {note}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def render_monitoring_markdown(payload: dict, thread_id: str | None = None) -> str:
     """Render monitoring analysis report as Markdown.
 
-    Covers all five analysis types: trend, anomaly, kpi_dashboard, correlation, spectrum.
-    Pro/Ultra tiers add evidence chain, method descriptions, model explainability and action plan sections.
+    Supports two formats:
+    - v2.0 (new): schema_version="2.0" from extract_monitoring_features.py
+    - v1.0 (legacy): analysis_type-based format (trend/anomaly/kpi_dashboard/correlation/spectrum)
     """
+    # Detect format version
+    schema_version = payload.get("schema_version", "")
+    if schema_version == "2.0" or payload.get("point_features") is not None:
+        return _render_monitoring_v2(payload, thread_id)
+
+    # Legacy format handling
     analysis_type = payload.get("analysis_type", "trend")
     type_label = ANALYSIS_TYPE_LABELS.get(analysis_type, analysis_type)
 

@@ -1,66 +1,53 @@
 ---
 name: monitoring-analysis
-description: Monitoring analysis scripts for equipment trend analysis, anomaly detection, KPI health assessment, cross-parameter correlation analysis, and spectrum/waveform analysis. Provides query_trend, trend_analysis, data_quality, export_report, and Pro/Ultra tier analysis scripts.
+description: >
+  监测分析专属 Skill。提供特征提取、异常判定、阈值判定和报告导出能力。
+  配合 monitoring-data Skill（数据获取）使用，由监测分析 Agent 编排调用。
 ---
 
 # Monitoring Analysis Skill Scripts
 
-This skill provides executable scripts for equipment monitoring analysis. The agent uses these scripts via the `bash` tool to query trend data, perform trend analysis, detect anomalies, assess KPI health, compute cross-parameter correlations, and analyze waveform/spectrum data.
+本 Skill 提供监测分析专属脚本：特征提取、异常判定、报告导出。
 
 ## When to Use This Skill
 
-Use these scripts when:
-
-- The user requests equipment trend analysis, anomaly detection, or KPI health assessment
-- The monitoring-analysis agent needs to fetch time-series trend data
-- Cross-parameter correlation analysis is requested
-- Waveform/spectrum analysis for rotating machinery is needed
+当监测分析 Agent 获取到原始监测数据后，调用本 Skill 进行：
+- 特征提取（趋势特征 + 波形频谱特征）
+- 异常判定（趋势异常 + 阈值越限 + 频谱异常）
+- 报告导出（Markdown / PDF）
 
 ## Preconditions
 
-- The `bash` tool must be available (sandbox tool group enabled)
-- Environment variables:
-  - `DEER_FLOW_DATA_PROVIDER` — Set to `ins` for InS platform data, `demo` for demo fallback (default: `ins`)
-  - `MONITORING_OUTPUT_DIR` — Output directory (default `/mnt/user-data/outputs`)
+- 已由 `monitoring-data` Skill 获取到 `monitoring_data.json`
+- 环境变量 `MONITORING_OUTPUT_DIR` — 输出目录（默认 `/mnt/user-data/outputs`）
 
 ## Scripts
 
-### query_trend.py — Query time-series trend data
+### extract_monitoring_features.py — 特征提取 + 异常判定 [新]
 
 ```bash
-python /mnt/skills/custom/monitoring-analysis/scripts/query_trend.py \
-  --metric-keys "runtime_rate,vibration_level" \
-  --date-range "2026-01-01..2026-05-18" \
-  --aggregation daily \
-  --forecast-horizon 14 \
-  --equipment "P-001,P-002" \
+python /mnt/skills/custom/monitoring-analysis/scripts/extract_monitoring_features.py \
+  --input /mnt/user-data/outputs/monitoring_data.json \
+  --analysis-focus full \
   --output-dir /mnt/user-data/outputs/
 ```
 
-Optional flags: `--include-alarms`, `--include-events`. Writes `/mnt/user-data/outputs/data/trend_data.json`.
+**参数**：
+| 参数 | 说明 |
+|------|------|
+| `--input` | monitoring_data.json 路径（由 monitoring-data Skill 产出） |
+| `--analysis-focus` | `full`(默认) / `trend` / `anomaly` / `spectrum` |
+| `--output-dir` | 输出目录 |
 
-### trend_analysis.py — Interpretive trend analysis (§13.2)
+**输出**：`monitoring_features.json`，包含每个测点的 trend_features、spectral_features、anomalies、health_status。
 
-```bash
-python /mnt/skills/custom/monitoring-analysis/scripts/trend_analysis.py \
-  --input /mnt/user-data/outputs/data/trend_data.json \
-  --output-dir /mnt/user-data/outputs/
-```
+### _thresholds.py — 阈值配置 [新，内部模块]
 
-Produces findings, evidence, confidence, trend_chart (ECharts option), forecast, and recommendations.
+10 个测点类别的 warning/critical 阈值。被 `extract_monitoring_features.py` 导入使用。
 
-### data_quality.py — Data quality assessment
+覆盖类别：vib, vibc, process_6k, thickness, probe, leak, key, speed。
 
-```bash
-python /mnt/skills/custom/monitoring-analysis/scripts/data_quality.py \
-  --input /mnt/user-data/outputs/data/trend_data.json \
-  --tier pro|ultra \
-  --output-dir /mnt/user-data/outputs/
-```
-
-Pro: missing value detection, ±5σ outlier marking, completeness rate. Ultra: 3D quality score + linear interpolation.
-
-### export_report.py — Export monitoring report
+### export_report.py — 报告导出
 
 ```bash
 python /mnt/skills/custom/monitoring-analysis/scripts/export_report.py \
@@ -69,34 +56,28 @@ python /mnt/skills/custom/monitoring-analysis/scripts/export_report.py \
   --format md
 ```
 
-Generates Markdown (required) and PDF (optional, needs weasyprint) monitoring reports.
+支持 daily/weekly/monthly/monitoring 四种 report_type。
 
-### Pro Tier Scripts
+---
 
-| Script | Description |
-|--------|-------------|
-| `pro_trend.py` | Multi-model regression, STL decomposition, PELT changepoint detection |
-| `pro_anomaly.py` | Isolation Forest, DBSCAN clustering, adaptive rolling thresholds |
-| `pro_kpi.py` | Health score trends, peer percentile comparison, weighted scoring |
-| `pro_correlation.py` | Spearman/Kendall coefficients, lagged cross-correlation, partial correlation |
-| `pro_spectrum.py` | Hilbert envelope, cepstrum, bearing fault frequency matching, sideband detection |
+## Deprecated Scripts（旧版，后续不再使用）
 
-### Ultra Tier Scripts
+以下脚本保留用于向后兼容，新流程不再调用：
 
-| Script | Description |
-|--------|-------------|
-| `ultra_trend.py` | ONNX LSTM prediction, 80%/95% confidence intervals, co-trending groups |
-| `ultra_anomaly.py` | Autoencoder scoring, multi-sensor cross-validation, root cause ranking |
-| `ultra_kpi.py` | Predictive health scoring, risk ranking, risk matrix |
-| `ultra_correlation.py` | Granger causality, transfer entropy, Graphical Lasso |
-| `ultra_spectrum.py` | CNN classification, CNN+rule combined verdict, fault evolution tracking |
+- `query_trend.py` — 旧版趋势数据查询（已被 monitoring-data Skill 替代）
+- `trend_analysis.py` — 旧版趋势分析（已被 extract_monitoring_features.py 替代）
+- `data_quality.py` — 旧版数据质量评估
+- `_ins_provider.py` — 旧版 InS 适配器（已被 monitoring-data Skill 替代）
+- `_data_providers.py` — 旧版数据提供者抽象
+- `_platform_bridge.py` — 旧版平台桥接
 
 ## Output Convention
 
-- All scripts output JSON to stdout
-- Errors emit `{"error": "<code>: <message>"}` and exit 0
-- Authentication is via environment variables, never hardcoded
+- 所有脚本输出 JSON 文件到 `--output-dir` 指定目录
+- 错误信息输出到 stderr，不阻塞 Agent 主流程
+- 认证通过环境变量（INS_ACCESS_TOKEN），不硬编码
 
-## Integration with Monitoring Analysis Agent
+## Dependencies
 
-The monitoring-analysis agent SOUL.md references these scripts for all analysis pipelines. For KPI dashboard functionality, the agent also uses `query_daily.py` from the `daily-report` skill.
+- **monitoring-data Skill** — 提供 `monitoring_data.json` 作为输入
+- **不依赖 features-tool** — 特征提取算法内联实现
