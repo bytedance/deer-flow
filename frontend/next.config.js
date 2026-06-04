@@ -10,7 +10,9 @@ function getInternalServiceURL(envKey, fallbackURL) {
     ? configured.replace(/\/+$/, "")
     : fallbackURL;
 }
+
 import nextra from "nextra";
+import { getAllowedDevOrigins } from "./src/lib/dev-origins.mjs";
 
 const withNextra = nextra({});
 
@@ -25,6 +27,7 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  allowedDevOrigins: getAllowedDevOrigins(),
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(
