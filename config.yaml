@@ -185,7 +185,7 @@ summarization:
   - view
   - cat
 memory:
-  enabled: true
+  enabled: false
   storage_path: memory.json
   debounce_seconds: 30
   model_name: null
@@ -194,7 +194,7 @@ memory:
   injection_enabled: true
   max_injection_tokens: 2000
 session_memory:
-  enabled: true
+  enabled: false
   debounce_seconds: 30
   model_name: null
   max_facts: 100
