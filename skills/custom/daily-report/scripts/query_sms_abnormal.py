@@ -26,18 +26,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _report_common import SMS_SEVERITY_MAP
+
 DEFAULT_OUTPUT_DIR = os.environ.get("DAILY_REPORT_OUTPUT_DIR", "/mnt/user-data/outputs")
 
 # Equipment types for which SMS data is relevant
 SMS_RELEVANT_TYPES = {"rotating_machinery", "all"}
-
-# Severity level → label mapping (consistent with abnormal-judgment agent)
-SEVERITY_MAP = [
-    (60, "critical"),
-    (41, "high"),
-    (21, "medium"),
-    (0, "low"),
-]
 
 # ---------------------------------------------------------------------------
 # InsApiClient (features-tool) bootstrap
@@ -85,7 +83,7 @@ def _normalize_id(eq_id: str) -> str:
 
 def _severity_label(level: int) -> str:
     """Map SMS latest_level to severity label."""
-    for threshold, label in SEVERITY_MAP:
+    for threshold, label in SMS_SEVERITY_MAP:
         if level >= threshold:
             return label
     return "low"
@@ -165,6 +163,7 @@ def fetch_sms_abnormal(
 
     start_ms, end_ms = _day_range_ms(date_str)
 
+    print("[数据查询] 正在查询 SMS 异常数据 (query_sms_abnormal)...", file=sys.stderr)
     result = _request_sms("/api/abnormal/list", {
         "currentPage": 1,
         "pageSize": 200,

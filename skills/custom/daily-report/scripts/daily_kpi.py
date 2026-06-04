@@ -400,6 +400,7 @@ def compute(payload: dict) -> dict:
         {
             "time": a.get("time", ""),
             "equipment": a.get("equipment", ""),
+            "event_type": a.get("event_label", ""),
             "level": a.get("level", "info"),
             "message": a.get("message", ""),
         }
