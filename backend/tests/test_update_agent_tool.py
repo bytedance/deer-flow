@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from langchain.tools import ToolRuntime
 
 from deerflow.config.agents_config import AgentConfig
 from deerflow.tools.builtins.update_agent_tool import update_agent
@@ -29,6 +30,18 @@ class _DummyRuntime(SimpleNamespace):
 
 def _runtime(agent_name: str | None = "test-agent", tool_call_id: str = "call_1") -> _DummyRuntime:
     return _DummyRuntime(context={"agent_name": agent_name} if agent_name is not None else {}, tool_call_id=tool_call_id)
+
+
+def _tool_runtime(agent_name: str | None = "test-agent", tool_call_id: str = "call_1") -> ToolRuntime:
+    return ToolRuntime(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": {}},
+        context={"agent_name": agent_name} if agent_name is not None else {},
+        config={"configurable": {"thread_id": "thread-1"}},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id=tool_call_id,
+        store=None,
+    )
 
 
 def _make_paths_mock(tmp_path: Path) -> MagicMock:
@@ -115,6 +128,7 @@ def test_update_agent_requires_at_least_one_field(tmp_path, patched_paths):
 
     msg = result.update["messages"][0]
     assert "No fields provided" in msg.content
+    assert msg.status == "error"
 
 
 def test_update_agent_rejects_unknown_model(tmp_path, patched_paths, stub_app_config):
@@ -139,6 +153,65 @@ def test_update_agent_accepts_known_model(tmp_path, patched_paths, stub_app_conf
     cfg = yaml.safe_load((_user_agent_dir(tmp_path) / "config.yaml").read_text())
     assert cfg["model"] == "gpt-known"
     assert "model" in result.update["messages"][0].content
+
+
+def test_update_agent_treats_nullish_optional_text_as_omitted(tmp_path, patched_paths):
+    """Models sometimes pass literal "null" strings while trying to omit fields.
+
+    Treat those as omitted for optional text fields so they do not get persisted
+    as a model name or SOUL.md content and feed repeated update_agent retries.
+    """
+    agent_dir = _seed_agent(tmp_path, description="old desc", soul="old soul")
+
+    result = update_agent.invoke(
+        {
+            "runtime": _tool_runtime(),
+            "soul": "null",
+            "description": "none",
+            "model": "undefined",
+        }
+    )
+
+    msg = result.update["messages"][0]
+    assert "No fields provided" in msg.content
+    assert msg.status == "error"
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["description"] == "old desc"
+    assert "model" not in cfg
+    assert (agent_dir / "SOUL.md").read_text() == "old soul"
+
+
+def test_update_agent_rejects_string_list_fields(tmp_path, patched_paths):
+    """skills/tool_groups must be real arrays; string placeholders are invalid."""
+    agent_dir = _seed_agent(tmp_path, skills=["existing"])
+
+    assert update_agent.args_schema is not None
+    with pytest.raises(ValueError, match="skills"):
+        update_agent.args_schema.model_validate({"skills": "alpha,beta"})
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["skills"] == ["existing"]
+
+
+def test_update_agent_treats_nullish_string_list_fields_as_omitted(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path, skills=["existing"])
+
+    result = update_agent.invoke(
+        {
+            "runtime": _tool_runtime(),
+            "skills": "null",
+            "tool_groups": "none",
+        }
+    )
+
+    msg = result.update["messages"][0]
+    assert "No fields provided" in msg.content
+    assert msg.status == "error"
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["skills"] == ["existing"]
+    assert "tool_groups" not in cfg
 
 
 # --- Partial update tests ---

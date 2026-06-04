@@ -30,6 +30,7 @@ def test_build_self_update_section_present_for_custom_agent():
     assert "<self_update>" in section
     assert "my-agent" in section
     assert "update_agent" in section
+    assert '"null"' in section
 
 
 def test_build_custom_mounts_section_returns_empty_when_no_mounts(monkeypatch):
