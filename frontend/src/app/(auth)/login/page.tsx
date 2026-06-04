@@ -133,7 +133,7 @@ export default function LoginPage() {
     <div className="bg-background grid min-h-screen lg:grid-cols-[3fr_2fr]">
       <IndustrialBackdrop />
 
-      <main className="flex h-screen items-center justify-center px-6 py-12 lg:px-12">
+      <main className="flex min-h-dvh items-center justify-center px-6 py-12 lg:px-12">
         <div className="w-full max-w-sm space-y-8">
           <div className="space-y-2 lg:hidden">
             <span

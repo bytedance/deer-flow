@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+
 const STORAGE_KEY = "cookie-consent";
 
 export function CookieConsentBanner() {
@@ -21,16 +23,15 @@ export function CookieConsentBanner() {
         <p className="text-muted-foreground">
           本站使用 Cookie 以改善用户体验。继续使用即表示您同意我们的 Cookie 政策。
         </p>
-        <button
-          type="button"
+        <Button
+          size="sm"
           onClick={() => {
             localStorage.setItem(STORAGE_KEY, "true");
             setVisible(false);
           }}
-          className="bg-primary text-primary-foreground hover:bg-primary/90 shrink-0 rounded-md px-4 py-1.5 text-sm font-medium transition-colors"
         >
           我知道了
-        </button>
+        </Button>
       </div>
     </div>
   );

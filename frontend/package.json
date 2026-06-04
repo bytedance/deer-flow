@@ -76,7 +76,6 @@
     "isomorphic-dompurify": "^3.12.0",
     "js-yaml": "^4.1.1",
     "katex": "^0.16.28",
-    "lucide-react": "^0.562.0",
     "motion": "^12.26.2",
     "nanoid": "^5.1.6",
     "next": "^16.1.7",

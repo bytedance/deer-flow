@@ -21,7 +21,7 @@ export function WorkspaceContainer({
   ...props
 }: React.ComponentProps<"div">) {
   return (
-    <div className={cn("flex h-screen w-full flex-col", className)} {...props}>
+    <div className={cn("flex min-h-dvh w-full flex-col", className)} {...props}>
       {children}
     </div>
   );

@@ -179,9 +179,6 @@ importers:
       katex:
         specifier: ^0.16.28
         version: 0.16.28
-      lucide-react:
-        specifier: ^0.562.0
-        version: 0.562.0(react@19.2.4)
       motion:
         specifier: ^12.26.2
         version: 12.34.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -4327,11 +4324,6 @@ packages:
 
   lucide-react@0.542.0:
     resolution: {integrity: sha512-w3hD8/SQB7+lzU2r4VdFyzzOzKnUjTZIF/MQJGSSvni7Llewni4vuViRppfRAa2guOsY5k4jZyxw/i9DQHv+dw==}
-    peerDependencies:
-      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
-
-  lucide-react@0.562.0:
-    resolution: {integrity: sha512-82hOAu7y0dbVuFfmO4bYF1XEwYk/mEbM5E+b1jgci/udUBEE/R7LF5Ip0CCEmXe8AybRM8L+04eP+LGZeDvkiw==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
@@ -10500,10 +10492,6 @@ snapshots:
   lru-cache@11.3.6: {}
 
   lucide-react@0.542.0(react@19.2.4):
-    dependencies:
-      react: 19.2.4
-
-  lucide-react@0.562.0(react@19.2.4):
     dependencies:
       react: 19.2.4
 

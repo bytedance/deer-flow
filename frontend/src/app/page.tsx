@@ -18,7 +18,7 @@ export default function LandingPage() {
       >
         <section className="flex flex-col gap-6 py-16 md:flex-row md:items-center md:text-left text-center">
           <div className="flex-1">
-            <h1 className="text-4xl font-bold tracking-tight md:text-6xl">
+            <h1 className="text-4xl font-bold tracking-tight text-wrap-balance md:text-6xl">
               EHM AI 工作台
             </h1>
             <p className="text-muted-foreground mt-4 max-w-xl text-lg md:text-xl">
@@ -41,7 +41,7 @@ export default function LandingPage() {
                 squareSize={4}
                 gridGap={6}
                 flickerChance={0.15}
-                color="rgb(37, 99, 235)"
+                color="oklch(0.62 0.15 230)"
                 maxOpacity={0.15}
               />
             </div>

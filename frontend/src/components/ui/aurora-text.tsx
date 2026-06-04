@@ -9,7 +9,7 @@ interface AuroraTextProps {
   speed?: number;
 }
 
-export const auroraColorsIndustrial = ["#1E3A5F", "#2563EB", "#1E40AF", "#0F172A"];
+export const auroraColorsIndustrial = ["oklch(0.30 0.10 230)", "oklch(0.45 0.15 230)", "oklch(0.62 0.15 230)", "oklch(0.20 0.05 230)"];
 
 export const AuroraText = memo(
   ({

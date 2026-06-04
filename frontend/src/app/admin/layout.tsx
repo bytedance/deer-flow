@@ -21,7 +21,7 @@ export default async function AdminLayout({
 
   if (!isAdmin) {
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex min-h-dvh items-center justify-center">
         <p className="text-destructive">Access denied. Admin privileges required.</p>
       </div>
     );
@@ -29,7 +29,7 @@ export default async function AdminLayout({
 
   return (
     <AuthProvider initialUser={initialUser}>
-      <div className="flex h-screen">
+      <div className="flex min-h-dvh">
         <AdminSidebar />
         <main className="flex-1 overflow-auto p-6">{children}</main>
       </div>
