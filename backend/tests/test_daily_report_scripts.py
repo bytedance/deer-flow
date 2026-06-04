@@ -405,7 +405,7 @@ class TestInsClientFetchAlarms:
     def test_fetches_alarms_with_mocked_client(self):
         mock_client = MagicMock()
         mock_client.get_machine_drops.return_value = [
-            {"time": "2026-05-15T10:00:00", "eventType": 1, "eventName": "振动报警"},
+            {"types": [1], "datatime": 1717459200000, "posName": "压缩机轴承", "posId": "PT-001"},
         ]
 
         with _script_sandbox("_ins_client") as m:
@@ -414,8 +414,10 @@ class TestInsClientFetchAlarms:
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59",
                 )
         assert len(result) == 1
-        assert result[0]["equipment"] == "EQ1"
+        assert result[0]["equipment"] == "压缩机轴承"
         assert result[0]["level"] == "high"
+        assert result[0]["event_type"] == 1
+        assert result[0]["event_label"] == "主报警"
 
     def test_handles_alarm_error(self):
         mock_client = MagicMock()
@@ -428,12 +430,13 @@ class TestInsClientFetchAlarms:
                 )
         assert result == []
 
-    def test_event_level_mapping(self):
+    def test_event_type_map_coverage(self):
+        """All event types in the map have valid labels and levels."""
         with _script_sandbox("_ins_client") as m:
-            f = m["_ins_client"]._event_level
-            assert f(1) == "high"
-            assert f(2) == "warning"
-            assert f(3) == "info"
-            assert f(14) == "warning"
-            assert f(15) == "high"
-            assert f(99) == "info"  # unknown defaults to info
+            event_map = m["_ins_client"]._EVENT_TYPE_MAP
+            assert event_map[1] == ("主报警", "high")
+            assert event_map[2] == ("预报警", "warning")
+            assert event_map[3] == ("启停机", "info")
+            assert event_map[15] == ("偏差报警", "high")
+            # Unknown type falls back to default in _format_machine_drop_entry
+            assert 99 not in event_map

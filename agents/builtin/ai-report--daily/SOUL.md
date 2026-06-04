@@ -327,7 +327,19 @@ python /mnt/skills/custom/daily-report/scripts/query_daily.py \
   --compare "{validated.compare_with}"
 ```
 
-5. 调用 KPI 计算脚本：
+5. 查询 SMS 异常数据（best-effort，失败不阻塞日报生成）：
+
+```bash
+python /mnt/skills/custom/daily-report/scripts/query_sms_abnormal.py \
+  --date "{validated.report_date}" \
+  --type "{validated.equipment_type}" \
+  --equipment "{validated.equipment_ids}" \
+  --equipment-names "{validated.equipment_labels}"
+```
+
+SMS 脚本返回非零或输出含 `error` 时忽略，日报仍正常生成（SMS 章节置空）。
+
+6. 调用 KPI 计算脚本：
 
 ```bash
 python /mnt/skills/custom/daily-report/scripts/daily_kpi.py \
@@ -335,7 +347,7 @@ python /mnt/skills/custom/daily-report/scripts/daily_kpi.py \
   --output /mnt/user-data/outputs/daily_kpi.json
 ```
 
-6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
+7. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
 
 ```python
 import json
@@ -369,7 +381,7 @@ render_ui(
 )
 ```
 
-7. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
+8. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ```text
 present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs/daily_report.pdf"])
