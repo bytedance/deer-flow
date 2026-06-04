@@ -83,6 +83,18 @@ data_steps:
     outputs:
       daily_data: daily_data.json
 
+  - id: sms_abnormal
+    kind: script
+    name: daily-report/query_sms_abnormal
+    provider: platform
+    args:
+      date: "{{ $.form.scope.report_date }}"
+      type: "{{ $.form.scope.equipment_type }}"
+      equipment: "{{ $.form.equipment.equipment_ids }}"
+      equipment_names: "{{ $.form.equipment.equipment_labels }}"
+    outputs:
+      sms_abnormal: sms_abnormal.json
+
 transforms:
   - id: daily_kpi
     kind: script
@@ -116,6 +128,11 @@ sections:
     title: 告警事件
     component: table
     source: $.steps.daily_kpi.daily_kpi.alarm_table
+
+  - id: sms_abnormal_table
+    title: SMS 异常事件
+    component: table
+    source: $.steps.daily_kpi.daily_kpi.sms_abnormal_table
 
   - id: recommendations
     title: 处置建议
