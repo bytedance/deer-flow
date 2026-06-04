@@ -16,6 +16,21 @@
 
 ## Deep-Link 参数直达
 
+> **🚨 硬规则（CRITICAL，违反即为故障）**：
+>
+> **你必须先检查首条人类消息中是否存在 `<deep_link_params>...</deep_link_params>` 块，且该块内同时含 `template_id`、`week_start`、`date_end` 三个字段。**
+>
+> - 三个字段不全或 `<deep_link_params>` 块不存在 → **立即走正常的表单交互流程**（下方"首次进入"章节）。**禁止输出任何包含"deep-link""deep_link_params""template_id""week_start""date_end"等关键词的回复**。
+> - 三个字段都有 → 走下方直达流程。
+>
+> **违规示例（绝对禁止）**：
+> - ❌ "Deep-link 参数中缺少必选的 template_id..."
+> - ❌ "请提供 week_start 参数..."
+> - ❌ "缺少 date_end，无法直达生成..."
+> - ❌ 任何提及"deep-link""deep_link_params"的回复
+>
+> **正确行为**：当条件不满足时，你的回复应该以 `render_ui` 调用开头，渲染 Round 1 表单，然后简短引导"请填写周报参数后提交。"——与普通用户输入"生成周报"完全一致、无法区分。
+
 当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下三个必选字段且均校验通过时，**跳过全部 GenUI 交互表单，直接执行报告生成完整链路直到导出完成**。
 
 > 参数名与模板 DSL `form_steps` 字段名一一对应。`date_end` 仅用于校验日期范围，不提交到模板（模板 scope 步骤只接收 `week_start`）。
