@@ -5,6 +5,7 @@ import {
   extractReasoningContentFromMessage,
   hasContent,
   hasToolCalls,
+  stripDeepLinkParams,
   stripUploadedFilesTag,
 } from "../messages/utils";
 
@@ -14,7 +15,7 @@ import { titleOfThread } from "./utils";
 function formatMessageContent(message: Message): string {
   const text = extractContentFromMessage(message);
   if (!text) return "";
-  return stripUploadedFilesTag(text);
+  return stripDeepLinkParams(stripUploadedFilesTag(text));
 }
 
 function formatToolCalls(message: Message): string {
