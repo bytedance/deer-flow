@@ -1,4 +1,9 @@
-"""Process-wide Python startup customizations for local development."""
+"""Process-wide Python startup customizations for backend entrypoints.
+
+When ``backend/`` is on ``sys.path``, Python imports this module during
+interpreter startup. Keep changes here suitable for all gateway, script,
+migration, and test entrypoints that run in that environment.
+"""
 
 from __future__ import annotations
 

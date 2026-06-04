@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -30,22 +29,6 @@ from app.gateway.routers import (
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.config.app_config import apply_logging_level
-
-
-def _configure_windows_event_loop_policy() -> None:
-    """Use an event loop policy compatible with async psycopg on Windows."""
-    if sys.platform != "win32":
-        return
-
-    selector_policy = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
-    if selector_policy is None:
-        return
-
-    if not isinstance(asyncio.get_event_loop_policy(), selector_policy):
-        asyncio.set_event_loop_policy(selector_policy())
-
-
-_configure_windows_event_loop_policy()
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config

@@ -40,7 +40,7 @@ fi
 _pick_python() {
     local candidate
     for candidate in python3 python py; do
-        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)' >/dev/null 2>&1; then
             printf '%s\n' "$candidate"
             return 0
         fi
