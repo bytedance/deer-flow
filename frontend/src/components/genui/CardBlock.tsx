@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle, XCircle, ArrowDown, ArrowRight, ArrowUp } from "lucide-react";
+import { AlertTriangle, CheckCircle2, XCircleIcon, ArrowDown, ArrowRight, ArrowUp } from "@/components/ui/icons";
 
 interface CardExtra {
   label: string;
@@ -36,7 +36,7 @@ const statusStyles = {
     bg: "bg-green-50 dark:bg-green-950/30",
     border: "border-green-200 dark:border-green-800",
     text: "text-green-700 dark:text-green-400",
-    icon: CheckCircle,
+    icon: CheckCircle2,
   },
   warning: {
     bg: "bg-yellow-50 dark:bg-yellow-950/30",
@@ -48,7 +48,7 @@ const statusStyles = {
     bg: "bg-red-50 dark:bg-red-950/30",
     border: "border-red-200 dark:border-red-800",
     text: "text-red-700 dark:text-red-400",
-    icon: XCircle,
+    icon: XCircleIcon,
   },
 };
 
