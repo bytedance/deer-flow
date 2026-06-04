@@ -4,7 +4,7 @@ import {
   ClipboardListIcon,
   Loader2Icon,
   XCircleIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useMemo, useState } from "react";
 import { Streamdown } from "streamdown";
 

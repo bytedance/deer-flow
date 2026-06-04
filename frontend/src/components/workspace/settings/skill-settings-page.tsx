@@ -1,6 +1,6 @@
 "use client";
 
-import { SparklesIcon, FactoryIcon, WrenchIcon } from "lucide-react";
+import { SparklesIcon, FactoryIcon, WrenchIcon } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 

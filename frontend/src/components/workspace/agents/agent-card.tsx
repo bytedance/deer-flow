@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
+import { BotIcon, MessageSquareIcon, Trash2Icon } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";

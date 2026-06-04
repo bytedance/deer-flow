@@ -1,6 +1,6 @@
 "use client";
 
-import { MessageSquarePlus } from "lucide-react";
+import { MessageSquarePlus } from "@/components/ui/icons";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 

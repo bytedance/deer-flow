@@ -1,6 +1,6 @@
 "use client";
 
-import { PlusIcon, StoreIcon } from "lucide-react";
+import { PlusIcon, StoreIcon } from "@/components/ui/icons";
 import Link from "next/link";
 import { useState } from "react";
 

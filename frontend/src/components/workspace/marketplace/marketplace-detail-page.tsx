@@ -7,7 +7,7 @@ import {
   Star,
   Calendar,
   Tag,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useParams, useRouter } from "next/navigation";
 import { useState, useCallback } from "react";
 import { toast } from "sonner";

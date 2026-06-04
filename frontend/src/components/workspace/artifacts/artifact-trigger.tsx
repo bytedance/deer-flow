@@ -1,4 +1,4 @@
-import { FilesIcon } from "lucide-react";
+import { FilesIcon } from "@/components/ui/icons";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/workspace/tooltip";

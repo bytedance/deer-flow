@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, Star, Download, Filter, Factory } from "lucide-react";
+import { Search, Star, Download, Filter, Factory } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useState, useMemo } from "react";
 

@@ -10,7 +10,7 @@ import {
   SparklesIcon,
   UserIcon,
   WrenchIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useEffect, useMemo, useState } from "react";
 
 import {

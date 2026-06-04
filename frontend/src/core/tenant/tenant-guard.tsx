@@ -1,6 +1,6 @@
 "use client";
 
-import { OctagonXIcon, ShieldAlertIcon } from "lucide-react";
+import { OctagonXIcon, ShieldAlertIcon } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 

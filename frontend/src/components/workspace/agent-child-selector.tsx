@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { createPortal } from "react-dom";

@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, PlusSquare } from "lucide-react";
+import { BotIcon, PlusSquare } from "@/components/ui/icons";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 

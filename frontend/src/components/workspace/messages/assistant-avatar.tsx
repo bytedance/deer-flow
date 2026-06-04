@@ -1,4 +1,4 @@
-import { BotIcon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 
 import { cn } from "@/lib/utils";
 

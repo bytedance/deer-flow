@@ -7,7 +7,7 @@
   ShapesIcon,
   SparklesIcon,
   VideoIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 import type { Translations } from "./types";
 

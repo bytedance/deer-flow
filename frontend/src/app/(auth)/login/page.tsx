@@ -1,6 +1,6 @@
 "use client";
 
-import { LockIcon, MailIcon } from "lucide-react";
+import { LockIcon, MailIcon } from "@/components/ui/icons";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useRef } from "react";

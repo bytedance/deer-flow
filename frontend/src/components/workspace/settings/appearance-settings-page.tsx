@@ -6,7 +6,7 @@ import {
   MonitorSmartphoneIcon,
   MoonIcon,
   SunIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useTheme } from "next-themes";
 import { useMemo, type ComponentType, type SVGProps } from "react";
 

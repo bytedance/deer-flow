@@ -7,7 +7,7 @@ import {
   Loader2Icon,
   TimerIcon,
   XCircleIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 import {
   Card,

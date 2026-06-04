@@ -4,7 +4,7 @@ import {
   Loader2Icon,
   ThumbsDownIcon,
   ThumbsUpIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import {
   memo,
   useCallback,

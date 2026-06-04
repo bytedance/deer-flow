@@ -12,7 +12,7 @@ import {
   RocketIcon,
   XIcon,
   ZapIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useSearchParams } from "next/navigation";
 import {
   useCallback,

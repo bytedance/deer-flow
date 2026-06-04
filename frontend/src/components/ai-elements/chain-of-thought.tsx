@@ -13,7 +13,7 @@ import {
   ChevronDownIcon,
   DotIcon,
   type LucideIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import type { ComponentProps, ReactNode } from "react";
 import {
   createContext,

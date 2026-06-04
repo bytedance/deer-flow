@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, Loader2Icon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 
 import { cn } from "@/lib/utils";
 

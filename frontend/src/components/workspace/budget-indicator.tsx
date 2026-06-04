@@ -1,6 +1,6 @@
 "use client";
 
-import { CoinsIcon, AlertTriangleIcon } from "lucide-react";
+import { CoinsIcon, AlertTriangleIcon } from "@/components/ui/icons";
 
 import { Progress } from "@/components/ui/progress";
 import {

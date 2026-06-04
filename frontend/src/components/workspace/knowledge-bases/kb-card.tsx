@@ -9,7 +9,7 @@ import {
   ShieldIcon,
   Trash2Icon,
   UsersIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useState } from "react";
 import { toast } from "sonner";
 

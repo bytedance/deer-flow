@@ -1,6 +1,6 @@
 "use client";
 
-import { BrainIcon } from "lucide-react";
+import { BrainIcon } from "@/components/ui/icons";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";

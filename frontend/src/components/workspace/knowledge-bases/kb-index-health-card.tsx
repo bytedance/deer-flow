@@ -7,7 +7,7 @@ import {
   GaugeIcon,
   Loader2Icon,
   XCircleIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 import { Badge } from "@/components/ui/badge";
 import {

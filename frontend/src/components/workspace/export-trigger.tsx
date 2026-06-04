@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FileJson, FileText } from "lucide-react";
+import { Download, FileJson, FileText } from "@/components/ui/icons";
 import { useCallback } from "react";
 import { toast } from "sonner";
 

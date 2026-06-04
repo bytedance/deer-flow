@@ -6,7 +6,7 @@ import {
   FactoryIcon,
   Loader2Icon,
   WrenchIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useState } from "react";
 import { toast } from "sonner";
 

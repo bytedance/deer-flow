@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 import { useCallback, useMemo, useState } from "react";
 
 

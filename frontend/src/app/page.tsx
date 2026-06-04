@@ -1,4 +1,4 @@
-import { BotIcon } from "lucide-react";
+import { Activity, BotIcon, FileText, MessageSquare, Wrench } from "@/components/ui/icons";
 import Link from "next/link";
 
 import { Footer } from "@/components/landing/footer";

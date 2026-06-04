@@ -10,7 +10,7 @@
  * follow-up actions it should emit a separate `form` or `confirm` block.
  */
 
-import { AlertTriangleIcon, CheckIcon, InfoIcon } from "lucide-react";
+import { AlertTriangleIcon, CheckIcon, InfoIcon } from "@/components/ui/icons";
 
 import { useI18n } from "@/core/i18n/hooks";
 

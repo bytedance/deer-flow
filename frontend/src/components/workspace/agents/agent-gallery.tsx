@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, PlusIcon } from "lucide-react";
+import { BotIcon, PlusIcon } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";

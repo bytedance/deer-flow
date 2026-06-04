@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
-import { ChevronUpIcon, Loader2Icon } from "lucide-react";
+import { ChevronUpIcon, Loader2Icon } from "@/components/ui/icons";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {

@@ -1,6 +1,6 @@
 "use client";
 
-import { BugIcon } from "lucide-react";
+import { BugIcon } from "@/components/ui/icons";
 
 import { cn } from "@/lib/utils";
 

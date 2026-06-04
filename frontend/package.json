@@ -32,6 +32,7 @@
     "@hookform/resolvers": "^5.2.2",
     "@langchain/core": "^1.1.15",
     "@langchain/langgraph-sdk": "^1.5.3",
+    "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-collapsible": "^1.1.12",

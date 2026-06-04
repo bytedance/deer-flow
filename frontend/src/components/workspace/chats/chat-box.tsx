@@ -1,4 +1,4 @@
-import { FilesIcon, XIcon } from "lucide-react";
+import { FilesIcon, XIcon } from "@/components/ui/icons";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GroupImperativeHandle } from "react-resizable-panels";

@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpenIcon, HeartPulseIcon, PlusIcon } from "lucide-react";
+import { BookOpenIcon, HeartPulseIcon, PlusIcon } from "@/components/ui/icons";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";

@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircleIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
+import { AlertCircleIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon } from "@/components/ui/icons";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";

@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, GitBranch, Plus, Trash2 } from "lucide-react";
+import { Database, GitBranch, Plus, Trash2 } from "@/components/ui/icons";
 import { useCallback } from "react";
 
 import { Button } from "@/components/ui/button";

@@ -1,6 +1,6 @@
 "use client";
 
-import { FileBarChartIcon } from "lucide-react";
+import { FileBarChartIcon } from "@/components/ui/icons";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";

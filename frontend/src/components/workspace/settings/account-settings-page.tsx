@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOutIcon } from "lucide-react";
+import { LogOutIcon } from "@/components/ui/icons";
 
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/core/auth/AuthProvider";
