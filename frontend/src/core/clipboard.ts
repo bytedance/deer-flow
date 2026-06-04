@@ -50,7 +50,9 @@ function fallbackWriteText(text: string): Promise<void> {
       return Promise.reject(new Error("Clipboard API not available"));
     }
   } catch (error) {
-    return Promise.reject(error);
+    return Promise.reject(
+      error instanceof Error ? error : new Error(String(error)),
+    );
   }
   return Promise.resolve();
 }
