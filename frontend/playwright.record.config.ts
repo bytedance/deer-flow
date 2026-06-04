@@ -28,10 +28,18 @@ export default defineConfig({
       env: {
         RECORD_PORT: "8012",
         RECORD_MODEL: process.env.RECORD_MODEL ?? "gpt-5.5",
-        DEERFLOW_RECORD_OUT: process.env.DEERFLOW_RECORD_OUT ?? "",
-        // forwarded from the invoking shell; never hardcoded
-        OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "",
-        OPENAI_API_BASE: process.env.OPENAI_API_BASE ?? "",
+        // Forwarded from the invoking shell; never hardcoded. Passed through only
+        // when actually set, so record_gateway.py raises a clear "missing env"
+        // error instead of receiving "" (which would write to Path("")).
+        ...(process.env.DEERFLOW_RECORD_OUT
+          ? { DEERFLOW_RECORD_OUT: process.env.DEERFLOW_RECORD_OUT }
+          : {}),
+        ...(process.env.OPENAI_API_KEY
+          ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY }
+          : {}),
+        ...(process.env.OPENAI_API_BASE
+          ? { OPENAI_API_BASE: process.env.OPENAI_API_BASE }
+          : {}),
       },
     },
     {

@@ -7,7 +7,8 @@ SSE the gateway emits for the recorded scenario, this test goes red. The replay
 model serves the recorded assistant turns by input hash, so the agent graph
 (write_file -> auto-title -> read_file -> final answer) reproduces offline.
 
-Fixtures are produced by ``scripts/record_traces.py`` (manual, needs a key).
+Fixtures are produced by ``scripts/record_gateway.py`` +
+``scripts/build_fixture_from_jsonl.py`` (manual, needs a key).
 """
 
 from __future__ import annotations

@@ -21,13 +21,15 @@ A real run makes model calls from several callers — the lead agent's own turns
 and their count/order is not something we want a replay to depend on. Matching by
 a normalized hash of the *input messages* means each call gets back exactly the
 output that was recorded for that input, regardless of order or which middleware
-issued it. That lets us record **with** title/memory enabled and still replay
-deterministically — instead of disabling the very layers most bugs live in.
+issued it. That keeps the in-graph, deterministic title call part of the
+recording; memory/summarization, by contrast, are disabled in the replay config
+(``_replay_fixture.py``) because their background, debounced timing is not
+reproducible across runs.
 
 Volatile fields (UUID thread/run/user ids, timestamps, dates, tmp/home paths)
 are normalized out before hashing so a recording replays across processes with
 different temp dirs. The same ``hash_messages`` is used by the recorder
-(``scripts/record_traces.py``) and here, so record and replay agree by
+(``scripts/record_gateway.py``) and here, so record and replay agree by
 construction.
 
 This lives in ``tests/`` (not in the publishable ``deerflow-harness`` package),
@@ -50,8 +52,9 @@ replayed run diverged from the recording (graph changed, a new volatile field
 slipped through normalization, or a non-deterministic tool result changed a
 downstream input). Re-record or extend normalization; never pass silently.
 
-Recording lives outside production code too (``scripts/record_traces.py``); CI
-consumes the fixtures through this replay side with no API key.
+Recording lives outside production code too (``scripts/record_gateway.py`` +
+``scripts/build_fixture_from_jsonl.py``); CI consumes the fixtures through this
+replay side with no API key.
 """
 
 from __future__ import annotations

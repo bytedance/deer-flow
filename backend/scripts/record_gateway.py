@@ -72,9 +72,14 @@ def main() -> int:
         print("ERROR: set OPENAI_API_KEY and OPENAI_API_BASE (an OpenAI-compatible /v1 endpoint)", file=sys.stderr)
         return 2
 
+    record_out = os.environ.get("DEERFLOW_RECORD_OUT")
+    if not record_out:
+        print("ERROR: set DEERFLOW_RECORD_OUT to the JSONL path to append captured turns to", file=sys.stderr)
+        return 2
+
     port = int(os.environ.get("RECORD_PORT", "8012"))
     model = os.environ.get("RECORD_MODEL", "gpt-5.5")
-    out = Path(os.environ["DEERFLOW_RECORD_OUT"])
+    out = Path(record_out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("", encoding="utf-8")  # fresh capture per recording run
 
@@ -83,7 +88,9 @@ def main() -> int:
     home = Path(tempfile.mkdtemp(prefix="record-gw-"))
     cfg = home / "config.yaml"
     cfg.write_text(build_config_yaml(model_block=real_model_block(model), home=home), encoding="utf-8")
-    os.environ.setdefault("DEER_FLOW_HOME", str(home))
+    # Override (not setdefault): the recorder must be hermetic, so an outer
+    # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
+    os.environ["DEER_FLOW_HOME"] = str(home)
     os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
     os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = str(prepare_hermetic_extras(home))
     os.environ.setdefault("AUTH_JWT_SECRET", "record-secret")

@@ -37,7 +37,9 @@ def main() -> int:
     cfg = home / "config.yaml"
     cfg.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
 
-    os.environ.setdefault("DEER_FLOW_HOME", str(home))
+    # Override (not setdefault): the replay gateway must be hermetic, so an outer
+    # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
+    os.environ["DEER_FLOW_HOME"] = str(home)
     os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
     os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = str(prepare_hermetic_extras(home))
     os.environ["DEERFLOW_REPLAY_FIXTURE"] = args.fixture
