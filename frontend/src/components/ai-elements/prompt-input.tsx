@@ -49,7 +49,7 @@ import {
   SquareIcon,
   UploadIcon,
   XIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { nanoid } from "nanoid";
 import {
   type ChangeEvent,

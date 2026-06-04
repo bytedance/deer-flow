@@ -458,6 +458,7 @@ class InsApiClient:
             "startTime": start_ms,
             "endTime": end_ms,
             "type": [str(t) for t in event_types],
+            "types": ",".join(str(t) for t in event_types),
         }
         if factory_id is not None:
             params["factoryId"] = factory_id

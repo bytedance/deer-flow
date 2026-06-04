@@ -1,0 +1,1 @@
+No capability changes. This is a pure internal performance optimization — the API contract and external behavior remain identical.

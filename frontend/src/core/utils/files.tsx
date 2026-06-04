@@ -6,7 +6,7 @@ import {
   FilePlayIcon,
   FileTextIcon,
   ImageIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 const extensionMap: Record<string, string> = {
   // Text

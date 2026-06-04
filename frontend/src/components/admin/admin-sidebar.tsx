@@ -8,7 +8,7 @@ import {
   type LucideIcon,
   SparklesIcon,
   UsersIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 

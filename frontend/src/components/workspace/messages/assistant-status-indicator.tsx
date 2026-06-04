@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2Icon } from "lucide-react";
+import { Loader2Icon } from "@/components/ui/icons";
 
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";

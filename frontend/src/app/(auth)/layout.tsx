@@ -22,7 +22,7 @@ export default async function AuthLayout({
       return <AuthProvider initialUser={null}>{children}</AuthProvider>;
     case "gateway_unavailable":
       return (
-        <div className="flex h-screen flex-col items-center justify-center gap-4">
+        <div className="flex min-h-dvh flex-col items-center justify-center gap-4">
           <p className="text-muted-foreground">
             Service temporarily unavailable.
           </p>

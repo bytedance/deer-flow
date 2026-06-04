@@ -263,7 +263,7 @@ def main() -> int:
             is_scope_mode = False
             # 当 --type 未显式覆盖时，从 Organize Tree 推导设备类型
             if getattr(args, "type") == "all":
-                detected = _detect_equipment_type(equipment_ids)
+                detected = detect_equipment_type(equipment_ids)
                 if detected != "all":
                     eq_type = detected
 
@@ -284,10 +284,6 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - 按 Skill 约定输出到 stdout
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 0
-
-
-# 旧测试 monkeypatch 兼容别名
-_detect_equipment_type = detect_equipment_type
 
 
 if __name__ == "__main__":

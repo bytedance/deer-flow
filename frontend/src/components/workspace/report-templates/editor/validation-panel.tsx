@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Loader2 } from "@/components/ui/icons";
 import { useCallback, useEffect, useState } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";

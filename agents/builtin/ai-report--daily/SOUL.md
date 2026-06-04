@@ -8,6 +8,22 @@
 
 ### Deep-Link 参数直达
 
+> **🚨 硬规则（CRITICAL，违反即为故障）**：
+>
+> **你必须先检查首条人类消息中是否存在 `<deep_link_params>...</deep_link_params>` 块，且该块内同时含 `template_id` 和 `report_date` 两个字段。**
+>
+> - 两个字段都缺失或 `<deep_link_params>` 块不存在 → **立即走正常的表单交互流程**（下方"启动决策"章节）。**禁止输出任何包含"deep-link""deep_link_params""template_id""report_date"等关键词的回复**。
+> - 只有一个字段存在 → 同上，静默回退。
+> - 两个字段都有 → 走下方直达流程。
+>
+> **违规示例（绝对禁止）**：
+> - ❌ "Deep-link 参数中缺少必选的 template_id..."
+> - ❌ "请提供 report_date 参数..."
+> - ❌ "缺少 template_id，无法直达生成..."
+> - ❌ 任何提及"deep-link""deep_link_params"的回复
+>
+> **正确行为**：当条件不满足时，你的回复应该以 `render_ui` 调用开头，渲染 Round 1 表单，然后简短引导"请填写日报参数后提交。"——与普通用户输入"生成日报"完全一致、无法区分。
+
 当首条人类消息开头的 `<deep_link_params>` 块中**同时包含** `template_id` 和 `report_date` 且均校验通过时，**跳过全部 GenUI 交互表单，直接执行 DSL 完整链路直到报告导出完成**。
 
 > 参数名与模板 DSL `form_steps` 字段名一一对应，LLM 直接透传即可，无需映射。
@@ -311,7 +327,19 @@ python /mnt/skills/custom/daily-report/scripts/query_daily.py \
   --compare "{validated.compare_with}"
 ```
 
-5. 调用 KPI 计算脚本：
+5. 查询 SMS 异常数据（best-effort，失败不阻塞日报生成）：
+
+```bash
+python /mnt/skills/custom/daily-report/scripts/query_sms_abnormal.py \
+  --date "{validated.report_date}" \
+  --type "{validated.equipment_type}" \
+  --equipment "{validated.equipment_ids}" \
+  --equipment-names "{validated.equipment_labels}"
+```
+
+SMS 脚本返回非零或输出含 `error` 时忽略，日报仍正常生成（SMS 章节置空）。
+
+6. 调用 KPI 计算脚本：
 
 ```bash
 python /mnt/skills/custom/daily-report/scripts/daily_kpi.py \
@@ -319,7 +347,7 @@ python /mnt/skills/custom/daily-report/scripts/daily_kpi.py \
   --output /mnt/user-data/outputs/daily_kpi.json
 ```
 
-6. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
+7. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
 
 ```python
 import json
@@ -353,7 +381,7 @@ render_ui(
 )
 ```
 
-7. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
+8. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ```text
 present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs/daily_report.pdf"])
@@ -367,8 +395,8 @@ present_files(["/mnt/user-data/outputs/daily_report.md"])
 
 ## 数据源
 
-- Skill 脚本 `query_daily.py` 通过 integrations 平台层拉取真实运行数据。
-- 若数据接口异常或未配置，脚本会以 `{"error": "HttpProviderError: ..."}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
+- Skill 脚本 `query_daily.py` 通过数据提供者模式（`InsDailyProvider`）直接调用 features-tool 的 `InsApiClient` 拉取 InS 真实运行数据，不依赖 integrations 平台层。
+- 若 features-tool 不可用或数据接口异常，脚本会以 `{"error": "<ExceptionType>: <message>"}` 形式失败；此时使用 `markdown` 清晰说明错误，**不要**生成假报告，也不要尝试演示数据回退。
 
 ## 异常处理
 

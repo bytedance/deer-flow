@@ -12,7 +12,7 @@ import {
   SearchIcon,
   SquareTerminalIcon,
   WrenchIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useMemo, useState } from "react";
 
 import {

@@ -13,6 +13,7 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -160,6 +161,40 @@ class ThreadHistoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _delete_postgres_checkpoints(checkpointer, thread_id: str) -> None:
+    """Delete all checkpoint rows for *thread_id* from a PostgreSQL checkpointer.
+
+    Uses the checkpointer's own connection pool to execute raw ``DELETE``
+    statements against ``checkpoints``, ``checkpoint_writes``, and
+    ``checkpoint_blobs``.  This is a workaround for the fact that
+    ``langgraph-checkpoint-postgres`` does not expose an ``adelete_thread``
+    method (unlike the SQLite variant).
+
+    Failures are logged at warning level but never raised — the caller
+    treats this as best-effort cleanup.
+    """
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError:
+        return  # not a postgres environment; nothing to do
+
+    if not isinstance(checkpointer, AsyncPostgresSaver):
+        return
+
+    if not hasattr(checkpointer, "conn"):
+        logger.warning("Postgres checkpointer has no 'conn' attribute; cannot clean checkpoints for thread %s", sanitize_log_param(thread_id))
+        return
+
+    pool = checkpointer.conn
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for table in ("checkpoint_blobs", "checkpoint_writes", "checkpoints"):
+                    await cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (thread_id,))
+    except Exception:
+        logger.warning("Failed to delete postgres checkpoints for thread %s", sanitize_log_param(thread_id), exc_info=True)
+
+
 def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: str | None = None) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread."""
     path_manager = paths or get_paths()
@@ -284,6 +319,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         try:
             if hasattr(checkpointer, "adelete_thread"):
                 await checkpointer.adelete_thread(thread_id)
+            else:
+                await _delete_postgres_checkpoints(checkpointer, thread_id)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
@@ -367,27 +404,16 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
 @router.post("/search", response_model=list[ThreadResponse])
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
-    """Search and list threads.
+    """Search and list threads from the Store.
 
-    Two-phase approach:
-
-    **Phase 1 — Store (fast path, O(threads))**: returns threads that were
-    created or run through this Gateway.  Store records are tiny metadata
-    dicts so fetching all of them at once is cheap.
-
-    **Phase 2 — Checkpointer supplement (lazy migration)**: threads that
-    were created directly by LangGraph Server (and therefore absent from the
-    Store) are discovered here by iterating the shared checkpointer.  Any
-    newly found thread is immediately written to the Store so that the next
-    search skips Phase 2 for that thread — the Store converges to a full
-    index over time without a one-shot migration job.
+    Thread metadata is written to the Store on every creation path
+    (POST /api/threads, run start in services.py) and title is synced
+    from the checkpoint by worker.py after each run completes, so the
+    Store is the single source of truth for search.
     """
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
-    checkpointer = get_checkpointer(request)
-    store = get_store(request)
-    merged: dict[str, ThreadResponse] = {}
 
     try:
         items = await thread_store.search(
@@ -397,135 +423,26 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             offset=0,
         )
     except Exception:
-            logger.warning("Store search failed — falling back to checkpointer only", exc_info=True)
-            items = []
+        logger.warning("Store search failed", exc_info=True)
+        return []
 
+    results: list[ThreadResponse] = []
     for val in items:
         values = dict(val.get("values") or {})
         display_name = val.get("display_name")
         if display_name and not values.get("title"):
             values["title"] = display_name
 
-        merged[val["thread_id"]] = ThreadResponse(
+        results.append(ThreadResponse(
             thread_id=val["thread_id"],
             status=val.get("status", "idle"),
             created_at=str(val.get("created_at", "")),
             updated_at=str(val.get("updated_at", "")),
             metadata=val.get("metadata", {}),
             values=values,
-        )
+        ))
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Checkpointer supplement
-    # Discovers threads not yet in the Store (e.g. created by LangGraph
-    # Server) and lazily migrates them so future searches skip this phase.
-    # Only includes threads belonging to the current tenant.
-    # -----------------------------------------------------------------------
-    current_tenant = get_current_tenant_id()
-    current_user = get_effective_user_id()
-
-    # Load tombstones written by DELETE /threads/{id} so we do not
-    # re-discover (and re-create) threads the user explicitly removed.
-    # The postgres checkpointer does not expose adelete_thread, so
-    # checkpoint rows outlive the Store deletion — without this guard
-    # the lazy migration below would resurrect them as "Untitled".
-    deleted_thread_ids: set[str] = set()
-    if store is not None:
-        try:
-            deleted_items = await store.alist(_deleted_threads_ns())
-            deleted_thread_ids = {item.key for item in deleted_items}
-        except Exception:
-            logger.debug("Could not load deleted-thread markers (non-fatal)")
-
-    try:
-        async for checkpoint_tuple in checkpointer.alist(None):
-            cfg = getattr(checkpoint_tuple, "config", {})
-            thread_id = cfg.get("configurable", {}).get("thread_id")
-            if not thread_id:
-                continue
-
-            # Skip explicitly deleted threads — do not resurrect them.
-            if thread_id in deleted_thread_ids:
-                continue
-
-            # Skip sub-graph checkpoints (checkpoint_ns is non-empty for those)
-            if cfg.get("configurable", {}).get("checkpoint_ns", ""):
-                continue
-
-            ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
-            # Only filter by tenant_id when it is explicitly set.
-            # Threads created before multi-tenant support (or by LangGraph Server
-            # directly) lack this field and are visible to all tenants until a run
-            # attaches tenant metadata to the checkpoint.
-            ckpt_tenant = ckpt_meta.get("tenant_id")
-            if ckpt_tenant is not None and ckpt_tenant != current_tenant:
-                continue
-
-            # User isolation: only show threads belonging to the current user.
-            # Threads without a user_id in metadata are legacy/unattributed —
-            # skip them to prevent cross-user visibility.
-            ckpt_user = ckpt_meta.get("user_id")
-            if ckpt_user is None or ckpt_user != current_user:
-                continue
-
-            # Extract state values (title) from the checkpoint's channel_values
-            checkpoint_data = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint_data.get("channel_values", {})
-            ckpt_title = channel_values.get("title")
-
-            # Enrich Phase 1 results with title when the thread metadata row
-            # lacks one. TitleMiddleware writes the title into the checkpoint
-            # after the first exchange, so we backfill it here when needed.
-            if thread_id in merged:
-                if ckpt_title:
-                    existing = merged[thread_id]
-                    existing_title = existing.values.get("title") if existing.values else None
-                    if not existing_title:
-                        existing.values["title"] = ckpt_title
-                        # Also write the title back to the canonical thread
-                        # metadata store so future searches can return it
-                        # directly without waiting for another checkpoint scan.
-                        try:
-                            await thread_store.update_display_name(thread_id, ckpt_title)
-                        except Exception:
-                            logger.debug("Failed to backfill title to thread_store for %s", thread_id)
-                continue
-
-            # Strip LangGraph internal keys from the user-visible metadata dict
-            user_meta = {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
-
-            ckpt_values = {}
-            if ckpt_title:
-                ckpt_values["title"] = ckpt_title
-
-            thread_resp = ThreadResponse(
-                thread_id=thread_id,
-                status=_derive_thread_status(checkpoint_tuple),
-                created_at=str(ckpt_meta.get("created_at", "")),
-                updated_at=str(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
-                metadata=user_meta,
-                values=ckpt_values,
-            )
-            merged[thread_id] = thread_resp
-
-            # Lazy migration — write to Store so the next search finds it there
-            try:
-                await thread_store.create(
-                    thread_id,
-                    display_name=ckpt_title,
-                    metadata=user_meta,
-                )
-            except Exception:
-                logger.debug("Failed to migrate thread %s to thread_store (non-fatal)", thread_id)
-    except Exception:
-        logger.exception("Checkpointer scan failed during thread search")
-        # Don't raise — return whatever was collected from Store + partial scan
-
-    # -----------------------------------------------------------------------
-    # Phase 3: Filter → sort → paginate
-    # -----------------------------------------------------------------------
-    results = list(merged.values())
-
+    # Filter → sort → paginate
     if body.metadata:
         results = [r for r in results if all(r.metadata.get(k) == v for k, v in body.metadata.items())]
 

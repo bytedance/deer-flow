@@ -1,10 +1,12 @@
 "use client";
 
-import { PlusIcon, StoreIcon } from "lucide-react";
+import { PlusIcon, StoreIcon } from "@/components/ui/icons";
 import Link from "next/link";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/core/i18n/hooks";
 import { useReportTemplates } from "@/core/report-templates";
 import type { Visibility } from "@/core/report-templates/types";
@@ -75,7 +77,22 @@ export function ReportTemplatesPage() {
       </nav>
 
       {isLoading && (
-        <div className="text-muted-foreground text-sm">{t.marketplace.loading}</div>
+        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <li key={i} className="rounded-xl bg-muted/30 p-4">
+              <div className="flex items-start justify-between gap-2">
+                <Skeleton className="h-5 w-32 rounded" />
+                <Skeleton className="h-5 w-12 rounded" />
+              </div>
+              <Skeleton className="mt-1 h-4 w-24 rounded" />
+              <div className="mt-2 flex gap-1">
+                <Skeleton className="h-4 w-12 rounded" />
+                <Skeleton className="h-4 w-16 rounded" />
+              </div>
+              <Skeleton className="mt-auto pt-3 h-3 w-36 rounded" />
+            </li>
+          ))}
+        </ul>
       )}
       {error && (
         <div className="rounded border border-destructive bg-destructive/10 p-3 text-sm">
@@ -96,15 +113,16 @@ export function ReportTemplatesPage() {
             <li key={tpl.id}>
               <Link
                 href={`/workspace/report-templates/${tpl.id}`}
-                className="flex h-full flex-col rounded-lg border bg-card p-4 transition-colors hover:border-primary hover:bg-accent"
+                className="flex h-full flex-col rounded-xl bg-muted/30 p-4 transition-colors hover:bg-muted/60"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="font-medium leading-tight">
                     {tpl.display_name || tpl.name}
                   </div>
-                  <span
+                  <Badge
+                    variant="outline"
                     className={cn(
-                      "rounded px-1.5 py-0.5 text-xs",
+                      "rounded-sm border-transparent text-xs",
                       tpl.status === "published" &&
                         "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
                       tpl.status === "draft" &&
@@ -114,7 +132,7 @@ export function ReportTemplatesPage() {
                     )}
                   >
                     {STATUS_LABEL[tpl.status] ?? tpl.status}
-                  </span>
+                  </Badge>
                 </div>
                 <div className="text-muted-foreground mt-1 text-xs">
                   {tpl.name} · v{tpl.current_version}

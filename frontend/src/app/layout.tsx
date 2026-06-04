@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 
 import { type Metadata } from "next";
 
+import { CookieConsentBanner } from "@/components/cookie-consent-banner";
 import { ThemeProvider } from "@/components/theme-provider";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
@@ -30,20 +31,20 @@ export default async function RootLayout({
       suppressHydrationWarning
     >
       <body>
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground"
+        >
+          跳转到主要内容
+        </a>
         <ThemeProvider
           attribute="class"
           defaultTheme="industrial-dark"
-          themes={[
-            "system",
-            "light",
-            "dark",
-            "industrial-light",
-            "industrial-dark",
-          ]}
-          enableSystem
+          themes={["industrial-dark", "industrial-light", "industrial-blue"]}
           disableTransitionOnChange
         >
           <I18nProvider initialLocale={locale}>{children}</I18nProvider>
+          <CookieConsentBanner />
         </ThemeProvider>
       </body>
     </html>

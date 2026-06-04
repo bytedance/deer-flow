@@ -1,4 +1,4 @@
-import { DownloadIcon, LoaderIcon, PackageIcon } from "lucide-react";
+import { DownloadIcon, LoaderIcon, PackageIcon } from "@/components/ui/icons";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 

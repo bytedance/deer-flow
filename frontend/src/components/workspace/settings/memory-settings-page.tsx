@@ -6,7 +6,7 @@ import {
   PlusIcon,
   Trash2Icon,
   UploadIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";

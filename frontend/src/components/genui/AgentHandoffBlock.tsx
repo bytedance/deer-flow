@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { ArrowRight, Wrench } from "lucide-react";
+import { ArrowRight, Wrench } from "@/components/ui/icons";
 
 // ---------------------------------------------------------------------------
 // Types — mirrors the handoff_data sent by the abnormal-judgment agent

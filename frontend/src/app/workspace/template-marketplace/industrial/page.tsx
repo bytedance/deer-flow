@@ -1,6 +1,6 @@
 "use client";
 
-import { Factory, Star, Download, ArrowLeft } from "lucide-react";
+import { Factory, Star, Download, ArrowLeft } from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";

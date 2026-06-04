@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpenIcon, Loader2Icon } from "lucide-react";
+import { BookOpenIcon, Loader2Icon } from "@/components/ui/icons";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import {

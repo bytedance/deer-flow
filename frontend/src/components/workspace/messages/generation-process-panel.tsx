@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronUp } from "lucide-react";
+import { ChevronUp } from "@/components/ui/icons";
 import { useState } from "react";
 
 import { ChainOfThought } from "@/components/ai-elements/chain-of-thought";

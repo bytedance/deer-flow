@@ -1,4 +1,4 @@
-import { ExternalLinkIcon } from "lucide-react";
+import { ExternalLinkIcon } from "@/components/ui/icons";
 import type { ComponentProps } from "react";
 
 import { Badge } from "@/components/ui/badge";

@@ -10,7 +10,7 @@ import {
   Image,
   LayoutGrid,
   Table2,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 import { useI18n } from "@/core/i18n/hooks";
 

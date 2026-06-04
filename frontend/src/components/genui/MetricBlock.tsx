@@ -14,7 +14,7 @@ import {
   ArrowDownIcon,
   ArrowRightIcon,
   ArrowUpIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 
 import { useI18n } from "@/core/i18n/hooks";
 

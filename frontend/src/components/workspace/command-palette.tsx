@@ -4,7 +4,7 @@ import {
   KeyboardIcon,
   MessageSquarePlusIcon,
   SettingsIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 

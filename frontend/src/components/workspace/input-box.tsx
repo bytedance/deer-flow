@@ -9,10 +9,9 @@ import {
   MicIcon,
   PaperclipIcon,
   PlusIcon,
-  RocketIcon,
   XIcon,
   ZapIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -1023,7 +1022,7 @@ export function InputBox({
                       <GraduationCapIcon className="size-3" />
                     )}
                     {context.mode === "ultra" && (
-                      <RocketIcon className="size-3" />
+                      <ZapIcon className="size-3" />
                     )}
                   </div>
                   <div className="text-xs font-normal">

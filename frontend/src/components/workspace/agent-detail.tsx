@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, CopyIcon, PencilIcon } from "lucide-react";
+import { BotIcon, CopyIcon, PencilIcon } from "@/components/ui/icons";
 
 import { type Agent } from "@/core/agents/types";
 import { cn } from "@/lib/utils";

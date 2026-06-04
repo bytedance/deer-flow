@@ -376,54 +376,6 @@ def test_search_threads_exposes_display_name_as_title() -> None:
     assert item["values"]["title"] == "中文问候开场"
 
 
-def test_search_threads_backfills_display_name_from_checkpoint_title() -> None:
-    """When a thread row exists without a title, ``/search`` should backfill
-    the checkpoint title into thread_meta so future searches don't regress to
-    ``Untitled``.
-    """
-    app, _store, checkpointer = _build_thread_app()
-    thread_id = "checkpoint-title"
-
-    async def _seed() -> None:
-        from langgraph.checkpoint.base import empty_checkpoint
-
-        await app.state.thread_store.create(thread_id, user_id=None, metadata={})
-
-        checkpoint = empty_checkpoint()
-        checkpoint["channel_values"]["title"] = "自动生成标题"
-        await checkpointer.aput(
-            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-            checkpoint,
-            {
-                "step": 1,
-                "source": "loop",
-                "writes": {},
-                "parents": {},
-                "created_at": "2026-05-07T00:00:00+00:00",
-            },
-            {},
-        )
-
-    import asyncio
-
-    asyncio.run(_seed())
-
-    with TestClient(app) as client:
-        response = client.post("/api/threads/search", json={"limit": 10})
-
-    assert response.status_code == 200, response.text
-    items = response.json()
-    item = next(entry for entry in items if entry["thread_id"] == thread_id)
-    assert item["values"]["title"] == "自动生成标题"
-
-    async def _read_backfilled_record() -> dict | None:
-        return await app.state.thread_store.get(thread_id, user_id=None)
-
-    record = asyncio.run(_read_backfilled_record())
-    assert record is not None
-    assert record["display_name"] == "自动生成标题"
-
-
 def test_memory_thread_meta_store_writes_iso_on_create() -> None:
     """``MemoryThreadMetaStore.create`` must emit ISO so newly created
     threads serialize correctly without depending on the router's
@@ -507,3 +459,106 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL checkpoint cleanup on thread deletion
+# ---------------------------------------------------------------------------
+
+
+class _FakeAsyncPostgresSaver:
+    """Stand-in for ``langgraph.checkpoint.postgres.aio.AsyncPostgresSaver``."""
+
+
+def test_delete_postgres_checkpoints_executes_three_deletes():
+    """_delete_postgres_checkpoints deletes from all three checkpoint tables."""
+    import asyncio
+    import sys
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    fake_module = MagicMock()
+    fake_module.AsyncPostgresSaver = _FakeAsyncPostgresSaver
+
+    with patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": fake_module}):
+        mock_cursor = AsyncMock()
+        # Use MagicMock (not AsyncMock) for conn because psycopg
+        # connection.cursor() is a sync method returning an async CM.
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__aenter__.return_value = mock_cursor
+        mock_pool = MagicMock()
+        mock_pool.connection.return_value.__aenter__.return_value = mock_conn
+
+        saver = _FakeAsyncPostgresSaver()
+        saver.conn = mock_pool
+
+        async def _run():
+            await threads._delete_postgres_checkpoints(saver, "thread-xyz")
+
+        asyncio.run(_run())
+
+    executed_tables = {call.args[0] for call in mock_cursor.execute.call_args_list}
+    for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+        assert any(table in sql for sql in executed_tables), f"{table} not found in {executed_tables}"
+    for call in mock_cursor.execute.call_args_list:
+        assert call.args[1] == ("thread-xyz",)
+
+
+def test_delete_postgres_checkpoints_skips_non_postgres():
+    """_delete_postgres_checkpoints is a no-op for non-Postgres checkpointer."""
+    import asyncio
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    async def _run():
+        await threads._delete_postgres_checkpoints(InMemorySaver(), "thread-xyz")
+
+    asyncio.run(_run())
+
+
+def test_delete_postgres_checkpoints_skips_when_no_conn():
+    """_delete_postgres_checkpoints warns when checkpointer has no conn attr."""
+    import asyncio
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    fake_module = MagicMock()
+    fake_module.AsyncPostgresSaver = _FakeAsyncPostgresSaver
+
+    with patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": fake_module}):
+        saver = _FakeAsyncPostgresSaver()
+        # No conn attribute set — hasattr(checkpointer, "conn") is False
+
+        with patch.object(threads.logger, "warning") as log_warning:
+            async def _run():
+                await threads._delete_postgres_checkpoints(saver, "thread-xyz")
+
+            asyncio.run(_run())
+
+    log_warning.assert_called_once()
+    assert "no 'conn' attribute" in log_warning.call_args[0][0]
+
+
+def test_delete_postgres_checkpoints_failure_is_non_fatal():
+    """_delete_postgres_checkpoints does not raise on pool/query failure."""
+    import asyncio
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    fake_module = MagicMock()
+    fake_module.AsyncPostgresSaver = _FakeAsyncPostgresSaver
+
+    with patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": fake_module}):
+        mock_pool = MagicMock()
+        mock_pool.connection.side_effect = OSError("pool exhausted")
+
+        saver = _FakeAsyncPostgresSaver()
+        saver.conn = mock_pool
+
+        with patch.object(threads.logger, "warning") as log_warning:
+            async def _run():
+                await threads._delete_postgres_checkpoints(saver, "thread-xyz")
+
+            asyncio.run(_run())
+
+    log_warning.assert_called_once()
+    assert "Failed to delete postgres checkpoints" in log_warning.call_args[0][0]

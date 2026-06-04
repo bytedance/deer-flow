@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { type Agent } from "@/core/agents";

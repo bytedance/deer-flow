@@ -5,7 +5,7 @@ import {
   InfoIcon,
   Settings2Icon,
   UserCircleIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useEffect, useState } from "react";
 
 import {

@@ -10,7 +10,7 @@ import {
   FileTextIcon,
   HistoryIcon,
   MessagesSquare,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ComponentType, useEffect, useMemo, useState } from "react";

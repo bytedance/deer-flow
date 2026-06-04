@@ -7,7 +7,7 @@ export function TenantGuardWrapper({ children }: { children: React.ReactNode }) 
 
   if (result === null) {
     return (
-      <div className="flex h-screen items-center justify-center">
+      <div className="flex min-h-dvh items-center justify-center">
         <p className="text-muted-foreground">Loading...</p>
       </div>
     );
@@ -15,7 +15,7 @@ export function TenantGuardWrapper({ children }: { children: React.ReactNode }) 
 
   if (!result.allowed) {
     return (
-      <div className="h-screen">
+      <div className="min-h-dvh">
         {result.reason === "not_found" ? <TenantNotFoundPage /> : <TenantDisabledPage />}
       </div>
     );

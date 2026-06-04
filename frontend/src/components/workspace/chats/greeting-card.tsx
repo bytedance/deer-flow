@@ -1,7 +1,8 @@
 "use client";
 
-import { BotIcon, Loader2Icon } from "lucide-react";
+import { BotIcon } from "@/components/ui/icons";
 
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 interface GreetingCardProps {
@@ -22,12 +23,12 @@ export function GreetingCard({
   if (isLoading) {
     return (
       <div className={cn("flex flex-col items-center gap-4 py-8", className)}>
-        <div className="bg-muted flex size-12 items-center justify-center rounded-full">
-          <BotIcon className="text-muted-foreground size-6" />
-        </div>
-        <div className="flex items-center gap-2">
-          <Loader2Icon className="text-muted-foreground size-4 animate-spin" />
-          <span className="text-muted-foreground text-sm">...</span>
+        <Skeleton className="size-12 rounded-full" />
+        <Skeleton className="h-5 w-64 rounded" />
+        <div className="flex gap-2">
+          <Skeleton className="h-9 w-24 rounded-full" />
+          <Skeleton className="h-9 w-28 rounded-full" />
+          <Skeleton className="h-9 w-20 rounded-full" />
         </div>
       </div>
     );
@@ -47,7 +48,7 @@ export function GreetingCard({
             <button
               key={suggestion}
               type="button"
-              className="border-border bg-background hover:bg-accent hover:text-accent-foreground rounded-full border px-4 py-2 text-sm transition-colors"
+              className="border-border bg-background hover:bg-accent hover:text-accent-foreground rounded-lg border px-4 py-2 text-sm transition-colors"
               onClick={() => onSuggestionClick?.(suggestion)}
             >
               {suggestion}

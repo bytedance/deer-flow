@@ -8,7 +8,7 @@ import {
   Pencil,
   Share2,
   Trash2,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";

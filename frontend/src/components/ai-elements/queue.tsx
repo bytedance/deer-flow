@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { ChevronDownIcon, PaperclipIcon } from "lucide-react";
+import { ChevronDownIcon, PaperclipIcon } from "@/components/ui/icons";
 import type { ComponentProps } from "react";
 
 export type QueueMessagePart = {

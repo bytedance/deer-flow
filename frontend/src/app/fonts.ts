@@ -1,9 +1,12 @@
 /**
  * Self-hosted fonts.
  *
- * - `Inter`        — Latin sans, used for UI chrome and body text.
- * - `Noto Sans SC` — Simplified-Chinese sans, paired with Inter for CJK glyphs.
- * - `JetBrains Mono` — Monospace, used for code blocks and engineering numerals.
+ * - `IBM Plex Sans` — Latin sans with industrial/engineering character, used
+ *   for UI chrome and body text.
+ * - `Noto Sans SC`  — Simplified-Chinese sans, paired with IBM Plex Sans for
+ *   CJK glyphs.
+ * - `JetBrains Mono` — Monospace, used for code blocks and engineering
+ *   numerals.
  *
  * `next/font/google` downloads the woff2 files at build time and serves them
  * from the same origin as the app, so deployments behind locked-down
@@ -12,9 +15,9 @@
  * The CSS variables are wired into Tailwind's `--font-sans` / `--font-mono`
  * tokens in `src/styles/globals.css`.
  */
-import { Inter, JetBrains_Mono, Noto_Sans_SC } from "next/font/google";
+import { IBM_Plex_Sans, JetBrains_Mono, Noto_Sans_SC } from "next/font/google";
 
-export const fontSansLatin = Inter({
+export const fontSansLatin = IBM_Plex_Sans({
   subsets: ["latin"],
   display: "swap",
   variable: "--font-sans-latin",

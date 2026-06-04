@@ -68,7 +68,7 @@
 @source inline("bg-{background,muted,primary,secondary,accent}");
 @source inline("border-{border,input}");
 
-@custom-variant dark (&:is(.dark *, .industrial-dark *));
+@custom-variant dark (&:is(.dark *, .industrial-dark *, .industrial-blue *));
 
 @theme {
   --font-sans:
@@ -155,6 +155,10 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* Tinted shadow — carries the foreground hue instead of pure black. */
+  --color-shadow: var(--shadow);
+  --shadow: 0 1px 3px 0 oklch(0.145 0 0 / 4%), 0 1px 2px -1px oklch(0.145 0 0 / 4%);
+
   /* Alarm priority colors — used by bg-alarm-*, text-alarm-* utilities. */
   --color-alarm-critical: var(--alarm-critical);
   --color-alarm-high: var(--alarm-high);
@@ -181,7 +185,7 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0.0098 87.47);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0 0 0);
+  --primary: oklch(0.145 0 0);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.9455 0.0098 87.47);
   --secondary-foreground: oklch(0.205 0 0);
@@ -258,6 +262,8 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
   font-weight: 300;
+
+  --shadow: 0 1px 3px 0 oklch(0 0 0 / 25%), 0 1px 2px -1px oklch(0 0 0 / 25%);
 
   /* Alarm priority palette tuned for dark surfaces. */
   --alarm-critical: oklch(0.55 0.22 320);
@@ -354,7 +360,63 @@
   --sidebar-ring: oklch(0.45 0.15 230);
 }
 
+.industrial-blue {
+  --radius: 0.375rem;
+  --background: oklch(0.23 0.05 252);
+  --foreground: oklch(0.91 0.005 250);
+  --card: oklch(0.30 0.05 252);
+  --card-foreground: oklch(0.91 0.005 250);
+  --popover: oklch(0.30 0.05 252);
+  --popover-foreground: oklch(0.91 0.005 250);
+  --primary: oklch(0.62 0.20 252);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.33 0.04 252);
+  --secondary-foreground: oklch(0.91 0.005 250);
+  --muted: oklch(0.31 0.04 252);
+  --muted-foreground: oklch(0.66 0.01 250);
+  --accent: oklch(0.36 0.06 260);
+  --accent-foreground: oklch(0.91 0.005 250);
+  --destructive: oklch(0.62 0.24 25);
+  --border: oklch(0.46 0.04 252);
+  --input: oklch(0.42 0.03 252);
+  --ring: oklch(0.62 0.20 252);
+  --chart-1: oklch(0.62 0.20 252);
+  --chart-2: oklch(0.65 0.15 185);
+  --chart-3: oklch(0.70 0.16 90);
+  --chart-4: oklch(0.65 0.18 30);
+  --chart-5: oklch(0.60 0.12 310);
+  --sidebar: oklch(0.18 0.05 252);
+  --sidebar-foreground: oklch(0.91 0.005 250);
+  --sidebar-primary: oklch(0.62 0.20 252);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.26 0.06 252);
+  --sidebar-accent-foreground: oklch(0.91 0.005 250);
+  --sidebar-border: oklch(0.46 0.04 252);
+  --sidebar-ring: oklch(0.62 0.20 252);
+  font-weight: 400;
+
+  --shadow: 0 1px 3px 0 oklch(0 0 0 / 25%), 0 1px 2px -1px oklch(0 0 0 / 25%);
+
+  --alarm-critical: oklch(0.55 0.22 320);
+  --alarm-high: oklch(0.65 0.24 25);
+  --alarm-medium: oklch(0.82 0.18 90);
+  --alarm-low: oklch(0.70 0.22 350);
+  --alarm-journal: oklch(0.70 0.16 230);
+  --alarm-foreground: oklch(0.985 0 0);
+
+  --status-running: oklch(0.62 0.12 145);
+  --status-stopped: oklch(0.65 0.00 0);
+  --status-maint: oklch(0.70 0.16 60);
+  --status-standby: oklch(0.70 0.12 230);
+  --status-fault: oklch(0.62 0.24 25);
+  --status-comm-loss: oklch(0.55 0.06 260);
+  --status-foreground: oklch(0.985 0 0);
+}
+
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
   * {
     @apply border-border outline-ring/50;
   }
@@ -441,6 +503,15 @@
       max-width: 80rem;
     }
   }
+
+  .noise-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -457,6 +528,6 @@
 :root {
   --container-width-xs: calc(var(--spacing) * 72);
   --container-width-sm: calc(var(--spacing) * 144);
-  --container-width-md: calc(var(--spacing) * 204);
+  --container-width-md: calc(var(--spacing) * 224);
   --container-width-lg: calc(var(--spacing) * 256);
 }

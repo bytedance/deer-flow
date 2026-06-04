@@ -17,7 +17,7 @@ interface ShineBorderProps extends React.HTMLAttributes<HTMLDivElement> {
   duration?: number;
   /**
    * Color of the border, can be a single color or an array of colors
-   * @default "#000000"
+   * @default "currentColor"
    */
   shineColor?: string | string[];
 }
@@ -30,7 +30,7 @@ interface ShineBorderProps extends React.HTMLAttributes<HTMLDivElement> {
 export function ShineBorder({
   borderWidth = 1,
   duration = 14,
-  shineColor = "#000000",
+  shineColor = "oklch(0.62 0.15 230)",
   className,
   style,
   ...props
@@ -45,8 +45,8 @@ export function ShineBorder({
             Array.isArray(shineColor) ? shineColor.join(",") : shineColor
           },transparent,transparent)`,
           backgroundSize: "300% 300%",
-          mask: `linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)`,
-          WebkitMask: `linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)`,
+          mask: `linear-gradient(var(--background, #fff) 0 0) content-box, linear-gradient(var(--background, #fff) 0 0)`,
+          WebkitMask: `linear-gradient(var(--background, #fff) 0 0) content-box, linear-gradient(var(--background, #fff) 0 0)`,
           WebkitMaskComposite: "xor",
           maskComposite: "exclude",
           padding: "var(--border-width)",

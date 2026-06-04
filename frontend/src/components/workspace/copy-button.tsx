@@ -1,4 +1,4 @@
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon } from "@/components/ui/icons";
 import { useCallback, useState, type ComponentProps } from "react";
 
 import { Button } from "@/components/ui/button";

@@ -4,7 +4,7 @@ import {
   Loader2Icon,
   ThumbsDownIcon,
   ThumbsUpIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import {
   memo,
   useCallback,
@@ -40,6 +40,7 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   parseUploadedFiles,
+  stripDeepLinkParams,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
@@ -257,7 +258,7 @@ function MessageContent_({
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
-      return rawContent ? stripUploadedFilesTag(rawContent) : "";
+      return rawContent ? stripDeepLinkParams(stripUploadedFilesTag(rawContent)) : "";
     }
     return rawContent ?? "";
   }, [rawContent, isHuman]);

@@ -109,7 +109,7 @@ export default function CardBlock({ block }: CardBlockProps) {
         : ArrowRight;
 
   return (
-    <div className="rounded-lg border bg-card p-4" role="region" aria-label={title}>
+    <div className="rounded-xl bg-muted/30 p-4" role="region" aria-label={title}>
       <p className="text-xs font-medium text-muted-foreground">{title}</p>
       <div className="mt-1 flex items-baseline gap-2">
         <span className="text-2xl font-semibold">{value}</span>

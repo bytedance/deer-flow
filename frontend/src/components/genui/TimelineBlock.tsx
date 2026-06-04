@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Circle, Clock } from "lucide-react";
+import { CheckCircle2, Circle, Clock } from "@/components/ui/icons";
 
 interface TimelineEvent {
   title: string;

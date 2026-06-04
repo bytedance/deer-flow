@@ -9,11 +9,13 @@ interface AuroraTextProps {
   speed?: number;
 }
 
+export const auroraColorsIndustrial = ["oklch(0.30 0.10 230)", "oklch(0.45 0.15 230)", "oklch(0.62 0.15 230)", "oklch(0.20 0.05 230)"];
+
 export const AuroraText = memo(
   ({
     children,
     className = "",
-    colors = ["#FF0080", "#7928CA", "#0070F3", "#38bdf8"],
+    colors = auroraColorsIndustrial,
     speed = 1,
   }: AuroraTextProps) => {
     const gradientStyle = {

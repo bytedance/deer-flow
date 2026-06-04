@@ -1,4 +1,4 @@
-import { ChevronUpIcon, ListTodoIcon } from "lucide-react";
+import { ChevronUpIcon, ListTodoIcon } from "@/components/ui/icons";
 import { useState } from "react";
 
 import type { Todo } from "@/core/todos";

@@ -1,6 +1,6 @@
 "use client";
 
-import { DownloadIcon, PlusIcon } from "lucide-react";
+import { DownloadIcon, PlusIcon } from "@/components/ui/icons";
 import { useState } from "react";
 import { toast } from "sonner";
 

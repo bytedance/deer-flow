@@ -1,7 +1,7 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { BookOpenIcon, ChevronDownIcon } from "lucide-react";
+import { BookOpenIcon, ChevronDownIcon } from "@/components/ui/icons";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";

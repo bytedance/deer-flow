@@ -345,8 +345,8 @@ def test_kpi_substitution_for_pump_equipment_mode(query_daily, monkeypatch, caps
         return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
 
     monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
-    # Simulate auto-detection: _detect_equipment_type returns "pump"
-    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "pump")
+    # Simulate auto-detection: detect_equipment_type returns "pump"
+    monkeypatch.setattr(query_daily, "detect_equipment_type", lambda ids: "pump")
 
     monkeypatch.setattr(
         sys,
@@ -380,7 +380,7 @@ def test_kpi_substitution_not_applied_when_custom_kpis_provided(query_daily, mon
         return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
 
     monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
-    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "pump")
+    monkeypatch.setattr(query_daily, "detect_equipment_type", lambda ids: "pump")
 
     monkeypatch.setattr(
         sys,
@@ -412,7 +412,7 @@ def test_kpi_substitution_not_applied_for_all_type(query_daily, monkeypatch, cap
 
     monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
     # Auto-detection returns "all" (mixed types or undetermined)
-    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "all")
+    monkeypatch.setattr(query_daily, "detect_equipment_type", lambda ids: "all")
 
     monkeypatch.setattr(
         sys,
@@ -442,7 +442,7 @@ def test_kpi_substitution_for_rotating_machinery(query_daily, monkeypatch, capsy
         return _ins_day_payload(date_str, equipment_ids, kpi_keys), "ins", []
 
     monkeypatch.setattr(query_daily, "fetch_day_with_provenance", fake_fetch)
-    monkeypatch.setattr(query_daily, "_detect_equipment_type", lambda ids: "rotating_machinery")
+    monkeypatch.setattr(query_daily, "detect_equipment_type", lambda ids: "rotating_machinery")
 
     monkeypatch.setattr(
         sys,

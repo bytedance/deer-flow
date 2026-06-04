@@ -8,7 +8,7 @@ import {
   SearchIcon,
   Trash2Icon,
   UploadIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 

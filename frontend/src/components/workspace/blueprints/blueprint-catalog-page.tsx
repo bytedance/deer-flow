@@ -10,7 +10,7 @@ import {
   Activity,
   CalendarDays,
   Package,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { useRouter } from "next/navigation";
 import { useState, useCallback } from "react";
 import { toast } from "sonner";

@@ -1,6 +1,6 @@
 "use client";
 
-import { ShieldIcon, Trash2Icon } from "lucide-react";
+import { ShieldIcon, Trash2Icon } from "@/components/ui/icons";
 import { useState } from "react";
 import { toast } from "sonner";
 

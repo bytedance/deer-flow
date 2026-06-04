@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowLeftIcon } from "lucide-react";
+import { ArrowLeftIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import {
   type CapabilityDetail,

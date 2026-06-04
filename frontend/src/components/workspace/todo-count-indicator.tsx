@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Bell, Play, Power } from "lucide-react";
+import { AlertTriangle, Bell, Play, Power } from "@/components/ui/icons";
 
 import { Button } from "@/components/ui/button";
 import {

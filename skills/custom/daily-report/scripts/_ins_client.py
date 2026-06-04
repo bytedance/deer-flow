@@ -40,6 +40,31 @@ EVENT_TYPES_BY_EQ_TYPE: dict[str, list[int]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Event type → (label, severity) — consistent with weekly/monthly reports
+# ---------------------------------------------------------------------------
+
+_EVENT_TYPE_MAP: dict[int, tuple[str, str]] = {
+    1: ("主报警", "high"),
+    2: ("预报警", "warning"),
+    3: ("启停机", "info"),
+    4: ("黑匣子", "info"),
+    5: ("正反进动", "info"),
+    6: ("通频值/过程量偏差", "warning"),
+    7: ("1X偏差", "warning"),
+    8: ("2X偏差", "warning"),
+    9: ("0.5X偏差", "warning"),
+    10: ("可选偏差", "warning"),
+    11: ("残余量偏差", "warning"),
+    12: ("振动波动", "warning"),
+    13: ("诊断事件", "info"),
+    14: ("预警", "warning"),
+    15: ("偏差报警", "high"),
+    16: ("诊断事件-D", "info"),
+    17: ("诊断事件-C", "info"),
+    18: ("诊断事件-B", "info"),
+}
+
+# ---------------------------------------------------------------------------
 # Availability detection
 # ---------------------------------------------------------------------------
 
@@ -166,6 +191,7 @@ def fetch_trend_data(
     results: dict[str, list[dict[str, Any]]] = {}
 
     for eq_id in equipment_ids:
+        print(f"[数据查询] 趋势数据 → {eq_id}...", file=sys.stderr)
         try:
             components = _run_async(client.get_slim_components(eq_id))
         except Exception as e:
@@ -200,6 +226,39 @@ def fetch_trend_data(
     return results
 
 
+def _format_machine_drop_entry(
+    entry: dict[str, Any], equipment_id: str
+) -> dict[str, Any] | None:
+    """Parse a raw getMachineDrops entry into a structured alarm dict.
+
+    Returns None when the entry has no recognized event type.
+    """
+    types: list[int] = entry.get("types") or []
+    if not types:
+        return None
+    primary_type = types[0]
+    label, level = _EVENT_TYPE_MAP.get(primary_type, (f"未知事件({primary_type})", "info"))
+
+    datatime = entry.get("datatime")
+    if isinstance(datatime, (int, float)):
+        try:
+            time_str = datetime.fromtimestamp(datatime / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, OverflowError, ValueError):
+            time_str = str(datatime)
+    else:
+        time_str = str(datatime or entry.get("time") or entry.get("dropTime") or "")
+
+    return {
+        "time": time_str,
+        "equipment": str(entry.get("posName") or entry.get("posId") or equipment_id),
+        "level": level,
+        "message": f"[{label}] {entry.get('posName') or equipment_id}",
+        "event_type": primary_type,
+        "event_label": label,
+        "pos_id": str(entry.get("posId") or ""),
+    }
+
+
 def fetch_alarm_events(
     equipment_ids: list[str],
     start_time: str,
@@ -227,6 +286,7 @@ def fetch_alarm_events(
 
     alarms: list[dict[str, Any]] = []
     for eq_id in equipment_ids:
+        print(f"[数据查询] 告警事件 → {eq_id}...", file=sys.stderr)
         try:
             raw_events = _run_async(client.get_machine_drops(
                 eq_id,
@@ -240,12 +300,9 @@ def fetch_alarm_events(
             continue
 
         for event in raw_events or []:
-            alarms.append({
-                "time": str(event.get("time") or event.get("dropTime") or ""),
-                "equipment": eq_id,
-                "level": _event_level(event.get("eventType", 0)),
-                "message": str(event.get("eventName") or event.get("msg") or ""),
-            })
+            formatted = _format_machine_drop_entry(event, eq_id)
+            if formatted is not None:
+                alarms.append(formatted)
 
     return alarms
 
@@ -264,16 +321,3 @@ def _run_async(maybe_coro: Any) -> Any:
     if asyncio.iscoroutine(maybe_coro):
         return asyncio.run(maybe_coro)
     return maybe_coro
-
-
-_EVENT_LEVEL_MAP: dict[int, str] = {
-    1: "high",
-    2: "warning",
-    3: "info",
-    14: "warning",
-    15: "high",
-}
-
-
-def _event_level(event_type: int) -> str:
-    return _EVENT_LEVEL_MAP.get(event_type, "info")
