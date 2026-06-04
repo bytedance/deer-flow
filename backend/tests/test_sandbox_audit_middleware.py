@@ -440,6 +440,35 @@ class TestClassifyCommand:
         assert _classify_command(cmd) == expected, f"Expected {expected!r} for compound cmd: {cmd!r}"
 
 
+class TestHomeDirectoryDeletionSpellings:
+    """Recursive deletion of ``$HOME`` / ``${HOME}`` matches ``~`` (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm -rf $HOME",
+            "rm -rf $HOME/",
+            "rm -rf $HOME/*",
+            "rm -rf ${HOME}",
+            "rm -rf ${HOME}/",
+            "rm -rf ${HOME}/*",
+            "rm -fr $HOME/",
+            "rm -fr ${HOME}/",
+            'rm -rf "$HOME"',
+            'rm -rf "$HOME/"',
+            'rm -rf "$HOME"/*',
+            'rm -rf "${HOME}"',
+            'rm -rf "${HOME}/"',
+            "rm -rf '$HOME/'",
+            "cd /tmp && rm -rf $HOME/",
+            "rm -rf ${HOME}/ && echo ok",
+            "safe;rm -rf $HOME/",
+        ],
+    )
+    def test_home_variable_deletion_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 

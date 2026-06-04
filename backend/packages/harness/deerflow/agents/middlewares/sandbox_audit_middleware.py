@@ -46,10 +46,21 @@ _RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
 _CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
 _LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
 
+# ``~``, ``$HOME`` and ``${HOME}`` name the same directory. One alternative
+# keeps a destructive target from passing just because it is spelled with a
+# variable. No quote branch belongs here: ``_classify_single_command`` matches
+# these rules again after ``shlex`` joins the tokens, and that pass is what
+# removes the quotes in ``rm -rf "$HOME/"``. ``_split_compound_command`` keeps
+# quote characters, so the raw-text rule never sees a bare ``$HOME`` there.
+# A longer name (``$HOMELESS``, ``$MY_HOME``, ``${HOME_CACHE}``) fails the
+# path suffix that follows. Default-value forms such as ``${HOME:-/tmp}`` are
+# outside this best-effort pattern.
+_HOME_TARGET = r"(?:~|\$HOME|\$\{HOME\})"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
+    re.compile(rf"rm\s+-[^\s]*r[^\s]*\s+(/\*?|{_HOME_TARGET}/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
