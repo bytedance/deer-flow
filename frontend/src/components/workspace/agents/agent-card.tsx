@@ -66,7 +66,9 @@ function TruncatedTooltip({
         {children}
       </TooltipTrigger>
       {truncated && (
-        <TooltipContent className="max-w-xs text-wrap">{text}</TooltipContent>
+        <TooltipContent className="max-w-xs text-wrap break-words">
+          {text}
+        </TooltipContent>
       )}
     </Tooltip>
   );
