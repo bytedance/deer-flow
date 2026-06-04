@@ -25,6 +25,8 @@ from _report_common import (
     KPI_BETTER_WHEN_HIGHER,
     KPI_DISPLAY_NAMES,
     KPI_THRESHOLDS,
+    SMS_SEVERITY_DISPLAY,
+    SMS_SEVERITY_RANK,
 )
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
@@ -241,11 +243,44 @@ def _severity_rank(score: float) -> int:
     return 1 if score > 1.0 else 0
 
 
-def _overall_status(kpi_summary: list[dict], alarms: list[dict], equipment_count: int | None = None) -> dict:
-    """根据 KPI 和告警生成整体运行状态（danger/warning/ok）和总结文字。"""
+def _build_sms_anomaly_table(sms_abnormal: dict | None) -> list[dict]:
+    """Convert SMS top_events to table rows for the DSL template section."""
+    if not sms_abnormal:
+        return []
+    events = sms_abnormal.get("top_events") or []
+    rows: list[dict] = []
+    for evt in events:
+        level = evt.get("latest_level", 0)
+        sev = evt.get("severity", "low")
+        rows.append({
+            "rank": evt.get("rank", 0),
+            "equipment": evt.get("mac_name", ""),
+            "component": evt.get("component_name", ""),
+            "health": evt.get("latest_health", 0),
+            "level": level,
+            "severity": SMS_SEVERITY_DISPLAY.get(sev, sev),
+            "event_count": evt.get("event_count", 0),
+            "process_status": evt.get("process_status", ""),
+            "run_status": evt.get("run_status", ""),
+        })
+    return rows
+
+
+def _overall_status(kpi_summary: list[dict], alarms: list[dict], equipment_count: int | None = None, sms_abnormal: dict | None = None) -> dict:
+    """根据 KPI、告警和 SMS 异常生成整体运行状态（danger/warning/ok）和总结文字。"""
     high_alarms = [a for a in alarms if a.get("level") == "high"]
     runtime = next((item for item in kpi_summary if item["key"] == "runtime_rate"), None)
     count_note = f"{equipment_count}台设备" if equipment_count else "设备"
+
+    sms_critical = 0
+    sms_high = 0
+    if sms_abnormal and isinstance(sms_abnormal, dict):
+        by_sev = sms_abnormal.get("by_severity") or {}
+        sms_critical = by_sev.get("critical", 0)
+        sms_high = by_sev.get("high", 0)
+
+    warning_from_sms = False
+
     if high_alarms:
         level = "danger"
         summary = f"今日存在 {len(high_alarms)} 条高级告警，需重点关注。"
@@ -255,9 +290,23 @@ def _overall_status(kpi_summary: list[dict], alarms: list[dict], equipment_count
     elif alarms:
         level = "warning"
         summary = f"{count_note}整体运行稳定，有少量异常需要关注。"
+    elif sms_critical > 0:
+        level = "warning"
+        warning_from_sms = True
+        summary = f"今日 {count_note} 存在 {sms_critical} 条 SMS 严重异常，运行率正常但需关注异常事件。"
+    elif sms_high > 0:
+        level = "warning"
+        warning_from_sms = True
+        summary = f"今日 {count_note} 存在 {sms_high} 条 SMS 高级异常，整体运行需关注。"
     else:
         level = "ok"
         summary = f"今日{count_note}运行平稳，无显著异常。"
+
+    # SMS critical combined with existing (non-SMS) warnings → escalate
+    if sms_critical > 0 and level == "warning" and not warning_from_sms:
+        level = "danger"
+        summary += f" 同时存在 {sms_critical} 条 SMS 严重异常，等级提升。"
+
     return {"level": level, "summary": summary}
 
 
@@ -280,6 +329,30 @@ def _recommendations(kpi_summary: list[dict], alarms: list[dict]) -> list[str]:
     if not recs:
         recs.append("无重点关注事项，继续保持。")
     return recs
+
+
+SMS_ABNORMAL_FILENAME = "sms_abnormal.json"
+
+
+def _load_sms_abnormal() -> dict | None:
+    """Try loading SMS abnormal data from the output directory.
+
+    Returns the sms_abnormal sub-dict on success, or None if the file
+    does not exist, is unreadable, or contains an error.
+    """
+    sms_path = _output_dir() / SMS_ABNORMAL_FILENAME
+    try:
+        raw = json.loads(sms_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    data = raw.get("sms_abnormal")
+    if not isinstance(data, dict):
+        return None
+    if "error" in data:
+        return None
+    if data.get("total_count", 0) == 0:
+        return None
+    return data
 
 
 def compute(payload: dict) -> dict:
@@ -332,8 +405,28 @@ def compute(payload: dict) -> dict:
         }
         for a in alarms
     ]
-    overall = _overall_status(kpi_summary, alarms, equipment_count if is_aggregated else None)
+
+    # Load SMS abnormal data if available
+    sms_abnormal = _load_sms_abnormal()
+    if sms_abnormal:
+        sms_total = sms_abnormal.get("total_count", 0)
+        sms_pending = (sms_abnormal.get("by_status") or {}).get("待处理", 0)
+        # Inject SMS KPI cards into kpi_summary
+        sms_kpis = [
+            {"key": "sms_abnormal_count", "name": KPI_DISPLAY_NAMES.get("sms_abnormal_count", "SMS异常数"),
+             "current": sms_total, "previous": None, "delta": None, "unit": "条",
+             "direction": None, "better_when_higher": False},
+            {"key": "sms_abnormal_pending", "name": KPI_DISPLAY_NAMES.get("sms_abnormal_pending", "待处理异常"),
+             "current": sms_pending, "previous": None, "delta": None, "unit": "条",
+             "direction": None, "better_when_higher": False},
+        ]
+        kpi_summary = list(kpi_summary) + sms_kpis
+    else:
+        sms_abnormal = None
+
+    overall = _overall_status(kpi_summary, alarms, equipment_count if is_aggregated else None, sms_abnormal)
     recs = _recommendations(kpi_summary, alarms)
+    sms_abnormal_table = _build_sms_anomaly_table(sms_abnormal)
 
     result: dict = {
         "report_date": payload.get("report_date"),
@@ -349,7 +442,10 @@ def compute(payload: dict) -> dict:
         "aggregation_mode": "grouped" if is_aggregated else "detail",
         "data_source": payload.get("data_source", ""),
         "data_notes": list(payload.get("data_notes") or []),
+        "sms_abnormal_table": sms_abnormal_table,
     }
+    if sms_abnormal:
+        result["sms_abnormal"] = sms_abnormal
     if is_aggregated:
         result["equipment_type"] = payload.get("equipment_type", "all")
         result["equipment_count"] = equipment_count or len(per_equipment)

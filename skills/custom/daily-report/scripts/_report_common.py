@@ -44,6 +44,8 @@ KPI_UNITS: dict[str, str] = {
     "vibration_velocity_rms": "mm/s",
     "vibration_acceleration_peak": "m/s²",
     "kurtosis_index": "—",
+    "sms_abnormal_count": "条",
+    "sms_abnormal_pending": "条",
 }
 
 # ---------------------------------------------------------------------------
@@ -64,6 +66,8 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
     "vibration_velocity_rms": "振动速度有效值",
     "vibration_acceleration_peak": "振动加速度峰值",
     "kurtosis_index": "峭度指标",
+    "sms_abnormal_count": "SMS异常数",
+    "sms_abnormal_pending": "待处理异常",
 }
 
 # ---------------------------------------------------------------------------
@@ -101,6 +105,31 @@ _EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
 }
 
 _ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
+
+# ---------------------------------------------------------------------------
+# SMS 异常等级映射
+# ---------------------------------------------------------------------------
+
+SMS_SEVERITY_MAP: list[tuple[int, str]] = [
+    (60, "critical"),
+    (41, "high"),
+    (21, "medium"),
+    (0, "low"),
+]
+
+SMS_SEVERITY_DISPLAY: dict[str, str] = {
+    "critical": "严重",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+
+SMS_SEVERITY_RANK: dict[str, int] = {
+    "critical": 3,
+    "high": 2,
+    "medium": 1,
+    "low": 0,
+}
 
 # ---------------------------------------------------------------------------
 # CSV / 校验工具
