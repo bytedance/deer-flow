@@ -32,6 +32,12 @@ vi.mock("@/components/ui/button", () => ({
     React.createElement("button", props, children),
 }));
 
+vi.mock("@/core/agents", () => ({
+  useAgent: () => ({
+    agent: undefined,
+  }),
+}));
+
 vi.mock("@/core/genui", () => ({
   submitInteraction: vi.fn(),
 }));

@@ -164,6 +164,7 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const requestedThreadId = threadId ?? null;
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
   // Ref to track current thread ID across async callbacks without causing re-renders,
@@ -184,7 +185,7 @@ export function useThreadStream({
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     appendMessages,
-  } = useThreadHistory(onStreamThreadId ?? "");
+  } = useThreadHistory(requestedThreadId ?? "");
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -194,7 +195,7 @@ export function useThreadStream({
   const prevThreadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const normalizedThreadId = threadId ?? null;
+    const normalizedThreadId = requestedThreadId;
     const prevThreadId = prevThreadIdRef.current;
     prevThreadIdRef.current = normalizedThreadId;
 
@@ -223,7 +224,7 @@ export function useThreadStream({
     return () => {
       sseManagerRef.current?.disconnect();
     };
-  }, [threadId]);
+  }, [requestedThreadId]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
@@ -407,6 +408,11 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    setOptimisticMessages([]);
+    setIsUploading(false);
+    messagesRef.current = [];
+    summarizedRef.current = new Set();
+    prevMsgCountRef.current = 0;
   }, [threadId]);
 
   // Clear optimistic when server messages arrive (count increases)
@@ -616,16 +622,27 @@ export function useThreadStream({
     messagesRef.current = thread.messages;
   }
 
+  const isThreadSwitchPending =
+    requestedThreadId !== onStreamThreadId &&
+    !(requestedThreadId === null && prevThreadIdRef.current === null);
+  const visibleHistory = isThreadSwitchPending ? [] : history;
+  const visibleThreadMessages = isThreadSwitchPending ? [] : thread.messages;
+  const visibleOptimisticMessages = isThreadSwitchPending
+    ? []
+    : optimisticMessages;
+
   const mergedMessages = mergeMessages(
-    history,
-    thread.messages,
-    optimisticMessages,
+    visibleHistory,
+    visibleThreadMessages,
+    visibleOptimisticMessages,
   );
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    isLoading: isThreadSwitchPending ? false : thread.isLoading,
+    error: isThreadSwitchPending ? null : thread.error,
     messages: mergedMessages,
   } as typeof thread;
 
@@ -663,11 +680,13 @@ export function useThreadHistory(threadId: string) {
       indexRef.current -= 1;
       return;
     }
+    const requestThreadId = threadIdRef.current;
+    const requestRunId = run.run_id;
     try {
       setLoading(true);
       loadedRunIdsRef.current.add(run.run_id);
       const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadIdRef.current)}/runs/${encodeURIComponent(run.run_id)}/messages`,
+        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(requestRunId)}/messages`,
         {
           method: "GET",
           headers: {
@@ -681,13 +700,20 @@ export function useThreadHistory(threadId: string) {
       const _messages = result.data
         .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
         .map((m) => m.content);
+      if (threadIdRef.current !== requestThreadId) {
+        return;
+      }
       setMessages((prev) => appendUniqueMessages(prev, _messages, "prepend"));
       indexRef.current -= 1;
     } catch (err) {
       console.error(err);
-      loadedRunIdsRef.current.delete(run.run_id);
+      if (threadIdRef.current === requestThreadId) {
+        loadedRunIdsRef.current.delete(requestRunId);
+      }
     } finally {
-      setLoading(false);
+      if (threadIdRef.current === requestThreadId) {
+        setLoading(false);
+      }
     }
   }, []);
   useEffect(() => {
@@ -695,6 +721,9 @@ export function useThreadHistory(threadId: string) {
       threadIdRef.current = threadId;
       initializedRef.current = false;
       loadedRunIdsRef.current = new Set();
+      runsRef.current = [];
+      indexRef.current = -1;
+      setLoading(false);
       setMessages([]);
     }
     if (runs.data && runs.data.length > 0) {

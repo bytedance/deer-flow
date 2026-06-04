@@ -75,6 +75,16 @@ function normalizeComparableMarkdown(content: string): string {
   return content.replace(/\r\n/g, "\n").trim().replace(/\n{3,}/g, "\n\n");
 }
 
+function createEmptyResolvedBlockHistory(): Awaited<
+  ReturnType<typeof fetchResolvedBlockHistory>
+> {
+  return {
+    blocks: [],
+    blockIdsByMessageKey: new Map(),
+    duplicatedRawBlockIds: new Set(),
+  };
+}
+
 function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
@@ -225,14 +235,16 @@ export function MessageList({
   const blocks = useBlockStore((state) => state.blocks);
   const [resolvedBlockHistory, setResolvedBlockHistory] = useState<
     Awaited<ReturnType<typeof fetchResolvedBlockHistory>>
-  >({
-    blocks: [],
-    blockIdsByMessageKey: new Map(),
-    duplicatedRawBlockIds: new Set(),
-  });
+  >(createEmptyResolvedBlockHistory);
 
   useEffect(() => {
+    let cancelled = false;
+
     void fetchResolvedBlockHistory(threadId, messages).then((history) => {
+      if (cancelled) {
+        return;
+      }
+
       setResolvedBlockHistory(history);
       // Populate interaction state from backend data (survives page refresh).
       const store = useBlockStore.getState();
@@ -242,6 +254,10 @@ export function MessageList({
         }
       }
     });
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, messagesStableKey]);
   const storeBlockIds = useMemo(
@@ -608,6 +624,12 @@ export function MessageList({
   ] = useState<Map<string, string | null>>(() => new Map());
 
   useEffect(() => {
+    setResolvedBlockHistory(createEmptyResolvedBlockHistory());
+    setHistoricalAnchoredBlockIds(new Set());
+    setLiveStreamMessageKeys(new Set());
+    preStreamMessageKeysRef.current = new Set();
+    preStreamBlockIdsRef.current = new Set();
+    wasLoadingRef.current = false;
     setBlockAnchorById(new Map());
   }, [threadId]);
 
