@@ -50,16 +50,12 @@ export function GenUIRenderer({ block, threadId, disableExpiration, onInteractio
   );
 
   const effectiveInteractionState = useMemo(() => {
-    if (
-      disableExpiration &&
-      block.interactive &&
-      block.callback_id &&
-      (!interactionState || interactionState.status === "idle")
-    ) {
-      return { status: "readonly" as const };
+    if (interactionState) return interactionState;
+    if (block.interactive && block.interaction_status === "submitted") {
+      return { status: "submitted" as const };
     }
-    return interactionState;
-  }, [disableExpiration, block.interactive, block.callback_id, interactionState]);
+    return undefined;
+  }, [block.interactive, block.interaction_status, interactionState]);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
