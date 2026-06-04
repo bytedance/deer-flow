@@ -3893,6 +3893,19 @@ wheels = [
 ]
 
 [[package]]
+name = "python-docx"
+version = "1.2.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "lxml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7" },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.2.2"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -5328,6 +5341,7 @@ dependencies = [
     { name = "psycopg" },
     { name = "pyarrow" },
     { name = "pymupdf" },
+    { name = "python-docx" },
     { name = "requests" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -5350,6 +5364,7 @@ requires-dist = [
     { name = "psycopg", specifier = ">=3.2.0" },
     { name = "pyarrow", specifier = ">=14.0.0" },
     { name = "pymupdf", specifier = ">=1.24.0" },
+    { name = "python-docx", specifier = ">=1.1.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "scipy", specifier = ">=1.11.0" },
