@@ -181,13 +181,23 @@ class SkillStorage(ABC):
         """Origin: ``deerflow.config.skills_config.SkillsConfig.container_path`` accessor."""
         return self._container_root
 
+    def _get_custom_base(self) -> Path:
+        """Base directory for custom skills.
+
+        Subclasses may override to implement per-user namespacing.  The default
+        returns ``<skills_root>/custom/`` which matches the pre-isolation layout.
+        """
+        return self.get_skills_root_path() / SkillCategory.CUSTOM.value
+
     def get_custom_skill_dir(self, name: str) -> Path:
-        """Path to ``custom/<name>``. Does not create the directory.
+        """Path to ``custom/<name>`` (or ``custom/<user_id>/<name>`` when namespaced).
+
+        Does not create the directory.
 
         Origin: ``deerflow.skills.manager.get_custom_skill_dir``.
         """
         normalized_name = self.validate_skill_name(name)
-        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / normalized_name
+        return self._get_custom_base() / normalized_name
 
     def get_custom_skill_file(self, name: str) -> Path:
         """Path to ``custom/<name>/SKILL.md``.
@@ -198,12 +208,14 @@ class SkillStorage(ABC):
         return self.get_custom_skill_dir(normalized_name) / SKILL_MD_FILE
 
     def get_skill_history_file(self, name: str) -> Path:
-        """Path to ``custom/.history/<name>.jsonl``. Does not create parents.
+        """Path to ``custom/.history/<name>.jsonl`` (or ``custom/<user_id>/.history/…``).
+
+        Does not create parents.
 
         Origin: ``deerflow.skills.manager.get_skill_history_file``.
         """
         normalized_name = self.validate_skill_name(name)
-        return self.get_skills_root_path() / SkillCategory.CUSTOM.value / ".history" / f"{normalized_name}.jsonl"
+        return self._get_custom_base() / ".history" / f"{normalized_name}.jsonl"
 
     # ------------------------------------------------------------------
     # Final template-method flows

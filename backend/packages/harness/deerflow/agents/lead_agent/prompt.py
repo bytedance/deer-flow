@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
-_enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
+_enabled_skills_by_config_cache: dict[tuple[int, str | None], tuple[object, list[Skill]]] = {}
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -131,14 +131,18 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[S
     """Return enabled skills using the caller's config source.
 
     When a concrete ``app_config`` is supplied, cache the loaded skills by that
-    config object's identity so request-scoped config injection still resolves
-    skill paths from the matching config without rescanning storage on every
-    agent factory call.
+    config object's identity and the current user so request-scoped config
+    injection still resolves skill paths from the matching config without
+    rescanning storage on every agent factory call.  Custom skills are scoped
+    to the authenticated user via ``get_effective_user_id()``.
     """
     if app_config is None:
         return _get_enabled_skills()
 
-    cache_key = id(app_config)
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    user_id = get_effective_user_id()
+    cache_key = (id(app_config), user_id)
     with _enabled_skills_lock:
         cached = _enabled_skills_by_config_cache.get(cache_key)
         if cached is not None:
@@ -146,7 +150,7 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[S
             if cached_config is app_config:
                 return list(cached_skills)
 
-    skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
+    skills = list(get_or_new_skill_storage(app_config=app_config, user_id=user_id).load_skills(enabled_only=True))
     with _enabled_skills_lock:
         _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
     return list(skills)

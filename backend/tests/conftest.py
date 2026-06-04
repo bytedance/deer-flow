@@ -162,6 +162,21 @@ def _blocking_io_probe_skipped(item: pytest.Item) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _reset_extensions_config():
+    """Reset the extensions_config singleton between tests to prevent cross-test contamination."""
+    try:
+        from deerflow.config.extensions_config import reset_extensions_config
+    except ImportError:
+        yield
+        return
+    reset_extensions_config()
+    try:
+        yield
+    finally:
+        reset_extensions_config()
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_storage_singleton():
     """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
     try:

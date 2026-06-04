@@ -33,7 +33,7 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
     monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
-    runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
+    runtime = SimpleNamespace(context={"thread_id": "thread-1", "user_id": "u1"}, config={"configurable": {"thread_id": "thread-1"}})
 
     result = anyio.run(
         skill_manage_module.skill_manage_tool.coroutine,
@@ -56,7 +56,7 @@ def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
         1,
     )
     assert "Patched custom skill" in patch_result
-    assert "Patched skill" in (skills_root / "custom" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Patched skill" in (skills_root / "custom" / "u1" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
     assert refresh_calls == ["refresh", "refresh"]
 
 
@@ -75,7 +75,7 @@ def test_skill_manage_patch_replaces_single_occurrence_by_default(monkeypatch, t
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
     monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
 
-    runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
+    runtime = SimpleNamespace(context={"thread_id": "thread-1", "user_id": "u1"}, config={"configurable": {"thread_id": "thread-1"}})
     content = _skill_content("demo-skill", "Demo skill") + "\nRepeated: Demo skill\n"
 
     anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", content)
@@ -90,7 +90,7 @@ def test_skill_manage_patch_replaces_single_occurrence_by_default(monkeypatch, t
         "Patched skill",
     )
 
-    skill_text = (skills_root / "custom" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
+    skill_text = (skills_root / "custom" / "u1" / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
     assert "1 replacement(s) applied, 2 match(es) found" in patch_result
     assert skill_text.count("Patched skill") == 1
     assert skill_text.count("Demo skill") == 1

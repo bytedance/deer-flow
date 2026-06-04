@@ -10,6 +10,7 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -87,7 +88,8 @@ async def _skill_manage_impl(
     name = SkillStorage.validate_skill_name(name)
     lock = _get_lock(name)
     thread_id = _get_thread_id(runtime)
-    skill_storage = get_or_new_skill_storage()
+    user_id = resolve_runtime_user_id(runtime)
+    skill_storage = get_or_new_skill_storage(user_id=user_id)
 
     async with lock:
         if action == "create":

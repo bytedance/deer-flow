@@ -127,7 +127,7 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
 
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
-    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None, user_id=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=explicit_config)
@@ -166,7 +166,7 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
 
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
-    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None, user_id=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
 
     prompt = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=explicit_config)
@@ -283,7 +283,7 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
 
     def fake_get_or_new_skill_storage(**kwargs):
         nonlocal load_count
-        assert kwargs == {"app_config": config}
+        assert kwargs.get("app_config") is config
 
         def load_skills(*, enabled_only):
             nonlocal load_count

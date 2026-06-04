@@ -16,14 +16,16 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     """Return a ``SkillStorage`` instance — either a new one or the process singleton.
 
     **New instance** is created (never cached) when:
+    - ``user_id`` is provided — creates a per-user storage whose custom-skill paths
+      are scoped to ``custom/<user_id>/``.  Never shares the process-level singleton.
     - ``skills_path`` is provided — uses it as the ``host_path`` override (class still resolved via config).
     - ``app_config`` is provided — constructs a storage from ``app_config.skills``
       so that per-request config (e.g. Gateway ``Depends(get_config)``) is respected
       without polluting the process-level singleton.
 
-    **Singleton** is returned (created on first call, then reused) when neither
-    ``skills_path`` nor ``app_config`` is given — uses ``get_app_config()`` to
-    resolve the active configuration.
+    **Singleton** is returned (created on first call, then reused) when none of the
+    above kwargs are given — uses ``get_app_config()`` to resolve the active
+    configuration.
     """
     global _default_skill_storage, _default_skill_storage_config
 
@@ -40,8 +42,18 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
             **kwargs,
         )
 
+    user_id = kwargs.pop("user_id", None)
     skills_path = kwargs.pop("skills_path", None)
     app_config = kwargs.pop("app_config", None)
+
+    # When user_id is given, always create a fresh per-user instance — never
+    # the process-level singleton, because different users need different
+    # _custom_base paths.
+    if user_id is not None:
+        if app_config is not None:
+            return _make_storage(app_config.skills, user_id=user_id, **kwargs)
+        app_config_now = get_app_config()
+        return _make_storage(app_config_now.skills, user_id=user_id, **kwargs)
 
     if skills_path is not None:
         if app_config is not None:
