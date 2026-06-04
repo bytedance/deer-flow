@@ -6,7 +6,11 @@ type ClipboardItemLike = {
 
 function copyTextWithExecCommand(text: string): boolean {
   const document = globalThis.document;
-  if (!document?.body?.appendChild || !document.execCommand) {
+  if (
+    typeof document?.createElement !== "function" ||
+    typeof document.body?.appendChild !== "function" ||
+    typeof document.execCommand !== "function"
+  ) {
     return false;
   }
 
@@ -41,10 +45,18 @@ export async function writeTextToClipboard(text: string): Promise<boolean> {
 }
 
 function fallbackWriteText(text: string): Promise<void> {
-  if (!copyTextWithExecCommand(text)) {
-    throw new Error("Clipboard API not available");
+  try {
+    if (!copyTextWithExecCommand(text)) {
+      return Promise.reject(new Error("Clipboard API not available"));
+    }
+  } catch (error) {
+    return Promise.reject(error);
   }
   return Promise.resolve();
+}
+
+function hasUsableClipboardItem(): boolean {
+  return typeof globalThis.ClipboardItem === "function";
 }
 
 async function readPlainTextFromClipboardItem(
@@ -71,8 +83,9 @@ export function installClipboardFallback(): void {
   const clipboard = navigator.clipboard as Partial<Clipboard> | undefined;
   const hasWriteText = typeof clipboard?.writeText === "function";
   const hasWrite = typeof clipboard?.write === "function";
+  const hasClipboardItem = hasUsableClipboardItem();
 
-  if (hasWriteText && hasWrite && "ClipboardItem" in globalThis) {
+  if (hasWriteText && hasWrite && hasClipboardItem) {
     return;
   }
 
@@ -108,7 +121,7 @@ export function installClipboardFallback(): void {
     return;
   }
 
-  if (!globalThis.ClipboardItem) {
+  if (!hasClipboardItem) {
     class ClipboardItemFallback {
       items: Record<string, Blob | string>;
       types: string[];

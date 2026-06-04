@@ -132,6 +132,24 @@ test("returns false when execCommand fallback fails", async () => {
   expect(textarea.remove).toHaveBeenCalled();
 });
 
+test("returns false when execCommand fallback cannot create an element", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      execCommand: vi.fn(),
+    },
+  });
+
+  await expect(writeTextToClipboard("hello")).resolves.toBe(false);
+});
+
 test("returns false when navigator is unavailable", async () => {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -197,6 +215,48 @@ test("installs a writeText fallback when Clipboard API is unavailable", async ()
   expect(textarea.remove).toHaveBeenCalled();
 });
 
+test("installed writeText fallback rejects instead of throwing synchronously", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  const result = globalThis.navigator.clipboard.writeText("hello");
+  expect(result).toBeInstanceOf(Promise);
+  await expect(result).rejects.toThrow("Clipboard API not available");
+});
+
+test("installed writeText fallback converts thrown DOM failures to rejections", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn(() => {
+        throw new Error("dom unavailable");
+      }),
+      execCommand: vi.fn(),
+    },
+  });
+
+  installClipboardFallback();
+
+  const result = globalThis.navigator.clipboard.writeText("hello");
+  expect(result).toBeInstanceOf(Promise);
+  await expect(result).rejects.toThrow("dom unavailable");
+});
+
 test("installs a write fallback for ClipboardItem text/plain payloads", async () => {
   const textarea = {
     remove: vi.fn(),
@@ -234,4 +294,24 @@ test("installs a write fallback for ClipboardItem text/plain payloads", async ()
   );
   expect(textarea.value).toBe("| A |\n| B |");
   expect(execCommand).toHaveBeenCalledWith("copy");
+});
+
+test("installs ClipboardItem fallback when the global property exists but is unusable", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      clipboard: {
+        write: vi.fn().mockResolvedValue(undefined),
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    },
+  });
+  Object.defineProperty(globalThis, "ClipboardItem", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  expect(typeof globalThis.ClipboardItem).toBe("function");
 });
