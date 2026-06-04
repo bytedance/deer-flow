@@ -346,6 +346,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - **Lazy initialization**: Tools loaded on first use via `get_cached_mcp_tools()`
 - **Cache invalidation**: Detects config file changes via mtime comparison
 - **Transports**: stdio (command-based), SSE, HTTP
+- **Per-call sessions (no pooling)**: Every MCP tool call opens, uses, and closes its own session inside a single coroutine (one asyncio task). MCP `ClientSession`/`stdio_client` are built on `anyio.create_task_group()`, whose cancel scope must be entered and exited in the **same** task. Sessions are therefore never cached/shared across tasks — a cross-task `__aexit__` raises `RuntimeError: Attempted to exit cancel scope in a different task` (issue #3379; the earlier `MCPSessionPool` was removed because it violated this for stdio just as #3203 found for HTTP/SSE). stdio tools get a thin per-call wrapper (`_make_per_call_mcp_tool`) **only** to forward interceptor-injected headers via MCP call `meta` (PR #3294); HTTP/SSE tools forward headers natively and pass through unwrapped. Persistent/stateful stdio sessions, if ever needed, must use a long-lived owner-task that opens and closes the session in one task — not a shared pool.
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
 - **Runtime updates**: Gateway API saves to extensions_config.json; the Gateway-embedded runtime detects changes via mtime
 
