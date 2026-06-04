@@ -293,6 +293,17 @@ class TestBuildPreview:
         assert "byte offset " in preview
         assert "Start near the line hints above" in preview
 
+    def test_json_line_hints_use_original_content_offsets(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items (line 4," in preview
+
     def test_table_preview_extracts_columns(self):
         content = "name,score\nAda,98\nGrace,99\n"
         preview = _build_preview(

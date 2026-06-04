@@ -68,7 +68,7 @@ def build_tool_output_synopsis(content: str, *, tool_name: str = "") -> ToolOutp
         )
 
     stripped = content.strip()
-    json_synopsis = _try_json(stripped)
+    json_synopsis = _try_json(content)
     if json_synopsis is not None:
         return json_synopsis
 
