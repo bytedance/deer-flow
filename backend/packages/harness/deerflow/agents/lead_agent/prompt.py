@@ -678,39 +678,23 @@ SOUL.md or config.yaml — those write into a temporary sandbox/tool workspace a
 Rules:
 - Always pass the FULL replacement text for `soul` (no patch semantics). Start from your current SOUL above and apply the user's edits.
 - Only pass the fields that should change. Omit the others to preserve them.
+- Never pass literal strings like `"null"`, `"none"`, or `"undefined"` for unchanged fields.
 - Pass `skills=[]` to disable all skills, or omit `skills` to keep the existing whitelist.
 - After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
 </self_update>
 """
 
 
-def get_deferred_tools_prompt_section(*, app_config: AppConfig | None = None) -> str:
-    """Generate <available-deferred-tools> block for the system prompt.
+def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozenset()) -> str:
+    """Generate <available-deferred-tools> from an explicit deferred-name set.
 
-    Lists only deferred tool names so the agent knows what exists
-    and can use tool_search to load them.
-    Returns empty string when tool_search is disabled or no tools are deferred.
+    Lists only names so the agent knows what exists and can use tool_search to
+    load them. Returns empty string when there are no deferred tools. The set is
+    computed at agent build time (after tool-policy filtering) and passed in.
     """
-    from deerflow.tools.builtins.tool_search import get_deferred_registry
-
-    if app_config is None:
-        try:
-            from deerflow.config import get_app_config
-
-            config = get_app_config()
-        except Exception:
-            return ""
-    else:
-        config = app_config
-
-    if not config.tool_search.enabled:
+    if not deferred_names:
         return ""
-
-    registry = get_deferred_registry()
-    if not registry:
-        return ""
-
-    names = "\n".join(e.name for e in registry.entries)
+    names = "\n".join(sorted(deferred_names))
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
@@ -772,6 +756,7 @@ def apply_prompt_template(
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    deferred_names: frozenset[str] = frozenset(),
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
@@ -799,7 +784,7 @@ def apply_prompt_template(
     skills_section = get_skills_prompt_section(available_skills, app_config=app_config)
 
     # Get deferred tools section (tool_search)
-    deferred_tools_section = get_deferred_tools_prompt_section(app_config=app_config)
+    deferred_tools_section = get_deferred_tools_prompt_section(deferred_names=deferred_names)
 
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section(app_config=app_config)

@@ -26,6 +26,7 @@ from app.channels.message_bus import (
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
+from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -670,12 +671,20 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
+        # ``user_id`` drives user-scoped filesystem buckets that only accept
+        # ``[A-Za-z0-9_-]``, so normalize the channel id and keep the raw value
+        # under ``channel_user_id`` for platform-facing lookups.
+        run_context_identity: dict[str, Any] = {"thread_id": thread_id}
+        if msg.user_id:
+            run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
+            run_context_identity["channel_user_id"] = msg.user_id
+
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
             self._default_session.get("context"),
             channel_layer.get("context"),
             user_layer.get("context"),
-            {"thread_id": thread_id},
+            run_context_identity,
         )
 
         # Custom agents are implemented as lead_agent + agent_name context.

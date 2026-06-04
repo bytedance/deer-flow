@@ -1,0 +1,28 @@
+name: PR Labeler
+
+# Applies area:* labels based on which files a PR changes (see .github/labeler.yml).
+# Uses pull_request_target so it also works on fork PRs. SAFE: actions/labeler
+# only reads the changed-file list via the API — it never checks out or runs PR code.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply area labels
+        uses: actions/labeler@v5
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: true

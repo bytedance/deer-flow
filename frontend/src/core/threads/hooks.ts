@@ -106,17 +106,79 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   });
 }
 
-function findLatestUnloadedRunIndex(
+export function findLatestUnloadedRunIndex(
   runs: Run[],
   loadedRunIds: ReadonlySet<string>,
 ): number {
-  for (let i = runs.length - 1; i >= 0; i--) {
+  for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
     if (run && !loadedRunIds.has(run.run_id)) {
       return i;
     }
   }
   return -1;
+}
+
+export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
+
+export function shouldAutoContinueOnEmptyRun(
+  fetchedMessageCount: number,
+  consecutiveEmptyLoads: number,
+  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+): boolean {
+  return (
+    fetchedMessageCount === 0 &&
+    consecutiveEmptyLoads < maxConsecutiveEmptyLoads
+  );
+}
+
+type RunMessagesPageResponse = {
+  data: RunMessage[];
+  has_more?: boolean;
+  hasMore?: boolean;
+};
+
+export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
+  return result.has_more ?? result.hasMore ?? false;
+}
+
+export function getOldestRunMessageSeq(messages: RunMessage[]) {
+  let oldestSeq: number | null = null;
+  for (const message of messages) {
+    if (typeof message.seq !== "number") {
+      continue;
+    }
+    oldestSeq =
+      oldestSeq === null ? message.seq : Math.min(oldestSeq, message.seq);
+  }
+  return oldestSeq;
+}
+
+export function getNextRunMessagesBeforeSeq(
+  result: RunMessagesPageResponse,
+): number | null | undefined {
+  if (!runMessagesPageHasMore(result)) {
+    return null;
+  }
+  return getOldestRunMessageSeq(result.data) ?? undefined;
+}
+
+export function buildRunMessagesUrl(
+  baseUrl: string,
+  threadId: string,
+  runId: string,
+  beforeSeq?: number,
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
+  if (beforeSeq !== undefined) {
+    url.searchParams.set("before_seq", String(beforeSeq));
+  }
+  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
 export function mergeMessages(
@@ -801,6 +863,7 @@ export function useThreadHistory(threadId: string) {
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -824,6 +887,7 @@ export function useThreadHistory(threadId: string) {
     setLoading(true);
 
     try {
+      let consecutiveEmptyLoads = 0;
       do {
         pendingLoadRef.current = false;
 
@@ -841,16 +905,20 @@ export function useThreadHistory(threadId: string) {
 
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
-        const result: { data: RunMessage[]; hasMore: boolean } = await fetch(
-          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(requestThreadId)}/runs/${encodeURIComponent(run.run_id)}/messages`,
-          {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
+        const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
+        const url = buildRunMessagesUrl(
+          getBackendBaseURL(),
+          requestThreadId,
+          run.run_id,
+          beforeSeq,
+        );
+        const result: RunMessagesPageResponse = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
           },
-        ).then((res) => {
+          credentials: "include",
+        }).then((res) => {
           return res.json();
         });
         const _messages = result.data
@@ -862,7 +930,29 @@ export function useThreadHistory(threadId: string) {
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
-        loadedRunIdsRef.current.add(run.run_id);
+        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
+        if (typeof nextBeforeSeq === "number") {
+          runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
+          pendingLoadRef.current = true;
+        } else if (nextBeforeSeq === undefined) {
+          console.warn(
+            `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
+          );
+        } else {
+          runBeforeSeqRef.current.delete(run.run_id);
+          loadedRunIdsRef.current.add(run.run_id);
+          if (
+            shouldAutoContinueOnEmptyRun(
+              _messages.length,
+              consecutiveEmptyLoads,
+            )
+          ) {
+            consecutiveEmptyLoads += 1;
+            pendingLoadRef.current = true;
+          } else {
+            consecutiveEmptyLoads = 0;
+          }
+        }
         indexRef.current = findLatestUnloadedRunIndex(
           runsRef.current,
           loadedRunIdsRef.current,
@@ -886,6 +976,7 @@ export function useThreadHistory(threadId: string) {
       pendingLoadRef.current = false;
       loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
+      runBeforeSeqRef.current = new Map();
       loadingRef.current = false;
       setLoading(false);
       setMessages([]);

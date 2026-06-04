@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
+_SAFE_USER_ID_DIGEST_HEX_LEN = 16
 
 
 def _default_local_base_dir() -> Path:
@@ -29,6 +32,23 @@ def _validate_user_id(user_id: str) -> str:
     if not _SAFE_USER_ID_RE.match(user_id):
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return user_id
+
+
+def make_safe_user_id(raw: str) -> str:
+    """Normalize an external identity into the user-id charset (``[A-Za-z0-9_-]``).
+
+    IM channel ids (Feishu/Slack/Telegram) may contain characters that
+    :func:`_validate_user_id` rejects. Already-safe ids pass through unchanged;
+    lossy ones get a short digest suffix so two distinct inputs never share a
+    storage bucket.
+    """
+    if not raw:
+        raise ValueError("user_id must be a non-empty string.")
+    sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw)
+    if sanitized == raw:
+        return raw
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
+    return f"{sanitized}-{digest}"
 
 
 def _join_host_path(base: str, *parts: str) -> str:
