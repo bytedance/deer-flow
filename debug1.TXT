@@ -1,0 +1,173 @@
+Check outputs directory
+ls -la /mnt/user-data/outputs/
+使用 “render_charts_file” 工具
+Validate charts.json structure
+cat /mnt/user-data/outputs/charts.json | python -c "import json,sys; d=json.load(sys.stdin); print(f'blocks: {len(d.get(\"blocks\",[]))}'); [print(f'  - {b[\"component\"]}: {b.get(\"props\",{}).get(\"title\",\"N/A\")[:60]}') for b in d.get('blocks',[])]"
+Check charts.json structure details
+python -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+print('Top-level keys:', list(d.keys()))
+if 'components' in d:
+    print(f'components: {len(d[\"components\"])}')
+    for c in d['components'][:3]:
+        print(f'  - {c.get(\"component\")}: {str(c.get(\"props\",{}).get(\"title\",\"\"))[:60]}')
+"
+Convert charts to blocks format
+python -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+# Convert charts to blocks format
+charts = d['charts']
+blocks = []
+for c in charts:
+    blocks.append({
+        'component': c['component'],
+        'props': c['props'],
+        'action': 'create',
+        'sequence': c.get('sequence', 0)
+    })
+d['blocks'] = blocks
+with open('/mnt/user-data/outputs/charts.json', 'w') as f:
+    json.dump(d, f, ensure_ascii=False)
+print(f'Converted {len(blocks)} charts to blocks format')
+for b in blocks:
+    print(f'  - {b[\"component\"]}: {str(b[\"props\"].get(\"title\",\"\"))[:60]}')
+"
+Inspect charts.json structure deeper
+python3 -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+# inspect chart structure
+charts = d['charts']
+print(f'Total charts: {len(charts)}')
+print('First chart keys:', list(charts[0].keys()))
+print('First chart type:', charts[0].get('type', 'N/A'))
+print('First chart:', json.dumps(charts[0], ensure_ascii=False)[:300])
+"
+Convert charts.json to blocks format correctly
+python3 -c "
+import json
+
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+
+charts = d['charts']
+blocks = []
+for i, c in enumerate(charts):
+    blocks.append({
+        'component': c['chart_type'],
+        'props': c['props'],
+        'action': 'create',
+        'sequence': i
+    })
+
+d['blocks'] = blocks
+with open('/mnt/user-data/outputs/charts.json', 'w') as f:
+    json.dump(d, f, ensure_ascii=False)
+
+print(f'Converted {len(blocks)} blocks')
+for b in blocks:
+    t = b['props'].get('title', 'N/A') if 'title' in b['props'] else ''
+    print(f'  - [{b[\"component\"]}] {t[:60]}')
+"
+使用 “render_charts_file” 工具
+Find charts.json anywhere on system
+find / -name "charts.json" -type f 2>/dev/null
+Verify file integrity
+stat /mnt/user-data/outputs/charts.json && wc -c /mnt/user-data/outputs/charts.json
+List all blocks with preview
+python3 -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+for b in d['blocks']:
+    props_preview = json.dumps(b['props'], ensure_ascii=False)[:120]
+    print(f'[{b[\"component\"]}] seq={b[\"sequence\"]} | {props_preview}')
+"
+Update component type mapping in charts.json
+python3 -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+
+# map chart_type to component
+type_map = {'card': 'card', 'trend': 'echart', 'waveform': 'echart', 'table': 'table'}
+for b in d['blocks']:
+    b['component'] = type_map.get(b['chart_type'], b['component'])
+    # remove chart_type key
+    b.pop('chart_type', None)
+
+with open('/mnt/user-data/outputs/charts.json', 'w') as f:
+    json.dump(d, f, ensure_ascii=False)
+print('Updated components')
+for b in d['blocks']:
+    print(f'  [{b[\"component\"]}] seq={b[\"sequence\"]} | {b[\"props\"].get(\"title\",\"\")[:50]}')
+"
+Regenerate charts.json from scratch
+cd /mnt/user-data/workspace && python3 /mnt/skills/custom/monitoring-analysis/scripts/generate_charts.py --output-dir /mnt/user-data/outputs/ --ma-window 50
+Regenerate blocks from fresh charts.json
+python3 << 'PYEOF'
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+
+type_map = {'card': 'card', 'trend': 'echart', 'waveform': 'echart', 'table': 'table'}
+blocks = []
+for i, c in enumerate(d['charts']):
+    blocks.append({
+        'component': type_map[c['chart_type']],
+        'props': c['props'],
+        'action': 'create',
+        'sequence': i
+    })
+d['blocks'] = blocks
+with open('/mnt/user-data/outputs/charts.json', 'w') as f:
+    json.dump(d, f, ensure_ascii=False)
+print('Converted', len(blocks), 'blocks')
+for b in blocks:
+    print(f"  [{b['component']}] {b['props'].get('title','')[:50]}")
+PYEOF
+准备交互表单
+准备交互表单
+准备交互表单
+Extract echart trend props
+python3 << 'PYEOF'
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+
+for b in d['blocks']:
+    if b['component'] == 'echart' and '趋势' in b['props'].get('title',''):
+        print(f"=== {b['props']['title']} ===")
+        print(json.dumps(b['props'], ensure_ascii=False)[:600])
+        print("...\n")
+PYEOF
+Save echart props to temp files
+python3 << 'PYEOF'
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+
+# Write each echart block's props to temp files for rendering
+for i, b in enumerate(d['blocks']):
+    if b['component'] == 'echart':
+        fname = f'/tmp/echart_{i}.json'
+        with open(fname, 'w') as f:
+            json.dump(b['props'], f, ensure_ascii=False)
+        opt_size = len(json.dumps(b['props'].get('option',{})))
+        print(f'{fname}: {b["props"]["title"][:50]} (option size: {opt_size})')
+PYEOF
+List echart blocks
+python3 -c "
+import json
+with open('/mnt/user-data/outputs/charts.json') as f:
+    d = json.load(f)
+for i, b in enumerate(d['blocks']):
+    if b['component'] == 'echart':
+        print(f'{i}: {b[\"props\"][\"title\"][:50]}')
+"
+Extract first echart props

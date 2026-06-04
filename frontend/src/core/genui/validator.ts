@@ -66,9 +66,19 @@ export const tablePropsSchema = z.object({
   onRowSelect: z.boolean().optional(),
 });
 
+const cardExtraSchema = z.object({
+  label: z.string().max(100),
+  value: z.union([z.string().max(200), z.number()]),
+});
+
 export const cardPropsSchema = z.object({
   title: z.string().max(200),
-  value: z.union([z.string().max(100), z.number()]),
+  // 新格式：状态卡片
+  status: z.enum(["normal", "warning", "critical"]).optional(),
+  content: z.string().max(1000).optional(),
+  extra: z.array(cardExtraSchema).max(10).optional(),
+  // 旧格式：数值卡片
+  value: z.union([z.string().max(100), z.number()]).optional(),
   subtitle: z.string().max(500).optional(),
   trend: trendSchema.optional(),
   icon: z.string().max(100).optional(),
@@ -309,6 +319,19 @@ const subDeviceSelectorPropsSchema = z.object({
   queryParams: deviceQueryParamsSchema.optional(),
 });
 
+const pointSelectorPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  queryParams: deviceQueryParamsSchema.optional(),
+  filterDeviceType: z.number().optional(),
+});
+
+const pointSelectorMultiPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  queryParams: deviceQueryParamsSchema.optional(),
+  filterDeviceType: z.number().optional(),
+  maxSelect: z.number().min(1).optional(),
+});
+
 // ─── Abnormal judgment schemas ──────────────────────────────────────
 
 const abnormalListSelectorPropsSchema = z.object({
@@ -345,6 +368,8 @@ const propsSchemas: Record<string, z.ZodType> = {
   "device-selector": deviceSelectorPropsSchema,
   "device-selector-multi": deviceSelectorMultiPropsSchema,
   "sub-device-selector": subDeviceSelectorPropsSchema,
+  "point-selector": pointSelectorPropsSchema,
+  "point-selector-multi": pointSelectorMultiPropsSchema,
   "abnormal-list-selector": abnormalListSelectorPropsSchema,
   "agent_handoff": agentHandoffPropsSchema,
 };

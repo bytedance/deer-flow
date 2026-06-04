@@ -14,6 +14,8 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   ]),
   card: new Set([
     "title", "value", "subtitle", "trend", "icon", "color",
+    // 新格式：状态卡片
+    "status", "content", "extra",
   ]),
   form: new Set([
     "title", "description", "fields", "submit_label", "cancel_label",
@@ -63,6 +65,12 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   ]),
   "sub-device-selector": new Set([
     "title", "queryParams",
+  ]),
+  "point-selector": new Set([
+    "title", "queryParams", "filterDeviceType",
+  ]),
+  "point-selector-multi": new Set([
+    "title", "queryParams", "filterDeviceType", "maxSelect",
   ]),
   "abnormal-list-selector": new Set([
     "title", "org_id", "page_size",

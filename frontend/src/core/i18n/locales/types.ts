@@ -1051,18 +1051,23 @@ export interface Translations {
     ariaDeviceSelector: string;
     ariaDeviceMultiSelector: string;
     ariaSubDeviceSelector: string;
+    ariaPointSelector: string;
+    ariaPointMultiSelector: string;
     loadingOrgTree: string;
     loadingSubDevices: string;
+    loadingPoints: string;
     loadingFailed: string;
     retry: string;
     selectOrgNode: string;
     noDevicesUnderNode: string;
     noSubDevices: string;
+    noPoints: string;
     selectAll: string;
     selected: string;
     confirmSelection: string;
     submitting: string;
     subDeviceList: string;
+    pointList: string;
     // Form block
     searchPlaceholder: string;
     selectAllOptions: string;

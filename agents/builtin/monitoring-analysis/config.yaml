@@ -1,69 +1,33 @@
 name: monitoring-analysis
 display_name: "监测分析"
-description: "擅长设备状态趋势分析、异常检测、KPI健康评估和多参数关联分析"
+description: "分析设备监测数据，提取图谱特征，判断是否存在异常"
 icon: "📊"
 order: 3
 model: null
 plan_mode: true
 tool_groups:
   - bash
-  - monitoring:pro
-  - monitoring:ultra
 exclude_tools: []
 skills:
-  - monitoring-analysis
-  - daily-report
+  - monitoring-data      # 公共 Skill: 数据获取（fetch_monitoring_data.py）
+  - monitoring-analysis  # 监测分析专属 Skill: 特征提取 + 异常判定 + 报告导出
 mcp_servers: null
 tags:
   - monitoring
   - analysis
-  - trend
-  - anomaly
-  - kpi
-  - correlation
   - spectrum
   - waveform
+  - trend
+  - anomaly
 starters:
-  - label: "分析设备运行趋势"
-    prompt: "分析设备运行趋势"
+  - label: "监测数据分析"
+    prompt: "分析设备监测数据，查看是否存在异常"
     auto_start: true
-  - label: "检测设备异常"
-    prompt: "检测设备监测异常"
-    auto_start: true
-  - label: "KPI健康评估"
-    prompt: "查看设备KPI健康状态"
-    auto_start: false
-  - label: "多参数关联分析"
-    prompt: "分析多参数关联关系"
-    auto_start: false
   - label: "波形频谱分析"
     prompt: "分析设备波形频谱特征"
     auto_start: false
-  # Pro 能力等级 starters（monitoring:pro 工具组启用时可用）
-  - label: "Pro 多维度趋势分析"
-    prompt: "对所选设备进行多维度趋势分析，包含多模型对比和变点检测"
+  - label: "趋势检测"
+    prompt: "检测设备监测数据趋势变化"
     auto_start: false
-    tool_groups: [monitoring:pro]
-  - label: "Pro 智能异常检测"
-    prompt: "使用 Isolation Forest 和 DBSCAN 聚类进行智能异常检测"
-    auto_start: false
-    tool_groups: [monitoring:pro]
-  - label: "Pro 健康评分与关联"
-    prompt: "评估设备健康评分并进行多参数关联分析（Spearman/Kendall/偏相关）"
-    auto_start: false
-    tool_groups: [monitoring:pro]
-  # Ultra 能力等级 starters（monitoring:ultra 工具组启用时可用）
-  - label: "Ultra 全景驾驶舱"
-    prompt: "生成全景驾驶舱视图：风险矩阵 + 健康仪表 + 异常表 + 趋势图"
-    auto_start: false
-    tool_groups: [monitoring:ultra]
-  - label: "Ultra 预测性健康评估"
-    prompt: "使用 LSTM 和 Autoencoder 进行预测性健康评估和根因分析"
-    auto_start: false
-    tool_groups: [monitoring:ultra]
-  - label: "Ultra 因果关联分析"
-    prompt: "使用 Granger 因果检验和传递熵分析参数间因果关联"
-    auto_start: false
-    tool_groups: [monitoring:ultra]
 advanced:
   subagent_enabled: false
