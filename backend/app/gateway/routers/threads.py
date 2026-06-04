@@ -13,6 +13,7 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -160,6 +161,40 @@ class ThreadHistoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _delete_postgres_checkpoints(checkpointer, thread_id: str) -> None:
+    """Delete all checkpoint rows for *thread_id* from a PostgreSQL checkpointer.
+
+    Uses the checkpointer's own connection pool to execute raw ``DELETE``
+    statements against ``checkpoints``, ``checkpoint_writes``, and
+    ``checkpoint_blobs``.  This is a workaround for the fact that
+    ``langgraph-checkpoint-postgres`` does not expose an ``adelete_thread``
+    method (unlike the SQLite variant).
+
+    Failures are logged at warning level but never raised — the caller
+    treats this as best-effort cleanup.
+    """
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError:
+        return  # not a postgres environment; nothing to do
+
+    if not isinstance(checkpointer, AsyncPostgresSaver):
+        return
+
+    if not hasattr(checkpointer, "conn"):
+        logger.warning("Postgres checkpointer has no 'conn' attribute; cannot clean checkpoints for thread %s", sanitize_log_param(thread_id))
+        return
+
+    pool = checkpointer.conn
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for table in ("checkpoint_blobs", "checkpoint_writes", "checkpoints"):
+                    await cur.execute(f"DELETE FROM {table} WHERE thread_id = %s", (thread_id,))
+    except Exception:
+        logger.warning("Failed to delete postgres checkpoints for thread %s", sanitize_log_param(thread_id), exc_info=True)
+
+
 def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: str | None = None) -> ThreadDeleteResponse:
     """Delete local persisted filesystem data for a thread."""
     path_manager = paths or get_paths()
@@ -284,6 +319,8 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         try:
             if hasattr(checkpointer, "adelete_thread"):
                 await checkpointer.adelete_thread(thread_id)
+            else:
+                await _delete_postgres_checkpoints(checkpointer, thread_id)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
