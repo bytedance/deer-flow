@@ -95,20 +95,30 @@ models:
         thinking:
           type: enabled
 
-  - name: minimax-m2.5
-    display_name: MiniMax M2.5
+  - name: minimax-m3
+    display_name: MiniMax M3
     use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.5
+    model: MiniMax-M3
     api_key: $MINIMAX_API_KEY
     base_url: https://api.minimax.io/v1
     max_tokens: 4096
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
-  - name: minimax-m2.5-highspeed
-    display_name: MiniMax M2.5 Highspeed
+  - name: minimax-m2.7
+    display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.5-highspeed
+    model: MiniMax-M2.7
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true
+
+  - name: minimax-m2.7-highspeed
+    display_name: MiniMax M2.7 Highspeed
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M2.7-highspeed
     api_key: $MINIMAX_API_KEY
     base_url: https://api.minimax.io/v1
     max_tokens: 4096

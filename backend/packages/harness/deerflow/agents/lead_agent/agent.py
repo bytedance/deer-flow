@@ -270,6 +270,7 @@ def _build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     app_config: AppConfig | None = None,
+    deferred_setup=None,
 ):
     """Build middleware chain based on runtime configuration.
 
@@ -318,11 +319,13 @@ def _build_middlewares(
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
-    # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
-    if resolved_app_config.tool_search.enabled:
+    # Hide deferred tool schemas from model binding until tool_search promotes them.
+    # The deferred set + catalog hash come from the build-time setup (assembled
+    # after tool-policy filtering); promotion is read from graph state.
+    if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
-        middlewares.append(DeferredToolFilterMiddleware())
+        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -351,6 +354,23 @@ def _build_middlewares(
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
     return middlewares
+
+
+def _assemble_deferred(filtered_tools, *, enabled: bool):
+    """Build the final tool list + deferred setup from a policy-filtered list.
+
+    Call AFTER tool-policy filtering so the deferred catalog never exposes a
+    tool the agent is not allowed to use. Fail-closed: if tool_search is enabled
+    and MCP tools survived filtering but no deferred set was recovered, raise
+    rather than silently binding their full schemas to the model.
+    """
+    from deerflow.tools.builtins.tool_search import _is_mcp_tool, build_deferred_tool_setup
+
+    setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
+    if enabled and not setup.deferred_names and any(_is_mcp_tool(t) for t in filtered_tools):
+        raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered — refusing to bind MCP schemas (fail-closed).")
+    final_tools = list(filtered_tools) + ([setup.tool_search_tool] if setup.tool_search_tool else [])
+    return final_tools, setup
 
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
@@ -460,16 +480,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
+        final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            tools=final_tools,
+            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config, deferred_setup=setup),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 available_skills=set(["bootstrap"]),
                 app_config=resolved_app_config,
+                deferred_names=setup.deferred_names,
             ),
             state_schema=ThreadState,
         )
@@ -478,17 +501,20 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # The default agent (no agent_name) does not see this tool.
     extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
-    tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+    final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
-        tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        tools=final_tools,
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config, deferred_setup=setup),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
             available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
             app_config=resolved_app_config,
+            deferred_names=setup.deferred_names,
         ),
         state_schema=ThreadState,
     )
