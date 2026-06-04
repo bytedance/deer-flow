@@ -82,18 +82,18 @@ _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
     "StreamChunkTimeoutError": 2,
 }
 
-# Exception class names that indicate the LLM streaming response was dropped
-# mid-flight (chunk-gap timeout, peer-closed connection, raw read error).
-# These deserve a more specific user-facing message than the generic
-# "temporarily unavailable" copy, because the typical root cause is a long
-# tool-call serialization stalling the upstream stream — and the most
-# actionable advice we can give the user is "ask for a shorter / split
-# output" rather than "wait and retry".
+# Exception class names that indicate the upstream stream-chunk watchdog
+# fired because the model stalled mid-flight. These deserve a more specific
+# user-facing message than the generic "temporarily unavailable" copy,
+# because the typical root cause is a long tool-call serialization stalling
+# the upstream stream — and the most actionable advice we can give the user
+# is "ask for a shorter / split output" rather than "wait and retry".
+# Generic connection drops (httpx RemoteProtocolError / ReadError) are
+# intentionally excluded: they routinely fire on transient network blips
+# with normal payloads, where the "split the work" guidance is misleading.
 _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
     {
         "StreamChunkTimeoutError",
-        "RemoteProtocolError",
-        "ReadError",
     }
 )
 

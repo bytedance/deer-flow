@@ -373,7 +373,11 @@ def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) ->
     result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    assert "streaming response was interrupted" in result.content
+    # ReadError is a generic connection drop, not a chunk-gap timeout, so
+    # it must fall back to the legacy transient copy rather than the
+    # specialized "split the work into smaller steps" guidance (#3195 CR).
+    assert "temporarily unavailable" in result.content
+    assert "streaming response was interrupted" not in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -397,7 +401,11 @@ async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPa
     result = await middleware.awrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    assert "streaming response was interrupted" in result.content
+    # ReadError is a generic connection drop, not a chunk-gap timeout, so
+    # it must fall back to the legacy transient copy rather than the
+    # specialized "split the work into smaller steps" guidance (#3195 CR).
+    assert "temporarily unavailable" in result.content
+    assert "streaming response was interrupted" not in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -611,10 +619,13 @@ def test_user_message_for_stream_chunk_timeout_mentions_split_or_shorten() -> No
     assert "temporarily unavailable" not in message
 
 
-def test_user_message_for_remote_protocol_error_uses_stream_drop_copy() -> None:
-    """RemoteProtocolError (peer closed connection mid-stream) shares the
-    same root cause as StreamChunkTimeoutError, so it must surface the same
-    actionable guidance.
+def test_user_message_for_remote_protocol_error_uses_generic_transient_copy() -> None:
+    """RemoteProtocolError is a generic connection drop that can fire on
+    transient network blips with perfectly normal payloads. The
+    "split the work into smaller steps" guidance only applies when the
+    upstream chunk-gap watchdog fires (StreamChunkTimeoutError), so
+    RemoteProtocolError must fall back to the legacy transient copy.
+    Regression guard for the #3195 CR feedback.
     """
     middleware = _build_middleware()
     exc = _RemoteProtocolError("Server closed connection unexpectedly")
@@ -622,8 +633,23 @@ def test_user_message_for_remote_protocol_error_uses_stream_drop_copy() -> None:
 
     message = middleware._build_user_message(exc, reason="transient")
 
-    assert "streaming response was interrupted" in message
-    assert "temporarily unavailable" not in message
+    assert "temporarily unavailable" in message
+    assert "streaming response was interrupted" not in message
+
+
+def test_user_message_for_read_error_uses_generic_transient_copy() -> None:
+    """httpx.ReadError is symmetric to RemoteProtocolError: a generic
+    connection drop that must NOT receive the "split the work" guidance.
+    Regression guard for the #3195 CR feedback.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("connection dropped mid-stream")
+    exc.__class__.__name__ = "ReadError"
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "temporarily unavailable" in message
+    assert "streaming response was interrupted" not in message
 
 
 def test_user_message_for_generic_transient_keeps_legacy_copy() -> None:
