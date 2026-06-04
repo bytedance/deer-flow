@@ -216,6 +216,9 @@ cost:
   - model: gpt-5.2
     input_per_1k_tokens: 0.003
     output_per_1k_tokens: 0.015
+  - model: deepseek-v4-pro
+    input_per_1k_tokens: 0.003
+    output_per_1k_tokens: 0.015
   budget:
     default_daily_limit_usd: 50.0
     default_monthly_limit_usd: 1000.0
