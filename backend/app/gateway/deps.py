@@ -52,7 +52,7 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
     the cancellation.
     """
-    drain = asyncio.ensure_future(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
+    drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
     try:
         await asyncio.shield(drain)
     except asyncio.CancelledError:

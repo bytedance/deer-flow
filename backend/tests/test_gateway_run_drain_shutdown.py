@@ -253,7 +253,15 @@ async def test_drain_flushes_real_graph_checkpoint_before_close():
     record.task = asyncio.create_task(run())
     try:
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        await asyncio.sleep(0.15)  # let the run go in-flight (>=1 superstep)
+
+        # Deterministically wait until the run is genuinely in-flight — poll for
+        # the first persisted checkpoint instead of a fixed sleep (avoids CI
+        # flakiness on slow runners / under event-loop contention).
+        async def _await_first_checkpoint() -> None:
+            while (await saver.aget_tuple(thread_cfg)) is None:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_await_first_checkpoint(), timeout=5.0)
 
         # The fix: drain while the checkpointer is still open ...
         await rm.shutdown(timeout=5.0)
@@ -264,6 +272,44 @@ async def test_drain_flushes_real_graph_checkpoint_before_close():
         # The final checkpoint landed before close.
         snapshot = await saver.aget_tuple(thread_cfg)
         assert snapshot is not None
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_preserves_status_of_run_completed_during_drain():
+    """A run that finishes (e.g. success) during the drain window must keep its
+    real terminal status — shutdown must not blanket-overwrite it to
+    ``interrupted`` in memory or in the store (Copilot review on PR #3381)."""
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    rm = RunManager(store=store)
+    record = await rm.create("t-complete")
+    await rm.set_status(record.run_id, RunStatus.running)
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # The run had effectively finished; swallow the cancellation and
+            # record success, like a run that completed in the same tick the
+            # shutdown cancelled it.
+            pass
+        await rm.set_status(record.run_id, RunStatus.success)
+
+    record.task = asyncio.create_task(worker())
+    try:
+        await asyncio.sleep(0)  # let the task reach its await point
+
+        await rm.shutdown(timeout=5.0)
+
+        assert record.status == RunStatus.success, f"shutdown overwrote in-memory status: {record.status}"
+        persisted = await store.get(record.run_id)
+        assert persisted is not None and persisted["status"] == "success", f"shutdown overwrote persisted status: {persisted}"
     finally:
         if not record.task.done():
             record.task.cancel()
