@@ -163,14 +163,26 @@ def fetch_sms_abnormal(
 
     start_ms, end_ms = _day_range_ms(date_str)
 
+    user_id = os.environ.get("DEER_FLOW_EFFECTIVE_USER_ID", "0")
+
+    # Build search keywords from user-selected equipment labels
+    search_keywords: list[str] = []
+    if equipment_meta:
+        search_keywords = [meta.get("name", "") for meta in equipment_meta.values() if meta.get("name")]
+    search = ",".join(search_keywords) if search_keywords else ""
+
     print("[数据查询] 正在查询 SMS 异常数据 (query_sms_abnormal)...", file=sys.stderr)
-    result = _request_sms("/api/abnormal/list", {
+    params: dict = {
         "currentPage": 1,
         "pageSize": 200,
         "orgId": 0,
+        "userId": user_id,
         "startTime": start_ms,
         "endTime": end_ms,
-    })
+    }
+    if search:
+        params["search"] = search
+    result = _request_sms("/api/abnormal/list", params)
 
     if "error" in result:
         return {
