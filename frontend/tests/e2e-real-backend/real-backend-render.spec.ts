@@ -40,9 +40,18 @@ const textTurns = fixture.turns
   .map((t) => t.output?.data?.content)
   .filter((c): c is string => typeof c === "string" && c.trim().length > 0);
 const suggestionsRaw = textTurns.find((c) => c.trim().startsWith("["));
-const EXPECTED_SUGGESTION = suggestionsRaw
-  ? (JSON.parse(suggestionsRaw)[0] as string)
-  : "";
+// Guarded parse: a bracket-prefixed turn that isn't a valid JSON string array
+// falls back to "" so the `not.toBe("")` assertion below fails with a clear
+// message instead of a generic JSON.parse throw.
+const EXPECTED_SUGGESTION = ((): string => {
+  if (!suggestionsRaw) return "";
+  try {
+    const arr: unknown = JSON.parse(suggestionsRaw);
+    return Array.isArray(arr) && typeof arr[0] === "string" ? arr[0] : "";
+  } catch {
+    return "";
+  }
+})();
 const EXPECTED_TITLE = textTurns.find((c) => !c.trim().startsWith("[")) ?? "";
 
 test.describe("real backend render (replay, no API key)", () => {

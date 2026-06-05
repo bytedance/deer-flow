@@ -25,6 +25,8 @@ mirrors exactly what ``runtime/journal.py`` writes for real runs
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -36,7 +38,7 @@ _EVENT_TYPE = {"human": "llm.human.input", "ai": "llm.ai.response"}
 
 
 class SeedMessage(BaseModel):
-    role: str  # "human" | "ai"
+    role: Literal["human", "ai"]
     content: str
     id: str
 

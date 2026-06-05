@@ -44,7 +44,13 @@ async function waitForCaptureStable(
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
-  return last;
+  // Hard failure on timeout: returning the last count here would let a
+  // truncated/partial recording pass silently (captured > 0). A recording must
+  // stabilize, or it is not trustworthy.
+  throw new Error(
+    `[record] captures never stabilized within ${maxMs}ms (last count=${last}); ` +
+      `the recording may be truncated — raise maxMs or check the record gateway.`,
+  );
 }
 
 test.describe.configure({ timeout: 220_000 });
