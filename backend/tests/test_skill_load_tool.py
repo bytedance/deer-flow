@@ -70,6 +70,19 @@ def test_skill_load_loads_referenced_file_inside_skill(monkeypatch, tmp_path):
     assert result == "Extra notes"
 
 
+def test_skill_load_normalizes_referenced_file_path(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: _storage([skill]),
+    )
+
+    result = skill_load_tool.func(runtime=_runtime(), skill_name="demo-skill", file_path=" ./references/notes.md ")
+
+    assert result == "Extra notes"
+
+
 def test_skill_load_rejects_path_traversal(monkeypatch, tmp_path):
     skill = _skill(tmp_path)
     monkeypatch.setattr(

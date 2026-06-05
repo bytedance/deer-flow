@@ -268,6 +268,20 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
+        assert "available_skills" not in call_kwargs["context"]
+
+    def test_context_omits_none_app_config(self, client):
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        client._app_config = None
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            list(client.stream("hi", thread_id="t1"))
+
+        call_kwargs = agent.stream.call_args.kwargs
+        assert "app_config" not in call_kwargs["context"]
 
     def test_custom_mode_is_normalized_to_string(self, client):
         """stream() forwards custom events even when the mode is not a plain string."""

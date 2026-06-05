@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+from deerflow.skills.path_utils import normalize_skill_file_path
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, Skill
@@ -20,6 +21,7 @@ def _resolve_skill_file(skill: Skill, file_path: str) -> Path:
     if not file_path:
         raise ValueError("file_path must not be empty.")
 
+    file_path = normalize_skill_file_path(file_path)
     relative = Path(file_path)
     if relative.is_absolute():
         raise ValueError("file_path must be relative to the skill directory.")
@@ -129,9 +131,10 @@ def skill_load_tool(
         if skill is None:
             return f"Error: Skill not found or disabled: {normalized_name}"
 
-        target = _resolve_skill_file(skill, file_path)
+        normalized_file_path = normalize_skill_file_path(file_path)
+        target = _resolve_skill_file(skill, normalized_file_path)
         if not target.is_file():
-            return f"Error: Skill file not found: {normalized_name}/{file_path}"
+            return f"Error: Skill file not found: {normalized_name}/{normalized_file_path}"
         content = _read_skill_file(target, app_config=app_config)
         return content if content else "(empty)"
     except ValueError as e:

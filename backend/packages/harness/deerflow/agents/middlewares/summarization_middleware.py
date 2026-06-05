@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any, Protocol, override, runtime_checkable
 
 from langchain.agents import AgentState
@@ -17,6 +16,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.skills.path_utils import normalize_skill_file_path
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 
@@ -94,8 +94,9 @@ def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | N
         file_path = args.get("file_path")
         if not isinstance(file_path, str) or not file_path:
             file_path = SKILL_MD_FILE
-        file_path = _normalize_skill_load_file_path(file_path)
-        if file_path is None:
+        try:
+            file_path = normalize_skill_file_path(file_path)
+        except ValueError:
             return None
         return f"skill_load:{skill_name}/{file_path}"
 
@@ -106,20 +107,6 @@ def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | N
     if path == normalized_root or path.startswith(normalized_root + "/"):
         return path
     return None
-
-
-def _normalize_skill_load_file_path(file_path: str) -> str | None:
-    path = file_path.strip().replace("\\", "/")
-    if not path:
-        return SKILL_MD_FILE
-    parts: list[str] = []
-    for part in PurePosixPath(path).parts:
-        if part in {"", "."}:
-            continue
-        if part == ".." or part.startswith("/"):
-            return None
-        parts.append(part)
-    return "/".join(parts) if parts else SKILL_MD_FILE
 
 
 def _clone_ai_message(

@@ -616,7 +616,8 @@ class DeerFlowClient:
         context = {"thread_id": thread_id}
         if self._agent_name:
             context["agent_name"] = self._agent_name
-        context["app_config"] = self._app_config
+        if self._app_config is not None:
+            context["app_config"] = self._app_config
         if self._available_skills is not None:
             context["available_skills"] = self._available_skills
 
