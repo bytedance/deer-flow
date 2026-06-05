@@ -1,0 +1,72 @@
+# Path-based PR auto-labeling config for actions/labeler@v5.
+# Each key is a label (must exist — see .github/labels.yml); the globs decide
+# when it is applied. A PR can match several areas, which is expected.
+
+"area:frontend":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "frontend/**"
+
+"area:backend":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/app/**"
+          - "backend/packages/harness/deerflow/runtime/**"
+          - "backend/packages/harness/deerflow/persistence/**"
+          - "backend/packages/harness/deerflow/config/**"
+          - "backend/packages/harness/deerflow/tools/**"
+          - "backend/packages/harness/deerflow/guardrails/**"
+          - "backend/packages/harness/deerflow/tracing/**"
+          - "backend/packages/harness/deerflow/models/**"
+          - "backend/packages/harness/deerflow/utils/**"
+          - "backend/packages/harness/deerflow/uploads/**"
+
+"area:agents":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/packages/harness/deerflow/agents/**"
+          - "backend/packages/harness/deerflow/subagents/**"
+          - "backend/packages/harness/deerflow/reflection/**"
+          - "backend/langgraph.json"
+          - "backend/**/prompts/**"
+
+"area:sandbox":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docker/**"
+          - "backend/packages/harness/deerflow/sandbox/**"
+          - "backend/Dockerfile"
+          - "frontend/Dockerfile"
+
+"area:skills":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "skills/**"
+          - "backend/packages/harness/deerflow/skills/**"
+          - "frontend/src/core/skills/**"
+
+"area:mcp":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/packages/harness/deerflow/mcp/**"
+          - "frontend/src/core/mcp/**"
+
+"area:ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "scripts/**"
+
+"area:docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "**/*.md"
+
+"area:deps":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/pyproject.toml"
+          - "backend/uv.lock"
+          - "frontend/package.json"
+          - "frontend/pnpm-lock.yaml"
