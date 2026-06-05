@@ -166,6 +166,36 @@ test("does not fail cleanup when textarea removal APIs are unavailable", async (
   await expect(writeTextToClipboard("hello")).resolves.toBe(true);
 });
 
+test("falls back to document body removal when parent removal is unavailable", async () => {
+  const body = {
+    appendChild: vi.fn(),
+    removeChild: vi.fn(),
+  };
+  const textarea = {
+    parentNode: body,
+    select: vi.fn(),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body,
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand: vi.fn().mockReturnValue(true),
+    },
+  });
+
+  await expect(writeTextToClipboard("hello")).resolves.toBe(true);
+  expect(body.removeChild).toHaveBeenCalledWith(textarea);
+});
+
 test("returns false when execCommand fallback fails", async () => {
   const textarea = {
     remove: vi.fn(),
@@ -453,11 +483,35 @@ test("installed write fallback rejects when getType cannot provide text/plain", 
     globalThis.navigator.clipboard.write([
       {
         getType: vi.fn().mockRejectedValue(new Error("missing")),
-        types: ["text/html"],
+        types: ["text/plain"],
       } as unknown as ClipboardItem,
     ]),
   ).rejects.toThrow("missing");
   expect(execCommand).not.toHaveBeenCalled();
+});
+
+test("installed write fallback rejects before getType when item types exclude text/plain", async () => {
+  const getType = vi.fn().mockResolvedValue(new Blob(["ignored"]));
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  await expect(
+    globalThis.navigator.clipboard.write([
+      {
+        getType,
+        types: ["text/html"],
+      } as unknown as ClipboardItem,
+    ]),
+  ).rejects.toThrow("Clipboard item type not available");
+  expect(getType).not.toHaveBeenCalled();
 });
 
 test("installed write fallback preserves existing clipboard prototype methods", async () => {
@@ -557,6 +611,28 @@ test("installClipboardFallback can recover when the same navigator loses fallbac
 
   expect(typeof globalThis.navigator.clipboard.writeText).toBe("function");
   expect(typeof globalThis.ClipboardItem).toBe("function");
+});
+
+test("installClipboardFallback defines writable fallback methods", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  expect(
+    Object.getOwnPropertyDescriptor(globalThis.navigator.clipboard, "write")
+      ?.writable,
+  ).toBe(true);
+  expect(
+    Object.getOwnPropertyDescriptor(globalThis.navigator.clipboard, "writeText")
+      ?.writable,
+  ).toBe(true);
 });
 
 test("installClipboardFallback skips missing clipboard on non-extensible navigator while installing ClipboardItem", async () => {

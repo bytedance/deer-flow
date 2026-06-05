@@ -23,15 +23,26 @@ function copyTextWithExecCommand(text: string): boolean {
   document.body.appendChild(textarea);
   textarea.select();
 
+  let copied = false;
   try {
-    return document.execCommand("copy");
+    copied = document.execCommand("copy");
   } finally {
     if (typeof textarea.remove === "function") {
       textarea.remove();
-    } else if (typeof textarea.parentNode?.removeChild === "function") {
-      textarea.parentNode?.removeChild(textarea);
+    } else {
+      const parentNode = textarea.parentNode;
+      if (typeof parentNode?.removeChild === "function") {
+        parentNode.removeChild(textarea);
+      } else if (
+        parentNode === document.body &&
+        typeof document.body.removeChild === "function"
+      ) {
+        document.body.removeChild(textarea);
+      }
     }
   }
+
+  return copied;
 }
 
 export async function writeTextToClipboard(text: string): Promise<boolean> {
@@ -74,6 +85,10 @@ async function readPlainTextFromClipboardItem(
   }
   if (plainText instanceof Blob) {
     return await plainText.text();
+  }
+
+  if (item.types && !item.types.includes("text/plain")) {
+    throw new Error("Clipboard item type not available");
   }
 
   const blob = await item.getType?.("text/plain");
@@ -125,12 +140,14 @@ export function installClipboardFallback(): void {
       missingMethods.write = {
         configurable: true,
         value: write,
+        writable: true,
       };
     }
     if (!hasWriteText) {
       missingMethods.writeText = {
         configurable: true,
         value: writeText,
+        writable: true,
       };
     }
 
@@ -156,6 +173,7 @@ export function installClipboardFallback(): void {
         Object.defineProperty(replacement, methodName, {
           configurable: true,
           value: method.bind(clipboard),
+          writable: true,
         });
       }
     }
@@ -163,10 +181,12 @@ export function installClipboardFallback(): void {
       write: {
         configurable: true,
         value: write,
+        writable: true,
       },
       writeText: {
         configurable: true,
         value: writeText,
+        writable: true,
       },
     });
     try {
