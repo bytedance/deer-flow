@@ -296,6 +296,178 @@ test("installs a write fallback for ClipboardItem text/plain payloads", async ()
   expect(execCommand).toHaveBeenCalledWith("copy");
 });
 
+test("installed write fallback rejects when ClipboardItem lacks text/plain", async () => {
+  const execCommand = vi.fn().mockReturnValue(true);
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue({
+        remove: vi.fn(),
+        select: vi.fn(),
+        setAttribute: vi.fn(),
+        style: {},
+        value: "",
+      }),
+      execCommand,
+    },
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+
+  const item = new globalThis.ClipboardItem({
+    "text/html": new Blob(["<table></table>"], { type: "text/html" }),
+  });
+  await expect(globalThis.navigator.clipboard.write([item])).rejects.toThrow(
+    "Clipboard item type not available",
+  );
+  expect(execCommand).not.toHaveBeenCalled();
+});
+
+test("installed write fallback rejects when getType cannot provide text/plain", async () => {
+  const execCommand = vi.fn().mockReturnValue(true);
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue({
+        remove: vi.fn(),
+        select: vi.fn(),
+        setAttribute: vi.fn(),
+        style: {},
+        value: "",
+      }),
+      execCommand,
+    },
+  });
+
+  installClipboardFallback();
+
+  await expect(
+    globalThis.navigator.clipboard.write([
+      {
+        getType: vi.fn().mockRejectedValue(new Error("missing")),
+        types: ["text/html"],
+      } as unknown as ClipboardItem,
+    ]),
+  ).rejects.toThrow("missing");
+  expect(execCommand).not.toHaveBeenCalled();
+});
+
+test("installed write fallback preserves existing clipboard prototype methods", async () => {
+  const readText = vi.fn().mockResolvedValue("existing");
+  const clipboard = Object.create({
+    readText,
+  });
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      clipboard,
+    },
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+
+  expect(globalThis.navigator.clipboard).toBe(clipboard);
+  await expect(globalThis.navigator.clipboard.readText()).resolves.toBe(
+    "existing",
+  );
+  expect(readText).toHaveBeenCalled();
+  await expect(
+    globalThis.navigator.clipboard.writeText("hello"),
+  ).rejects.toThrow("Clipboard API not available");
+});
+
+test("installClipboardFallback does not replace existing clipboard methods when only ClipboardItem is missing", async () => {
+  const write = vi.fn().mockResolvedValue(undefined);
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  const clipboard = {
+    write,
+    writeText,
+  };
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      clipboard,
+    },
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+
+  expect(globalThis.navigator.clipboard).toBe(clipboard);
+  expect(Reflect.get(globalThis.navigator.clipboard, "write")).toBe(write);
+  expect(Reflect.get(globalThis.navigator.clipboard, "writeText")).toBe(
+    writeText,
+  );
+  expect(typeof globalThis.ClipboardItem).toBe("function");
+});
+
+test("installClipboardFallback is idempotent for the same navigator", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+  const clipboard = globalThis.navigator.clipboard;
+  const ClipboardItemFallback = globalThis.ClipboardItem;
+
+  installClipboardFallback();
+
+  expect(globalThis.navigator.clipboard).toBe(clipboard);
+  expect(globalThis.ClipboardItem).toBe(ClipboardItemFallback);
+});
+
+test("installClipboardFallback can recover when the same navigator loses fallback globals", async () => {
+  const navigator = {};
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: navigator,
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+  Reflect.deleteProperty(navigator, "clipboard");
+
+  installClipboardFallback();
+
+  expect(typeof globalThis.navigator.clipboard.writeText).toBe("function");
+  expect(typeof globalThis.ClipboardItem).toBe("function");
+});
+
 test("installs ClipboardItem fallback when the global property exists but is unusable", async () => {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,

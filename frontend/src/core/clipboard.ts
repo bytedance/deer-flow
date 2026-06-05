@@ -73,7 +73,11 @@ async function readPlainTextFromClipboardItem(
   }
 
   const blob = await item.getType?.("text/plain");
-  return (await blob?.text()) ?? "";
+  if (blob instanceof Blob) {
+    return await blob.text();
+  }
+
+  throw new Error("Clipboard item type not available");
 }
 
 export function installClipboardFallback(): void {
@@ -102,25 +106,63 @@ export function installClipboardFallback(): void {
           return Promise.reject(new Error("Clipboard item not available"));
         }
 
-        const plainText = firstItem.items?.["text/plain"];
-        if (typeof plainText === "string") {
-          return writeText(plainText);
-        }
-
         return readPlainTextFromClipboardItem(firstItem).then(writeText);
       };
 
+  const fallbackClipboard = clipboard ?? {};
+
   try {
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: {
-        ...clipboard,
-        write,
-        writeText,
+    const missingMethods: PropertyDescriptorMap = {};
+    if (!hasWrite) {
+      missingMethods.write = {
+        configurable: true,
+        value: write,
+      };
+    }
+    if (!hasWriteText) {
+      missingMethods.writeText = {
+        configurable: true,
+        value: writeText,
+      };
+    }
+
+    Object.defineProperties(fallbackClipboard, missingMethods);
+
+    if (!clipboard) {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: fallbackClipboard,
+      });
+    }
+  } catch {
+    const replacement = Object.create(clipboard ?? null);
+    for (const methodName of ["read", "readText"] as const) {
+      const method = clipboard?.[methodName];
+      if (typeof method === "function") {
+        Object.defineProperty(replacement, methodName, {
+          configurable: true,
+          value: method.bind(clipboard),
+        });
+      }
+    }
+    Object.defineProperties(replacement, {
+      write: {
+        configurable: true,
+        value: write,
+      },
+      writeText: {
+        configurable: true,
+        value: writeText,
       },
     });
-  } catch {
-    return;
+    try {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: replacement,
+      });
+    } catch {
+      return;
+    }
   }
 
   if (!hasClipboardItem) {
