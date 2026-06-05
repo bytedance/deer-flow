@@ -80,17 +80,25 @@ def _get_runtime_available_skills(runtime: Runtime) -> set[str] | None:
     return None
 
 
-def _truncate_content(content: str, *, app_config: "AppConfig | None") -> str:
+def _get_read_file_output_max_chars(app_config: "AppConfig | None") -> int | None:
     try:
         config = app_config or get_app_config()
         sandbox_cfg = getattr(config, "sandbox", None)
-        max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+        return sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
     except Exception:
-        max_chars = 50000
+        return 50000
 
-    if max_chars is None or max_chars <= 0 or len(content) <= max_chars:
+
+def _read_skill_file(target: Path, *, app_config: "AppConfig | None") -> str:
+    max_chars = _get_read_file_output_max_chars(app_config)
+    if max_chars is None or max_chars <= 0:
+        return target.read_text(encoding="utf-8")
+
+    with target.open(encoding="utf-8") as stream:
+        content = stream.read(max_chars + 1)
+    if len(content) <= max_chars:
         return content
-    return content[:max_chars] + f"\n\n... [truncated: showing first {max_chars} of {len(content)} characters]"
+    return content[:max_chars] + f"\n\n... [truncated: showing first {max_chars} characters]"
 
 
 @tool("skill_load", parse_docstring=True)
@@ -124,8 +132,8 @@ def skill_load_tool(
         target = _resolve_skill_file(skill, file_path)
         if not target.is_file():
             return f"Error: Skill file not found: {normalized_name}/{file_path}"
-        content = target.read_text(encoding="utf-8")
-        return _truncate_content(content, app_config=app_config) if content else "(empty)"
+        content = _read_skill_file(target, app_config=app_config)
+        return content if content else "(empty)"
     except ValueError as e:
         return f"Error: {e}"
     except UnicodeDecodeError:

@@ -218,7 +218,7 @@ def test_skill_load_truncates_large_output(monkeypatch, tmp_path):
 
     result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")
 
-    assert result == "abc\n\n... [truncated: showing first 3 of 6 characters]"
+    assert result == "abc\n\n... [truncated: showing first 3 characters]"
 
 
 def test_skill_load_does_not_truncate_when_max_chars_is_negative(monkeypatch, tmp_path):
