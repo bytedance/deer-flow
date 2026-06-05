@@ -48,6 +48,33 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
     "vibration_velocity_rms": "振动速度有效值",
     "vibration_acceleration_peak": "振动加速度峰值",
     "kurtosis_index": "峭度指标",
+    "sms_abnormal_count": "SMS异常数",
+    "sms_abnormal_pending": "待处理异常",
+}
+
+# ---------------------------------------------------------------------------
+# SMS abnormal severity mapping
+# ---------------------------------------------------------------------------
+
+SMS_SEVERITY_MAP: list[tuple[int, str]] = [
+    (60, "critical"),
+    (41, "high"),
+    (21, "medium"),
+    (0, "low"),
+]
+
+SMS_SEVERITY_DISPLAY: dict[str, str] = {
+    "critical": "严重",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+
+SMS_SEVERITY_RANK: dict[str, int] = {
+    "critical": 3,
+    "high": 2,
+    "medium": 1,
+    "low": 0,
 }
 
 # ---------------------------------------------------------------------------

@@ -253,7 +253,18 @@ python /mnt/skills/custom/weekly-report/scripts/query_weekly.py \
   --compare "{validated.compare_with}"
 ```
 
-5. 调用周 KPI 计算脚本：
+5. 查询 SMS 异常数据（best-effort，失败不阻塞周报生成）：
+
+```bash
+python /mnt/skills/custom/weekly-report/scripts/query_sms_abnormal.py \
+  --week-start "{validated.week_start}" \
+  --type "{validated.equipment_type}" \
+  --equipment "{validated.equipment_ids}" \
+  --equipment-names "{validated.equipment_labels}"
+```
+
+SMS 脚本返回非零或输出含 `error` 时忽略，周报仍正常生成（SMS 章节置空）。
+6. 调用周 KPI 计算脚本：
 
 ```bash
 python /mnt/skills/custom/weekly-report/scripts/weekly_kpi.py \
@@ -261,7 +272,7 @@ python /mnt/skills/custom/weekly-report/scripts/weekly_kpi.py \
   --output /mnt/user-data/outputs/weekly_kpi.json
 ```
 
-6. 读取 `/mnt/user-data/outputs/weekly_kpi.json`，先把章节作为 GenUI Block 渲染（多 `card` + `echart` + 2 个 `table` + `markdown`），然后导出 .md / .pdf：
+7. 读取 `/mnt/user-data/outputs/weekly_kpi.json`，先把章节作为 GenUI Block 渲染（多 `card` + `echart` + 2 个 `table` + `markdown`），然后导出 .md / .pdf：
 
 ```python
 import json
@@ -296,7 +307,7 @@ render_ui(
 )
 ```
 
-7. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：
+8. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：
    - 每个 `kpi_summary[i]` 渲染一个 `card`：`title=item.name`，`value=item.current_mean`（含单位），`subtitle="峰值 {current_peak} / 低谷 {current_trough}"`，`trend.direction=item.direction`，`trend.value` 用 `delta_pct` 百分比显示（如 `+2.4%`），`delta_pct` 为 `null` 时显示 `—`。
    - 1 个 `echart`，`option = payload["daily_trend_chart"]`，**不要二次组装**。
    - 1 个 `table`，`columns = [{key:"equipment",label:"设备"},{key:"level",label:"级别"},{key:"count",label:"次数"},{key:"latest_time",label:"最近一次"},{key:"dominant_message",label:"主导原因"}]`，`data = payload["anomaly_top_n"]`，标题"异常 TopN"。
@@ -304,7 +315,7 @@ render_ui(
    - 1 个 `markdown`，内容为 `payload["next_week_focus"]` 列表的项目符号渲染，标题"下周关注"。
    - 最后渲染上面那个含下载链接的 `markdown`。
 
-8. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `weekly_kpi.json` 或 `weekly_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
+9. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `weekly_kpi.json` 或 `weekly_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ```text
 present_files(["/mnt/user-data/outputs/weekly_report.md", "/mnt/user-data/outputs/weekly_report.pdf"])

@@ -84,6 +84,18 @@ data_steps:
     outputs:
       weekly_data: weekly_data.json
 
+  - id: sms_abnormal
+    kind: script
+    name: weekly-report/query_sms_abnormal
+    provider: platform
+    args:
+      week_start: "{{ $.form.scope.week_start }}"
+      type: "{{ $.form.scope.equipment_type }}"
+      equipment: "{{ $.form.equipment.equipment_ids }}"
+      equipment_names: "{{ $.form.equipment.equipment_labels }}"
+    outputs:
+      sms_abnormal: sms_abnormal.json
+
 transforms:
   - id: weekly_kpi
     kind: script
@@ -112,6 +124,11 @@ sections:
     title: 异常 TopN
     component: table
     source: $.steps.weekly_kpi.weekly_kpi.anomaly_top_n
+
+  - id: sms_abnormal_table
+    title: SMS 异常事件
+    component: table
+    source: $.steps.weekly_kpi.weekly_kpi.sms_abnormal_table
 
   - id: alarms
     title: 告警流水

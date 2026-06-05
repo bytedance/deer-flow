@@ -36,6 +36,17 @@ python /mnt/skills/custom/weekly-report/scripts/query_weekly.py \
 
 Writes `/mnt/user-data/outputs/weekly_data.json`. Fetches per-day data from the platform bridge and aggregates into a 7-day shape.
 
+### query_sms_abnormal.py — Query 7-day SMS abnormal events
+
+```bash
+python /mnt/skills/custom/weekly-report/scripts/query_sms_abnormal.py \
+  --week-start YYYY-MM-DD \
+  --equipment "RM-001,RM-002" \
+  --type rotating_machinery
+```
+
+Writes `/mnt/user-data/outputs/sms_abnormal.json`. Queries the SMS /api/abnormal/list for the full 7-day week range with equipment-level filtering. Non-rotating equipment types short-circuit to empty results.
+
 ### weekly_kpi.py — Compute weekly KPI summary, trend chart and alarms
 
 ```bash
@@ -44,7 +55,7 @@ python /mnt/skills/custom/weekly-report/scripts/weekly_kpi.py \
   --output /mnt/user-data/outputs/weekly_kpi.json
 ```
 
-Produces `kpi_summary`, `daily_trend_chart` (ready-to-render ECharts option), `anomaly_top_n`, `alarm_table`, `overall_status`, and `next_week_focus`.
+Produces `kpi_summary`, `daily_trend_chart` (ready-to-render ECharts option), `anomaly_top_n`, `alarm_table`, `sms_abnormal_table`, `overall_status`, and `next_week_focus`. If `sms_abnormal.json` exists in the output directory, SMS anomaly data is automatically incorporated into the KPI summary and overall status.
 
 ### list_equipment.py — Discover available equipment
 
@@ -66,7 +77,7 @@ python /mnt/skills/custom/weekly-report/scripts/export_report.py \
   --output /mnt/user-data/outputs/weekly_report.md
 ```
 
-Generates a Markdown report with sections: 本周概览, 周 KPI, 日趋势, 异常 TopN, 告警流水, 下周关注.
+Generates a Markdown report with sections: 本周概览, 周 KPI, 日趋势, 异常 TopN, SMS 异常事件, 告警流水, 下周关注.
 
 ## Output Convention
 
