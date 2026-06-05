@@ -11,7 +11,10 @@ from deerflow.config.redaction_config import load_redaction_config_from_dict
 def middleware():
     config_dict = {"enabled": True, "redact_string": "[REDACTED]", "patterns": [r"(?i)api_key\s*=\s*['\"][A-Za-z0-9_-]+['\"]", r"password123"]}
     load_redaction_config_from_dict(config_dict)
-    return RedactionMiddleware()
+    try:
+        yield RedactionMiddleware()
+    finally:
+        load_redaction_config_from_dict(None)
 
 
 def test_redact_text(middleware):
@@ -23,16 +26,17 @@ def test_redact_text(middleware):
 
 
 def test_wrap_model_call(middleware):
-    request = ModelRequest(messages=[HumanMessage(content="Use api_key='secret'")], model=None)
+    request = ModelRequest(messages=[HumanMessage(content="Use api_key='secret123'")], model=None)
 
     def mock_handler(req: ModelRequest) -> tuple[AIMessage, bool]:
         assert "secret123" not in req.messages[0].content
-        return AIMessage(content="i generated an api_key='secret'")
+        assert "[REDACTED]" in req.messages[0].content
+        return AIMessage(content="i generated an api_key='my_secret_key'")
 
     response = middleware.wrap_model_call(request, mock_handler)
 
     assert "[REDACTED]" in response.content
-    assert "secret" not in response.content
+    assert "secret123" not in response.content
 
 
 def test_wrap_tool_call(middleware):
@@ -45,3 +49,19 @@ def test_wrap_tool_call(middleware):
 
     assert "[REDACTED]" in response.content
     assert "sk_secret_123" not in response.content
+
+
+def test_wrap_tool_call_command(middleware):
+    """Verify that ToolMessage wrapped inside a Command are also redacted."""
+    from langgraph.types import Command
+
+    request = ToolCallRequest(tool_call={"name": "test_tool", "id": "2", "args": {}}, tool=None, state={}, runtime=None)
+
+    def mock_handler(req: ToolCallRequest):
+        return Command(update={"messages": [ToolMessage(content="Found api_key='sk_secret_123' in the file.", tool_call_id="2", name="test_tool")]})
+
+    response = middleware.wrap_tool_call(request, mock_handler)
+
+    assert isinstance(response, Command)
+    assert "sk_secret_123" not in response.update["messages"][0].content
+    assert "[REDACTED]" in response.update["messages"][0].content
