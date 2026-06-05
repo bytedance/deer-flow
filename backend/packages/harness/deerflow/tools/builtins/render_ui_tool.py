@@ -117,14 +117,6 @@ def render_ui_tool(
             block["functional_interaction"] = True
 
         writer = get_stream_writer()
-        writer(block)
-
-        persist_block(thread_id, block)
-
-        from deerflow.agents.genui_persistence import get_persisted_blocks
-
-        folded = get_persisted_blocks(thread_id)
-        writer({"type": "ui_blocks_folded", "blocks": folded})
 
         if interactive and callback_id and action == "create":
             from deerflow.agents.middlewares.genui_middleware import get_interaction_store
@@ -138,6 +130,15 @@ def render_ui_tool(
                 checkpoint_id=checkpoint_id,
                 timeout=timeout_seconds,
             )
+
+        writer(block)
+
+        persist_block(thread_id, block)
+
+        from deerflow.agents.genui_persistence import get_persisted_blocks
+
+        folded = get_persisted_blocks(thread_id)
+        writer({"type": "ui_blocks_folded", "blocks": folded})
 
     block_json = json.dumps(block, ensure_ascii=False, separators=(",", ":"))
     return f"UI component '{component}' ({action}) rendered successfully. block_id={resolved_block_id}\n<!--ui_block:{block_json}-->"
