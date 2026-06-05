@@ -216,9 +216,13 @@ export function installClipboardFallback(): void {
       }
     }
 
-    Object.defineProperty(globalThis, "ClipboardItem", {
-      configurable: true,
-      value: ClipboardItemFallback,
-    });
+    try {
+      Object.defineProperty(globalThis, "ClipboardItem", {
+        configurable: true,
+        value: ClipboardItemFallback,
+      });
+    } catch {
+      return;
+    }
   }
 }

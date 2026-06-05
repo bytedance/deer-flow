@@ -620,6 +620,31 @@ test("installClipboardFallback skips missing clipboard on non-extensible navigat
   expect(typeof globalThis.ClipboardItem).toBe("function");
 });
 
+test("installClipboardFallback does not throw when ClipboardItem cannot be defined", async () => {
+  const originalDefineProperty = Object.defineProperty;
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+  vi.spyOn(Object, "defineProperty").mockImplementation(
+    (target, property, descriptor) => {
+      if (target === globalThis && property === "ClipboardItem") {
+        throw new Error("locked global");
+      }
+      return originalDefineProperty(target, property, descriptor);
+    },
+  );
+
+  expect(() => installClipboardFallback()).not.toThrow();
+  expect(typeof globalThis.navigator.clipboard.writeText).toBe("function");
+  expect("ClipboardItem" in globalThis).toBe(false);
+});
+
 test("installs ClipboardItem fallback when the global property exists but is unusable", async () => {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
