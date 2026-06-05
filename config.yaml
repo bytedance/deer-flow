@@ -26,28 +26,6 @@ auth:
   admin_username: admin
   admin_password_hash: ''
 models:
-- name: gpt-5.4
-  display_name: InS-5.4
-  use: langchain_openai:ChatOpenAI
-  model: gpt-5.4
-  api_key: $OPENAI_API_KEY
-  request_timeout: 600.0
-  max_retries: 2
-  max_tokens: 4096
-  temperature: 0.7
-  supports_vision: true
-  base_url: https://aiapi.shenguyun.com/v1
-- name: gpt-5.2
-  display_name: InS-5.2
-  use: langchain_openai:ChatOpenAI
-  model: gpt-5.2
-  api_key: $OPENAI_API_KEY
-  request_timeout: 600.0
-  max_retries: 2
-  max_tokens: 4096
-  temperature: 0.7
-  supports_vision: true
-  base_url: https://aiapi.shenguyun.com/v1
 - name: deepseek-v4-pro
   display_name: InS-4.0 Pro
   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek

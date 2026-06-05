@@ -232,10 +232,11 @@ build_custom_sandbox_image() {
 
     echo -e "${BLUE}Building sandbox image: $sandbox_image ...${NC}"
     echo ""
+    # 构建上下文为项目根目录，以便访问 docker/sandbox/ 下的文件
     docker build \
         -f "$DOCKER_DIR/sandbox/Dockerfile" \
         -t "$sandbox_image" \
-        "$DOCKER_DIR/sandbox"
+        "$REPO_ROOT"
 }
 
 ensure_sandbox_image_ready() {
