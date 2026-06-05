@@ -142,7 +142,7 @@ _TREND_PATH_BY_SERIES: dict[str, str] = {
 }
 
 _WAVE_PATH_BY_SERIES: dict[str, str] = {
-    "2k": "ins-os-view/data/getWaveDataHis",
+    "2k": "ins-os-view/data/getMPWaveDataHisList",  # 机泵用多探头波形接口
     "6k": "ins-os-view/sg6kData/getWaveDataHis",
     "8k": "ins-os-view/sg8kData/getWaveDataHis",
     "9k": "ins-os-view/sg9kData/getWaveDataHis",

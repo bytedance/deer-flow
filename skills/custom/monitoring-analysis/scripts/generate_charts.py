@@ -392,9 +392,18 @@ def generate_charts(
         # 确定要渲染的特征
         features_to_render = []
 
-        if point_type == 83:
-            # 振动测点 (type=83)：默认只渲染 pp_value，有异常则额外渲染异常特征
-            features_to_render.append("pp_value")
+        # 2k/8k 振动测点：23-泵联端, 24-第三方振动, 26-主轴, 27-辅轴, 83-8k振动
+        # 默认只渲染 a_peak，有异常则额外渲染
+        VIB_TYPES_A_PEAK = {23, 24, 26, 27, 83}
+
+        # 9k 机组振动测点：91-壳振, 92-十字头, 93-活塞杆偏摆X, 94-活塞杆沉降/偏摆Y,
+        # 95-缸头振动, 96-盖侧压力, 99-轴侧压力
+        # 默认只渲染 rms，有异常则额外渲染
+        VIBC_TYPES_RMS = {91, 92, 93, 94, 95, 96, 99}
+
+        if point_type in VIB_TYPES_A_PEAK:
+            # 2k/8k 振动测点：默认只渲染 a_peak
+            features_to_render.append("a_peak")
 
             # 检查是否有异常特征
             anomalies = pf.get("anomalies", [])
@@ -409,7 +418,25 @@ def generate_charts(
                 if feature not in features_to_render:
                     features_to_render.append(feature)
 
-            print(f"[charts] 测点 {point_name} (type=83): 渲染特征 {features_to_render} (异常特征: {anomaly_features})", file=sys.stderr)
+            print(f"[charts] 测点 {point_name} (type={point_type}): 渲染特征 {features_to_render} (异常特征: {anomaly_features})", file=sys.stderr)
+        elif point_type in VIBC_TYPES_RMS:
+            # 9k 机组振动测点：默认只渲染 rms
+            features_to_render.append("rms")
+
+            # 检查是否有异常特征
+            anomalies = pf.get("anomalies", [])
+            anomaly_features = set()
+            for anomaly in anomalies:
+                feature = anomaly.get("feature")
+                if feature:
+                    anomaly_features.add(feature)
+
+            # 添加异常特征（去重）
+            for feature in anomaly_features:
+                if feature not in features_to_render:
+                    features_to_render.append(feature)
+
+            print(f"[charts] 测点 {point_name} (type={point_type}): 渲染特征 {features_to_render} (异常特征: {anomaly_features})", file=sys.stderr)
         else:
             # 其他类型测点：渲染所有特征
             features_to_render = feature_names

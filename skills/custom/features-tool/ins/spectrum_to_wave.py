@@ -109,7 +109,9 @@ def extract_time_domain_wave(wave_data: Dict) -> Optional[np.ndarray]:
 
     优先级：
     1. 如果是SHIFT类型，直接从waveDataShift.wave获取
-    2. 如果是SPECTRUM类型，通过IFFT重建
+    2. 如果是SPEED类型（机泵），从waveDataSpeed.wave获取
+    3. 如果是ACC类型（加速度），从waveDataAcc.wave获取
+    4. 如果是SPECTRUM类型，通过IFFT重建
 
     Args:
         wave_data: 解析后的波形数据字典
@@ -127,9 +129,36 @@ def extract_time_domain_wave(wave_data: Dict) -> Optional[np.ndarray]:
             if isinstance(wave, list) and len(wave) > 0:
                 return np.array(wave)
 
+    # SPEED类型 — 机泵 (2k) 使用，数据在 waveDataSpeed.wave
+    if wave_type == 'SPEED' and 'waveDataSpeed' in wave_data:
+        speed_data = wave_data['waveDataSpeed']
+        if isinstance(speed_data, dict) and 'wave' in speed_data:
+            wave = speed_data['wave']
+            if isinstance(wave, list) and len(wave) > 0:
+                return np.array(wave)
+
+    # ACC类型 — 加速度数据，数据在 waveDataAcc.wave
+    if wave_type == 'ACC' and 'waveDataAcc' in wave_data:
+        acc_data = wave_data['waveDataAcc']
+        if isinstance(acc_data, dict) and 'wave' in acc_data:
+            wave = acc_data['wave']
+            if isinstance(wave, list) and len(wave) > 0:
+                return np.array(wave)
+
     # 如果是SPECTRUM类型，通过IFFT重建
     if wave_type == 'SPECTRUM' or 'spectrum' in wave_data:
         return spectrum_to_wave(wave_data)
+
+    # COMPRESSION类型 — 9k系列使用压缩格式
+    # 解压公式：原始值 = compressed_value * p1 + p0
+    if 'compression' in wave_data:
+        comp = wave_data['compression']
+        if isinstance(comp, dict):
+            p0 = float(comp.get('p0', 0))
+            p1 = float(comp.get('p1', 0))
+            wave_data_comp = comp.get('waveDataCompression', [])
+            if wave_data_comp:
+                return np.array([v * p1 + p0 for v in wave_data_comp])
 
     # COMPLEX类型（包含多种波形）
     if 'complex' in wave_data:
