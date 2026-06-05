@@ -108,6 +108,10 @@ class TestMainCommandDispatch:
         """Run main() with a fixed list of inputs, then raise KeyboardInterrupt to exit."""
         mock_engine.current_session_id = "test1234"
         mock_engine.client = MagicMock()
+        mock_engine.client._model_name = "opus"
+        mock_engine.client.list_models.return_value = {"models": [{"name": "opus", "display_name": "Opus", "supports_thinking": True}]}
+        mock_engine.client.list_skills.return_value = {"skills": [{"name": "coding", "category": "dev", "enabled": True}]}
+        mock_engine.list_uploads.return_value = {"count": 0, "files": []}
 
         input_iter = iter(inputs)
 
@@ -235,6 +239,98 @@ class TestMainCommandDispatch:
         ]
         self._run_main(["!steps_all", "!exit"], engine, monkeypatch)
         engine.get_all_checkpoint_steps.assert_called_once()
+
+    # --- File management ---
+
+    def test_upload_file(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!upload /path/to/file.txt", "!exit"], engine, monkeypatch)
+        engine.upload_file.assert_called_with("/path/to/file.txt")
+
+    def test_list_files(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!files", "!exit"], engine, monkeypatch)
+        engine.list_uploads.assert_called_once()
+
+    def test_delete_file(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!delete myfile.txt", "!exit"], engine, monkeypatch)
+        engine.delete_upload.assert_called_with("myfile.txt")
+
+    # --- Models & skills ---
+
+    def test_list_models(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!models", "!exit"], engine, monkeypatch)
+        engine.client.list_models.assert_called_once()
+
+    def test_use_model(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!use sonnet", "!exit"], engine, monkeypatch)
+        engine.switch_model.assert_called_with("sonnet")
+
+    def test_list_skills(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!skills", "!exit"], engine, monkeypatch)
+        engine.client.list_skills.assert_called_once()
+
+    def test_enable_skill(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!enable coding", "!exit"], engine, monkeypatch)
+        engine.enable_skill.assert_called_with("coding")
+
+    def test_disable_skill(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!disable coding", "!exit"], engine, monkeypatch)
+        engine.disable_skill.assert_called_with("coding")
+
+    # --- Runtime modes ---
+
+    def test_plan_on(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!plan on", "!exit"], engine, monkeypatch)
+        engine.enable_plan_mode.assert_called_once()
+
+    def test_plan_off(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!plan off", "!exit"], engine, monkeypatch)
+        engine.disable_plan_mode.assert_called_once()
+
+    def test_plan_invalid(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!plan invalid", "!exit"], engine, monkeypatch)
+        engine.enable_plan_mode.assert_not_called()
+        engine.disable_plan_mode.assert_not_called()
+
+    def test_subagent_on(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!subagent on", "!exit"], engine, monkeypatch)
+        engine.enable_subagent.assert_called_once()
+
+    def test_subagent_off(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!subagent off", "!exit"], engine, monkeypatch)
+        engine.disable_subagent.assert_called_once()
+
+    def test_subagent_invalid(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!subagent invalid", "!exit"], engine, monkeypatch)
+        engine.enable_subagent.assert_not_called()
+        engine.disable_subagent.assert_not_called()
 
     # --- Help / Exit ---
 

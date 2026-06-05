@@ -113,6 +113,19 @@ def main():
                 print("  Debugging | 诊断流程:")
                 print("    !steps             Show current session steps | 查看当前会话步骤")
                 print("    !steps_all         Show all checkpoints (de‑duplicated) | 查看全部检查点（去重）")
+                print("  File Management | 文件管理:")
+                print("    !upload <path>     Upload file | 上传文件")
+                print("    !files             List uploaded files | 列出上传文件")
+                print("    !delete <file>     Delete uploaded file | 删除上传文件")
+                print("  Models & Skills | 模型与技能:")
+                print("    !models            List available models | 列出可用模型")
+                print("    !use <model>       Switch model | 切换模型")
+                print("    !skills            List available skills | 列出可用技能")
+                print("    !enable <skill>    Enable skill | 启用技能")
+                print("    !disable <skill>   Disable skill | 禁用技能")
+                print("  Runtime Modes | 运行模式:")
+                print("    !plan on/off       Enable/disable plan mode | 开启/关闭计划模式")
+                print("    !subagent on/off   Enable/disable subagent delegation | 开启/关闭子代理")
                 print("  Input | 输入:")
                 print("    !multi             Enter multi-line input mode | 进入多行输入模式")
                 print("  System | 系统:")
@@ -212,6 +225,98 @@ def main():
                     new_flag = "✓ New content | 有新内容" if cp["has_new_content"] else "✗ No new content | 无新增"
                     print(f"  [{idx}] {cp['checkpoint_id'][:8]}... | ts:{ts_display} | {new_flag}")
                 print()
+                continue
+
+            if user_input.lower().startswith("!upload"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !upload <file_path> | 用法: !upload <文件路径>")
+                    continue
+                engine.upload_file(parts[1])
+                continue
+
+            if user_input.lower() == "!files":
+                listing = engine.list_uploads()
+                if listing and listing.get("count", 0) > 0:
+                    print("\n[Uploaded Files | 上传文件]")
+                    for f in listing["files"]:
+                        print(f"  {f['filename']} | {f['size']} bytes")
+                    print()
+                else:
+                    print("\n[Uploaded Files | 上传文件] No files uploaded | 暂无文件\n")
+                continue
+
+            if user_input.lower().startswith("!delete") and not user_input.lower().startswith("!delete session"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !delete <filename> | 用法: !delete <文件名>")
+                    continue
+                engine.delete_upload(parts[1])
+                continue
+
+            if user_input.lower() == "!models":
+                models = engine.client.list_models()["models"]
+                print("\n[Available Models | 可用模型]")
+                for m in models:
+                    status = "✓ Current | 当前使用" if m["name"] == engine.client._model_name else ""
+                    thinking = "✓ Supports thinking | 支持思考" if m["supports_thinking"] else ""
+                    print(f"  {m['name']} | {m['display_name']} {thinking} {status}")
+                print()
+                continue
+
+            if user_input.lower().startswith("!use"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !use <model_name> | 用法: !use <模型名>")
+                    continue
+                engine.switch_model(parts[1])
+                continue
+
+            if user_input.lower() == "!skills":
+                skills = engine.client.list_skills()["skills"]
+                print("\n[Available Skills | 可用技能]")
+                for s in skills:
+                    status = "✓ Enabled | 已启用" if s["enabled"] else "✗ Disabled | 已禁用"
+                    print(f"  {s['name']} | {s['category']} | {status}")
+                print()
+                continue
+
+            if user_input.lower().startswith("!enable"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !enable <skill_name> | 用法: !enable <技能名>")
+                    continue
+                engine.enable_skill(parts[1])
+                continue
+
+            if user_input.lower().startswith("!disable"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !disable <skill_name> | 用法: !disable <技能名>")
+                    continue
+                engine.disable_skill(parts[1])
+                continue
+
+            if user_input.lower().startswith("!plan"):
+                parts = user_input.split()
+                if len(parts) < 2 or parts[1] not in ["on", "off"]:
+                    print("[Error] Usage: !plan on|off | 用法: !plan on|off")
+                    continue
+                if parts[1] == "on":
+                    engine.enable_plan_mode()
+                else:
+                    engine.disable_plan_mode()
+                continue
+
+            if user_input.lower().startswith("!subagent"):
+                parts = user_input.split()
+                if len(parts) < 2 or parts[1] not in ["on", "off"]:
+                    print("[Error] Usage: !subagent on|off | 用法: !subagent on|off")
+                    continue
+                if parts[1] == "on":
+                    engine.enable_subagent()
+                else:
+                    engine.disable_subagent()
                 continue
 
             # Normal chat interaction

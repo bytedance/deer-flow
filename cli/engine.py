@@ -899,3 +899,172 @@ class DeerFlowProductionEngine:
         self.store.save_async(session_id)
 
         yield f"\n\n[Metrics] Tokens: {total_tokens} | Tool Calls: {tool_calls}"
+
+    # ------------------------------------------------------------------
+    # File upload
+    # ------------------------------------------------------------------
+
+    def upload_file(self, file_path, session_id=None):
+        """
+        Upload a file to the current session.
+
+        Args:
+            file_path: Path to the file to upload.
+            session_id: ID of the session. Uses current session if None.
+
+        Returns:
+            dict: Upload result from the client, or None on failure.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            print("[Error] No active session")
+            return None
+        if not os.path.exists(file_path):
+            print(f"[Error] File not found: {file_path}")
+            return None
+        client = self._get_or_create_client(session_id)
+        result = client.upload_files(session_id, [file_path])
+        print(f"[Upload] Success: {result['message']}")
+        return result
+
+    def list_uploads(self, session_id=None):
+        """
+        List all files uploaded to a session.
+
+        Args:
+            session_id: ID of the session. Uses current session if None.
+
+        Returns:
+            dict: List of uploaded files, or None if no active session.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            print("[Error] No active session")
+            return None
+        client = self._get_or_create_client(session_id)
+        return client.list_uploads(session_id)
+
+    def delete_upload(self, filename, session_id=None):
+        """
+        Delete an uploaded file from a session.
+
+        Args:
+            filename: Name of the file to delete.
+            session_id: ID of the session. Uses current session if None.
+
+        Returns:
+            dict: Deletion result from the client, or None on failure.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            print("[Error] No active session")
+            return None
+        client = self._get_or_create_client(session_id)
+        return client.delete_upload(session_id, filename)
+
+    # ------------------------------------------------------------------
+    # Runtime controls (apply to current client + persist for new sessions)
+    # ------------------------------------------------------------------
+
+    def enable_skill(self, skill_name):
+        """
+        Enable a skill for the agent.
+
+        Args:
+            skill_name: Name of the skill to enable.
+
+        Returns:
+            bool: True if skill was enabled successfully.
+        """
+        client = self.client
+        if client is None:
+            return False
+        try:
+            client.update_skill(skill_name, enabled=True)
+            print(f"[Skill] Enabled: {skill_name}")
+            return True
+        except Exception as e:
+            print(f"[Error] Failed to enable skill: {e}")
+            return False
+
+    def disable_skill(self, skill_name):
+        """
+        Disable a skill for the agent.
+
+        Args:
+            skill_name: Name of the skill to disable.
+
+        Returns:
+            bool: True if skill was disabled successfully.
+        """
+        client = self.client
+        if client is None:
+            return False
+        try:
+            client.update_skill(skill_name, enabled=False)
+            print(f"[Skill] Disabled: {skill_name}")
+            return True
+        except Exception as e:
+            print(f"[Error] Failed to disable skill: {e}")
+            return False
+
+    def switch_model(self, model_name):
+        """
+        Switch the agent to use a different model.
+
+        The choice is persisted to ``_runtime_settings`` so that newly
+        created sessions inherit it.
+
+        Args:
+            model_name: Name of the model to use.
+
+        Returns:
+            bool: True if model was switched successfully.
+        """
+        client = self.client
+        if client is None:
+            return False
+        models = client.list_models()["models"]
+        if not any(m["name"] == model_name for m in models):
+            print(f"[Error] Model {model_name} not found")
+            return False
+        client._model_name = model_name
+        self._runtime_settings["model_name"] = model_name
+        print(f"[Model] Switched to: {model_name}")
+        return True
+
+    def enable_plan_mode(self):
+        """Enable plan mode for the agent and persist the setting."""
+        client = self.client
+        if client is None:
+            return
+        client._plan_mode = True
+        self._runtime_settings["plan_mode"] = True
+        print("[Mode] Plan mode enabled")
+
+    def disable_plan_mode(self):
+        """Disable plan mode for the agent and persist the setting."""
+        client = self.client
+        if client is None:
+            return
+        client._plan_mode = False
+        self._runtime_settings["plan_mode"] = False
+        print("[Mode] Plan mode disabled")
+
+    def enable_subagent(self):
+        """Enable subagent delegation and persist the setting."""
+        client = self.client
+        if client is None:
+            return
+        client._subagent_enabled = True
+        self._runtime_settings["subagent_enabled"] = True
+        print("[Mode] Subagent delegation enabled")
+
+    def disable_subagent(self):
+        """Disable subagent delegation and persist the setting."""
+        client = self.client
+        if client is None:
+            return
+        client._subagent_enabled = False
+        self._runtime_settings["subagent_enabled"] = False
+        print("[Mode] Subagent delegation disabled")

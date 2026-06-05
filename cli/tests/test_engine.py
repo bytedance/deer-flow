@@ -1,4 +1,4 @@
-"""Unit tests for engine.py — session lifecycle, client management, chat, archive, export, search, and introspection."""
+"""Unit tests for engine.py — full feature coverage."""
 
 from __future__ import annotations
 
@@ -1033,3 +1033,140 @@ class TestSearch:
             {"step": 1, "user_input": "Hello", "ai_response": "Hi"},
         ]):
             engine.search_sessions("zzznotfound")
+
+
+# ---------------------------------------------------------------------------
+# File upload operations
+# ---------------------------------------------------------------------------
+
+class TestFileOperations:
+    """Upload, list, and delete files."""
+
+    def test_upload_file_no_active_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        result = engine.upload_file("/some/file")
+        assert result is None
+
+    def test_upload_file_not_found(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        result = engine.upload_file("/nonexistent/path.txt")
+        assert result is None
+
+    def test_upload_file_success(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content")
+
+        client = engine._get_or_create_client("s1")
+        client.upload_files.return_value = {"message": "Uploaded"}
+
+        result = engine.upload_file(str(test_file))
+        assert result == {"message": "Uploaded"}
+
+    def test_list_uploads_no_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        assert engine.list_uploads() is None
+
+    def test_delete_upload_no_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        assert engine.delete_upload("file.txt") is None
+
+
+# ---------------------------------------------------------------------------
+# Runtime controls
+# ---------------------------------------------------------------------------
+
+class TestRuntimeControls:
+    """Switching model, plan mode, subagent, and skills."""
+
+    def test_switch_model_success(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        client = engine._get_or_create_client("s1")
+        client.list_models.return_value = {"models": [{"name": "opus"}, {"name": "sonnet"}]}
+
+        result = engine.switch_model("opus")
+
+        assert result is True
+        assert engine._runtime_settings["model_name"] == "opus"
+
+    def test_switch_model_not_found(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        client = engine._get_or_create_client("s1")
+        client.list_models.return_value = {"models": [{"name": "sonnet"}]}
+
+        result = engine.switch_model("nonexistent")
+
+        assert result is False
+
+    def test_switch_model_no_client(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        assert engine.switch_model("opus") is False
+
+    def test_enable_disable_plan_mode(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        client = engine._get_or_create_client("s1")
+
+        engine.enable_plan_mode()
+        assert client._plan_mode is True
+        assert engine._runtime_settings["plan_mode"] is True
+
+        engine.disable_plan_mode()
+        assert client._plan_mode is False
+        assert engine._runtime_settings["plan_mode"] is False
+
+    def test_enable_disable_subagent(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        client = engine._get_or_create_client("s1")
+
+        engine.enable_subagent()
+        assert client._subagent_enabled is True
+        assert engine._runtime_settings["subagent_enabled"] is True
+
+        engine.disable_subagent()
+        assert client._subagent_enabled is False
+
+    def test_enable_disable_skill_no_client(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        assert engine.enable_skill("s") is False
+        assert engine.disable_skill("s") is False
+
+    def test_enable_skill_success(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        engine._get_or_create_client("s1")
+        result = engine.enable_skill("coding")
+        assert result is True
