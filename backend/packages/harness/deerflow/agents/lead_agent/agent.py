@@ -18,7 +18,10 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 ``create_chat_model`` call must add to this list and pass the flag.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -44,6 +47,11 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
+
+if TYPE_CHECKING:
+    from langchain.tools import BaseTool
+
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +364,7 @@ def _build_middlewares(
     return middlewares
 
 
-def _assemble_deferred(filtered_tools, *, enabled: bool):
+def _assemble_deferred(filtered_tools: list[BaseTool], *, enabled: bool) -> tuple[list[BaseTool], DeferredToolSetup]:
     """Build the final tool list + deferred setup from a policy-filtered list.
 
     Call AFTER tool-policy filtering so the deferred catalog never exposes a
@@ -364,13 +372,16 @@ def _assemble_deferred(filtered_tools, *, enabled: bool):
     and MCP tools survived filtering but no deferred set was recovered, raise
     rather than silently binding their full schemas to the model.
     """
-    from deerflow.tools.builtins.tool_search import _is_mcp_tool, build_deferred_tool_setup
+    from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
+    from deerflow.tools.mcp_metadata import is_mcp_tool
 
-    setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
-    if enabled and not setup.deferred_names and any(_is_mcp_tool(t) for t in filtered_tools):
+    deferred_setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
+    if enabled and not deferred_setup.deferred_names and any(is_mcp_tool(t) for t in filtered_tools):
         raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered — refusing to bind MCP schemas (fail-closed).")
-    final_tools = list(filtered_tools) + ([setup.tool_search_tool] if setup.tool_search_tool else [])
-    return final_tools, setup
+    final_tools = list(filtered_tools)
+    if deferred_setup.tool_search_tool:
+        final_tools.append(deferred_setup.tool_search_tool)
+    return final_tools, deferred_setup
 
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:

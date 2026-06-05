@@ -7,6 +7,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ def get_available_tools(
                     # the deferred catalog + tool_search tool are assembled per
                     # agent from the policy-filtered tool list.
                     for t in mcp_tools:
-                        t.metadata = {**(t.metadata or {}), "deerflow_mcp": True}
+                        tag_mcp_tool(t)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
