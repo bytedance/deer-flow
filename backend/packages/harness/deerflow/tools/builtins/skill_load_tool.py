@@ -58,7 +58,9 @@ def _coerce_available_skills(value: object) -> set[str] | None:
     if isinstance(value, str):
         return {SkillStorage.validate_skill_name(value)}
     if isinstance(value, (list, tuple, set, frozenset)):
-        return {SkillStorage.validate_skill_name(item) for item in value if isinstance(item, str)}
+        if not all(isinstance(item, str) for item in value):
+            raise ValueError("available_skills collections must contain only skill name strings.")
+        return {SkillStorage.validate_skill_name(item) for item in value}
     raise ValueError("available_skills must be None, a skill name string, or a collection of skill name strings.")
 
 

@@ -140,6 +140,22 @@ def test_skill_load_rejects_unsupported_available_skills_type(monkeypatch, tmp_p
     assert result == "Error: available_skills must be None, a skill name string, or a collection of skill name strings."
 
 
+def test_skill_load_rejects_non_string_available_skill_names(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: _storage([skill]),
+    )
+
+    result = skill_load_tool.func(
+        runtime=_runtime(available_skills=["demo-skill", 123]),
+        skill_name="demo-skill",
+    )
+
+    assert result == "Error: available_skills collections must contain only skill name strings."
+
+
 def test_skill_load_returns_generic_error_for_unexpected_failures(monkeypatch):
     class BrokenStorage:
         def get_skill(self, name: str, *, enabled_only: bool = False):
