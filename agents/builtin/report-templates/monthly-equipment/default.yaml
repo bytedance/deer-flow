@@ -85,6 +85,18 @@ data_steps:
     outputs:
       monthly_data: monthly_data.json
 
+  - id: sms_abnormal
+    kind: script
+    name: monthly-report/query_sms_abnormal
+    provider: platform
+    args:
+      report_month: "{{ $.form.scope.report_month }}"
+      type: "{{ $.form.scope.equipment_type }}"
+      equipment: "{{ $.form.equipment.equipment_ids }}"
+      equipment_names: "{{ $.form.equipment.equipment_labels }}"
+    outputs:
+      sms_abnormal: sms_abnormal.json
+
 transforms:
   - id: monthly_kpi
     kind: script
@@ -113,6 +125,11 @@ sections:
     title: 重大异常与事件
     component: table
     source: $.steps.monthly_kpi.monthly_kpi.major_events
+
+  - id: sms_abnormal_table
+    title: SMS 异常事件
+    component: table
+    source: $.steps.monthly_kpi.monthly_kpi.sms_abnormal_table
 
   - id: compare
     title: 环比 / 同比分析

@@ -55,6 +55,33 @@ KPI_UNITS: dict[str, str] = {
     "mtbf": "小时",
     "mttr": "小时",
     "target_rate": "%",
+    "sms_abnormal_count": "条",
+    "sms_abnormal_pending": "条",
+}
+
+# ---------------------------------------------------------------------------
+# SMS abnormal severity mapping
+# ---------------------------------------------------------------------------
+
+SMS_SEVERITY_MAP: list[tuple[int, str]] = [
+    (60, "critical"),
+    (41, "high"),
+    (21, "medium"),
+    (0, "low"),
+]
+
+SMS_SEVERITY_DISPLAY: dict[str, str] = {
+    "critical": "严重",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+
+SMS_SEVERITY_RANK: dict[str, int] = {
+    "critical": 3,
+    "high": 2,
+    "medium": 1,
+    "low": 0,
 }
 
 # ---------------------------------------------------------------------------
@@ -83,6 +110,8 @@ KPI_DISPLAY_NAMES_MONTHLY: dict[str, str] = {
     "mtbf": "MTBF",
     "mttr": "MTTR",
     "target_rate": "达标率",
+    "sms_abnormal_count": "SMS异常数",
+    "sms_abnormal_pending": "待处理异常",
 }
 
 # ---------------------------------------------------------------------------

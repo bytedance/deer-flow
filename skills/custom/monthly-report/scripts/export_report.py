@@ -374,6 +374,28 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
             )
         lines.append("")
 
+    # SMS 异常事件 — section 5.5 between 重大事件回顾 (5) and 月环比+同比 (6)
+    sms_table = payload.get("sms_abnormal_table") or []
+    if sms_table:
+        lines.append("## 5.5 SMS 异常事件")
+        lines.append("")
+        lines.append("| 排名 | 设备 | 部件 | 健康度 | 等级 | 严重性 | 事件数 | 处置状态 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for row in sms_table:
+            lines.append(
+                "| {rank} | {eq} | {comp} | {health} | {level} | {sev} | {cnt} | {status} |".format(
+                    rank=_table_cell(row.get("rank", "")),
+                    eq=_table_cell(row.get("equipment", "")),
+                    comp=_table_cell(row.get("component", "")),
+                    health=_table_cell(row.get("health", "")),
+                    level=_table_cell(row.get("level", "")),
+                    sev=_table_cell(row.get("severity", "")),
+                    cnt=_table_cell(row.get("event_count", 0)),
+                    status=_table_cell(row.get("process_status", "")),
+                )
+            )
+        lines.append("")
+
     if compare_types:
         lines.append("## 6. 月环比 + 同比")
         lines.append("")

@@ -38,6 +38,7 @@ from _report_common import (
     KPI_BETTER_WHEN_HIGHER_MONTHLY as KPI_BETTER_WHEN_HIGHER,
     KPI_DISPLAY_NAMES_MONTHLY as KPI_DISPLAY_NAMES,
     KPI_UNITS,
+    SMS_SEVERITY_DISPLAY,
     direction as _direction,
     safe_pct as _safe_pct,
 )
@@ -45,6 +46,7 @@ from _report_common import (
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "monthly_data.json"
 OUTPUT_FILENAME = "monthly_kpi.json"
+SMS_ABNORMAL_FILENAME = "sms_abnormal.json"
 
 # MTTR / downtime_count / alarm_count are lower-is-better
 # by virtue of NOT being in KPI_BETTER_WHEN_HIGHER.
@@ -421,6 +423,65 @@ def _build_critical_events(events: list[dict]) -> list[dict]:
     return out
 
 
+def _load_sms_abnormal() -> tuple[dict | None, str | None]:
+    """Try loading SMS abnormal data from output directory.
+
+    Returns (sms_abnormal_dict, diagnostic_note).
+    sms_abnormal_dict is None when data is unavailable.
+    diagnostic_note explains why — useful for data_notes in the report.
+    """
+    sms_path = _output_dir() / SMS_ABNORMAL_FILENAME
+    try:
+        raw = json.loads(sms_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "SMS 异常数据文件未生成（query_sms_abnormal 步骤可能未执行）"
+    except json.JSONDecodeError:
+        return None, "SMS 异常数据文件格式错误"
+    except OSError:
+        return None, "SMS 异常数据文件读取失败"
+    data = raw.get("sms_abnormal")
+    if not isinstance(data, dict):
+        return None, "SMS 异常数据格式异常"
+    if "error" in data:
+        err_msg = data.get("error", "")
+        return None, f"SMS 异常查询接口返回错误：{err_msg[:200]}"
+    if data.get("total_count", 0) == 0:
+        return None, "该月份内 SMS 系统无匹配的异常记录"
+    return data, None
+
+
+def _build_sms_anomaly_table(sms_abnormal: dict | None) -> list[dict]:
+    """Convert SMS top_events into display rows for the report."""
+    if not sms_abnormal:
+        return []
+    events = sms_abnormal.get("top_events") or []
+    rows: list[dict] = []
+    for evt in events:
+        level = evt.get("latest_level", 0)
+        sev = _sms_severity_label(level)
+        rows.append({
+            "rank": evt.get("rank", 0),
+            "equipment": evt.get("mac_name", ""),
+            "component": evt.get("component_name", ""),
+            "health": evt.get("latest_health", 0),
+            "level": level,
+            "severity": SMS_SEVERITY_DISPLAY.get(sev, sev),
+            "event_count": evt.get("event_count", 0),
+            "process_status": evt.get("process_status", ""),
+            "run_status": evt.get("run_status", ""),
+        })
+    return rows
+
+
+def _sms_severity_label(level: int) -> str:
+    """Map SMS latest_level to severity label."""
+    from _report_common import SMS_SEVERITY_MAP
+    for threshold, label in SMS_SEVERITY_MAP:
+        if level >= threshold:
+            return label
+    return "low"
+
+
 def _build_improvement_tracking(records: list[dict]) -> list[dict]:
     """Pass-through with derived completion_rate (sprint plan M2 mapping)."""
     out: list[dict] = []
@@ -445,6 +506,7 @@ def _build_overall_status(
     kpi_summary: list[dict],
     critical_events: list[dict],
     notes: list[str],
+    sms_abnormal: dict | None = None,
 ) -> dict:
     """Single-line summary (≤ 80 chars) for card/banner use.
 
@@ -452,9 +514,13 @@ def _build_overall_status(
     """
     runtime = next((k for k in kpi_summary if k["key"] == "runtime_rate"), None)
     mtbf = next((k for k in kpi_summary if k["key"] == "mtbf"), None)
-    if critical_events:
+    sms_critical = (
+        (sms_abnormal or {}).get("by_severity", {}).get("critical", 0) +
+        (sms_abnormal or {}).get("by_severity", {}).get("high", 0)
+    ) if sms_abnormal else 0
+    if critical_events or sms_critical > 0:
         level = "critical"
-        parts = [f"本月发生 {len(critical_events)} 起重大事件，需复盘。"]
+        parts = [f"本月发生 {len(critical_events)} 起重大事件" + (f"，{sms_critical} 条 SMS 严重/高异常" if sms_critical > 0 else "") + "，需复盘。"]
     elif runtime and isinstance(runtime.get("current_mean"), (int, float)) and runtime["current_mean"] < 0.85:
         level = "warning"
         parts = [f"运行率均值 {runtime['current_mean']*100 if runtime['current_mean'] <= 1 else runtime['current_mean']:.1f}%, 低于目标。"]
@@ -525,6 +591,7 @@ def _build_next_month_plan(
     kpi_summary: list[dict],
     anomaly_top_n: list[dict],
     improvement_tracking: list[dict],
+    sms_abnormal: dict | None = None,
 ) -> list[str]:
     plan: list[str] = []
     # Carry-over from anomaly hot spots.
@@ -533,6 +600,17 @@ def _build_next_month_plan(
             f"{row['equipment']} {row['level']} 级告警 {row['count']} 次（{row['dominant_message']}），"
             "下月优先排查"
         )
+    # SMS hot spots
+    if sms_abnormal:
+        top_events = sms_abnormal.get("top_events") or []
+        for evt in top_events[:2]:
+            level = evt.get("latest_level", 0)
+            sev = _sms_severity_label(level)
+            if sev in ("critical", "high"):
+                plan.append(
+                    f"{evt.get('mac_name', '未知设备')} 本月存在 SMS {SMS_SEVERITY_DISPLAY.get(sev, sev)}异常"
+                    f"（{evt.get('component_name', '')}），下月安排现场检查"
+                )
     # Persistent down-trend KPIs (excluding derived metrics).
     for item in kpi_summary:
         if item["key"] in ("mtbf", "mttr", "target_rate"):
@@ -581,11 +659,47 @@ def compute(payload: dict) -> dict:
     anomaly_top_n = _build_anomaly_top_n(current.get("alarms") or [])
     critical_events = _build_critical_events(current.get("critical_events") or [])
     improvement_tracking = _build_improvement_tracking(current.get("improvement_tracking") or [])
-    overall = _build_overall_status(kpi_summary, critical_events, notes)
+
+    # SMS integration
+    sms_abnormal, sms_diag = _load_sms_abnormal()
+    sms_abnormal_table = _build_sms_anomaly_table(sms_abnormal)
+    if sms_diag:
+        notes.append(f"[SMS] {sms_diag}")
+    if sms_abnormal:
+        sms_total = sms_abnormal.get("total_count", 0)
+        sms_pending = sms_abnormal.get("by_status", {}).get("待处理", 0)
+        kpi_summary.extend([
+            {
+                "key": "sms_abnormal_count",
+                "name": KPI_DISPLAY_NAMES.get("sms_abnormal_count", "SMS异常数"),
+                "unit": "条",
+                "current_mean": sms_total, "current_peak": None, "current_trough": None,
+                "current_volatility": None, "current_in_target_ratio": None,
+                "previous_month_mean": None, "delta_mom": None, "delta_mom_pct": None,
+                "direction_mom": "flat",
+                "previous_year_month_mean": None, "delta_yoy": None, "delta_yoy_pct": None,
+                "direction_yoy": "flat",
+                "better_when_higher": False,
+            },
+            {
+                "key": "sms_abnormal_pending",
+                "name": KPI_DISPLAY_NAMES.get("sms_abnormal_pending", "待处理异常"),
+                "unit": "条",
+                "current_mean": sms_pending, "current_peak": None, "current_trough": None,
+                "current_volatility": None, "current_in_target_ratio": None,
+                "previous_month_mean": None, "delta_mom": None, "delta_mom_pct": None,
+                "direction_mom": "flat",
+                "previous_year_month_mean": None, "delta_yoy": None, "delta_yoy_pct": None,
+                "direction_yoy": "flat",
+                "better_when_higher": False,
+            },
+        ])
+
+    overall = _build_overall_status(kpi_summary, critical_events, notes, sms_abnormal)
     monthly_review = _build_monthly_review(
         kpi_summary, critical_events, improvement_tracking, notes
     )
-    next_month_plan = _build_next_month_plan(kpi_summary, anomaly_top_n, improvement_tracking)
+    next_month_plan = _build_next_month_plan(kpi_summary, anomaly_top_n, improvement_tracking, sms_abnormal)
 
     # Slim down period for output: drop week_buckets (full buckets are available
     # via monthly_data.json; KPI consumers only need start/end/day_count).
@@ -609,6 +723,7 @@ def compute(payload: dict) -> dict:
         "kpi_summary": kpi_summary,
         "weekly_trend_chart": weekly_trend_chart,
         "anomaly_top_n": anomaly_top_n,
+        "sms_abnormal_table": sms_abnormal_table,
         "critical_events": critical_events,
         "improvement_tracking": improvement_tracking,
         "monthly_review": monthly_review,

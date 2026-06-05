@@ -83,6 +83,38 @@ scripts:
     timeout_seconds: 180
     max_output_bytes: 104857600   # 100 MB
 
+  query_sms_abnormal:
+    entry: scripts/query_sms_abnormal.py
+    kind: [data_step]
+    description: "查询月度 SMS 异常事件统计（异常数、严重等级分布、待处理数）"
+    args_schema:
+      report_month:
+        type: string
+        required: true
+        pattern: "^\\d{4}-\\d{2}$"
+        description: "月份 YYYY-MM"
+      type:
+        type: enum
+        values: [all, static_equipment, rotating_machinery, pump, reciprocating_machinery]
+        default: rotating_machinery
+        description: "设备类型过滤（非旋转类型短路）"
+      equipment:
+        type: csv
+        items: {pattern: "^[A-Za-z0-9_-]+$", max_length: 64}
+        max_items: 1000
+        description: "设备 ID 列表"
+      equipment_names:
+        type: csv
+        items: {pattern: "^.+$", max_length: 200}
+        max_items: 1000
+        description: "设备名称列表（与 --equipment 一一对应）"
+    output_files:
+      - id: sms_abnormal
+        path: "{run_output_dir}/data/sms_abnormal.json"
+        description: "SMS 月度异常统计（total_count / by_severity / by_status / top_events）"
+    timeout_seconds: 30
+    max_output_bytes: 1048576    # 1 MB
+
   monthly_kpi:
     entry: scripts/monthly_kpi.py
     kind: [transform]

@@ -36,6 +36,17 @@ python /mnt/skills/custom/monthly-report/scripts/query_monthly.py \
 
 Writes `/mnt/user-data/outputs/monthly_data.json`. Fetches per-day data from the platform bridge, buckets into week buckets (month-anchored, NOT ISO weeks), and aggregates into the monthly shape including maintenance records, critical events, and improvement tracking.
 
+### query_sms_abnormal.py — Query monthly SMS abnormal events
+
+```bash
+python /mnt/skills/custom/monthly-report/scripts/query_sms_abnormal.py \
+  --report-month YYYY-MM \
+  --equipment "RM-001,RM-002" \
+  --type rotating_machinery
+```
+
+Writes `/mnt/user-data/outputs/sms_abnormal.json`. Queries the SMS /api/abnormal/list for the full calendar month with pagination support. Non-rotating equipment types short-circuit to empty results.
+
 ### monthly_kpi.py — Compute monthly KPI summary
 
 ```bash
@@ -44,7 +55,7 @@ python /mnt/skills/custom/monthly-report/scripts/monthly_kpi.py \
   --output /mnt/user-data/outputs/monthly_kpi.json
 ```
 
-Produces `kpi_summary` (with MoM/YoY deltas), `weekly_trend_chart`, `anomaly_top_n`, `critical_events`, `improvement_tracking`, `overall_status`, and `next_month_plan`.
+Produces `kpi_summary` (with MoM/YoY deltas), `weekly_trend_chart`, `anomaly_top_n`, `critical_events`, `sms_abnormal_table`, `improvement_tracking`, `overall_status`, and `next_month_plan`. If `sms_abnormal.json` exists in the output directory, SMS anomaly data is automatically incorporated into the KPI summary, overall status, and next-month plan.
 
 ### list_equipment.py — Discover available equipment
 
@@ -66,7 +77,7 @@ python /mnt/skills/custom/monthly-report/scripts/export_report.py \
   --output /mnt/user-data/outputs/monthly_report.md
 ```
 
-Generates a Markdown report with 8 sections: 月度总览, 月 KPI, 周维度趋势, 异常 TopN, 重大事件回顾, 月环比+同比, 改进措施跟踪, 下月计划.
+Generates a Markdown report with 9 sections: 月度总览, 月 KPI, 周维度趋势, 异常 TopN, 重大事件回顾, SMS 异常事件, 月环比+同比, 改进措施跟踪, 下月计划.
 
 ## Output Convention
 

@@ -278,7 +278,18 @@ python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
 
    **执行完毕后必须验证**：检查标准输出是否包含 `"output"` 字段且不含 `"error"` 字段。若含 `error`，渲染 markdown 说明错误并停止，不要继续后续步骤。
 
-7. 执行 monthly_kpi.py 计算月度 KPI（依赖上一步输出的 `monthly_data.json`）：
+7. 查询 SMS 异常数据（best-effort，失败不阻塞月报生成）：
+
+   ```bash
+   python /mnt/skills/custom/monthly-report/scripts/query_sms_abnormal.py \
+     --report-month "{validated.report_month}" \
+     --type "{validated.equipment_type}" \
+     --equipment "{validated.equipment_ids}" \
+     --equipment-names "{validated.equipment_labels}"
+   ```
+
+   SMS 脚本返回非零或输出含 `error` 时忽略，月报仍正常生成（SMS 章节置空）。
+8. 执行 monthly_kpi.py 计算月度 KPI（依赖上一步输出的 `monthly_data.json`）：
 
    ```bash
    python /mnt/skills/custom/monthly-report/scripts/monthly_kpi.py \
@@ -286,7 +297,7 @@ python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
      --output /mnt/user-data/outputs/monthly_kpi.json
    ```
 
-8. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
+9. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
 
 ```python
 import json
@@ -305,7 +316,7 @@ write_report(payload)
 pdf_available = False
 ```
 
-9. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：
+10. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：
    - 每个 `kpi_summary[i]` 渲染一个 `card`：
      - `title = item.name`
      - `value = item.current_mean`（含单位；为 `null` 时显示 `—`，常见于零故障月的 MTBF/MTTR）
@@ -333,7 +344,7 @@ pdf_available = False
 
    `pdf_available == False` 时把 PDF 链接换成 `- PDF 不可用（weasyprint 未安装）`。
 
-10. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `monthly_kpi.json` 或 `monthly_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
+11. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `monthly_kpi.json` 或 `monthly_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ```text
 present_files(["/mnt/user-data/outputs/monthly_report.md", "/mnt/user-data/outputs/monthly_report.pdf"])
