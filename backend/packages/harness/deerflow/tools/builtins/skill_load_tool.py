@@ -59,8 +59,7 @@ def _coerce_available_skills(value: object) -> set[str] | None:
         return {SkillStorage.validate_skill_name(value)}
     if isinstance(value, (list, tuple, set, frozenset)):
         return {SkillStorage.validate_skill_name(item) for item in value if isinstance(item, str)}
-    logger.warning("Ignoring unsupported available_skills value of type %s; no skills will be available", type(value).__name__)
-    return set()
+    raise ValueError("available_skills must be None, a skill name string, or a collection of skill name strings.")
 
 
 def _get_runtime_available_skills(runtime: Runtime) -> set[str] | None:

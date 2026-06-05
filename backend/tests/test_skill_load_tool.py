@@ -124,7 +124,7 @@ def test_skill_load_treats_string_available_skills_as_one_name(monkeypatch, tmp_
     assert "# Demo Skill" in result
 
 
-def test_skill_load_warns_and_denies_unsupported_available_skills(caplog, monkeypatch, tmp_path):
+def test_skill_load_rejects_unsupported_available_skills_type(monkeypatch, tmp_path):
     skill = _skill(tmp_path)
     monkeypatch.setattr(
         skill_load_module,
@@ -132,14 +132,12 @@ def test_skill_load_warns_and_denies_unsupported_available_skills(caplog, monkey
         lambda: _storage([skill]),
     )
 
-    with caplog.at_level("WARNING"):
-        result = skill_load_tool.func(
-            runtime=_runtime(available_skills={"demo-skill": True}),
-            skill_name="demo-skill",
-        )
+    result = skill_load_tool.func(
+        runtime=_runtime(available_skills={"demo-skill": True}),
+        skill_name="demo-skill",
+    )
 
-    assert result == "Error: Skill is not available to this agent: demo-skill"
-    assert "Ignoring unsupported available_skills value of type dict" in caplog.text
+    assert result == "Error: available_skills must be None, a skill name string, or a collection of skill name strings."
 
 
 def test_skill_load_returns_generic_error_for_unexpected_failures(monkeypatch):
