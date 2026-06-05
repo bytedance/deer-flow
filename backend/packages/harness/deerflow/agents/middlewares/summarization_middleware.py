@@ -301,11 +301,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             tool_calls = list(msg.tool_calls)
             skill_keys_by_id: dict[str, str] = {}
             for tc in tool_calls:
-                if self._is_skill_tool_call(tc, skills_root):
-                    tc_id = tc.get("id")
-                    skill_key = _tool_call_skill_key(tc, skills_root)
-                    if tc_id and skill_key:
-                        skill_keys_by_id[tc_id] = skill_key
+                name = tc.get("name") or ""
+                if name not in self._skill_file_read_tool_names:
+                    continue
+                skill_key = _tool_call_skill_key(tc, skills_root)
+                tc_id = tc.get("id")
+                if tc_id and skill_key:
+                    skill_keys_by_id[tc_id] = skill_key
 
             if not skill_keys_by_id:
                 i += 1
@@ -372,13 +374,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
         selected.reverse()
         return selected
-
-    def _is_skill_tool_call(self, tool_call: dict[str, Any], skills_root: str) -> bool:
-        """Return True when ``tool_call`` reads a file under the configured skills root."""
-        name = tool_call.get("name") or ""
-        if name not in self._skill_file_read_tool_names:
-            return False
-        return _tool_call_skill_key(tool_call, skills_root) is not None
 
     def _fire_hooks(
         self,

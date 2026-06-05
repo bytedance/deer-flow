@@ -17,12 +17,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _resolve_skill_file(skill: Skill, file_path: str) -> Path:
-    if not file_path:
+def _resolve_skill_file(skill: Skill, normalized_file_path: str) -> Path:
+    if not normalized_file_path:
         raise ValueError("file_path must not be empty.")
 
-    file_path = normalize_skill_file_path(file_path)
-    relative = Path(file_path)
+    relative = Path(normalized_file_path)
     if relative.is_absolute():
         raise ValueError("file_path must be relative to the skill directory.")
     if any(part in {"", ".."} for part in relative.parts):
@@ -86,7 +85,10 @@ def _get_read_file_output_max_chars(app_config: "AppConfig | None") -> int | Non
     try:
         config = app_config or get_app_config()
         sandbox_cfg = getattr(config, "sandbox", None)
-        return sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+        if not sandbox_cfg:
+            return 50000
+        max_chars = sandbox_cfg.read_file_output_max_chars
+        return 50000 if max_chars is None else max_chars
     except Exception:
         return 50000
 

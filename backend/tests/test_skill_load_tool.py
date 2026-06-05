@@ -247,3 +247,9 @@ def test_skill_load_does_not_truncate_when_max_chars_is_negative(monkeypatch, tm
     result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")
 
     assert result == "abcdef"
+
+
+def test_get_read_file_output_max_chars_defaults_when_config_value_is_none():
+    app_config = SimpleNamespace(sandbox=SimpleNamespace(read_file_output_max_chars=None))
+
+    assert skill_load_module._get_read_file_output_max_chars(app_config) == 50000
