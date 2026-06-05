@@ -1165,3 +1165,86 @@ async def test_close_all_sync_from_running_loop_does_not_wait_on_itself():
             await asyncio.sleep(0.01)
 
     assert cm.closed is True, "owner task must close itself after the loop regains control"
+
+
+# ---------------------------------------------------------------------------
+# reset_mcp_tools_cache deadlock regression
+# ---------------------------------------------------------------------------
+
+
+class _CloseTrackingCm:
+    """A create_session() context manager that records when __aexit__ runs."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aenter__(self):
+        session = MagicMock()
+
+        async def init():
+            return None
+
+        session.initialize = init
+        return session
+
+    async def __aexit__(self, *args):
+        self.closed = True
+        return False
+
+
+def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
+    """reset_mcp_tools_cache() must not deadlock when called from inside a
+    running loop that owns sessions (#3392 CR blocker).
+
+    The previous implementation spun up a worker thread running
+    ``asyncio.run(pool.close_all())`` and blocked the loop thread on
+    ``.result()``. close_all() then routed teardown of the current loop's
+    sessions back onto that blocked loop via run_coroutine_threadsafe(...),
+    so neither side could make progress. This test drives the exact scenario
+    on a daemon thread and asserts the call returns within a bounded time.
+    """
+    from deerflow.mcp.cache import reset_mcp_tools_cache
+    from deerflow.mcp.session_pool import get_session_pool
+
+    conn = {"transport": "stdio", "command": "x", "args": []}
+    cm = _CloseTrackingCm()
+    done = threading.Event()
+
+    async def scenario():
+        pool = get_session_pool()
+        # Entry owned by THIS loop — the deadlock-prone case.
+        await pool.get_session("s", "t1", conn)
+        # Synchronous call: asyncio.get_running_loop() succeeds inside it, so
+        # it takes the "running loop" branch in reset_mcp_tools_cache().
+        reset_mcp_tools_cache()
+        # Signal-only teardown completes once the loop regains control.
+        await asyncio.sleep(0.05)
+
+    def run():
+        asyncio.run(scenario())
+        done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        t.start()
+        t.join(timeout=5)
+
+    assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
+    assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
+
+
+@pytest.mark.asyncio
+async def test_reset_mcp_tools_cache_async_closes_sessions_deterministically():
+    """The async reset entry awaits close_all() on the current loop, so sessions
+    owned by this loop are fully torn down before it returns (#3392).
+    """
+    from deerflow.mcp.cache import reset_mcp_tools_cache_async
+    from deerflow.mcp.session_pool import get_session_pool
+
+    conn = {"transport": "stdio", "command": "x", "args": []}
+    cm = _CloseTrackingCm()
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        pool = get_session_pool()
+        await pool.get_session("s", "t1", conn)
+        await reset_mcp_tools_cache_async()
+        assert cm.closed is True, "async reset must close the session before returning"

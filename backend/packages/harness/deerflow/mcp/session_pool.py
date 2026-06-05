@@ -330,8 +330,24 @@ class MCPSessionPool:
             except Exception:
                 logger.warning("Error closing MCP session on owning loop", exc_info=True)
         else:
-            # Owning loop exists but is idle; drive it to completion.
-            loop.run_until_complete(self._shutdown(close_evt, task, cancel))
+            # Owning loop exists but is neither the current loop nor running.
+            # We are inside an async context here, so run_until_complete() would
+            # raise "Cannot run the event loop while another loop is running";
+            # and the loop may belong to another thread, where driving it from
+            # here is unsafe. This branch is not expected in practice — a
+            # session's owning loop is either the long-lived gateway loop (which
+            # is running) or a short-lived asyncio.run loop (which is closed and
+            # caught above). Fall back to a best-effort thread-safe signal so the
+            # owner task tears down if/when its loop runs again.
+            logger.debug(
+                "Owning loop for MCP session is idle; signalling close best-effort"
+            )
+            self._signal_close(loop, close_evt)
+            if cancel:
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    pass
 
     async def close_scope(self, scope_key: str) -> None:
         """Close all sessions for a given scope (e.g. thread_id)."""
