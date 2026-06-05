@@ -176,6 +176,66 @@ class TestMainCommandDispatch:
         self._run_main(["!sessions", "!exit"], engine, monkeypatch)
         engine.list_sessions.assert_called_once()
 
+    def test_archive_session(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!archive sid123", "!exit"], engine, monkeypatch)
+        engine.archive_session.assert_called_with("sid123")
+
+    def test_list_archives(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!archives", "!exit"], engine, monkeypatch)
+        engine.list_archives.assert_called_once()
+
+    def test_restore_archive(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!restore sid123", "!exit"], engine, monkeypatch)
+        engine.restore_archive.assert_called_with("sid123")
+
+    def test_export_session(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!export", "!exit"], engine, monkeypatch)
+        engine.export_session_markdown.assert_called_once()
+
+    def test_export_all_checkpoints(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!export_all", "!exit"], engine, monkeypatch)
+        engine.export_all_checkpoints.assert_called_once()
+
+    def test_search(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!search keyword", "!exit"], engine, monkeypatch)
+        engine.search_sessions.assert_called_with("keyword")
+
+    def test_search_missing_keyword(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        self._run_main(["!search", "!exit"], engine, monkeypatch)
+        engine.search_sessions.assert_not_called()
+
+    def test_steps(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        engine.get_session_steps.return_value = [
+            {"step": 1, "user_input": "Hello world this is a longer message for truncation test"},
+        ]
+        self._run_main(["!steps", "!exit"], engine, monkeypatch)
+        engine.get_session_steps.assert_called_once()
+
+    def test_steps_all(self, monkeypatch):
+        engine = MagicMock()
+        engine.current_session_id = "test1234"
+        engine.get_all_checkpoint_steps.return_value = [
+            {"checkpoint_id": "abc12345xx", "ts": "2024-01-01", "has_new_content": True},
+        ]
+        self._run_main(["!steps_all", "!exit"], engine, monkeypatch)
+        engine.get_all_checkpoint_steps.assert_called_once()
+
     # --- Help / Exit ---
 
     def test_help(self, monkeypatch):

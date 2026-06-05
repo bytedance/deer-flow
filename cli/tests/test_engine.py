@@ -1,4 +1,4 @@
-"""Unit tests for engine.py — session lifecycle, client management, and chat."""
+"""Unit tests for engine.py — session lifecycle, client management, chat, archive, export, search, and introspection."""
 
 from __future__ import annotations
 
@@ -531,3 +531,505 @@ class TestListing:
         _prime_session(engine, "s1", "First")
         _prime_session(engine, "s2", "Second")
         engine.list_sessions()
+
+
+# ---------------------------------------------------------------------------
+# Archive / restore
+# ---------------------------------------------------------------------------
+
+class TestArchiveRestore:
+    """Archive and restore session lifecycle."""
+
+    def test_archive_session_moves_files(self, tmp_path: Path):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        db_path = sessions_dir / "s1_checkpoints.db"
+        db_path.write_text("fake-db")
+        engine._get_or_create_client("s1")
+
+        engine.archive_session("s1")
+
+        store.archive_session_files.assert_called_once_with("s1")
+        assert not (sessions_dir / "s1_checkpoints.db").exists()
+        assert (archive_dir / "s1_checkpoints.db").exists()
+
+    def test_restore_archive_success(self, tmp_path: Path):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        archive_data = {
+            "session_id": "arch1",
+            "info": {
+                "created_at": 1000.0,
+                "last_active": 2000.0,
+                "title": "Archived Session",
+                "last_checkpoint_id": None,
+            },
+            "metrics": {"total_tokens": 10, "tool_calls": 1, "turns": 1},
+        }
+        (archive_dir / "arch1.json").write_text(json.dumps(archive_data))
+
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+
+        result = engine.restore_archive("arch1")
+
+        assert result is True
+        assert "arch1" in engine.store.sessions
+        assert engine.store.sessions["arch1"]["title"] == "Archived Session"
+        assert engine.current_session_id == "arch1"
+
+    def test_restore_archive_not_found(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+
+        result = engine.restore_archive("missing")
+
+        assert result is False
+
+    def test_restore_archive_already_active(self, tmp_path: Path):
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        (archive_dir / "arch1.json").write_text(
+            json.dumps({
+                "session_id": "arch1",
+                "info": {"created_at": 1.0, "last_active": 2.0, "title": "X", "last_checkpoint_id": None},
+                "metrics": {"total_tokens": 0, "tool_calls": 0, "turns": 0},
+            })
+        )
+
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "arch1")
+
+        result = engine.restore_archive("arch1")
+
+        assert result is False
+
+    def test_list_archives_empty(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        engine.list_archives()
+
+    def test_list_archives_with_files(self, tmp_path: Path):
+        archive_dir = tmp_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        (archive_dir / "arch1.json").write_text("{}")
+        (archive_dir / "arch2.json").write_text("{}")
+
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        engine.list_archives()
+
+
+# ---------------------------------------------------------------------------
+# _extract_steps — checkpoint-to-step parsing
+# ---------------------------------------------------------------------------
+
+class TestExtractSteps:
+    """Parsing checkpoint history into structured conversation steps."""
+
+    def _make_thread_data(self, checkpoints: list[dict]) -> dict:
+        return {"checkpoints": checkpoints}
+
+    def _make_cp(self, messages: list[dict], checkpoint_id="cp1", ts="2024-01-01"):
+        return {
+            "checkpoint_id": checkpoint_id,
+            "parent_checkpoint_id": "parent1",
+            "ts": ts,
+            "values": {"messages": messages, "total_tokens": 100},
+        }
+
+    def test_empty_checkpoints(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([])
+
+        steps = engine._extract_steps("s1")
+        assert steps == []
+
+    def test_single_human_ai_turn(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([
+            self._make_cp([
+                {"type": "human", "id": "h1", "content": "Hello", "metadata": {}},
+                {"type": "ai", "id": "a1", "content": "Hi there!", "response_metadata": {"model": "opus"}},
+            ]),
+        ])
+
+        steps = engine._extract_steps("s1")
+
+        assert len(steps) == 1
+        assert steps[0]["step"] == 1
+        assert steps[0]["user_input"] == "Hello"
+        assert steps[0]["ai_response"] == "Hi there!"
+        assert steps[0]["ai_response_metadata"]["model"] == "opus"
+
+    def test_detects_duplicate_messages_across_checkpoints(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([
+            self._make_cp([
+                {"type": "human", "id": "h1", "content": "Q1", "metadata": {}},
+                {"type": "ai", "id": "a1", "content": "A1", "response_metadata": {}},
+            ], checkpoint_id="cp1"),
+            self._make_cp([
+                {"type": "human", "id": "h1", "content": "Q1", "metadata": {}},
+                {"type": "ai", "id": "a1", "content": "A1", "response_metadata": {}},
+            ], checkpoint_id="cp2"),
+        ])
+
+        steps = engine._extract_steps("s1")
+
+        assert len(steps) == 1
+        assert len(steps[0]["duplicate_messages"]) == 2
+
+    def test_tool_calls_and_results(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([
+            self._make_cp([
+                {"type": "human", "id": "h1", "content": "Search X", "metadata": {}},
+                {
+                    "type": "ai",
+                    "id": "a1",
+                    "content": "",
+                    "response_metadata": {},
+                    "tool_calls": [
+                        {"id": "tc1", "name": "search", "args": {"query": "X"}},
+                    ],
+                },
+                {
+                    "type": "tool",
+                    "id": "t1",
+                    "content": "Found 3 results",
+                    "tool_call_id": "tc1",
+                },
+            ]),
+        ])
+
+        steps = engine._extract_steps("s1")
+
+        assert len(steps) == 1
+        assert len(steps[0]["tool_calls"]) == 1
+        assert steps[0]["tool_calls"][0]["name"] == "search"
+        assert steps[0]["tool_calls"][0]["result"] == "Found 3 results"
+
+    def test_messages_without_id(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([
+            self._make_cp([
+                {"type": "human", "content": "No ID message", "metadata": {}},
+            ]),
+        ])
+
+        steps = engine._extract_steps("s1")
+
+        assert len(steps) == 1
+        assert steps[0]["user_input"] == "No ID message"
+
+    def test_marks_duplicate_tool_calls(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = self._make_thread_data([
+            self._make_cp([
+                {"type": "human", "id": "h1", "content": "Q", "metadata": {}},
+                {"type": "ai", "id": "a1", "content": "", "response_metadata": {}, "tool_calls": [
+                    {"id": "tc1", "name": "t1", "args": {}},
+                ]},
+            ]),
+            self._make_cp([
+                {"type": "human", "id": "h2", "content": "Q2", "metadata": {}},
+                {"type": "ai", "id": "a2", "content": "", "response_metadata": {}, "tool_calls": [
+                    {"id": "tc1", "name": "t1", "args": {}},
+                ]},
+            ]),
+        ])
+
+        steps = engine._extract_steps("s1")
+
+        assert len(steps) == 2
+        assert steps[1]["tool_calls"][0]["is_duplicate"] is True
+
+
+# ---------------------------------------------------------------------------
+# get_session_steps / get_all_checkpoint_steps
+# ---------------------------------------------------------------------------
+
+class TestIntrospectionMethods:
+    """Read-only introspection using per-session clients."""
+
+    def test_get_session_steps_defaults_to_current(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+        with patch.object(engine, "_extract_steps", return_value=[{"step": 1}]) as mock_extract:
+            result = engine.get_session_steps()
+            mock_extract.assert_called_once_with("s1")
+            assert result == [{"step": 1}]
+
+    def test_get_session_steps_returns_empty_when_no_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        assert engine.get_session_steps() == []
+
+    def test_get_all_checkpoint_steps_basic(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = {
+            "checkpoints": [
+                {
+                    "checkpoint_id": "cp1",
+                    "parent_checkpoint_id": None,
+                    "ts": "2024-01-01",
+                    "values": {
+                        "messages": [
+                            {"type": "human", "id": "h1", "content": "Hello"},
+                            {"type": "ai", "id": "a1", "content": "Hi"},
+                        ],
+                    },
+                },
+                {
+                    "checkpoint_id": "cp2",
+                    "parent_checkpoint_id": "cp1",
+                    "ts": "2024-01-02",
+                    "values": {
+                        "messages": [
+                            {"type": "human", "id": "h1", "content": "Hello"},
+                            {"type": "ai", "id": "a1", "content": "Hi"},
+                            {"type": "human", "id": "h2", "content": "Follow-up"},
+                        ],
+                    },
+                },
+            ],
+        }
+
+        cps = engine.get_all_checkpoint_steps("s1")
+
+        assert len(cps) == 2
+        assert cps[0]["checkpoint_id"] == "cp1"
+        assert len(cps[0]["new_messages"]) == 2
+        assert cps[1]["checkpoint_id"] == "cp2"
+        assert len(cps[1]["new_messages"]) == 1
+        assert cps[1]["new_messages"][0]["content"] == "Follow-up"
+        assert cps[0]["has_new_content"] is True
+
+    def test_get_all_checkpoint_steps_no_checkpoints(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1")
+
+        client = engine._get_or_create_client("s1")
+        client.get_thread.return_value = {"checkpoints": []}
+
+        cps = engine.get_all_checkpoint_steps("s1")
+        assert cps == []
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+
+class TestExport:
+    """Markdown export of sessions and checkpoints."""
+
+    def test_export_session_markdown_no_active_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        result = engine.export_session_markdown()
+        assert result is None
+
+    def test_export_session_markdown_creates_file(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1", "Export Test")
+        engine.store.session_metrics["s1"]["total_tokens"] = 10
+
+        with patch.object(engine, "get_session_steps", return_value=[
+            {"step": 1, "user_input": "Q", "ai_response": "A", "tool_calls": [], "duplicate_messages": []}
+        ]):
+            result = engine.export_session_markdown("s1")
+
+        assert result is not None
+        assert os.path.exists(result)
+        content = Path(result).read_text()
+        assert "# Export Test" in content
+        assert "Q" in content
+        assert "A" in content
+
+    def test_export_all_checkpoints_no_active_session(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _clear_all_sessions(engine)
+        result = engine.export_all_checkpoints()
+        assert result is None
+
+    def test_export_all_checkpoints_creates_file(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1", "CP Export")
+        engine.store.session_metrics["s1"]["total_tokens"] = 20
+
+        with patch.object(engine, "get_all_checkpoint_steps", return_value=[
+            {
+                "checkpoint_id": "cp1",
+                "parent_checkpoint_id": None,
+                "ts": "2024-01-01",
+                "new_messages": [{"type": "human", "content": "Hello"}],
+                "has_new_content": True,
+            },
+        ]):
+            result = engine.export_all_checkpoints("s1")
+
+        assert result is not None
+        assert os.path.exists(result)
+        content = Path(result).read_text()
+        assert "# CP Export (All Checkpoints)" in content
+        assert "Hello" in content
+
+    def test_export_session_markdown_with_tool_calls(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1", "Tool Test")
+
+        with patch.object(engine, "get_session_steps", return_value=[
+            {
+                "step": 1,
+                "user_input": "Search X",
+                "ai_response": "Results:",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "name": "search",
+                        "args": {"query": "X"},
+                        "result": '{"hits": 5}',
+                        "is_duplicate": False,
+                    },
+                ],
+                "duplicate_messages": [],
+            },
+        ]):
+            result = engine.export_session_markdown("s1")
+
+        content = Path(result).read_text()
+        assert "search" in content
+        assert "hits" in content
+
+    def test_export_all_checkpoints_with_no_new_content(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        _prime_session(engine, "s1", "Empty CP")
+
+        with patch.object(engine, "get_all_checkpoint_steps", return_value=[
+            {
+                "checkpoint_id": "cp1",
+                "parent_checkpoint_id": None,
+                "ts": "2024-01-01",
+                "new_messages": [],
+                "has_new_content": False,
+            },
+        ]):
+            result = engine.export_all_checkpoints("s1")
+
+        content = Path(result).read_text()
+        assert "no new messages" in content.lower()
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+class TestSearch:
+    """Keyword search across sessions."""
+
+    def test_search_finds_keyword_in_user_input(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        engine.store.sessions = {"s1": {"title": "Session One"}}
+        engine.store.session_metrics["s1"] = {"total_tokens": 0, "tool_calls": 0, "turns": 0}
+
+        with patch.object(engine, "get_session_steps", return_value=[
+            {"step": 1, "user_input": "I love Python programming", "ai_response": "That's great!"},
+        ]):
+            engine.search_sessions("Python")
+
+    def test_search_finds_keyword_in_ai_response(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        engine.store.sessions = {"s1": {"title": "Session One"}}
+        engine.store.session_metrics["s1"] = {"total_tokens": 0, "tool_calls": 0, "turns": 0}
+
+        with patch.object(engine, "get_session_steps", return_value=[
+            {"step": 1, "user_input": "Hello", "ai_response": "I recommend using pytest"},
+        ]):
+            engine.search_sessions("pytest")
+
+    def test_search_no_match(self, tmp_path: Path):
+        store = MagicMock()
+        store.sessions = {}
+        engine = _make_engine(store, tmp_path)
+        engine.store.sessions = {"s1": {"title": "X"}}
+        engine.store.session_metrics["s1"] = {"total_tokens": 0, "tool_calls": 0, "turns": 0}
+
+        with patch.object(engine, "get_session_steps", return_value=[
+            {"step": 1, "user_input": "Hello", "ai_response": "Hi"},
+        ]):
+            engine.search_sessions("zzznotfound")

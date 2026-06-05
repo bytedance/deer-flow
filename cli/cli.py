@@ -103,7 +103,16 @@ def main():
                 print("    !switch <id>       Switch to session | 切换会话")
                 print("    !delete session <id> Delete session | 删除会话")
                 print("    !rename <title>    Rename current session | 重命名当前会话")
+                print("    !archive <id>      Archive session | 归档会话")
+                print("    !archives          List archived sessions | 查看归档会话")
+                print("    !restore <id>      Restore session from archive | 从归档恢复会话")
                 print("    !sessions          List all sessions | 列出所有会话")
+                print("    !export            Export current session to Markdown | 导出当前会话为Markdown")
+                print("    !export_all        Export all checkpoints to Markdown | 导出全部检查点为Markdown")
+                print("    !search <keyword>  Search all sessions | 搜索所有会话")
+                print("  Debugging | 诊断流程:")
+                print("    !steps             Show current session steps | 查看当前会话步骤")
+                print("    !steps_all         Show all checkpoints (de‑duplicated) | 查看全部检查点（去重）")
                 print("  Input | 输入:")
                 print("    !multi             Enter multi-line input mode | 进入多行输入模式")
                 print("  System | 系统:")
@@ -145,6 +154,64 @@ def main():
 
             if user_input.lower() == "!sessions":
                 engine.list_sessions()
+                continue
+
+            if user_input.lower() == "!archives":
+                engine.list_archives()
+                continue
+
+            if user_input.lower().startswith("!archive"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !archive <session_id> | 用法: !archive <会话ID>")
+                    continue
+                engine.archive_session(parts[1])
+                continue
+
+            if user_input.lower().startswith("!restore"):
+                parts = user_input.split()
+                if len(parts) < 2:
+                    print("[Error] Usage: !restore <session_id> | 用法: !restore <会话ID>")
+                    continue
+                engine.restore_archive(parts[1])
+                continue
+
+            if user_input.lower() == "!export":
+                engine.export_session_markdown()
+                continue
+
+            if user_input.lower() == "!export_all":
+                engine.export_all_checkpoints()
+                continue
+
+            if user_input.lower().startswith("!search"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("[Error] Usage: !search <keyword> | 用法: !search <关键词>")
+                    continue
+                engine.search_sessions(parts[1])
+                continue
+
+            if user_input.lower() == "!steps":
+                steps = engine.get_session_steps()
+                print("\n[Step List | 步骤列表]")
+                for step in steps:
+                    preview = step["user_input"][:60] + "..." if len(step["user_input"]) > 60 else step["user_input"]
+                    print(f"  {step['step']}. {preview}")
+                print()
+                continue
+
+            if user_input.lower() == "!steps_all":
+                cps = engine.get_all_checkpoint_steps()
+                print(f"\n[All Checkpoints | 全部检查点] Total: {len(cps)}\n")
+                if not cps:
+                    print("  No checkpoints found. | 未找到检查点。\n")
+                    continue
+                for idx, cp in enumerate(cps, 1):
+                    ts_display = str(cp["ts"]) if cp["ts"] is not None else "N/A"
+                    new_flag = "✓ New content | 有新内容" if cp["has_new_content"] else "✗ No new content | 无新增"
+                    print(f"  [{idx}] {cp['checkpoint_id'][:8]}... | ts:{ts_display} | {new_flag}")
+                print()
                 continue
 
             # Normal chat interaction

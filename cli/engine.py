@@ -31,6 +31,7 @@ Author: heart-scalpel
 License: MIT
 """
 
+import json
 import os
 import time
 import re
@@ -118,6 +119,10 @@ class DeerFlowProductionEngine:
     def _get_checkpoint_path(self, session_id: str) -> Path:
         """Get the database path for a specific session."""
         return SESSIONS_DIR / f"{session_id}_checkpoints.db"
+
+    def _get_archive_checkpoint_path(self, session_id: str) -> Path:
+        """Get the archived database path for a specific session."""
+        return ARCHIVE_DIR / f"{session_id}_checkpoints.db"
 
     # ------------------------------------------------------------------
     # Client property
@@ -403,6 +408,434 @@ class DeerFlowProductionEngine:
                 f"  {sid} | {title} | Turns: {metrics['turns']} | "
                 f"Tokens: {metrics['total_tokens']} {current}"
             )
+        print()
+
+    # ------------------------------------------------------------------
+    # Archive / restore
+    # ------------------------------------------------------------------
+
+    def archive_session(self, session_id):
+        """
+        Archive a session, moving all files including its database to the
+        archive directory.
+
+        Args:
+            session_id: ID of the session to archive.
+
+        Returns:
+            bool: True if archiving was successful, False otherwise.
+        """
+        if session_id not in self.store.sessions:
+            print(f"[Error] Session {session_id} not found")
+            return False
+
+        self._destroy_client(session_id)
+
+        self.store.archive_session_files(session_id)
+        db_path = self._get_checkpoint_path(session_id)
+        archive_db_path = self._get_archive_checkpoint_path(session_id)
+        if db_path.exists():
+            db_path.rename(archive_db_path)
+
+        if self.current_session_id == session_id:
+            self.current_session_id = None
+            self._ensure_current_session()
+
+        print(f"[Session] Archived: {session_id}")
+        return True
+
+    def list_archives(self):
+        """Print a list of all archived sessions."""
+        print("\n[Archived Sessions]")
+        archives = list(ARCHIVE_DIR.glob("*.json"))
+        if not archives:
+            print("  No archived sessions")
+        else:
+            for f in archives:
+                print(f"  {f.stem}")
+        print()
+
+    def restore_archive(self, session_id, switch=True):
+        """
+        Restore an archived session including its database file.
+
+        Args:
+            session_id: ID of the archived session to restore.
+            switch: Whether to switch to the restored session (default True).
+
+        Returns:
+            bool: True if restoration was successful, False otherwise.
+        """
+        archive_path = ARCHIVE_DIR / f"{session_id}.json"
+        archive_db_path = self._get_archive_checkpoint_path(session_id)
+
+        if not archive_path.exists():
+            print(f"[Error] Archive {session_id} not found")
+            return False
+        if session_id in self.store.sessions:
+            print(f"[Error] Session {session_id} already active")
+            return False
+
+        with open(archive_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.store.sessions[session_id] = data["info"]
+        self.store.session_metrics[session_id] = data["metrics"]
+
+        active_path = SESSIONS_DIR / f"{session_id}.json"
+        archive_path.rename(active_path)
+
+        if archive_db_path.exists():
+            active_db_path = self._get_checkpoint_path(session_id)
+            archive_db_path.rename(active_db_path)
+
+        if switch:
+            self._activate_session(session_id)
+
+        self.store.save_async(session_id)
+        print(f"[Session] Restored from archive: {session_id}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Read-only session introspection (no global reset)
+    # ------------------------------------------------------------------
+
+    def _extract_steps(self, session_id: str):
+        """Extract structured steps from a session's checkpoint history.
+
+        Returns a list of step dicts without switching the active session.
+        """
+        client = self._get_or_create_client(session_id)
+        thread_data = client.get_thread(session_id)
+        checkpoints = thread_data.get("checkpoints", [])
+        if not checkpoints:
+            return []
+
+        seen_message_ids: set[str] = set()
+        steps: list[dict] = []
+        current_step = None
+
+        for cp_idx, cp in enumerate(checkpoints):
+            messages = cp["values"].get("messages", [])
+
+            for msg in messages:
+                msg_id = msg.get("id")
+                if msg_id is None:
+                    msg_id = f"__no_id__:{msg.get('type', '')}:{msg.get('content', '')}"
+                is_duplicate = msg_id in seen_message_ids
+
+                if not is_duplicate:
+                    seen_message_ids.add(msg_id)
+
+                    if msg["type"] == "human":
+                        if current_step:
+                            steps.append(current_step)
+                        current_step = {
+                            "step": len(steps) + 1,
+                            "checkpoint_id": cp.get("checkpoint_id"),
+                            "parent_checkpoint_id": cp.get("parent_checkpoint_id"),
+                            "ts": cp.get("ts"),
+                            "total_tokens": cp["values"].get("total_tokens"),
+                            "user_input": msg["content"],
+                            "user_files": msg.get("metadata", {}).get("files", []),
+                            "ai_response": "",
+                            "tool_calls": [],
+                            "ai_response_metadata": {},
+                            "duplicate_messages": [],
+                        }
+                    elif msg["type"] == "ai" and current_step:
+                        current_step["ai_response"] += msg.get("content", "")
+                        current_step["ai_response_metadata"] = msg.get(
+                            "response_metadata", {}
+                        )
+                        if msg.get("tool_calls"):
+                            for tc in msg["tool_calls"]:
+                                current_step["tool_calls"].append({
+                                    "id": tc["id"],
+                                    "name": tc["name"],
+                                    "args": tc["args"],
+                                    "result": "",
+                                    "is_duplicate": False,
+                                })
+                    elif msg["type"] == "tool" and current_step:
+                        for tc in current_step["tool_calls"]:
+                            if tc["id"] == msg["tool_call_id"]:
+                                tc["result"] = msg.get("content", "")
+                                break
+                else:
+                    if current_step:
+                        current_step["duplicate_messages"].append({
+                            "type": msg["type"],
+                            "checkpoint_id": cp.get("checkpoint_id"),
+                            "checkpoint_index": cp_idx,
+                        })
+
+        if current_step:
+            steps.append(current_step)
+
+        # Mark duplicate tool calls
+        seen_tool_call_ids: set[str] = set()
+        for step in steps:
+            for tc in step["tool_calls"]:
+                if tc["id"] in seen_tool_call_ids:
+                    tc["is_duplicate"] = True
+                else:
+                    seen_tool_call_ids.add(tc["id"])
+
+        return steps
+
+    def get_session_steps(self, session_id=None):
+        """
+        Get structured conversation steps with duplicate detection.
+
+        Uses the per-session client directly — no global session switch,
+        so shared resources are left untouched.
+
+        Args:
+            session_id: ID of the session. Uses current session if None.
+
+        Returns:
+            list: List of step dictionaries containing conversation data.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            return []
+        return self._extract_steps(session_id)
+
+    def get_all_checkpoint_steps(self, session_id=None):
+        """
+        Get a list of all checkpoints as individual steps.
+
+        Only messages newly appearing in each checkpoint are shown
+        (duplicates hidden).  Every checkpoint is preserved for precise
+        rollback and auditing.
+
+        Args:
+            session_id: Session ID, uses current session if None.
+
+        Returns:
+            list[dict]: Each element represents a checkpoint.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id:
+            return []
+
+        client = self._get_or_create_client(session_id)
+        thread_data = client.get_thread(session_id)
+        checkpoints = thread_data.get("checkpoints", [])
+        if not checkpoints:
+            return []
+
+        seen_message_ids: set[str] = set()
+        checkpoint_steps: list[dict] = []
+
+        for cp in checkpoints:
+            messages = cp["values"].get("messages", [])
+            new_msgs = []
+            for msg in messages:
+                msg_id = msg.get("id")
+                if msg_id is None:
+                    msg_id = (
+                        f"__no_id__:{msg.get('type', '')}:{msg.get('content', '')}"
+                    )
+                if msg_id not in seen_message_ids:
+                    seen_message_ids.add(msg_id)
+                    new_msgs.append(msg)
+
+            checkpoint_steps.append({
+                "checkpoint_id": cp.get("checkpoint_id"),
+                "parent_checkpoint_id": cp.get("parent_checkpoint_id"),
+                "ts": cp.get("ts"),
+                "new_messages": new_msgs,
+                "has_new_content": len(new_msgs) > 0,
+            })
+
+        return checkpoint_steps
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def export_session_markdown(self, session_id=None):
+        """
+        Export a session to a formatted Markdown file.
+
+        Args:
+            session_id: ID of the session. Uses current session if None.
+
+        Returns:
+            str: Path to the exported Markdown file, or None on failure.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id or session_id not in self.store.sessions:
+            print("[Error] No active session")
+            return None
+
+        steps = self.get_session_steps(session_id)
+        info = self.store.sessions[session_id]
+        title = info.get("title", "Session Export")
+
+        md = f"# {title}\n\n"
+        md += f"Session ID: {session_id}\n"
+        md += f"Created: {time.ctime(info['created_at'])}\n"
+        md += f"Last Active: {time.ctime(info['last_active'])}\n"
+        md += f"Total Turns: {len(steps)}\n"
+        md += f"Total Tokens: {self.store.session_metrics[session_id]['total_tokens']}\n\n"
+        md += "---\n\n"
+
+        for step in steps:
+            md += f"## Turn {step['step']}\n\n"
+            md += f"**User**: {step['user_input']}\n\n"
+            md += f"**AI**: {step['ai_response']}\n\n"
+
+            if step["tool_calls"]:
+                md += "**Tool Calls**\n\n"
+                for tc in step["tool_calls"]:
+                    if tc["is_duplicate"]:
+                        md += f"### {tc['name']} ⚠️ Duplicate\n"
+                    else:
+                        md += f"### {tc['name']}\n"
+
+                    md += "**Parameters**:\n"
+                    md += f"```json\n{json.dumps(tc['args'], ensure_ascii=False, indent=2)}\n```\n"
+
+                    if tc["result"]:
+                        md += "**Result**:\n"
+                        try:
+                            if isinstance(tc["result"], str):
+                                result_json = json.loads(tc["result"])
+                                md += f"```json\n{json.dumps(result_json, ensure_ascii=False, indent=2)}\n```\n"
+                            else:
+                                md += f"```json\n{json.dumps(tc['result'], ensure_ascii=False, indent=2)}\n```\n"
+                        except (json.JSONDecodeError, TypeError):
+                            md += f"```\n{tc['result']}\n```\n"
+                    md += "\n"
+
+            if step.get("duplicate_messages"):
+                duplicate_count = len(step["duplicate_messages"])
+                md += (
+                    f"⚠️ **Note**: {duplicate_count} duplicate messages detected "
+                    "across checkpoints (not shown)\n\n"
+                )
+
+            md += "---\n\n"
+
+        session_dir = SESSIONS_DIR / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time())
+        filename = session_dir / f"export_{timestamp}.md"
+
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(md)
+
+        print(f"[Export] Session exported to: {filename}")
+        return str(filename)
+
+    def export_all_checkpoints(self, session_id=None):
+        """
+        Export all checkpoints to a Markdown file.
+
+        Duplicate messages are hidden but every checkpoint round is listed.
+
+        Args:
+            session_id: Session ID, uses current session if None.
+
+        Returns:
+            str: Path to the exported Markdown file, or None on failure.
+        """
+        session_id = session_id or self.current_session_id
+        if not session_id or session_id not in self.store.sessions:
+            print("[Error] No active session")
+            return None
+
+        all_steps = self.get_all_checkpoint_steps(session_id)
+        info = self.store.sessions[session_id]
+        title = info.get("title", "Session Export All")
+
+        md = f"# {title} (All Checkpoints)\n\n"
+        md += f"Session ID: {session_id}\n"
+        md += f"Created: {time.ctime(info['created_at'])}\n"
+        md += f"Last Active: {time.ctime(info['last_active'])}\n"
+        md += f"Total Checkpoints: {len(all_steps)}\n"
+        md += f"Total Tokens: {self.store.session_metrics[session_id]['total_tokens']}\n\n"
+        md += "---\n\n"
+
+        for idx, step in enumerate(all_steps, 1):
+            ts_display = str(step["ts"]) if step["ts"] is not None else "Unknown"
+            md += f"## Checkpoint {idx}\n\n"
+            md += f"- **ID**: `{step['checkpoint_id']}`\n"
+            md += f"- **Parent ID**: `{step['parent_checkpoint_id']}`\n"
+            md += f"- **Time**: {ts_display}\n\n"
+
+            if not step["has_new_content"]:
+                md += (
+                    "⚠️ This checkpoint introduced no new messages "
+                    "(content identical to previous checkpoint).\n\n"
+                )
+            else:
+                for msg in step["new_messages"]:
+                    if msg["type"] == "human":
+                        md += f"### [User]\n\n{msg['content']}\n\n"
+                    elif msg["type"] == "ai":
+                        content = msg.get("content", "")
+                        if content:
+                            md += f"### [AI]\n\n{content}\n\n"
+                        if msg.get("tool_calls"):
+                            for tc in msg["tool_calls"]:
+                                md += f"#### [Tool Call: {tc['name']}]\n\n"
+                                md += f"```json\n{json.dumps(tc['args'], ensure_ascii=False, indent=2)}\n```\n\n"
+                    elif msg["type"] == "tool":
+                        result = msg.get("content", "")
+                        md += "#### [Tool Result]\n\n"
+                        try:
+                            result_json = json.loads(result)
+                            md += f"```json\n{json.dumps(result_json, ensure_ascii=False, indent=2)}\n```\n\n"
+                        except (json.JSONDecodeError, TypeError):
+                            md += f"```\n{result}\n```\n\n"
+            md += "---\n\n"
+
+        session_dir = SESSIONS_DIR / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time())
+        filename = session_dir / f"export_all_checkpoints_{timestamp}.md"
+
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(md)
+
+        print(f"[Export] All checkpoints exported to: {filename}")
+        return str(filename)
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
+    def search_sessions(self, keyword):
+        """
+        Search all active sessions for a keyword in user inputs or AI
+        responses.  Uses each session's own client directly — no global
+        session switch, so shared resources are untouched.
+
+        Args:
+            keyword: The keyword to search for (case-insensitive).
+        """
+        print(f"\n[Search Results for: {keyword}]")
+        found = False
+
+        for sid in self.store.sessions:
+            steps = self.get_session_steps(sid)
+            for step in steps:
+                if (
+                    keyword.lower() in step["user_input"].lower()
+                    or keyword.lower() in step["ai_response"].lower()
+                ):
+                    title = self.store.sessions[sid].get("title", "New Session")
+                    print(f"  Session: {sid} | {title} | Turn {step['step']}")
+                    print(f"    User: {step['user_input'][:80]}...")
+                    found = True
+                    break
+
+        if not found:
+            print("  No matching sessions found")
         print()
 
     # ------------------------------------------------------------------
