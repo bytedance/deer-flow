@@ -20,18 +20,20 @@ function copyTextWithExecCommand(text: string): boolean {
   textarea.style.position = "fixed";
   textarea.style.top = "-9999px";
   textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
 
   let copied = false;
+  let appended = false;
   try {
+    document.body.appendChild(textarea);
+    appended = true;
+    textarea.select();
     copied = document.execCommand("copy");
   } finally {
-    if (typeof textarea.remove === "function") {
-      textarea.remove();
-    } else {
+    if (appended) {
       const parentNode = textarea.parentNode;
-      if (typeof parentNode?.removeChild === "function") {
+      if (typeof textarea.remove === "function") {
+        textarea.remove();
+      } else if (typeof parentNode?.removeChild === "function") {
         parentNode.removeChild(textarea);
       }
     }
@@ -94,6 +96,10 @@ async function readPlainTextFromClipboardItem(
   throw new Error("Clipboard item type not available");
 }
 
+/**
+ * Installs browser clipboard fallbacks for Streamdown copy controls by patching
+ * missing navigator.clipboard methods and ClipboardItem when the host permits it.
+ */
 export function installClipboardFallback(): void {
   const navigator = globalThis.navigator;
   if (!navigator) {

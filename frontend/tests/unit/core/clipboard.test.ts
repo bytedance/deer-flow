@@ -166,6 +166,36 @@ test("does not fail cleanup when textarea removal APIs are unavailable", async (
   await expect(writeTextToClipboard("hello")).resolves.toBe(true);
 });
 
+test("cleans up the textarea when selecting text fails", async () => {
+  const textarea = {
+    remove: vi.fn(),
+    select: vi.fn(() => {
+      throw new Error("selection failed");
+    }),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand: vi.fn(),
+    },
+  });
+
+  await expect(writeTextToClipboard("hello")).resolves.toBe(false);
+  expect(textarea.remove).toHaveBeenCalled();
+});
+
 test("returns false when execCommand fallback fails", async () => {
   const textarea = {
     remove: vi.fn(),
