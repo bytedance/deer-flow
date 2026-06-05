@@ -22,9 +22,39 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sourc
     sed -i 's|https://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
 
 # Install build tools + Node.js from mirror
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --fix-missing: tolerate occasional 5xx errors on individual packages
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     curl \
     build-essential \
+    # Common CLI / debugging tools (baked in for offline / LAN-restricted runs)
+    ca-certificates \
+    gnupg \
+    git \
+    tini \
+    jq \
+    yq \
+    wget \
+    unzip \
+    zip \
+    xz-utils \
+    p7zip-full \
+    less \
+    vim-tiny \
+    nano \
+    tree \
+    file \
+    xxd \
+    procps \
+    htop \
+    lsof \
+    psmisc \
+    strace \
+    iputils-ping \
+    iproute2 \
+    dnsutils \
+    net-tools \
+    traceroute \
+    tcpdump \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-slim /usr/local/bin/node /usr/local/bin/
 COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -77,10 +107,49 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=utf-8
 
+# Switch to Alibaba Cloud Debian mirror (mirrors.aliyun.com) to avoid
+# flaky / blocked access to the default deb.debian.org host. This stage
+# does not inherit the same sed from the builder stage, so the redirection
+# must be repeated here.
+RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    sed -i 's|https://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true; \
+    sed -i 's|https://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+
 # libpq5 required by asyncpg + psycopg[binary] (PostgreSQL C client library)
 # transitively pulls in: libgssapi-krb5-2, libldap-2.5-0, libssl3
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --fix-missing: tolerate occasional 5xx errors on individual packages
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     libpq5 \
+    # Common CLI / debugging tools (baked in for offline / LAN-restricted runs)
+    ca-certificates \
+    gnupg \
+    git \
+    tini \
+    jq \
+    yq \
+    wget \
+    unzip \
+    zip \
+    xz-utils \
+    p7zip-full \
+    less \
+    vim-tiny \
+    nano \
+    tree \
+    file \
+    xxd \
+    procps \
+    htop \
+    lsof \
+    psmisc \
+    strace \
+    iputils-ping \
+    iproute2 \
+    dnsutils \
+    net-tools \
+    traceroute \
+    tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Node.js runtime from builder (provides npx for MCP servers)
