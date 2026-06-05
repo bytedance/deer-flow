@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { handleRunStream, mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
+import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 test.describe("Personal Assistant UX", () => {
   test.describe("Assistant Avatar (8.4)", () => {
@@ -51,7 +51,9 @@ test.describe("Personal Assistant UX", () => {
   });
 
   test.describe("Greeting Card (3.8)", () => {
-    test("new thread shows greeting card with suggestions", async ({ page }) => {
+    test("new thread shows greeting card without suggestion chips", async ({
+      page,
+    }) => {
       mockLangGraphAPI(page);
 
       await page.route("**/api/threads/*/greeting", (route) => {
@@ -78,18 +80,21 @@ test.describe("Personal Assistant UX", () => {
 
       await expect(
         page.getByRole("button", { name: "查看关键设备状态" }),
-      ).toBeVisible({ timeout: 5_000 });
-
+      ).toHaveCount(0);
       await expect(
         page.getByRole("button", { name: "生成今日巡检报告" }),
-      ).toBeVisible();
-
+      ).toHaveCount(0);
       await expect(
         page.getByRole("button", { name: "分析异常趋势" }),
-      ).toBeVisible();
+      ).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "趋势" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "诊断" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "频谱" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "日报" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "创建" })).toHaveCount(0);
     });
 
-    test("greeting card shows English suggestions for en-US", async ({
+    test("greeting card hides English suggestion chips for en-US", async ({
       page,
     }) => {
       mockLangGraphAPI(page);
@@ -117,16 +122,17 @@ test.describe("Personal Assistant UX", () => {
 
       await expect(
         page.getByRole("button", { name: "Check critical equipment status" }),
-      ).toBeVisible({ timeout: 5_000 });
+      ).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Trend" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Diagnose" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Spectrum" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Daily Report" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Create" })).toHaveCount(0);
     });
 
-    test("clicking suggestion chip sends it as a message", async ({ page }) => {
-      let streamCalled = false;
-      await page.route("**/runs/stream", (route) => {
-        streamCalled = true;
-        return handleRunStream(route);
-      });
-
+    test("greeting suggestions returned by the API stay hidden", async ({
+      page,
+    }) => {
       mockLangGraphAPI(page);
 
       await page.route("**/api/threads/*/greeting", (route) => {
@@ -143,14 +149,15 @@ test.describe("Personal Assistant UX", () => {
 
       await page.goto("/workspace/chats/new");
 
-      const suggestionButton = page.getByRole("button", {
-        name: "查看设备状态",
-      });
-      await expect(suggestionButton).toBeVisible({ timeout: 10_000 });
-
-      await suggestionButton.click();
-
-      await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+      await expect(
+        page.getByRole("button", { name: "查看设备状态" }),
+      ).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "趋势" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "诊断" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "频谱" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "日报" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "创建" })).toHaveCount(0);
+      await expect(page.getByRole("textbox")).toBeVisible({ timeout: 10_000 });
     });
   });
 });

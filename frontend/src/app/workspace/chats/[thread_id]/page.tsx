@@ -4,8 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage, usePromptInputController } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import {
+  CHAT_COMPOSER_INPUT_BOX_CLASSNAME,
+  getChatComposerDockClassName,
+  getChatComposerFrameClassName,
+} from "@/components/workspace/chat-composer-layout";
 import { ChatReportTrigger } from "@/components/workspace/chat-report-trigger";
-import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import {
   ChatBox,
   useDeepLinkChat,
@@ -13,11 +17,6 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import { GreetingCard } from "@/components/workspace/chats/greeting-card";
-import {
-  CHAT_COMPOSER_INPUT_BOX_CLASSNAME,
-  getChatComposerDockClassName,
-  getChatComposerFrameClassName,
-} from "@/components/workspace/chat-composer-layout";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { IndustrialOnboardingOverlay } from "@/components/workspace/industrial-onboarding-overlay";
 import { InputBox } from "@/components/workspace/input-box";
@@ -27,14 +26,15 @@ import {
   MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
 import { ThreadTitle } from "@/components/workspace/thread-title";
-import { TodoList } from "@/components/workspace/todo-list";
 import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
+import { TodoList } from "@/components/workspace/todo-list";
 import { Welcome } from "@/components/workspace/welcome";
 import { useGreeting } from "@/core/greeting/use-greeting";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -46,7 +46,6 @@ export default function ChatPage() {
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
-  const [localSettings, setLocalSettings] = useLocalSettings();
   const mountedRef = useRef(false);
   useSpecificChatMode();
   const deepLink = useDeepLinkChat(isNewThread);
@@ -106,13 +105,6 @@ export default function ChatPage() {
   const { greeting, isLoading: isGreetingLoading } = useGreeting(
     threadId,
     isNewThread,
-  );
-
-  const handleSuggestionClick = useCallback(
-    (suggestion: string) => {
-      void sendMessage(threadId, { text: suggestion, files: [] });
-    },
-    [sendMessage, threadId],
   );
 
   useEffect(() => {
@@ -251,9 +243,7 @@ export default function ChatPage() {
                       (greeting ? (
                         <GreetingCard
                           greeting={greeting.greeting}
-                          suggestions={greeting.suggestions}
                           isLoading={isGreetingLoading}
-                          onSuggestionClick={handleSuggestionClick}
                         />
                       ) : (
                         <Welcome mode={settings.context.mode} />
