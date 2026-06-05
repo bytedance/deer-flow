@@ -16,6 +16,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,10 @@ def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | N
     if name == "skill_load":
         skill_name = args.get("skill_name")
         if not isinstance(skill_name, str) or not skill_name:
+            return None
+        try:
+            skill_name = SkillStorage.validate_skill_name(skill_name)
+        except ValueError:
             return None
         file_path = args.get("file_path")
         if not isinstance(file_path, str) or not file_path:

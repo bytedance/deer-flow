@@ -617,7 +617,8 @@ class DeerFlowClient:
         if self._agent_name:
             context["agent_name"] = self._agent_name
         context["app_config"] = self._app_config
-        context["available_skills"] = self._available_skills
+        if self._available_skills is not None:
+            context["available_skills"] = self._available_skills
 
         seen_ids: set[str] = set()
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``

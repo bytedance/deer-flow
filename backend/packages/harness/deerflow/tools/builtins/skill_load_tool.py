@@ -68,7 +68,8 @@ def _get_runtime_available_skills(runtime: Runtime) -> set[str] | None:
     context = getattr(runtime, "context", None)
     if isinstance(context, dict) and "available_skills" in context:
         value = context["available_skills"]
-        return _coerce_available_skills(value)
+        if value is not None:
+            return _coerce_available_skills(value)
 
     config = getattr(runtime, "config", None)
     if isinstance(config, dict):

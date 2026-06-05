@@ -108,6 +108,23 @@ def test_skill_load_rejects_skill_outside_runtime_allowlist(monkeypatch, tmp_pat
     assert result == "Error: Skill is not available to this agent: demo-skill"
 
 
+def test_skill_load_falls_back_to_metadata_when_context_allowlist_is_none(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: _storage([skill]),
+    )
+    runtime = SimpleNamespace(
+        context={"available_skills": None},
+        config={"metadata": {"available_skills": ["other-skill"]}},
+    )
+
+    result = skill_load_tool.func(runtime=runtime, skill_name="demo-skill")
+
+    assert result == "Error: Skill is not available to this agent: demo-skill"
+
+
 def test_skill_load_treats_string_available_skills_as_one_name(monkeypatch, tmp_path):
     skill = _skill(tmp_path)
     monkeypatch.setattr(
