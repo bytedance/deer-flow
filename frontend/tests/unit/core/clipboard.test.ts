@@ -9,8 +9,10 @@ const originalNavigator = globalThis.navigator;
 const hadOriginalNavigator = "navigator" in globalThis;
 const originalDocument = globalThis.document;
 const hadOriginalDocument = "document" in globalThis;
-const originalClipboardItem = globalThis.ClipboardItem;
-const hadOriginalClipboardItem = "ClipboardItem" in globalThis;
+const originalClipboardItemDescriptor = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "ClipboardItem",
+);
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -32,13 +34,14 @@ afterEach(() => {
     });
   }
 
-  if (!hadOriginalClipboardItem) {
+  if (!originalClipboardItemDescriptor) {
     Reflect.deleteProperty(globalThis, "ClipboardItem");
   } else {
-    Object.defineProperty(globalThis, "ClipboardItem", {
-      configurable: true,
-      value: originalClipboardItem,
-    });
+    Object.defineProperty(
+      globalThis,
+      "ClipboardItem",
+      originalClipboardItemDescriptor,
+    );
   }
 });
 
@@ -102,6 +105,65 @@ test("falls back to execCommand when Clipboard API is unavailable", async () => 
   expect(textarea.select).toHaveBeenCalled();
   expect(execCommand).toHaveBeenCalledWith("copy");
   expect(textarea.remove).toHaveBeenCalled();
+});
+
+test("falls back to parent removal when textarea.remove is unavailable", async () => {
+  const parentNode = {
+    removeChild: vi.fn(),
+  };
+  const textarea = {
+    parentNode,
+    select: vi.fn(),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+  const execCommand = vi.fn().mockReturnValue(true);
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand,
+    },
+  });
+
+  await expect(writeTextToClipboard("hello")).resolves.toBe(true);
+  expect(parentNode.removeChild).toHaveBeenCalledWith(textarea);
+});
+
+test("does not fail cleanup when textarea removal APIs are unavailable", async () => {
+  const textarea = {
+    parentNode: {},
+    select: vi.fn(),
+    setAttribute: vi.fn(),
+    style: {},
+    value: "",
+  };
+
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue(textarea),
+      execCommand: vi.fn().mockReturnValue(true),
+    },
+  });
+
+  await expect(writeTextToClipboard("hello")).resolves.toBe(true);
 });
 
 test("returns false when execCommand fallback fails", async () => {
@@ -494,6 +556,21 @@ test("installClipboardFallback can recover when the same navigator loses fallbac
   installClipboardFallback();
 
   expect(typeof globalThis.navigator.clipboard.writeText).toBe("function");
+  expect(typeof globalThis.ClipboardItem).toBe("function");
+});
+
+test("installClipboardFallback skips missing clipboard on non-extensible navigator while installing ClipboardItem", async () => {
+  const navigator = {};
+  Object.preventExtensions(navigator);
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: navigator,
+  });
+  Reflect.deleteProperty(globalThis, "ClipboardItem");
+
+  installClipboardFallback();
+
+  expect("clipboard" in globalThis.navigator).toBe(false);
   expect(typeof globalThis.ClipboardItem).toBe("function");
 });
 

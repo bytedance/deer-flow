@@ -26,7 +26,11 @@ function copyTextWithExecCommand(text: string): boolean {
   try {
     return document.execCommand("copy");
   } finally {
-    textarea.remove();
+    if (typeof textarea.remove === "function") {
+      textarea.remove();
+    } else if (typeof textarea.parentNode?.removeChild === "function") {
+      textarea.parentNode?.removeChild(textarea);
+    }
   }
 }
 
@@ -87,6 +91,10 @@ export function installClipboardFallback(): void {
   }
 
   const clipboard = navigator.clipboard as Partial<Clipboard> | undefined;
+  const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+    navigator,
+    "clipboard",
+  );
   const hasWriteText = typeof clipboard?.writeText === "function";
   const hasWrite = typeof clipboard?.write === "function";
   const hasClipboardItem = hasUsableClipboardItem();
@@ -129,10 +137,16 @@ export function installClipboardFallback(): void {
     Object.defineProperties(fallbackClipboard, missingMethods);
 
     if (!clipboard) {
-      Object.defineProperty(navigator, "clipboard", {
-        configurable: true,
-        value: fallbackClipboard,
-      });
+      const cannotDefineClipboard =
+        Object.isExtensible(navigator) === false &&
+        clipboardDescriptor?.configurable !== true;
+
+      if (!cannotDefineClipboard) {
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: fallbackClipboard,
+        });
+      }
     }
   } catch {
     const replacement = Object.create(clipboard ?? null);
@@ -161,7 +175,7 @@ export function installClipboardFallback(): void {
         value: replacement,
       });
     } catch {
-      return;
+      // The ClipboardItem fallback below is independent from navigator.clipboard.
     }
   }
 
