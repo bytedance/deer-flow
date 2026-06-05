@@ -166,36 +166,6 @@ test("does not fail cleanup when textarea removal APIs are unavailable", async (
   await expect(writeTextToClipboard("hello")).resolves.toBe(true);
 });
 
-test("falls back to document body removal when parent removal is unavailable", async () => {
-  const body = {
-    appendChild: vi.fn(),
-    removeChild: vi.fn(),
-  };
-  const textarea = {
-    parentNode: body,
-    select: vi.fn(),
-    setAttribute: vi.fn(),
-    style: {},
-    value: "",
-  };
-
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    value: {},
-  });
-  Object.defineProperty(globalThis, "document", {
-    configurable: true,
-    value: {
-      body,
-      createElement: vi.fn().mockReturnValue(textarea),
-      execCommand: vi.fn().mockReturnValue(true),
-    },
-  });
-
-  await expect(writeTextToClipboard("hello")).resolves.toBe(true);
-  expect(body.removeChild).toHaveBeenCalledWith(textarea);
-});
-
 test("returns false when execCommand fallback fails", async () => {
   const textarea = {
     remove: vi.fn(),

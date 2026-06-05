@@ -33,11 +33,6 @@ function copyTextWithExecCommand(text: string): boolean {
       const parentNode = textarea.parentNode;
       if (typeof parentNode?.removeChild === "function") {
         parentNode.removeChild(textarea);
-      } else if (
-        parentNode === document.body &&
-        typeof document.body.removeChild === "function"
-      ) {
-        document.body.removeChild(textarea);
       }
     }
   }
