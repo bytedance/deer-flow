@@ -11,7 +11,7 @@ function copyTextWithExecCommand(text: string): boolean {
     typeof document.body?.appendChild !== "function" ||
     typeof document.execCommand !== "function"
   ) {
-    return false;
+    throw new Error("Clipboard DOM fallback not available");
   }
 
   const textarea = document.createElement("textarea");
@@ -47,7 +47,7 @@ export async function writeTextToClipboard(text: string): Promise<boolean> {
 function fallbackWriteText(text: string): Promise<void> {
   try {
     if (!copyTextWithExecCommand(text)) {
-      return Promise.reject(new Error("Clipboard API not available"));
+      return Promise.reject(new Error("Clipboard copy command failed"));
     }
   } catch (error) {
     return Promise.reject(

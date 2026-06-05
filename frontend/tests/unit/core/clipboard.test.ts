@@ -229,7 +229,7 @@ test("installed writeText fallback rejects instead of throwing synchronously", a
 
   const result = globalThis.navigator.clipboard.writeText("hello");
   expect(result).toBeInstanceOf(Promise);
-  await expect(result).rejects.toThrow("Clipboard API not available");
+  await expect(result).rejects.toThrow("Clipboard DOM fallback not available");
 });
 
 test("installed writeText fallback converts thrown DOM failures to rejections", async () => {
@@ -255,6 +255,35 @@ test("installed writeText fallback converts thrown DOM failures to rejections", 
   const result = globalThis.navigator.clipboard.writeText("hello");
   expect(result).toBeInstanceOf(Promise);
   await expect(result).rejects.toThrow("dom unavailable");
+});
+
+test("installed writeText fallback distinguishes copy command failure", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      body: {
+        appendChild: vi.fn(),
+      },
+      createElement: vi.fn().mockReturnValue({
+        remove: vi.fn(),
+        select: vi.fn(),
+        setAttribute: vi.fn(),
+        style: {},
+        value: "",
+      }),
+      execCommand: vi.fn().mockReturnValue(false),
+    },
+  });
+
+  installClipboardFallback();
+
+  await expect(
+    globalThis.navigator.clipboard.writeText("hello"),
+  ).rejects.toThrow("Clipboard copy command failed");
 });
 
 test("installs a write fallback for ClipboardItem text/plain payloads", async () => {
@@ -396,7 +425,7 @@ test("installed write fallback preserves existing clipboard prototype methods", 
   expect(readText).toHaveBeenCalled();
   await expect(
     globalThis.navigator.clipboard.writeText("hello"),
-  ).rejects.toThrow("Clipboard API not available");
+  ).rejects.toThrow("Clipboard DOM fallback not available");
 });
 
 test("installClipboardFallback does not replace existing clipboard methods when only ClipboardItem is missing", async () => {
