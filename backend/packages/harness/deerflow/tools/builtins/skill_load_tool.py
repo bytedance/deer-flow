@@ -59,6 +59,7 @@ def _coerce_available_skills(value: object) -> set[str] | None:
         return {SkillStorage.validate_skill_name(value)}
     if isinstance(value, (list, tuple, set, frozenset)):
         return {SkillStorage.validate_skill_name(item) for item in value if isinstance(item, str)}
+    logger.warning("Ignoring unsupported available_skills value of type %s; no skills will be available", type(value).__name__)
     return set()
 
 
@@ -85,7 +86,7 @@ def _truncate_content(content: str, *, app_config: "AppConfig | None") -> str:
     except Exception:
         max_chars = 50000
 
-    if not max_chars or len(content) <= max_chars:
+    if max_chars is None or max_chars <= 0 or len(content) <= max_chars:
         return content
     return content[:max_chars] + f"\n\n... [truncated: showing first {max_chars} of {len(content)} characters]"
 

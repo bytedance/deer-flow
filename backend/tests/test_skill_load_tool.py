@@ -124,6 +124,24 @@ def test_skill_load_treats_string_available_skills_as_one_name(monkeypatch, tmp_
     assert "# Demo Skill" in result
 
 
+def test_skill_load_warns_and_denies_unsupported_available_skills(caplog, monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda: _storage([skill]),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = skill_load_tool.func(
+            runtime=_runtime(available_skills={"demo-skill": True}),
+            skill_name="demo-skill",
+        )
+
+    assert result == "Error: Skill is not available to this agent: demo-skill"
+    assert "Ignoring unsupported available_skills value of type dict" in caplog.text
+
+
 def test_skill_load_returns_generic_error_for_unexpected_failures(monkeypatch):
     class BrokenStorage:
         def get_skill(self, name: str, *, enabled_only: bool = False):
@@ -170,3 +188,18 @@ def test_skill_load_truncates_large_output(monkeypatch, tmp_path):
     result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")
 
     assert result == "abc\n\n... [truncated: showing first 3 of 6 characters]"
+
+
+def test_skill_load_does_not_truncate_when_max_chars_is_negative(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    skill.skill_file.write_text("abcdef", encoding="utf-8")
+    app_config = SimpleNamespace(sandbox=SimpleNamespace(read_file_output_max_chars=-1))
+    monkeypatch.setattr(
+        skill_load_module,
+        "get_or_new_skill_storage",
+        lambda *, app_config=None: _storage([skill]),
+    )
+
+    result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")
+
+    assert result == "abcdef"

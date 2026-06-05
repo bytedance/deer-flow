@@ -16,6 +16,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | N
             return None
         file_path = args.get("file_path")
         if not isinstance(file_path, str) or not file_path:
-            file_path = "SKILL.md"
+            file_path = SKILL_MD_FILE
         return f"skill_load:{skill_name}/{file_path}"
 
     path = _tool_call_path(tool_call)
@@ -288,15 +289,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 continue
 
             tool_calls = list(msg.tool_calls)
-            skill_paths_by_id: dict[str, str] = {}
+            skill_keys_by_id: dict[str, str] = {}
             for tc in tool_calls:
                 if self._is_skill_tool_call(tc, skills_root):
                     tc_id = tc.get("id")
                     skill_key = _tool_call_skill_key(tc, skills_root)
                     if tc_id and skill_key:
-                        skill_paths_by_id[tc_id] = skill_key
+                        skill_keys_by_id[tc_id] = skill_key
 
-            if not skill_paths_by_id:
+            if not skill_keys_by_id:
                 i += 1
                 continue
 
@@ -311,9 +312,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
             for k in range(i + 1, j):
                 tool_msg = messages[k]
-                if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id in skill_paths_by_id:
+                if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id in skill_keys_by_id:
                     skill_tool_tokens += self.token_counter([tool_msg])
-                    skill_key_parts.append(skill_paths_by_id[tool_msg.tool_call_id])
+                    skill_key_parts.append(skill_keys_by_id[tool_msg.tool_call_id])
                     skill_tool_indices.append(k)
                     matched_skill_call_ids.add(tool_msg.tool_call_id)
 
