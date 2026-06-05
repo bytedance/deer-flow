@@ -50,7 +50,7 @@ _ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
     "9k": "ins-os-view/sg9kData/getTrendDataHis",
 }
 _WAVE_ENDPOINT_PATH_BY_SERIES: dict[str, str] = {
-    "2k": "ins-os-view/data/getWaveDataHis",
+    "2k": "ins-os-view/data/getMPWaveDataHisList",  # 机泵用多探头波形接口
     "6k": "ins-os-view/sg6kData/getWaveDataHis",
     "8k": "ins-os-view/sg8kData/getWaveDataHis",
     "9k": "ins-os-view/sg9kData/getWaveDataHis",
@@ -432,8 +432,6 @@ class InsApiClient:
         rows = _extract_trend_rows(body)
         return parse_trend_response(rows, series)
 
-    async def get_waveform_data(self, component_id: str, time_ms: str, endpoint_series: str = "8k") -> dict[str, Any]:
-        items = await self._fetch_wave_items(component_id, time_ms, endpoint_series)
     async def get_machine_drops(
         self,
         machine_id: str,
@@ -466,8 +464,8 @@ class InsApiClient:
         body = await self._get_json(path, params)
         return body.get("data") or []
 
-    async def get_waveform_data(self, component_id: str, time_ms: str) -> dict[str, Any]:
-        items = await self._fetch_wave_items(component_id, time_ms)
+    async def get_waveform_data(self, component_id: str, time_ms: str, endpoint_series: str = "8k") -> dict[str, Any]:
+        items = await self._fetch_wave_items(component_id, time_ms, endpoint_series)
         if not items:
             raise RuntimeError("未获取到波形数据")
         decoded = items[0]
@@ -620,15 +618,29 @@ class InsApiClient:
         else:
             items = []
         decoded_items: list[dict[str, Any]] = []
-        for item in items:
-            wave_str = item.get("waveStr") or item.get("wave_str")
-            if not isinstance(wave_str, str):
-                continue
-            clean = "".join(ch for ch in wave_str if not ch.isspace())
-            try:
-                decoded_items.append(parse_wave_str(clean))
-            except Exception:
-                continue
+
+        # 2k 系列 (getMPWaveDataHisList) 返回 data 是字符串数组，直接是 base64 protobuf
+        # 其他系列返回 data 是对象数组 [{waveStr/waveObject: "..."}]
+        if series == "2k":
+            for item in items:
+                if not isinstance(item, str):
+                    continue
+                clean = "".join(ch for ch in item if not ch.isspace())
+                try:
+                    decoded_items.append(parse_wave_str(clean))
+                except Exception:
+                    continue
+        else:
+            for item in items:
+                # 9k系列返回 waveObject 字段，8k/6k 返回 waveStr 字段
+                wave_str = item.get("waveStr") or item.get("wave_str") or item.get("waveObject")
+                if not isinstance(wave_str, str):
+                    continue
+                clean = "".join(ch for ch in wave_str if not ch.isspace())
+                try:
+                    decoded_items.append(parse_wave_str(clean))
+                except Exception:
+                    continue
         return decoded_items
 
 

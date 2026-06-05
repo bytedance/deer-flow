@@ -217,7 +217,12 @@ def _parse_trend_8k_9k(body: dict, features: list[str]) -> list[dict]:
 
 
 def _parse_trend_2k_6k(body: dict, features: list[str]) -> list[dict]:
-    """解析 2K/6K 趋势响应（单条格式）。"""
+    """解析 2K/6K 趋势响应。
+
+    支持两种格式：
+    1) 新格式: [{"gpid": "...", "value": [{"datatime": x, "value": [{"name": "中文名", "value": v}]}]}]
+    2) 旧格式: {"gpid": {"values": {"中文名": [...]}, "times": [...]}}
+    """
     rows = []
     data = body.get("data", {})
     if isinstance(data, list):
@@ -230,6 +235,50 @@ def _parse_trend_2k_6k(body: dict, features: list[str]) -> list[dict]:
     for item in items_list:
         if not isinstance(item, dict):
             continue
+
+        # ---- 新格式：item 本身有 gpid + value 列表 ----
+        gpid_new = item.get("gpid")
+        value_list_new = item.get("value")
+        if gpid_new and isinstance(value_list_new, list):
+            for point in value_list_new:
+                if not isinstance(point, dict):
+                    continue
+                time_ms = point.get("datatime")
+                if time_ms is None:
+                    continue
+                sub_values = point.get("value", [])
+                if not isinstance(sub_values, list):
+                    continue
+                row_values = {}
+                for sv in sub_values:
+                    if not isinstance(sv, dict):
+                        continue
+                    # 6K 格式优先使用 key (英文)，2K 格式使用 name (中文)
+                    name_key = sv.get("key") or ""
+                    if not name_key:
+                        name_cn = sv.get("name", "")
+                        name_key = _TWO_K_NAME_MAP.get(name_cn, name_cn)
+                    val = sv.get("value")
+                    if val is None or val == "":
+                        continue
+                    # 支持字符串格式的数字
+                    if isinstance(val, str):
+                        try:
+                            val = float(val)
+                        except (ValueError, TypeError):
+                            continue
+                    if not isinstance(val, (int, float)):
+                        continue
+                    row_values[name_key] = float(val)
+                if row_values:
+                    rows.append({
+                        "component_id": str(gpid_new),
+                        "time_ms": int(time_ms),
+                        "values": row_values,
+                    })
+            continue  # 已处理新格式，跳过旧格式逻辑
+
+        # ---- 旧格式：item = {gpid: {...}} ----
         for gpid, gpid_data in item.items():
             if not isinstance(gpid_data, dict):
                 continue
@@ -406,11 +455,38 @@ def _extract_wave_y(wave_data: dict) -> list:
             if isinstance(wave, list) and wave:
                 return [float(v) for v in wave]
 
+    # SPEED 类型 — 机泵 (2k) 使用，数据在 waveDataSpeed.wave
+    if wave_type == "SPEED" and "waveDataSpeed" in wave_data:
+        speed_data = wave_data["waveDataSpeed"]
+        if isinstance(speed_data, dict) and "wave" in speed_data:
+            wave = speed_data["wave"]
+            if isinstance(wave, list) and wave:
+                return [float(v) for v in wave]
+
+    # ACC 类型 — 加速度数据，数据在 waveDataAcc.wave
+    if wave_type == "ACC" and "waveDataAcc" in wave_data:
+        acc_data = wave_data["waveDataAcc"]
+        if isinstance(acc_data, dict) and "wave" in acc_data:
+            wave = acc_data["wave"]
+            if isinstance(wave, list) and wave:
+                return [float(v) for v in wave]
+
     # SPECTRUM 类型通过 IFFT 重建
     if wave_type == "SPECTRUM" or "spectrum" in wave_data:
         result = _spectrum_to_wave(wave_data)
         if result:
             return result
+
+    # COMPRESSION 类型 — 9k 系列使用压缩格式
+    # 解压公式：原始值 = compressed_value * p1 + p0
+    if "compression" in wave_data:
+        comp = wave_data["compression"]
+        if isinstance(comp, dict):
+            p0 = float(comp.get("p0", 0))
+            p1 = float(comp.get("p1", 0))
+            wave_data_comp = comp.get("waveDataCompression", [])
+            if wave_data_comp:
+                return [v * p1 + p0 for v in wave_data_comp]
 
     # COMPLEX 类型
     if "complex" in wave_data:
@@ -464,9 +540,13 @@ def _fetch_waveform(pid: str, series: str, time_ms: str) -> dict | None:
         print(f"[fetch] waveform: {pid} (series={series}) 无波形端点路径", file=sys.stderr)
         return None
     if series == "2k":
+        # 机泵用 getMPWaveDataHisList 接口，参数是 gpid + time
         params = {"gpid": pid, "time": time_ms}
     else:
         params = {"gpids": pid, "timepoint": time_ms}
+    # 9k 系列需要额外传 second 参数
+    if series == "9k":
+        params["second"] = "3"
 
     try:
         body = _get(path, params)
@@ -479,10 +559,20 @@ def _fetch_waveform(pid: str, series: str, time_ms: str) -> dict | None:
         print(f"[fetch] waveform: {pid} API 返回 data 为空或非 list: {type(data).__name__}", file=sys.stderr)
         return None
 
-    item = data[0] if data else {}
-    wave_str = item.get("waveStr") or item.get("wave_str") or ""
+    # 2k 系列 (getMPWaveDataHisList) 返回 data 是字符串数组，直接是 base64 protobuf
+    # 其他系列返回 data 是对象数组 [{waveStr/waveObject: "..."}]
+    if series == "2k":
+        wave_str = data[0] if isinstance(data[0], str) else ""
+    else:
+        item = data[0] if data else {}
+        # 9k系列返回 waveObject 字段，8k/6k 返回 waveStr 字段
+        wave_str = item.get("waveStr") or item.get("wave_str") or item.get("waveObject") or ""
+
     if not wave_str:
-        print(f"[fetch] waveform: {pid} data[0] 中无 waveStr，item keys: {list(item.keys())[:10]}", file=sys.stderr)
+        if series == "2k":
+            print(f"[fetch] waveform: {pid} 2k data[0] 不是字符串，type: {type(data[0]).__name__}", file=sys.stderr)
+        else:
+            print(f"[fetch] waveform: {pid} data[0] 中无波形字段(waveStr/waveObject)，item keys: {list(item.keys())[:10]}", file=sys.stderr)
         return None
 
     # base64 + protobuf 解码
