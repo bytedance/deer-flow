@@ -154,9 +154,9 @@ export default function PointSelectorBlock({ block }: PointSelectorBlockProps) {
       }
       const text = await res.text();
       const data = safeJsonParse<unknown[]>(text);
-      const list = Array.isArray(data) ? data : [];
+      const list = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
       setPoints(
-        list.map((item: Record<string, unknown>) => ({
+        list.map((item) => ({
           id: String(item.id),
           name: (item.name as string) ?? "",
           machineId: String(item.machineId),
