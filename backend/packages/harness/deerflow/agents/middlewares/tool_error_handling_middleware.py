@@ -77,9 +77,11 @@ def _build_runtime_middlewares(
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     middlewares: list[AgentMiddleware] = [
+        ToolOutputBudgetMiddleware.from_app_config(app_config),
         ThreadDataMiddleware(lazy_init=lazy_init),
         SandboxMiddleware(lazy_init=lazy_init),
     ]
@@ -87,7 +89,7 @@ def _build_runtime_middlewares(
     if include_uploads:
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
-        middlewares.insert(1, UploadsMiddleware())
+        middlewares.insert(2, UploadsMiddleware())
 
     if include_dangling_tool_call_patch:
         from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
@@ -136,11 +138,42 @@ def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = T
     )
 
 
-def build_subagent_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_subagent_runtime_middlewares(
+    *,
+    app_config: AppConfig | None = None,
+    model_name: str | None = None,
+    lazy_init: bool = True,
+) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
-    return _build_runtime_middlewares(
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+
+    middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
     )
+
+    if model_name is None and app_config.models:
+        model_name = app_config.models[0].name
+
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    if model_config is not None and model_config.supports_vision:
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        middlewares.append(ViewImageMiddleware())
+
+    # Same provider safety-termination guard the lead agent uses — subagents
+    # are equally exposed to truncated tool_calls returned with
+    # finish_reason=content_filter (and friends), and the bad call would then
+    # propagate back to the lead agent via the task tool result.
+    safety_config = app_config.safety_finish_reason
+    if safety_config.enabled:
+        from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    return middlewares

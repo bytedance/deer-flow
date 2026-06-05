@@ -36,6 +36,7 @@ models:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
+- Xiaomi MiMo (`deerflow.models.patched_mimo:PatchedChatMiMo`)
 - Claude Code OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
 - Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider
@@ -94,20 +95,30 @@ models:
         thinking:
           type: enabled
 
-  - name: minimax-m2.5
-    display_name: MiniMax M2.5
+  - name: minimax-m3
+    display_name: MiniMax M3
     use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.5
+    model: MiniMax-M3
     api_key: $MINIMAX_API_KEY
     base_url: https://api.minimax.io/v1
     max_tokens: 4096
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
-  - name: minimax-m2.5-highspeed
-    display_name: MiniMax M2.5 Highspeed
+  - name: minimax-m2.7
+    display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.5-highspeed
+    model: MiniMax-M2.7
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true
+
+  - name: minimax-m2.7-highspeed
+    display_name: MiniMax M2.7 Highspeed
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M2.7-highspeed
     api_key: $MINIMAX_API_KEY
     base_url: https://api.minimax.io/v1
     max_tokens: 4096
@@ -165,6 +176,37 @@ models:
 ```
 
 For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
+
+**MiMo with thinking via OpenAI-compatible API**:
+
+MiMo returns `reasoning_content` on assistant messages in thinking mode. In multi-turn agent conversations with tool calls, subsequent requests must preserve that historical `reasoning_content` on assistant messages or the MiMo API can return HTTP 400. Standard `langchain_openai:ChatOpenAI` drops this provider-specific field, so use `deerflow.models.patched_mimo:PatchedChatMiMo`:
+
+For pay-as-you-go API keys (`sk-...`), use `https://api.xiaomimimo.com/v1`. For Token Plan keys (`tp-...`), use the regional Token Plan Base URL shown in the MiMo console, such as `https://token-plan-cn.xiaomimimo.com/v1`. MiMo documents these key types as separate and non-interchangeable.
+
+`PatchedChatMiMo` is model-id agnostic. Use it for every MiMo thinking model entry you configure, including model entries referenced by `subagents.*.model` overrides (for example `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`, `mimo-v2-omni`, or `mimo-v2-flash`).
+
+```yaml
+models:
+  - name: mimo-v2.5-pro
+    display_name: MiMo V2.5 Pro
+    use: deerflow.models.patched_mimo:PatchedChatMiMo
+    model: mimo-v2.5-pro
+    api_key: $MIMO_API_KEY
+    base_url: https://api.xiaomimimo.com/v1
+    max_tokens: 8192
+    supports_thinking: true
+    supports_vision: false
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+
+`PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
 ### Tool Groups
 
@@ -319,14 +361,19 @@ models:
 - `OPENAI_API_KEY` - OpenAI API key
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `DEEPSEEK_API_KEY` - DeepSeek API key
+- `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
+- `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
+- `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
+- `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
 ## Configuration Location
 
-The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`), not in the backend directory.
+The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`). Set `DEER_FLOW_PROJECT_ROOT` when the process may start from another working directory, or set `DEER_FLOW_CONFIG_PATH` to point at a specific file.
 
 ## Configuration Priority
 
@@ -334,12 +381,12 @@ DeerFlow searches for configuration in this order:
 
 1. Path specified in code via `config_path` argument
 2. Path from `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current working directory (typically `backend/` when running)
-4. `config.yaml` in parent directory (project root: `deer-flow/`)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or under the current working directory when `DEER_FLOW_PROJECT_ROOT` is unset
+4. Legacy backend/repository-root locations for monorepo compatibility
 
 ## Best Practices
 
-1. **Place `config.yaml` in project root** - Not in `backend/` directory
+1. **Place `config.yaml` in project root** - Set `DEER_FLOW_PROJECT_ROOT` if the runtime starts elsewhere
 2. **Never commit `config.yaml`** - It's already in `.gitignore`
 3. **Use environment variables for secrets** - Don't hardcode API keys
 4. **Keep `config.example.yaml` updated** - Document all new options
@@ -350,7 +397,7 @@ DeerFlow searches for configuration in this order:
 
 ### "Config file not found"
 - Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
-- The backend searches parent directory by default, so root location is preferred
+- If the runtime starts outside the project root, set `DEER_FLOW_PROJECT_ROOT`
 - Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location
 
 ### "Invalid API key"
@@ -360,7 +407,7 @@ DeerFlow searches for configuration in this order:
 ### "Skills not loading"
 - Check that `deer-flow/skills/` directory exists
 - Verify skills have valid `SKILL.md` files
-- Check `skills.path` configuration if using custom path
+- Check `skills.path` or `DEER_FLOW_SKILLS_PATH` if using a custom path
 
 ### "Docker sandbox fails to start"
 - Ensure Docker is running

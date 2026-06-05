@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.channels.base import Channel
-from app.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
 
 
 def _run(coro):
@@ -246,6 +247,109 @@ class TestResolveAttachments:
 
         assert len(result) == 1
         assert result[0].filename == "data.csv"
+
+
+# ---------------------------------------------------------------------------
+# Inbound file ingestion tests
+# ---------------------------------------------------------------------------
+
+
+class TestInboundFileIngestion:
+    def test_rejects_preexisting_symlink_destination(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        outside_file = tmp_path / "outside-created.txt"
+        (uploads_dir / "victim.txt").symlink_to(outside_file)
+
+        msg = InboundMessage(
+            channel_name="test-channel",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"filename": "victim.txt", "url": "https://example.invalid/victim.txt"}],
+        )
+
+        async def fake_reader(file_info, client):
+            return b"attacker data"
+
+        with (
+            patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+            patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": fake_reader}, clear=False),
+        ):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result == []
+        assert not outside_file.exists()
+        assert (uploads_dir / "victim.txt").is_symlink()
+
+    def test_rejects_dangling_symlink_destination(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        missing_target = tmp_path / "missing-created.txt"
+        (uploads_dir / "victim.txt").symlink_to(missing_target)
+
+        msg = InboundMessage(
+            channel_name="test-channel",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"filename": "victim.txt", "url": "https://example.invalid/victim.txt"}],
+        )
+
+        async def fake_reader(file_info, client):
+            return b"attacker data"
+
+        with (
+            patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+            patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": fake_reader}, clear=False),
+        ):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result == []
+        assert not missing_target.exists()
+        assert (uploads_dir / "victim.txt").is_symlink()
+
+    def test_hardlinked_existing_file_is_not_overwritten(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        outside_file = tmp_path / "outside-created.txt"
+        outside_file.write_text("protected", encoding="utf-8")
+        os.link(outside_file, uploads_dir / "victim.txt")
+
+        msg = InboundMessage(
+            channel_name="test-channel",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"filename": "victim.txt", "url": "https://example.invalid/victim.txt"}],
+        )
+
+        async def fake_reader(file_info, client):
+            return b"new attachment data"
+
+        with (
+            patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+            patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": fake_reader}, clear=False),
+        ):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result == [
+            {
+                "filename": "victim_1.txt",
+                "size": len(b"new attachment data"),
+                "path": "/mnt/user-data/uploads/victim_1.txt",
+                "is_image": False,
+            }
+        ]
+        assert outside_file.read_text(encoding="utf-8") == "protected"
+        assert (uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
+        assert (uploads_dir / "victim_1.txt").read_bytes() == b"new attachment data"
 
 
 # ---------------------------------------------------------------------------

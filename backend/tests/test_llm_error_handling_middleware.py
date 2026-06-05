@@ -94,6 +94,31 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
 
     assert isinstance(result, AIMessage)
     assert "out of quota" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "quota"
+    assert result.additional_kwargs["error_type"] == "FakeError"
+
+
+def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=25, retry_cap_delay_ms=25)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("Connection error.", status_code=503)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_detail"] == "Connection error."
 
 
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:

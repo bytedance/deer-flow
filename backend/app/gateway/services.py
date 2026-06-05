@@ -15,10 +15,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage
+from langchain_core.messages.utils import convert_to_messages
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -31,6 +34,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.runtime.runs.naming import resolve_root_run_name
 
 logger = logging.getLogger(__name__)
 
@@ -74,21 +78,35 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
 
 
 def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
-    """Convert LangGraph Platform input format to LangChain state dict."""
+    """Convert LangGraph Platform input format to LangChain state dict.
+
+    Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
+    so that ``additional_kwargs`` (e.g. uploaded-file metadata — gh #3132), ``id``,
+    ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
+    hand-rolled version only forwarded ``content`` and collapsed every role to
+    ``HumanMessage``, which silently stripped frontend-supplied attachments.
+
+    Malformed message dicts (missing ``role``/``type``/``content``, unsupported
+    role, etc.) raise ``HTTPException(400)`` with the offending index, instead
+    of bubbling up as a 500.  The gateway is a system boundary, so per-entry
+    validation errors are the right shape for clients to retry against.
+    """
     if raw_input is None:
         return {}
     messages = raw_input.get("messages")
     if messages and isinstance(messages, list):
-        converted = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                role = msg.get("role", msg.get("type", "user"))
-                content = msg.get("content", "")
-                if role in ("user", "human"):
-                    converted.append(HumanMessage(content=content))
-                else:
-                    # TODO: handle other message types (system, ai, tool)
-                    converted.append(HumanMessage(content=content))
+        converted: list[Any] = []
+        for index, msg in enumerate(messages):
+            if isinstance(msg, BaseMessage):
+                converted.append(msg)
+            elif isinstance(msg, dict):
+                try:
+                    converted.extend(convert_to_messages([msg]))
+                except (ValueError, TypeError, NotImplementedError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid message at input.messages[{index}]: {exc}",
+                    ) from exc
             else:
                 converted.append(msg)
         return {**raw_input, "messages": converted}
@@ -96,6 +114,74 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
+
+
+# Whitelist of run-context keys that the langgraph-compat layer forwards from
+# ``body.context`` into the run config. ``config["context"]`` exists in
+# LangGraph >=0.6, but these values must be written to both ``configurable``
+# (for legacy ``_get_runtime_config`` consumers) and ``context`` because
+# LangGraph >=1.1.9 no longer makes ``ToolRuntime.context`` fall back to
+# ``configurable`` for consumers like ``setup_agent``.
+_CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "model_name",
+        "mode",
+        "thinking_enabled",
+        "reasoning_effort",
+        "is_plan_mode",
+        "subagent_enabled",
+        "max_concurrent_subagents",
+        "agent_name",
+        "is_bootstrap",
+    }
+)
+
+
+def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
+    """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
+    and ``config['context']`` so they are visible to legacy configurable readers and
+    to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
+    see issue #2677).
+
+    ``user_id`` is intentionally propagated into ``config['context']`` in addition to
+    the whitelisted keys, so non-web callers (e.g. IM channels) that supply identity in
+    ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
+    ``setdefault`` so a server-authenticated id stamped by
+    :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+    """
+    if not context:
+        return
+    configurable = config.setdefault("configurable", {})
+    runtime_context = config.setdefault("context", {})
+    for key in _CONTEXT_CONFIGURABLE_KEYS:
+        if key in context:
+            if isinstance(configurable, dict):
+                configurable.setdefault(key, context[key])
+            if isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
+    if "user_id" in context and isinstance(runtime_context, dict):
+        runtime_context.setdefault("user_id", context["user_id"])
+
+
+def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
+    """Stamp the authenticated user into the run context for background tools.
+
+    Tool execution may happen after the request handler has returned, so tools
+    that persist user-scoped files should not rely only on ambient ContextVars.
+    The value comes from server-side auth state, never from client context.
+    """
+
+    user = getattr(request.state, "user", None)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return
+
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return
+
+    runtime_context = config.setdefault("context", {})
+    if isinstance(runtime_context, dict):
+        runtime_context["user_id"] = str(user_id)
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -178,6 +264,7 @@ def build_run_config(
             target = config.setdefault("configurable", {})
         if target is not None and "agent_name" not in target:
             target["agent_name"] = normalized
+        config.setdefault("run_name", resolve_root_run_name(config, normalized))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
@@ -211,6 +298,23 @@ async def start_run(
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
+    body_context = getattr(body, "context", None) or {}
+    model_name = body_context.get("model_name")
+
+    # Coerce non-string model_name values to str before truncation.
+    if model_name is not None and not isinstance(model_name, str):
+        model_name = str(model_name)
+
+    # Validate model against the allowlist when a model_name is provided.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name!r} is not in the configured model allowlist",
+            )
+
     try:
         record = await run_mgr.create_or_reject(
             thread_id,
@@ -219,6 +323,7 @@ async def start_run(
             metadata=body.metadata or {},
             kwargs={"input": body.input, "config": body.config},
             multitask_strategy=body.multitask_strategy,
+            model_name=model_name,
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -245,27 +350,12 @@ async def start_run(
     graph_input = normalize_input(body.input)
     config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
 
-    # Merge DeerFlow-specific context overrides into configurable.
+    # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
     # The ``context`` field is a custom extension for the langgraph-compat layer
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-    context = getattr(body, "context", None)
-    if context:
-        _CONTEXT_CONFIGURABLE_KEYS = {
-            "model_name",
-            "mode",
-            "thinking_enabled",
-            "reasoning_effort",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-            "agent_name",
-            "is_bootstrap",
-        }
-        configurable = config.setdefault("configurable", {})
-        for key in _CONTEXT_CONFIGURABLE_KEYS:
-            if key in context:
-                configurable.setdefault(key, context[key])
+    merge_run_context_overrides(config, getattr(body, "context", None))
+    inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 
@@ -323,5 +413,53 @@ async def sse_consumer(
 
     finally:
         if record.status in (RunStatus.pending, RunStatus.running):
+            if record.on_disconnect == DisconnectMode.cancel:
+                await run_mgr.cancel(record.run_id)
+
+
+async def wait_for_run_completion(
+    bridge: StreamBridge,
+    record: RunRecord,
+    request: Request,
+    run_mgr: RunManager,
+) -> bool:
+    """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+
+    The non-streaming ``/wait`` endpoints used to ``await record.task``
+    directly with no disconnect handling.  When the client (or an
+    intermediate HTTP proxy) timed out during a long tool call such as
+    ``pip install``, the handler would swallow ``CancelledError`` and
+    serialize whatever checkpoint happened to exist — masking a half-finished
+    run as a normal completion (issue #3265).
+
+    This helper consumes the same bridge that ``sse_consumer`` does so the
+    wait path shares its disconnect semantics: each wake-up polls
+    ``request.is_disconnected()``; on a real disconnect it cancels the
+    background run when ``record.on_disconnect`` is ``cancel``.  The bridge's
+    heartbeat sentinels guarantee at least one wake-up per
+    ``heartbeat_interval`` even when the agent emits no events for a while.
+
+    Returns:
+        ``True`` when ``END_SENTINEL`` was observed (run reached a terminal
+        state), ``False`` when the loop exited because the client
+        disconnected.  Callers must skip checkpoint serialization on
+        ``False`` so a partial checkpoint is not returned as a normal
+        response.
+    """
+    completed = False
+    try:
+        async for entry in bridge.subscribe(record.run_id):
+            # END_SENTINEL means the run reached a terminal state; honour it
+            # even if the client just disconnected so the caller still serializes
+            # the real final checkpoint.
+            if entry is END_SENTINEL:
+                completed = True
+                return True
+            if await request.is_disconnected():
+                break
+            # Heartbeats and regular events: keep waiting for END_SENTINEL.
+        return completed
+    finally:
+        if not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)

@@ -12,7 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    PENDING_CLARIFICATION_METADATA_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from app.channels.store import ChannelStore
 
 
@@ -372,6 +379,66 @@ class TestExtractResponseText:
         # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
         assert _extract_response_text(result) == ""
 
+    def test_ignores_hidden_human_control_messages(self):
+        """Hidden control messages should not terminate current-turn response extraction."""
+        from app.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "plan this"},
+                {"type": "ai", "content": "Here is the plan."},
+                {
+                    "type": "human",
+                    "name": "todo_reminder",
+                    "content": "keep todos updated",
+                    "additional_kwargs": {"hide_from_ui": True},
+                },
+            ]
+        }
+
+        assert _extract_response_text(result) == "Here is the plan."
+
+
+class TestClarificationDetection:
+    def test_final_clarification_tool_message_is_pending(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is True
+
+    def test_clarification_followed_by_regular_ai_is_not_pending(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                {"type": "ai", "content": "I will continue without pending clarification."},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is False
+
+    def test_previous_turn_clarification_does_not_mark_current_turn(self):
+        from app.channels.manager import _has_current_turn_clarification
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "deploy"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                {"type": "human", "content": "prod"},
+                {"type": "ai", "content": "Deploying to prod."},
+            ]
+        }
+        assert _has_current_turn_clarification(result) is False
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
@@ -434,6 +501,47 @@ class TestChannelManager:
         assert csrf_token
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
+
+    def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "default"}]}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return MockResponse()
+
+        calls = []
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+
+            reply = await manager._fetch_gateway("/api/models", "models")
+
+            assert reply == "Available models:\n• default"
+            assert calls[0]["url"] == "http://gateway:8001/api/models"
+            assert calls[0]["timeout"] == 10
+            assert calls[0]["headers"]["X-DeerFlow-Internal-Token"]
+
+        _run(go())
 
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
@@ -530,6 +638,8 @@ class TestChannelManager:
             assert call_args[0][0] == "test-thread-123"  # thread_id
             assert call_args[0][1] == "lead_agent"  # assistant_id
             assert call_args[1]["input"]["messages"][0]["content"] == "hi"
+            assert call_args[1]["config"]["configurable"]["checkpoint_ns"] == ""
+            assert call_args[1]["config"]["configurable"]["thread_id"] == "test-thread-123"
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == "Hello from agent!"
@@ -572,6 +682,74 @@ class TestChannelManager:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].metadata == meta
+
+        _run(go())
+
+    def test_handle_chat_marks_clarification_outbound_metadata(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "deploy"},
+                        {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                        {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                    ]
+                }
+            )
+            manager._client = mock_client
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="deploy",
+                metadata={"message_id": "msg-1"},
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert outbound_received[0].text == "Which environment?"
+            assert outbound_received[0].metadata["message_id"] == "msg-1"
+            assert outbound_received[0].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
+
+        _run(go())
+
+    def test_handle_chat_does_not_mark_regular_outbound_as_clarification(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            await manager.start()
+
+            await bus.publish_inbound(InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert outbound_received[0].text == "Hello from agent!"
+            assert PENDING_CLARIFICATION_METADATA_KEY not in outbound_received[0].metadata
 
         _run(go())
 
@@ -661,9 +839,132 @@ class TestChannelManager:
             call_args = mock_client.runs.wait.call_args
             assert call_args[0][1] == "lead_agent"
             assert call_args[1]["config"]["recursion_limit"] == 55
+            assert call_args[1]["config"]["configurable"]["checkpoint_ns"] == ""
+            assert call_args[1]["config"]["configurable"]["thread_id"] == "test-thread-123"
             assert call_args[1]["context"]["thinking_enabled"] is False
             assert call_args[1]["context"]["subagent_enabled"] is True
             assert call_args[1]["context"]["agent_name"] == "mobile-agent"
+
+        _run(go())
+
+    def test_clarification_follow_up_preserves_history(self):
+        """Conversation should continue after ask_clarification instead of resetting history."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
+
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None):
+                del assistant_id, context  # unused in this test, kept for signature parity
+
+                checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
+                key = (thread_id, str(checkpoint_ns))
+                history = history_by_checkpoint.setdefault(key, [])
+
+                human_text = input["messages"][0]["content"]
+                history.append(human_text)
+
+                if len(history) == 1:
+                    return {
+                        "messages": [
+                            {"type": "human", "content": history[0]},
+                            {
+                                "type": "ai",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "name": "ask_clarification",
+                                        "args": {"question": "Which environment should I use?"},
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "tool",
+                                "name": "ask_clarification",
+                                "content": "Which environment should I use?",
+                            },
+                        ]
+                    }
+
+                if len(history) == 2 and history[0] == "Deploy my app" and history[1] == "prod":
+                    return {
+                        "messages": [
+                            {"type": "human", "content": history[0]},
+                            {
+                                "type": "ai",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "name": "ask_clarification",
+                                        "args": {"question": "Which environment should I use?"},
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "tool",
+                                "name": "ask_clarification",
+                                "content": "Which environment should I use?",
+                            },
+                            {"type": "human", "content": history[1]},
+                            {"type": "ai", "content": "Got it. I will deploy to prod."},
+                        ]
+                    }
+
+                return {
+                    "messages": [
+                        {"type": "human", "content": history[-1]},
+                        {"type": "ai", "content": "History missing; clarification repeated."},
+                    ]
+                }
+
+            mock_client = MagicMock()
+            mock_client.threads.create = AsyncMock(return_value={"thread_id": "clarify-thread-1"})
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "clarify-thread-1"})
+            mock_client.runs.wait = AsyncMock(side_effect=_runs_wait)
+            manager._client = mock_client
+
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="Deploy my app",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="prod",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            assert outbound_received[0].text == "Which environment should I use?"
+            assert outbound_received[1].text == "Got it. I will deploy to prod."
+
+            assert mock_client.runs.wait.call_count == 2
+            first_call = mock_client.runs.wait.call_args_list[0]
+            second_call = mock_client.runs.wait.call_args_list[1]
+            assert first_call.kwargs["config"]["configurable"]["checkpoint_ns"] == ""
+            assert second_call.kwargs["config"]["configurable"]["checkpoint_ns"] == ""
 
         _run(go())
 
@@ -830,6 +1131,67 @@ class TestChannelManager:
             assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
+
+        _run(go())
+
+    def test_handle_feishu_streaming_marks_only_final_clarification_outbound(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            stream_events = [
+                _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": "Thinking", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "deploy"},
+                            {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {}}]},
+                            {"type": "tool", "name": "ask_clarification", "content": "Which environment?"},
+                        ],
+                        "artifacts": [],
+                    },
+                ),
+            ]
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+            manager._client = mock_client
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="deploy",
+                    thread_ts="om-source-1",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            assert [msg.is_final for msg in outbound_received] == [False, False, True]
+            assert outbound_received[0].text == "Thinking"
+            assert outbound_received[1].text == "Which environment?"
+            assert outbound_received[2].text == "Which environment?"
+            assert all(PENDING_CLARIFICATION_METADATA_KEY not in msg.metadata for msg in outbound_received[:-1])
+            assert outbound_received[-1].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
 
         _run(go())
 
@@ -1343,6 +1705,8 @@ class TestChannelManager:
             call_args = mock_client.runs.stream.call_args
 
             assert call_args[1]["input"]["messages"][0]["content"] == "hello"
+            assert call_args[1]["config"]["configurable"]["checkpoint_ns"] == ""
+            assert call_args[1]["config"]["configurable"]["thread_id"] == "test-thread-123"
             assert call_args[1]["context"]["is_bootstrap"] is True
 
             # Final message should be published
@@ -1421,6 +1785,51 @@ class TestChannelManager:
             assert "/bootstrap" in outbound_received[0].text
 
         _run(go())
+
+
+class TestResolveRunParamsUserId:
+    """Regression for PR #3294: channel identity must reach ``run_context``
+    while staying safe for user-scoped filesystem buckets.
+    """
+
+    def _manager(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        return ChannelManager(bus=bus, store=store)
+
+    def test_safe_user_id_is_passed_through(self):
+        manager = self._manager()
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="123456", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "123456"
+        assert run_context["channel_user_id"] == "123456"
+
+    def test_unsafe_user_id_is_normalized_but_raw_preserved(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        manager = self._manager()
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == make_safe_user_id(raw)
+        assert run_context["user_id"] != raw
+        assert run_context["channel_user_id"] == raw
+
+    @pytest.mark.parametrize("raw_user_id", ["", None])
+    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id):
+        manager = self._manager()
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw_user_id, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert "user_id" not in run_context
+        assert "channel_user_id" not in run_context
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1918,31 @@ class TestExtractArtifacts:
             ]
         }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]
+
+    def test_ignores_hidden_human_control_messages(self):
+        """Hidden control messages should not hide current-turn present_files artifacts."""
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "export"},
+                {
+                    "type": "ai",
+                    "content": "Done.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/plan.md"]}},
+                    ],
+                },
+                {
+                    "type": "human",
+                    "name": "todo_completion_reminder",
+                    "content": "mark tasks complete",
+                    "additional_kwargs": {"hide_from_ui": True},
+                },
+            ]
+        }
+
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/plan.md"]
 
 
 class TestFormatArtifactText:
@@ -1619,6 +2053,50 @@ class TestHandleChatWithArtifacts:
             assert outbound_received[0].text != "(No response from agent)"
             assert "output.csv" in outbound_received[0].text
             assert outbound_received[0].artifacts == ["/mnt/user-data/outputs/output.csv"]
+
+        _run(go())
+
+    def test_hidden_human_control_message_does_not_trigger_no_response_fallback(self):
+        """Plan-mode hidden control messages should not mask the final AI response."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "make a plan"},
+                    {"type": "ai", "content": "Here is a concrete plan."},
+                    {
+                        "type": "human",
+                        "name": "todo_reminder",
+                        "content": "sync todos",
+                        "additional_kwargs": {"hide_from_ui": True},
+                    },
+                ]
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text="make a plan",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == "Here is a concrete plan."
 
         _run(go())
 
@@ -1754,7 +2232,8 @@ class TestFeishuChannel:
         async def go():
             bus = MessageBus()
             bus.publish_inbound = AsyncMock()
-            channel = FeishuChannel(bus, config={})
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            channel = FeishuChannel(bus, config={"channel_store": store})
             channel._api_client = MagicMock()
 
             reply_started = asyncio.Event()
@@ -1790,6 +2269,11 @@ class TestFeishuChannel:
                         text="Hello",
                         is_final=False,
                         thread_ts="om-source-msg",
+                        metadata={
+                            "user_id": "user-1",
+                            "root_id": "om-root-msg",
+                            "topic_id": "om-root-msg",
+                        },
                     )
                 )
             )
@@ -1804,6 +2288,9 @@ class TestFeishuChannel:
             assert channel._reply_card.await_count == 1
             channel._update_card.assert_awaited_once_with("om-running-card", "Hello")
             assert "om-source-msg" not in channel._running_card_tasks
+            assert store.get_thread_id("feishu", "chat-1", topic_id="om-source-msg") == "thread-1"
+            assert store.get_thread_id("feishu", "chat-1", topic_id="om-running-card") == "thread-1"
+            assert store.get_thread_id("feishu", "chat-1", topic_id="om-root-msg") == "thread-1"
 
         _run(go())
 

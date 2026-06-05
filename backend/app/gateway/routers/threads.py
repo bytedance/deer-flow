@@ -13,11 +13,11 @@ matching the LangGraph Platform wire format expected by the
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from langgraph.checkpoint.base import empty_checkpoint
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
@@ -26,6 +26,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -88,6 +89,28 @@ class ThreadSearchRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=1000, description="Maximum results")
     offset: int = Field(default=0, ge=0, description="Pagination offset")
     status: str | None = Field(default=None, description="Filter by thread status")
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_filters(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """Reject filter entries the SQL backend cannot compile.
+
+        Enforces consistent behaviour across SQL and memory backends.
+        See ``deerflow.persistence.json_compat`` for the shared validators.
+        """
+        if not v:
+            return v
+        from deerflow.persistence.json_compat import validate_metadata_filter_key, validate_metadata_filter_value
+
+        bad_entries: list[str] = []
+        for key, value in v.items():
+            if not validate_metadata_filter_key(key):
+                bad_entries.append(f"{key!r} (unsafe key)")
+            elif not validate_metadata_filter_value(value):
+                bad_entries.append(f"{key!r} (unsupported value type {type(value).__name__})")
+        if bad_entries:
+            raise ValueError(f"Invalid metadata filter entries: {', '.join(bad_entries)}")
+        return v
 
 
 class ThreadStateResponse(BaseModel):
@@ -233,7 +256,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
     thread_id = body.thread_id or str(uuid.uuid4())
-    now = time.time()
+    now = now_iso()
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
@@ -243,8 +266,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         return ThreadResponse(
             thread_id=thread_id,
             status=existing_record.get("status", "idle"),
-            created_at=str(existing_record.get("created_at", "")),
-            updated_at=str(existing_record.get("updated_at", "")),
+            created_at=coerce_iso(existing_record.get("created_at", "")),
+            updated_at=coerce_iso(existing_record.get("updated_at", "")),
             metadata=existing_record.get("metadata", {}),
         )
 
@@ -262,8 +285,6 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     # Write an empty checkpoint so state endpoints work immediately
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
-        from langgraph.checkpoint.base import empty_checkpoint
-
         ckpt_metadata = {
             "step": -1,
             "source": "input",
@@ -281,8 +302,8 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     return ThreadResponse(
         thread_id=thread_id,
         status="idle",
-        created_at=str(now),
-        updated_at=str(now),
+        created_at=now,
+        updated_at=now,
         metadata=body.metadata,
     )
 
@@ -295,20 +316,27 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     (SQL-backed for sqlite/postgres, Store-backed for memory mode).
     """
     from app.gateway.deps import get_thread_store
+    from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
     repo = get_thread_store(request)
-    rows = await repo.search(
-        metadata=body.metadata or None,
-        status=body.status,
-        limit=body.limit,
-        offset=body.offset,
-    )
+    try:
+        rows = await repo.search(
+            metadata=body.metadata or None,
+            status=body.status,
+            limit=body.limit,
+            offset=body.offset,
+        )
+    except InvalidMetadataFilterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return [
         ThreadResponse(
             thread_id=r["thread_id"],
             status=r.get("status", "idle"),
-            created_at=r.get("created_at", ""),
-            updated_at=r.get("updated_at", ""),
+            # ``coerce_iso`` heals legacy unix-second values that
+            # ``MemoryThreadMetaStore`` historically wrote with ``time.time()``;
+            # SQL-backed rows already arrive as ISO strings and pass through.
+            created_at=coerce_iso(r.get("created_at", "")),
+            updated_at=coerce_iso(r.get("updated_at", "")),
             metadata=r.get("metadata", {}),
             values={"title": r["display_name"]} if r.get("display_name") else {},
             interrupts={},
@@ -340,8 +368,8 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
-        created_at=str(record.get("created_at", "")),
-        updated_at=str(record.get("updated_at", "")),
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
     )
 
@@ -381,8 +409,8 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         record = {
             "thread_id": thread_id,
             "status": "idle",
-            "created_at": ckpt_meta.get("created_at", ""),
-            "updated_at": ckpt_meta.get("updated_at", ckpt_meta.get("created_at", "")),
+            "created_at": coerce_iso(ckpt_meta.get("created_at", "")),
+            "updated_at": coerce_iso(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
             "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
         }
 
@@ -396,8 +424,8 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
     return ThreadResponse(
         thread_id=thread_id,
         status=status,
-        created_at=str(record.get("created_at", "")),
-        updated_at=str(record.get("updated_at", "")),
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values(channel_values),
     )
@@ -448,10 +476,10 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
         values=values,
         next=next_tasks,
         metadata=metadata,
-        checkpoint={"id": checkpoint_id, "ts": str(metadata.get("created_at", ""))},
+        checkpoint={"id": checkpoint_id, "ts": coerce_iso(metadata.get("created_at", ""))},
         checkpoint_id=checkpoint_id,
         parent_checkpoint_id=parent_checkpoint_id,
-        created_at=str(metadata.get("created_at", "")),
+        created_at=coerce_iso(metadata.get("created_at", "")),
         tasks=tasks,
     )
 
@@ -501,7 +529,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         channel_values.update(body.values)
 
     checkpoint["channel_values"] = channel_values
-    metadata["updated_at"] = time.time()
+    metadata["updated_at"] = now_iso()
 
     if body.as_node:
         metadata["source"] = "update"
@@ -542,7 +570,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         next=[],
         metadata=metadata,
         checkpoint_id=new_checkpoint_id,
-        created_at=str(metadata.get("created_at", "")),
+        created_at=coerce_iso(metadata.get("created_at", "")),
     )
 
 
@@ -609,7 +637,7 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
                     parent_checkpoint_id=parent_id,
                     metadata=user_meta,
                     values=values,
-                    created_at=str(metadata.get("created_at", "")),
+                    created_at=coerce_iso(metadata.get("created_at", "")),
                     next=next_tasks,
                 )
             )

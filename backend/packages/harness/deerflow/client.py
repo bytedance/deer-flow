@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import shutil
 import tempfile
 import uuid
@@ -32,7 +33,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _build_middlewares
+from deerflow.agents.lead_agent.agent import _assemble_deferred, _build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
@@ -41,7 +42,8 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.installer import install_skill_from_archive
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -123,6 +125,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        environment: str | None = None,
     ):
         """Initialize the client.
 
@@ -140,6 +143,12 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            environment: Deployment environment label that ends up in
+                ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
+                When ``None`` the worker/client falls back to the
+                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                explicit value for programmatic callers that do not want
+                env-var coupling.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -156,6 +165,7 @@ class DeerFlowClient:
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
+        self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -227,15 +237,22 @@ class DeerFlowClient:
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        final_tools, deferred_setup = _assemble_deferred(tools, enabled=self._app_config.tool_search.enabled)
         kwargs: dict[str, Any] = {
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
+            # attach_tracing=False because ``stream()`` injects tracing
+            # callbacks at the graph invocation root so a single embedded run
+            # produces one trace with correct session_id / user_id propagation.
+            # Attaching them again on the model would emit duplicate spans.
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "tools": final_tools,
+            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares, deferred_setup=deferred_setup),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                deferred_names=deferred_setup.deferred_names,
             ),
             "state_schema": ThreadState,
         }
@@ -264,25 +281,35 @@ class DeerFlowClient:
         return [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in tool_calls]
 
     @staticmethod
-    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None) -> "StreamEvent":
-        """Build a ``messages-tuple`` AI text event, attaching usage when present."""
+    def _serialize_additional_kwargs(msg) -> dict[str, Any] | None:
+        """Copy message additional_kwargs when present."""
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs:
+            return dict(additional_kwargs)
+        return None
+
+    @staticmethod
+    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI text event."""
         data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
         if usage:
             data["usage_metadata"] = usage
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
         return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
-    def _ai_tool_calls_event(msg_id: str | None, tool_calls) -> "StreamEvent":
+    def _ai_tool_calls_event(msg_id: str | None, tool_calls, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
         """Build a ``messages-tuple`` AI tool-calls event."""
-        return StreamEvent(
-            type="messages-tuple",
-            data={
-                "type": "ai",
-                "content": "",
-                "id": msg_id,
-                "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
-            },
-        )
+        data: dict[str, Any] = {
+            "type": "ai",
+            "content": "",
+            "id": msg_id,
+            "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
+        }
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
+        return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
     def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
@@ -307,19 +334,30 @@ class DeerFlowClient:
                 d["tool_calls"] = DeerFlowClient._serialize_tool_calls(msg.tool_calls)
             if getattr(msg, "usage_metadata", None):
                 d["usage_metadata"] = msg.usage_metadata
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
             return d
         if isinstance(msg, ToolMessage):
-            return {
+            d = {
                 "type": "tool",
                 "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
             }
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, HumanMessage):
-            return {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, SystemMessage):
-            return {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         return {"type": "unknown", "content": str(msg), "id": getattr(msg, "id", None)}
 
     @staticmethod
@@ -542,6 +580,7 @@ class DeerFlowClient:
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
+            - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "additional_kwargs": {...}}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
@@ -549,6 +588,28 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+
+        # Inject tracing callbacks and Langfuse trace metadata at the graph
+        # invocation root so the embedded client matches the gateway worker's
+        # behaviour: a single ``stream()`` produces one trace with all node /
+        # LLM / tool calls nested under it, and the trace carries the reserved
+        # ``langfuse_session_id`` / ``langfuse_user_id`` keys that the Langfuse
+        # CallbackHandler lifts onto the root trace's ``sessionId`` / ``userId``.
+        tracing_callbacks = build_tracing_callbacks()
+        if tracing_callbacks:
+            existing_callbacks = list(config.get("callbacks") or [])
+            config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+        configurable = config.get("configurable") or {}
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=self._agent_name or "lead-agent",
+            model_name=configurable.get("model_name") or self._model_name,
+            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
@@ -564,6 +625,7 @@ class DeerFlowClient:
         # in both the final ``messages`` chunk and the values snapshot —
         # count it only on whichever arrives first.
         counted_usage_ids: set[str] = set()
+        sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
@@ -593,6 +655,20 @@ class DeerFlowClient:
                 "total_tokens": total_tokens,
             }
 
+        def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
+            if not additional_kwargs:
+                return None
+            if not msg_id:
+                return additional_kwargs
+
+            sent = sent_additional_kwargs_by_id.setdefault(msg_id, {})
+            delta = {key: value for key, value in additional_kwargs.items() if sent.get(key) != value}
+            if not delta:
+                return None
+
+            sent.update(delta)
+            return delta
+
         for item in self._agent.stream(
             state,
             config=config,
@@ -620,17 +696,31 @@ class DeerFlowClient:
 
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
+                    additional_kwargs = self._serialize_additional_kwargs(msg_chunk)
                     counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+                    sent_additional_kwargs = False
 
                     if text:
                         if msg_id:
                             streamed_ids.add(msg_id)
-                        yield self._ai_text_event(msg_id, text, counted_usage)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            additional_kwargs_delta,
+                        )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
 
                     if msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
-                        yield self._ai_tool_calls_event(msg_id, msg_chunk.tool_calls)
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg_chunk.tool_calls,
+                            additional_kwargs_delta,
+                        )
 
                 elif isinstance(msg_chunk, ToolMessage):
                     if msg_id:
@@ -653,17 +743,45 @@ class DeerFlowClient:
                 if msg_id and msg_id in streamed_ids:
                     if isinstance(msg, AIMessage):
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
+                        additional_kwargs = self._serialize_additional_kwargs(msg)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if additional_kwargs_delta:
+                            # Metadata-only follow-up: ``messages-tuple`` has no
+                            # dedicated attribution event, so clients should
+                            # merge this empty-content AI event by message id
+                            # and ignore it for text rendering.
+                            yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
                     continue
 
                 if isinstance(msg, AIMessage):
                     counted_usage = _account_usage(msg_id, msg.usage_metadata)
+                    additional_kwargs = self._serialize_additional_kwargs(msg)
+                    sent_additional_kwargs = False
 
                     if msg.tool_calls:
-                        yield self._ai_tool_calls_event(msg_id, msg.tool_calls)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg.tool_calls,
+                            additional_kwargs_delta,
+                        )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
 
                     text = self._extract_text(msg.content)
                     if text:
-                        yield self._ai_text_event(msg_id, text, counted_usage)
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            additional_kwargs_delta,
+                        )
+                    elif msg_id:
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if not additional_kwargs_delta:
+                            continue
+                        # See the metadata-only follow-up convention above.
+                        yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
 
                 elif isinstance(msg, ToolMessage):
                     yield self._tool_message_event(msg)
@@ -752,8 +870,6 @@ class DeerFlowClient:
             Dict with "skills" key containing list of skill info dicts,
             matching the Gateway API ``SkillsListResponse`` schema.
         """
-        from deerflow.skills.loader import load_skills
-
         return {
             "skills": [
                 {
@@ -763,7 +879,7 @@ class DeerFlowClient:
                     "category": s.category,
                     "enabled": s.enabled,
                 }
-                for s in load_skills(enabled_only=enabled_only)
+                for s in get_or_new_skill_storage().load_skills(enabled_only=enabled_only)
             ]
         }
 
@@ -872,9 +988,9 @@ class DeerFlowClient:
         Returns:
             Skill info dict, or None if not found.
         """
-        from deerflow.skills.loader import load_skills
+        from deerflow.skills.storage import get_or_new_skill_storage
 
-        skill = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
+        skill = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
         if skill is None:
             return None
         return {
@@ -899,9 +1015,9 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
-        from deerflow.skills.loader import load_skills
+        from deerflow.skills.storage import get_or_new_skill_storage
 
-        skills = load_skills(enabled_only=False)
+        skills = get_or_new_skill_storage().load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found")
@@ -924,7 +1040,7 @@ class DeerFlowClient:
         self._agent_config_key = None
         reload_extensions_config()
 
-        updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
+        updated = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:
             raise RuntimeError(f"Skill '{name}' disappeared after update")
         return {
@@ -948,7 +1064,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return install_skill_from_archive(skill_path)
+        return get_or_new_skill_storage().install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

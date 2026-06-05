@@ -8,7 +8,7 @@ dependencies = [
     "deerflow-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
-    "python-multipart>=0.0.26",
+    "python-multipart>=0.0.27",
     "sse-starlette>=2.1.0",
     "uvicorn[standard]>=0.34.0",
     "lark-oapi>=1.4.0",
@@ -25,9 +25,11 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["deerflow-harness[postgres]"]
+discord = ["discord.py>=2.7.0"]
 
 [dependency-groups]
 dev = [
+    "blockbuster>=1.5.26,<1.6",
     "prompt-toolkit>=3.0.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
@@ -37,6 +39,7 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
+    "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
 ]
 
 [tool.uv]
@@ -47,4 +50,3 @@ members = ["packages/harness"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
-

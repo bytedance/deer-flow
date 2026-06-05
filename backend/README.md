@@ -11,31 +11,26 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
                         │          Nginx (Port 2026)           │
                         │      Unified reverse proxy           │
                         └───────┬──────────────────┬───────────┘
-                                │                  │
-              /api/langgraph/*  │                  │  /api/* (other)
-                                ▼                  ▼
-               ┌────────────────────┐  ┌────────────────────────┐
-               │ LangGraph Server   │  │   Gateway API (8001)   │
-               │    (Port 2024)     │  │   FastAPI REST         │
-               │                    │  │                        │
-               │ ┌────────────────┐ │  │ Models, MCP, Skills,   │
-               │ │  Lead Agent    │ │  │ Memory, Uploads,       │
-               │ │  ┌──────────┐  │ │  │ Artifacts              │
-               │ │  │Middleware│  │ │  └────────────────────────┘
-               │ │  │  Chain   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │  Tools   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │Subagents │  │ │
-               │ │  └──────────┘  │ │
-               │ └────────────────┘ │
-               └────────────────────┘
+                                │
+            /api/langgraph/*    │    /api/* (other)
+            rewritten to /api/* │
+                                ▼
+               ┌────────────────────────────────────────┐
+               │        Gateway API (8001)              │
+               │        FastAPI REST + agent runtime    │
+               │                                        │
+               │ Models, MCP, Skills, Memory, Uploads,  │
+               │ Artifacts, Threads, Runs, Streaming    │
+               │                                        │
+               │ ┌────────────────────────────────────┐ │
+               │ │ Lead Agent                         │ │
+               │ │ Middleware Chain, Tools, Subagents │ │
+               │ └────────────────────────────────────┘ │
+               └────────────────────────────────────────┘
 ```
 
 **Request Routing** (via Nginx):
-- `/api/langgraph/*` → LangGraph Server - agent interactions, threads, streaming
+- `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 
@@ -74,12 +69,12 @@ Middlewares execute in strict order, each handling a specific concern:
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
-- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
+- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/). Async runtime paths use async sandbox lifecycle hooks so startup, readiness polling, and release do not block the event loop.
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
 - **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
 - **File-write safety**: `str_replace` serializes read-modify-write per `(sandbox.id, path)` so isolated sandboxes keep concurrency even when virtual paths match
-- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
+- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`write_file` overwrites by default and exposes `append` for end-of-file writes; `bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
 ### Subagent System
 
@@ -124,7 +119,7 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
+| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
@@ -193,7 +188,7 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts LangGraph + Gateway + Frontend + Nginx
+make dev  # Starts Gateway + Frontend + Nginx
 ```
 
 Access at: http://localhost:2026
@@ -201,14 +196,11 @@ Access at: http://localhost:2026
 **Backend Only** (from backend directory):
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
-Direct access: LangGraph at http://localhost:2024, Gateway at http://localhost:8001
+Direct access: Gateway at http://localhost:8001
 
 ---
 
@@ -244,11 +236,15 @@ backend/
 │   └── utils/                  # Utilities
 ├── docs/                       # Documentation
 ├── tests/                      # Test suite
-├── langgraph.json              # LangGraph server configuration
+├── langgraph.json              # LangGraph graph registry for tooling/Studio compatibility
 ├── pyproject.toml              # Python dependencies
 ├── Makefile                    # Development commands
 └── Dockerfile                  # Container build
 ```
+
+`langgraph.json` is not the default service entrypoint.  The scripts and Docker
+deployments run the Gateway embedded runtime; the file is kept for LangGraph
+tooling, Studio, or direct LangGraph Server compatibility.
 
 ---
 
@@ -362,10 +358,11 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run LangGraph server (port 2024)
-make gateway    # Run Gateway API (port 8001)
+make dev        # Run Gateway API + embedded agent runtime (port 8001)
+make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
+make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
 ```
 
 ### Code Style
@@ -381,6 +378,18 @@ make format     # Format code (ruff)
 ```bash
 uv run pytest
 ```
+
+`make detect-blocking-io` statically scans backend business code for blocking
+IO that may run on the backend event loop and is not test-coverage-bound. It
+prints a concise summary for human review and writes complete JSON findings to
+`.deer-flow/blocking-io-findings.json` at the repository root (regardless of
+whether the target is invoked from the repo root or from `backend/`). JSON
+findings include both broad IO category and review-oriented fields such as
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code`. `priority` is a deterministic review ordering from the operation type,
+not proof of a bug. Bare-name same-file calls are resolved by function name,
+so duplicate helper names in one file can conservatively over-report async
+reachability.
 
 ---
 

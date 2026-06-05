@@ -1,4 +1,27 @@
+"""Lead agent factory.
+
+INVARIANT — tracing callback placement
+======================================
+
+Tracing callbacks (Langfuse, LangSmith) are attached at the **graph
+invocation root** in :func:`_make_lead_agent` (see the
+``build_tracing_callbacks()`` block that appends to ``config["callbacks"]``).
+Every ``create_chat_model(...)`` call inside this module — and inside any
+middleware reachable from this graph (e.g. ``TitleMiddleware``) — MUST pass
+``attach_tracing=False``.
+
+Forgetting that flag emits duplicate spans (one rooted at the graph, one at
+the model) AND prevents the Langfuse handler's ``propagate_attributes``
+path from firing, so ``session_id`` / ``user_id`` never reach the trace.
+The four current sites are: bootstrap agent, default agent, summarization
+middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
+``create_chat_model`` call must add to this list and pass the flag.
+"""
+
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -9,6 +32,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -19,9 +43,15 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import get_memory_config
-from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.types import Skill
+from deerflow.tracing import build_tracing_callbacks
+
+if TYPE_CHECKING:
+    from langchain.tools import BaseTool
+
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +82,8 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
-    config = get_summarization_config()
+    resolved_app_config = app_config or get_app_config()
+    config = resolved_app_config.summarization
 
     if not config.enabled:
         return None
@@ -72,10 +103,14 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # Bind "middleware:summarize" tag so RunJournal identifies these LLM calls
     # as middleware rather than lead_agent (SummarizationMiddleware is a
     # LangChain built-in, so we tag the model at creation time).
+    # attach_tracing=False because the graph-level RunnableConfig (set in
+    # ``_make_lead_agent``) already carries tracing callbacks; binding them
+    # again at the model level would emit duplicate spans and break
+    # ``session_id`` / ``user_id`` propagation.
     if config.model_name:
-        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=config.model_name, thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     else:
-        model = create_chat_model(thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(thinking_enabled=False, app_config=resolved_app_config, attach_tracing=False)
     model = model.with_config(tags=["middleware:summarize"])
 
     # Prepare kwargs
@@ -92,18 +127,13 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if get_memory_config().enabled:
+    if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
     # config is not expected to change after startup.
-    try:
-        resolved_app_config = app_config or get_app_config()
-        skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-    except Exception:
-        logger.exception("Failed to resolve skills container path; falling back to default")
-        skills_container_path = "/mnt/skills"
+    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,
@@ -248,6 +278,7 @@ def _build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     app_config: AppConfig | None = None,
+    deferred_setup=None,
 ):
     """Build middleware chain based on runtime configuration.
 
@@ -261,6 +292,12 @@ def _build_middlewares(
     """
     resolved_app_config = app_config or get_app_config()
     middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+
+    # Always inject current date (and optionally memory) as <system-reminder> into the
+    # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -279,10 +316,10 @@ def _build_middlewares(
         middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
-    middlewares.append(TitleMiddleware())
+    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name))
+    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Additive: inject per-user Mem0 recall before the model call.
     # Only appended when MEM0_ENABLED=1; chain is byte-for-byte identical when unset.
@@ -297,11 +334,13 @@ def _build_middlewares(
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
-    # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
-    if resolved_app_config.tool_search.enabled:
+    # Hide deferred tool schemas from model binding until tool_search promotes them.
+    # The deferred set + catalog hash come from the build-time setup (assembled
+    # after tool-policy filtering); promotion is read from graph state.
+    if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
-        middlewares.append(DeferredToolFilterMiddleware())
+        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -310,24 +349,84 @@ def _build_middlewares(
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
-    middlewares.append(LoopDetectionMiddleware())
+    loop_detection_config = resolved_app_config.loop_detection
+    if loop_detection_config.enabled:
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
+
+    # SafetyFinishReasonMiddleware — suppress tool execution when the provider
+    # safety-terminated the response. Registered after custom middlewares so
+    # that LangChain's reverse-order after_model dispatch runs Safety first;
+    # cleared tool_calls then flow through Loop/Subagent accounting without
+    # firing extra alarms. See safety_finish_reason_middleware.py docstring.
+    safety_config = resolved_app_config.safety_finish_reason
+    if safety_config.enabled:
+        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
     return middlewares
 
 
-def make_lead_agent(config: RunnableConfig, app_config: AppConfig | None = None):
+def _assemble_deferred(filtered_tools: list[BaseTool], *, enabled: bool) -> tuple[list[BaseTool], DeferredToolSetup]:
+    """Build the final tool list + deferred setup from a policy-filtered list.
+
+    Call AFTER tool-policy filtering so the deferred catalog never exposes a
+    tool the agent is not allowed to use. Fail-closed: if tool_search is enabled
+    and MCP tools survived filtering but no deferred set was recovered, raise
+    rather than silently binding their full schemas to the model.
+    """
+    from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
+    from deerflow.tools.mcp_metadata import is_mcp_tool
+
+    deferred_setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
+    if enabled and not deferred_setup.deferred_names and any(is_mcp_tool(t) for t in filtered_tools):
+        raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered — refusing to bind MCP schemas (fail-closed).")
+    final_tools = list(filtered_tools)
+    if deferred_setup.tool_search_tool:
+        final_tools.append(deferred_setup.tool_search_tool)
+    return final_tools, deferred_setup
+
+
+def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
+    if is_bootstrap:
+        return {"bootstrap"}
+    if agent_config and agent_config.skills is not None:
+        return set(agent_config.skills)
+    return None
+
+
+def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig) -> list[Skill]:
+    try:
+        from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
+
+        skills = get_enabled_skills_for_config(app_config)
+    except Exception:
+        logger.exception("Failed to load skills for allowed-tools policy")
+        raise
+
+    if available_skills is None:
+        return skills
+    return [skill for skill in skills if skill.name in available_skills]
+
+
+def make_lead_agent(config: RunnableConfig):
+    """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
+    runtime_config = _get_runtime_config(config)
+    runtime_app_config = runtime_config.get("app_config")
+    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
+
+
+def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
-    from deerflow.tools.builtins import setup_agent
+    from deerflow.tools.builtins import setup_agent, update_agent
 
     cfg = _get_runtime_config(config)
-    resolved_app_config = app_config or get_app_config()
+    resolved_app_config = app_config
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
@@ -339,6 +438,7 @@ def make_lead_agent(config: RunnableConfig, app_config: AppConfig | None = None)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -377,41 +477,62 @@ def make_lead_agent(config: RunnableConfig, app_config: AppConfig | None = None)
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
-            "available_skills": ["bootstrap"] if is_bootstrap else (agent_config.skills if agent_config and agent_config.skills is not None else None),
+            "available_skills": sorted(available_skills) if available_skills is not None else None,
         }
     )
 
+    # Inject tracing callbacks at the graph invocation root so a single LangGraph
+    # run produces one trace with all node / LLM / tool calls as child spans,
+    # AND so the Langfuse handler sees ``on_chain_start(parent_run_id=None)`` and
+    # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
+    # ``config["metadata"]`` onto the trace. Without root-level attachment the
+    # model is a nested observation and the handler strips ``langfuse_*`` keys.
+    tracing_callbacks = build_tracing_callbacks()
+    if tracing_callbacks:
+        existing = config.get("callbacks") or []
+        if not isinstance(existing, list):
+            existing = list(existing)
+        config["callbacks"] = [*existing, *tracing_callbacks]
+
+    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
+        final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+            tools=final_tools,
+            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config, deferred_setup=setup),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 available_skills=set(["bootstrap"]),
                 app_config=resolved_app_config,
+                deferred_names=setup.deferred_names,
             ),
             state_schema=ThreadState,
         )
 
+    # Custom agents can update their own SOUL.md / config via update_agent.
+    # The default agent (no agent_name) does not see this tool.
+    extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
+    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+    final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
-        tools=get_available_tools(
-            model_name=model_name,
-            groups=agent_config.tool_groups if agent_config else None,
-            subagent_enabled=subagent_enabled,
-            app_config=resolved_app_config,
-        ),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+        tools=final_tools,
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config, deferred_setup=setup),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
             available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
             app_config=resolved_app_config,
+            deferred_names=setup.deferred_names,
         ),
         state_schema=ThreadState,
     )

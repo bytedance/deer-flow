@@ -43,6 +43,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { getAPIClient } from "@/core/api";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   exportThreadAsJSON,
@@ -126,7 +127,12 @@ export function RecentChatList() {
       const baseUrl = isLocalhost ? VERCEL_URL : window.location.origin;
       const shareUrl = `${baseUrl}${pathOfThread(thread)}`;
       try {
-        await navigator.clipboard.writeText(shareUrl);
+        const didCopy = await writeTextToClipboard(shareUrl);
+        if (!didCopy) {
+          toast.error(t.clipboard.failedToCopyToClipboard);
+          return;
+        }
+
         toast.success(t.clipboard.linkCopied);
       } catch {
         toast.error(t.clipboard.failedToCopyToClipboard);

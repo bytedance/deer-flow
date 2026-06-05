@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -1138,6 +1139,170 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
 
     assert failures == []
     assert sandbox.content == "ALPHA\ntail\n"
+
+
+def test_write_file_tool_bounds_large_oserror_and_masks_local_paths(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-large-oserror"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            host_path = f"{_THREAD_DATA['workspace_path']}/nested/output.txt"
+            raise OSError(f"write failed at {host_path}\n{'A' * 12000}\nremote tail marker")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+    monkeypatch.setattr("deerflow.sandbox.tools.get_thread_data", lambda runtime: _THREAD_DATA)
+    monkeypatch.setattr("deerflow.sandbox.tools.validate_local_tool_path", lambda path, thread_data: None)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._resolve_and_validate_user_data_path",
+        lambda path, thread_data: f"{_THREAD_DATA['workspace_path']}/output.txt",
+    )
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="写入大文件失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="report body",
+    )
+
+    assert len(result) <= 2000
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "/tmp/deer-flow/threads/t1/user-data/workspace" not in result
+    assert "/mnt/user-data/workspace/nested/output.txt" in result
+    assert "remote tail marker" in result
+    assert "[write_file error truncated:" in result
+
+
+def test_write_file_tool_preserves_short_oserror_without_truncation(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-short-oserror"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise OSError("disk quota exceeded")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="写入失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert result == "Error: Failed to write file '/mnt/user-data/workspace/output.txt': OSError: disk quota exceeded"
+    assert "[write_file error truncated:" not in result
+
+
+def test_write_file_tool_bounds_large_sandbox_error(monkeypatch) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-large-sandbox-error"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise SandboxError(f"remote write rejected {'B' * 12000} final detail")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="远端写入失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert len(result) <= 2000
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "SandboxError: remote write rejected" in result
+    assert "final detail" in result
+    assert "[write_file error truncated:" in result
+
+
+@pytest.mark.parametrize(
+    ("raised_error", "expected_fragment"),
+    [
+        pytest.param(
+            PermissionError("permission denied"),
+            "Error: Permission denied writing to file: /mnt/user-data/workspace/output.txt",
+            id="permission",
+        ),
+        pytest.param(
+            IsADirectoryError("target is a directory"),
+            "Error: Path is a directory, not a file: /mnt/user-data/workspace/output.txt",
+            id="directory",
+        ),
+        pytest.param(
+            Exception("remote sandbox timeout"),
+            "Exception: remote sandbox timeout",
+            id="generic",
+        ),
+    ],
+)
+def test_write_file_tool_formats_all_other_failure_branches(
+    monkeypatch,
+    raised_error: Exception,
+    expected_fragment: str,
+) -> None:
+    class FailingSandbox:
+        id = "sandbox-write-other-failure"
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            raise raised_error
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    sandbox = FailingSandbox()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="验证错误分支格式化",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert "/mnt/user-data/workspace/output.txt" in result
+    assert expected_fragment in result
+    assert "[write_file error truncated:" not in result
+
+
+def test_write_file_tool_handles_sandbox_init_failure(monkeypatch) -> None:
+    """Regression for #3133 review: SandboxError raised during sandbox
+    initialization (before the local `requested_path` assignment) must still
+    surface as a bounded tool error rather than an UnboundLocalError.
+    """
+
+    def raise_sandbox_error(runtime):
+        raise SandboxError("sandbox missing")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", raise_sandbox_error)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = write_file_tool.func(
+        runtime=runtime,
+        description="sandbox 初始化失败",
+        path="/mnt/user-data/workspace/output.txt",
+        content="tiny payload",
+    )
+
+    assert "Error: Failed to write file '/mnt/user-data/workspace/output.txt':" in result
+    assert "SandboxError: sandbox missing" in result
+    assert "[write_file error truncated:" not in result
 
 
 def test_file_operation_lock_memory_cleanup() -> None:

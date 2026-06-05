@@ -17,14 +17,13 @@ import json
 import os
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
 
 from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.app_config import AppConfig
-from deerflow.config.model_config import ModelConfig
-from deerflow.config.sandbox_config import SandboxConfig
 
 # Load .env from project root (for OPENAI_API_KEY etc.)
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -55,24 +54,34 @@ def _make_e2e_config() -> AppConfig:
     - ``E2E_MODEL_ID``    (default: ``ep-20251211175242-llcmh``)
     - ``E2E_BASE_URL``    (default: ``https://ark-cn-beijing.bytedance.net/api/v3``)
     - ``OPENAI_API_KEY``  (required for LLM tests)
+
+    Note: We use model_validate with a raw dict (not AppConfig(models=[ModelConfig(...)]))
+    because passing already-validated Pydantic instances triggers a pydantic-core
+    shortcut that returns stale cached data when another AppConfig was previously
+    loaded from disk in the same process. Dict-based validation is always correct.
     """
-    return AppConfig(
-        models=[
-            ModelConfig(
-                name=os.getenv("E2E_MODEL_NAME", "volcengine-ark"),
-                display_name="E2E Test Model",
-                use=os.getenv("E2E_MODEL_USE", "langchain_openai:ChatOpenAI"),
-                model=os.getenv("E2E_MODEL_ID", "ep-20251211175242-llcmh"),
-                base_url=os.getenv("E2E_BASE_URL", "https://ark-cn-beijing.bytedance.net/api/v3"),
-                api_key=os.getenv("OPENAI_API_KEY", ""),
-                max_tokens=512,
-                temperature=0.7,
-                supports_thinking=False,
-                supports_reasoning_effort=False,
-                supports_vision=False,
-            )
-        ],
-        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=True),
+    return AppConfig.model_validate(
+        {
+            "models": [
+                {
+                    "name": os.getenv("E2E_MODEL_NAME", "volcengine-ark"),
+                    "display_name": "E2E Test Model",
+                    "use": os.getenv("E2E_MODEL_USE", "langchain_openai:ChatOpenAI"),
+                    "model": os.getenv("E2E_MODEL_ID", "ep-20251211175242-llcmh"),
+                    "base_url": os.getenv("E2E_BASE_URL", "https://ark-cn-beijing.bytedance.net/api/v3"),
+                    "api_key": os.getenv("OPENAI_API_KEY", ""),
+                    "max_tokens": 512,
+                    "temperature": 0.7,
+                    "supports_thinking": False,
+                    "supports_reasoning_effort": False,
+                    "supports_vision": False,
+                }
+            ],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                "allow_host_bash": True,
+            },
+        }
     )
 
 
@@ -86,19 +95,31 @@ def e2e_env(tmp_path, monkeypatch):
     """Isolated filesystem environment for E2E tests.
 
     - DEER_FLOW_HOME → tmp_path (all thread data lands in a temp dir)
+    - DEER_FLOW_PROJECT_ROOT → repository root (shared skills/config assets
+      still resolve correctly when tests run from backend/)
     - Singletons reset so they pick up the new env
     - Title/memory/summarization disabled to avoid extra LLM calls
     - AppConfig built programmatically (avoids config.yaml param-name issues)
     """
     # 1. Filesystem isolation
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "DEER_FLOW_PROJECT_ROOT",
+        str(Path(__file__).resolve().parents[2]),
+    )
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
 
-    # 2. Inject a clean AppConfig via the global singleton.
+    # 2. Inject a clean AppConfig. We must reset _app_config to None BEFORE
+    # calling _make_e2e_config() because AppConfig() constructor misbehaves when
+    # a disk config is already cached: it returns the cached model list instead
+    # of the provided one. Clearing first ensures the test config is correct.
+    monkeypatch.setattr("deerflow.config.app_config._app_config", None)
+    monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", False)
     config = _make_e2e_config()
     monkeypatch.setattr("deerflow.config.app_config._app_config", config)
     monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: config)
 
     # 3. Disable title generation (extra LLM call, non-deterministic)
     from deerflow.config.title_config import TitleConfig
@@ -540,9 +561,11 @@ class TestSkillInstallation:
         skills_root = tmp_path / "skills"
         (skills_root / "public").mkdir(parents=True)
         (skills_root / "custom").mkdir(parents=True)
+        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
         monkeypatch.setattr(
-            "deerflow.skills.installer.get_skills_root_path",
-            lambda: skills_root,
+            "deerflow.skills.storage._default_skill_storage",
+            LocalSkillStorage(host_path=str(skills_root)),
         )
         self._skills_root = skills_root
 
@@ -617,19 +640,21 @@ class TestConfigManagement:
 
     def test_list_models_returns_injected_config(self, e2e_env):
         """list_models() returns the model from the injected AppConfig."""
+        expected_model_name = os.getenv("E2E_MODEL_NAME", "volcengine-ark")
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         result = c.list_models()
         assert "models" in result
         assert len(result["models"]) == 1
-        assert result["models"][0]["name"] == "volcengine-ark"
+        assert result["models"][0]["name"] == expected_model_name
         assert result["models"][0]["display_name"] == "E2E Test Model"
 
     def test_get_model_found(self, e2e_env):
         """get_model() returns the model when it exists."""
+        expected_model_name = os.getenv("E2E_MODEL_NAME", "volcengine-ark")
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        model = c.get_model("volcengine-ark")
+        model = c.get_model(expected_model_name)
         assert model is not None
-        assert model["name"] == "volcengine-ark"
+        assert model["name"] == expected_model_name
         assert model["supports_thinking"] is False
 
     def test_get_model_not_found(self, e2e_env):

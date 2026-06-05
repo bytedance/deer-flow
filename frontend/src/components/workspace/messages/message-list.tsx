@@ -1,6 +1,7 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import {
   Conversation,
@@ -9,33 +10,44 @@ import {
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildTokenDebugSteps,
+  type TokenUsageInlineMode,
+} from "@/core/messages/usage-model";
+import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
-  groupMessages,
+  getAssistantTurnCopyData,
+  getAssistantTurnUsageMessages,
+  getMessageGroups,
+  getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
   hasReasoning,
-  hasToolCalls,
+  isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { parseSubtaskResult } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
+import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
-import { MessageTokenUsageList } from "./message-token-usage";
+import {
+  MessageTokenUsageDebugList,
+  MessageTokenUsageList,
+} from "./message-token-usage";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
-export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
-export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
+export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
@@ -149,7 +161,7 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-  tokenUsageEnabled = false,
+  tokenUsageInlineMode = "off",
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
@@ -158,7 +170,7 @@ export function MessageList({
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
-  tokenUsageEnabled?: boolean;
+  tokenUsageInlineMode?: TokenUsageInlineMode;
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
@@ -167,10 +179,90 @@ export function MessageList({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const groupedMessages = getMessageGroups(messages);
+  const turnUsageMessagesByGroupIndex =
+    getAssistantTurnUsageMessages(groupedMessages);
+  const tokenDebugSteps = useMemo(
+    () => buildTokenDebugSteps(messages, t),
+    [messages, t],
+  );
+  const streamingMessages = useMemo(
+    () =>
+      getStreamingMessageLookup(
+        messages,
+        thread.isLoading,
+        thread.getMessagesMetadata,
+      ),
+    [messages, thread.getMessagesMetadata, thread.isLoading],
+  );
+
+  const renderAssistantCopyButton = useCallback(
+    (messages: Message[], isStreaming: boolean) => {
+      const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
+
+      if (!clipboardData) {
+        return null;
+      }
+
+      return (
+        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+          <CopyButton clipboardData={clipboardData} />
+        </div>
+      );
+    },
+    [],
+  );
+
+  const renderTokenUsage = useCallback(
+    ({
+      messages,
+      turnUsageMessages,
+      inlineDebug = true,
+      debugMessageIds,
+    }: {
+      messages: Message[];
+      turnUsageMessages?: Message[] | null;
+      inlineDebug?: boolean;
+      debugMessageIds?: string[];
+    }) => {
+      if (tokenUsageInlineMode === "per_turn") {
+        return (
+          <MessageTokenUsageList
+            enabled={true}
+            isLoading={thread.isLoading}
+            messages={turnUsageMessages ?? []}
+          />
+        );
+      }
+
+      if (tokenUsageInlineMode === "step_debug" && inlineDebug) {
+        const messageIds = new Set(
+          debugMessageIds ??
+            messages
+              .filter((message) => message.type === "ai")
+              .map((message) => message.id)
+              .filter((id): id is string => typeof id === "string"),
+        );
+        return (
+          <MessageTokenUsageDebugList
+            enabled={true}
+            isLoading={thread.isLoading}
+            steps={tokenDebugSteps.filter((step) =>
+              messageIds.has(step.messageId),
+            )}
+          />
+        );
+      }
+
+      return null;
+    },
+    [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
+  );
 
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
+
   return (
     <Conversation
       className={cn("flex size-full flex-col justify-center", className)}
@@ -181,19 +273,43 @@ export function MessageList({
           hasMore={hasMoreHistory}
           loadMore={loadMoreHistory}
         />
-        {groupMessages(messages, (group) => {
+        {groupedMessages.map((group, groupIndex) => {
+          const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+
           if (group.type === "human" || group.type === "assistant") {
-            return group.messages.map((msg) => {
-              return (
-                <MessageListItem
-                  key={`${group.id}/${msg.id}`}
-                  threadId={threadId}
-                  message={msg}
-                  isLoading={thread.isLoading}
-                  tokenUsageEnabled={tokenUsageEnabled}
-                />
-              );
-            });
+            return (
+              <div
+                key={group.id}
+                className={cn(
+                  "w-full",
+                  group.type === "assistant" && "group/assistant-turn",
+                )}
+              >
+                {group.messages.map((msg) => {
+                  return (
+                    <MessageListItem
+                      key={`${group.id}/${msg.id}`}
+                      message={msg}
+                      isLoading={thread.isLoading}
+                      threadId={threadId}
+                      showCopyButton={group.type !== "assistant"}
+                    />
+                  );
+                })}
+                {renderTokenUsage({
+                  messages: group.messages,
+                  turnUsageMessages,
+                })}
+                {group.type === "assistant" &&
+                  renderAssistantCopyButton(
+                    group.messages,
+                    isAssistantMessageGroupStreaming(
+                      group.messages,
+                      streamingMessages,
+                    ),
+                  )}
+              </div>
+            );
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
@@ -204,11 +320,10 @@ export function MessageList({
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
                   />
-                  <MessageTokenUsageList
-                    enabled={tokenUsageEnabled}
-                    isLoading={thread.isLoading}
-                    messages={group.messages}
-                  />
+                  {renderTokenUsage({
+                    messages: group.messages,
+                    turnUsageMessages,
+                  })}
                 </div>
               );
             }
@@ -232,11 +347,10 @@ export function MessageList({
                   />
                 )}
                 <ArtifactFileList files={files} threadId={threadId} />
-                <MessageTokenUsageList
-                  enabled={tokenUsageEnabled}
-                  isLoading={thread.isLoading}
-                  messages={group.messages}
-                />
+                {renderTokenUsage({
+                  messages: group.messages,
+                  turnUsageMessages,
+                })}
               </div>
             );
           } else if (group.type === "assistant:subagent") {
@@ -259,37 +373,26 @@ export function MessageList({
               } else if (message.type === "tool") {
                 const taskId = message.tool_call_id;
                 if (taskId) {
-                  const result = extractTextFromMessage(message);
-                  if (result.startsWith("Task Succeeded. Result:")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "completed",
-                      result: result
-                        .split("Task Succeeded. Result:")[1]
-                        ?.trim(),
-                    });
-                  } else if (result.startsWith("Task failed.")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result.split("Task failed.")[1]?.trim(),
-                    });
-                  } else if (result.startsWith("Task timed out")) {
-                    updateSubtask({
-                      id: taskId,
-                      status: "failed",
-                      error: result,
-                    });
-                  } else {
-                    updateSubtask({
-                      id: taskId,
-                      status: "in_progress",
-                    });
-                  }
+                  const parsed = parseSubtaskResult(
+                    extractTextFromMessage(message),
+                  );
+                  updateSubtask({ id: taskId, ...parsed });
                 }
               }
             }
+
             const results: React.ReactNode[] = [];
+            const subagentDebugMessageIds: string[] = [];
+            if (tasks.size > 0) {
+              results.push(
+                <div
+                  key="subtask-count"
+                  className="text-muted-foreground pt-2 text-sm font-normal"
+                >
+                  {t.subtasks.executing(tasks.size)}
+                </div>,
+              );
+            }
             for (const message of group.messages.filter(
               (message) => message.type === "ai",
             )) {
@@ -299,17 +402,17 @@ export function MessageList({
                     key={"thinking-group-" + message.id}
                     messages={[message]}
                     isLoading={thread.isLoading}
+                    tokenDebugSteps={tokenDebugSteps.filter(
+                      (step) => step.messageId === message.id,
+                    )}
+                    showTokenDebugSummaries={
+                      tokenUsageInlineMode === "step_debug"
+                    }
                   />,
                 );
+              } else if (message.id) {
+                subagentDebugMessageIds.push(message.id);
               }
-              results.push(
-                <div
-                  key="subtask-count"
-                  className="text-muted-foreground font-norma pt-2 text-sm"
-                >
-                  {t.subtasks.executing(tasks.size)}
-                </div>,
-              );
               const taskIds = message.tool_calls
                 ?.filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
@@ -329,30 +432,31 @@ export function MessageList({
                 className="relative z-1 flex flex-col gap-2"
               >
                 {results}
-                <MessageTokenUsageList
-                  enabled={tokenUsageEnabled}
-                  isLoading={thread.isLoading}
-                  messages={group.messages}
-                />
+                {renderTokenUsage({
+                  messages: group.messages,
+                  turnUsageMessages,
+                  debugMessageIds: subagentDebugMessageIds,
+                })}
               </div>
             );
           }
-          const tokenUsageMessages = group.messages.filter(
-            (message) =>
-              message.type === "ai" &&
-              (hasToolCalls(message) ? true : !hasContent(message)),
-          );
           return (
             <div key={"group-" + group.id} className="w-full">
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}
+                tokenDebugSteps={tokenDebugSteps.filter((step) =>
+                  group.messages.some(
+                    (message) => message.id === step.messageId,
+                  ),
+                )}
+                showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
               />
-              <MessageTokenUsageList
-                enabled={tokenUsageEnabled}
-                isLoading={thread.isLoading}
-                messages={tokenUsageMessages}
-              />
+              {renderTokenUsage({
+                messages: group.messages,
+                turnUsageMessages,
+                inlineDebug: false,
+              })}
             </div>
           );
         })}
