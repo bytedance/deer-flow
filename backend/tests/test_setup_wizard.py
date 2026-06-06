@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import yaml
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS
+from wizard.steps import llm as llm_step
 from wizard.steps import search as search_step
 from wizard.writer import (
     build_minimal_config,
@@ -57,6 +58,58 @@ class TestProviders:
     def test_at_least_one_free_web_fetch_provider(self):
         free = [provider for provider in WEB_FETCH_PROVIDERS if provider.env_var is None]
         assert free, "Expected at least one free (no-key) web fetch provider"
+
+
+class TestLLMStep:
+    def test_other_openai_compatible_prompts_for_thinking_support(self, monkeypatch):
+        provider_index = next(i for i, provider in enumerate(LLM_PROVIDERS) if provider.name == "other")
+
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        choices = iter([provider_index])
+        text_answers = iter(["https://example.com/v1", "custom-reasoner"])
+        prompts: list[str] = []
+
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: next(choices))
+        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: next(text_answers))
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "test-key")
+
+        def fake_yes_no(prompt, default=True):
+            prompts.append(prompt)
+            return True
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", fake_yes_no)
+
+        result = llm_step.run_llm_step()
+
+        assert result.provider.name == "other"
+        assert result.model_name == "custom-reasoner"
+        assert result.base_url == "https://example.com/v1"
+        assert result.extra_model_config == {"supports_thinking": True}
+        assert prompts == ["Does this model support thinking/reasoning mode?"]
+
+    def test_provider_default_thinking_metadata_skips_capability_prompt(self, monkeypatch):
+        provider_index = next(i for i, provider in enumerate(LLM_PROVIDERS) if provider.name == "vllm")
+
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        choices = iter([provider_index, 0])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: next(choices))
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "test-key")
+
+        def fail_yes_no(*_args, **_kwargs):
+            raise AssertionError("thinking support is already declared by the provider")
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", fail_yes_no)
+
+        result = llm_step.run_llm_step()
+
+        assert result.provider.name == "vllm"
+        assert result.extra_model_config is None
 
 
 class TestBuildMinimalConfig:
@@ -128,6 +181,18 @@ class TestBuildMinimalConfig:
         assert model["max_retries"] == 2
         assert model["max_tokens"] == 8192
         assert model["temperature"] == 0.7
+
+    def test_model_capability_metadata_is_written(self):
+        content = build_minimal_config(
+            provider_use="langchain_openai:ChatOpenAI",
+            model_name="custom-reasoner",
+            display_name="Other OpenAI-compatible",
+            api_key_field="api_key",
+            env_var="OPENAI_API_KEY",
+            extra_model_config={"supports_thinking": True},
+        )
+        data = yaml.safe_load(content)
+        assert data["models"][0]["supports_thinking"] is True
 
     def test_web_fetch_tool_included(self):
         content = build_minimal_config(
