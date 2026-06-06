@@ -628,7 +628,7 @@ def test_loop_detection_before_clarification(mock_create_agent):
     loop_idx = mw_types.index("LoopDetectionMiddleware")
     clar_idx = mw_types.index("ClarificationMiddleware")
     assert loop_idx < clar_idx
-    assert loop_idx == clar_idx - 1
+    assert loop_idx == clar_idx - 2
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +673,7 @@ def test_loop_detection_custom_middleware(mock_create_agent):
     assert "LoopDetectionMiddleware" not in mw_types
     # Custom replacement still sits immediately before ClarificationMiddleware.
     assert mw_types[-1] == "ClarificationMiddleware"
-    assert mw_types[-2] == "MyLoopDetection"
+    assert mw_types[-3] == "MyLoopDetection"
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +805,7 @@ def test_full_chain_order(mock_create_agent):
         "ViewImageMiddleware",
         "SubagentLimitMiddleware",
         "LoopDetectionMiddleware",
+        "TokenBudgetMiddleware",
         "ClarificationMiddleware",
     ]
     assert mw_types == expected_order
