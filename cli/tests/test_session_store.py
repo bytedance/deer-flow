@@ -223,7 +223,7 @@ class TestDeleteSessionFiles:
                 "last_checkpoint_id": None,
             }
             store.session_metrics["d1"] = {"total_tokens": 0, "tool_calls": 0, "turns": 0}
-            store.save_async("s1")  # Just to exercise queue
+            store.save_async("d1")  # Exercise queue with pending write for d1
             (sessions_dir / "d1.json").write_text("{}")
 
             store.delete_session_files("d1")

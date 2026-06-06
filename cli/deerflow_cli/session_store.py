@@ -48,6 +48,7 @@ class SessionStore:
         self._write_queue = queue.Queue()
         self._pending_writes = {}
         self._lock = threading.Lock()
+        self._shutdown = False
         self._write_thread = threading.Thread(target=self._write_worker, daemon=True)
         self._write_thread.start()
 
@@ -102,17 +103,19 @@ class SessionStore:
         Args:
             session_id: ID of the session to save
         """
-        if session_id not in self.sessions:
+        if self._shutdown:
             return
 
-        data = {
-            "session_id": session_id,
-            "info": self.sessions[session_id],
-            "metrics": self.session_metrics[session_id],
-        }
-
         with self._lock:
+            if session_id not in self.sessions:
+                return
+            data = {
+                "session_id": session_id,
+                "info": self.sessions[session_id].copy(),
+                "metrics": self.session_metrics[session_id].copy(),
+            }
             self._pending_writes[session_id] = data
+
         self._write_queue.put(session_id)
 
     def delete_session_files(self, session_id: str):
@@ -167,9 +170,10 @@ class SessionStore:
 
     def shutdown(self):
         """Gracefully shut down the session store, flushing all pending writes."""
-        # Wait for all pending writes to complete
-        self._write_queue.join()
-        # Send shutdown signal to worker thread
+        if self._shutdown:
+            return
+        self._shutdown = True
+        # Send shutdown signal — worker will drain remaining items first.
         self._write_queue.put(None)
-        # Wait for worker thread to exit
+        # Wait for worker thread to exit (it calls task_done for every item).
         self._write_thread.join(timeout=5)

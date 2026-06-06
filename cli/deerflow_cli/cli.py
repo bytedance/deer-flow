@@ -34,7 +34,7 @@ def safe_input(prompt):
         except UnicodeDecodeError:
             print("\n[Error] Input encoding error. Please use UTF-8. | 输入编码错误，请使用UTF-8\n")
         except EOFError:
-            return ""
+            return None
 
 
 def multi_line_input(prompt):
@@ -59,7 +59,7 @@ def multi_line_input(prompt):
         except UnicodeDecodeError:
             print("\n[Error] Input encoding error. Please use UTF-8. | 输入编码错误，请使用UTF-8\n")
         except EOFError:
-            break
+            return None
     return '\n'.join(lines)
 
 
@@ -82,19 +82,25 @@ def main():
                 engine.create_session()
 
             prompt = f"[{engine.current_session_id[:8]}] You: "
-            user_input = safe_input(prompt).strip()
+            user_input = safe_input(prompt)
+            if user_input is None:
+                break
+            user_input = user_input.strip()
 
             if not user_input:
                 continue
 
             if user_input.lower() == '!multi':
                 user_input = multi_line_input(f"\n[{engine.current_session_id[:8]}] Multi-line Input Mode | 多行输入模式")
+                if user_input is None:
+                    break
                 if not user_input.strip():
                     print("\n[Info] Empty input ignored | 空输入已忽略\n")
                     continue
                 print()
 
             if user_input.lower() == "!exit":
+                engine.shutdown()
                 break
 
             if user_input.lower() == "!help":

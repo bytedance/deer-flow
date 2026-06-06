@@ -423,6 +423,8 @@ class DeerFlowProductionEngine:
         session_id = session_id or self.current_session_id
         if not session_id or session_id not in self.store.sessions:
             session_id = self.create_session()
+        elif session_id != self.current_session_id:
+            self._activate_session(session_id)
 
         self.store.sessions[session_id]["last_active"] = time.time()
         stream_kwargs = {"thread_id": session_id, **kwargs}

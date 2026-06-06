@@ -42,7 +42,7 @@ class TestSafeInput:
 
         with patch("deerflow_cli.cli.input", side_effect=EOFError()):
             result = safe_input("> ")
-        assert result == ""
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ class TestMultiLineInput:
         with patch("deerflow_cli.cli.input", side_effect=EOFError()):
             result = multi_line_input("Enter:")
 
-        assert result == ""
+        assert result is None
 
     def test_handles_unicode_decode_error(self):
         from deerflow_cli.cli import multi_line_input
