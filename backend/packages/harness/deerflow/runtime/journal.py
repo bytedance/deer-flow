@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TASK_EVENT_TYPES = {
+TASK_EVENT_TYPES = {
     "task_started",
     "task_running",
     "task_completed",
@@ -42,6 +42,23 @@ _TASK_EVENT_TYPES = {
     "task_cancelled",
     "task_timed_out",
 }
+
+# Cap on free-text fields persisted from task progress events. The live SSE
+# stream still carries the full payload; only the durable snapshot is bounded
+# so a verbose subagent cannot write unbounded message/result/error bodies into
+# the run event store on every poll.
+_MAX_TASK_EVENT_TEXT = 4000
+_TASK_EVENT_TEXT_FIELDS = ("message", "result", "error")
+
+
+def _sanitize_task_event(content: dict) -> dict:
+    """Return a copy of a task progress event with large text fields bounded."""
+    sanitized = dict(content)
+    for field_name in _TASK_EVENT_TEXT_FIELDS:
+        value = sanitized.get(field_name)
+        if isinstance(value, str) and len(value) > _MAX_TASK_EVENT_TEXT:
+            sanitized[field_name] = value[:_MAX_TASK_EVENT_TEXT] + "…[truncated]"
+    return sanitized
 
 
 class RunJournal(BaseCallbackHandler):
@@ -370,9 +387,9 @@ class RunJournal(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if name not in _TASK_EVENT_TYPES:
+        if name not in TASK_EVENT_TYPES:
             return
-        content = data if isinstance(data, dict) else {"data": data}
+        content = _sanitize_task_event(data) if isinstance(data, dict) else {"data": data}
         self._put(
             event_type=name,
             category="progress",
@@ -454,6 +471,33 @@ class RunJournal(BaseCallbackHandler):
         return "lead_agent"
 
     # -- Public methods (called by worker) --
+
+    def record_task_progress_event(self, chunk: Any) -> None:
+        """Persist a ``task_*`` progress event emitted via the custom stream.
+
+        Subagent task progress (``task_started`` / ``task_running`` / terminal
+        events) is emitted through LangGraph's ``StreamWriter`` (stream_mode
+        ``"custom"``), which feeds the live SSE stream but does **not** trigger
+        the callback ``on_custom_event``. The worker bridges those custom chunks
+        here so the run event store keeps a durable, inspectable record of
+        delegated-task progress after the live stream ends.
+
+        Non-task chunks are ignored. Free-text fields are bounded before storage
+        (the live SSE payload is unaffected).
+        """
+        if not isinstance(chunk, dict):
+            return
+        event_type = chunk.get("type")
+        if event_type not in TASK_EVENT_TYPES:
+            return
+        subagent_type = chunk.get("subagent_type")
+        caller = f"subagent:{subagent_type}" if subagent_type else "lead_agent"
+        self._put(
+            event_type=event_type,
+            category="progress",
+            content=_sanitize_task_event(chunk),
+            metadata={"caller": caller},
+        )
 
     def record_external_llm_usage_records(
         self,

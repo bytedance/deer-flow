@@ -314,6 +314,8 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                if single_mode == "custom":
+                    _maybe_record_task_progress(journal, chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -333,6 +335,8 @@ async def run_agent(
                     continue
 
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                if mode == "custom":
+                    _maybe_record_task_progress(journal, chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -549,6 +553,21 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
+
+
+def _maybe_record_task_progress(journal: Any, chunk: Any) -> None:
+    """Bridge ``task_*`` custom-stream chunks into the run journal.
+
+    ``task_tool`` emits progress via LangGraph's ``StreamWriter`` (stream_mode
+    ``"custom"``), which reaches the live SSE stream but never triggers the
+    callback ``on_custom_event``. Without this bridge the subagent task
+    progress / diagnostics are not persisted, so post-stream inspection (e.g.
+    ``GET /runs/{rid}/events``) would show nothing. The journal filters and
+    sanitizes the payload itself.
+    """
+    if journal is None:
+        return
+    journal.record_task_progress_event(chunk)
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:

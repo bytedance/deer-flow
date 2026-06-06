@@ -264,6 +264,83 @@ class TestCustomEvents:
         assert events == []
 
 
+class TestTaskProgressBridge:
+    @pytest.mark.anyio
+    async def test_record_task_progress_event_persists_and_sanitizes(self, journal_setup):
+        j, store = journal_setup
+        big = "x" * 9000
+        j.record_task_progress_event(
+            {
+                "type": "task_running",
+                "task_id": "task-9",
+                "subagent_type": "general-purpose",
+                "message": big,
+                "diagnostics": {"tool_call_count": 3, "recent_tools": ["bash"]},
+            }
+        )
+        await j.flush()
+        events = await store.list_events("t1", "r1")
+        assert len(events) == 1
+        event = events[0]
+        assert event["event_type"] == "task_running"
+        assert event["category"] == "progress"
+        assert event["content"]["task_id"] == "task-9"
+        # Large free-text fields are bounded in the durable snapshot.
+        assert event["content"]["message"].endswith("…[truncated]")
+        assert len(event["content"]["message"]) < len(big)
+        assert event["content"]["diagnostics"]["tool_call_count"] == 3
+        assert event["metadata"]["caller"] == "subagent:general-purpose"
+
+    @pytest.mark.anyio
+    async def test_record_task_progress_event_ignores_non_task(self, journal_setup):
+        j, store = journal_setup
+        j.record_task_progress_event({"type": "values", "messages": []})
+        j.record_task_progress_event("not-a-dict")
+        await j.flush()
+        assert await store.list_events("t1", "r1") == []
+
+    @pytest.mark.anyio
+    async def test_stream_writer_custom_events_reach_journal_via_worker_bridge(self, journal_setup):
+        """End-to-end: ``get_stream_writer()`` output -> worker bridge -> store.
+
+        Guards against the regression where the journal can persist task
+        progress but nothing wires the ``custom`` stream to it — which would
+        make the persistence feature dead code. This drives a real LangGraph
+        graph using ``StreamWriter`` exactly as ``task_tool`` does, then runs
+        each custom chunk through the worker's actual bridge helper.
+        """
+        from typing import TypedDict
+
+        from langgraph.config import get_stream_writer
+        from langgraph.graph import START, StateGraph
+
+        from deerflow.runtime.runs.worker import _maybe_record_task_progress
+
+        j, store = journal_setup
+
+        class _S(TypedDict):
+            n: int
+
+        def _node(state: _S):
+            writer = get_stream_writer()
+            writer({"type": "task_started", "task_id": "tk", "subagent_type": "bash"})
+            writer({"type": "task_running", "task_id": "tk", "diagnostics": {"tool_call_count": 1, "recent_tools": ["bash"]}})
+            writer({"type": "task_completed", "task_id": "tk", "result": "done"})
+            writer({"type": "debug", "ignored": True})  # non-task chunk must be skipped
+            return {"n": state["n"] + 1}
+
+        graph = StateGraph(_S).add_node("node", _node).add_edge(START, "node").compile()
+
+        async for chunk in graph.astream({"n": 0}, stream_mode="custom"):
+            _maybe_record_task_progress(j, chunk)
+
+        await j.flush()
+        events = await store.list_events("t1", "r1")
+        assert [e["event_type"] for e in events] == ["task_started", "task_running", "task_completed"]
+        assert all(e["category"] == "progress" for e in events)
+        assert events[0]["metadata"]["caller"] == "subagent:bash"
+
+
 class TestBufferFlush:
     @pytest.mark.anyio
     async def test_flush_threshold(self, journal_setup):
