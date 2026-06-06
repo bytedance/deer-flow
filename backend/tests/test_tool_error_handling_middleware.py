@@ -136,18 +136,19 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 7 baseline (ToolOutputBudget, ThreadData, Sandbox, DanglingToolCall,
-    # LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 LoopDetectionMiddleware + 1 SafetyFinishReasonMiddleware
-    # (both enabled by default).
+    # Assert membership and the meaningful relative ordering rather than brittle
+    # absolute positions/counts: LoopDetection and SafetyFinishReason are both
+    # enabled by default, loop detection runs before the safety guard, and the
+    # safety guard is last.
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 9
     assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
-    assert isinstance(middlewares[-2], LoopDetectionMiddleware)
-    assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+    loop_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, LoopDetectionMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert loop_idx < safety_idx
+    assert safety_idx == len(middlewares) - 1
 
 
 def test_build_subagent_runtime_middlewares_includes_loop_detection_when_enabled(monkeypatch: pytest.MonkeyPatch):
@@ -170,6 +171,37 @@ def test_build_subagent_runtime_middlewares_omits_loop_detection_when_disabled(m
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False)
 
     assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_subagent_runtime_middlewares_scales_tool_freq_with_max_turns(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(enabled=True, tool_freq_warn=30, tool_freq_hard_limit=50)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    # The per-tool frequency guard scales with the budget so legitimate
+    # high-volume single-tool work is not force-stopped at 50 long before
+    # max_turns. The identical-call detector is untouched — true loops still
+    # stop early.
+    assert loop.tool_freq_hard_limit == 1000
+    assert loop.tool_freq_warn == 500
+    assert loop.warn_threshold == 3
+    assert loop.hard_limit == 5
+
+
+def test_build_subagent_runtime_middlewares_does_not_lower_tool_freq(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    # An operator who configured a higher cap than the budget must not be lowered.
+    app_config.loop_detection = LoopDetectionConfig(enabled=True, tool_freq_warn=200, tool_freq_hard_limit=5000)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    assert loop.tool_freq_hard_limit == 5000
+    assert loop.tool_freq_warn == 200
 
 
 def test_wrap_tool_call_passthrough_on_success():

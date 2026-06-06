@@ -143,8 +143,15 @@ def build_subagent_runtime_middlewares(
     app_config: AppConfig | None = None,
     model_name: str | None = None,
     lazy_init: bool = True,
+    max_turns: int | None = None,
 ) -> list[AgentMiddleware]:
-    """Middlewares shared by subagent runtime before subagent-only middlewares."""
+    """Middlewares shared by subagent runtime before subagent-only middlewares.
+
+    ``max_turns`` is the subagent's turn budget (mapped to the subagent graph's
+    recursion limit). When provided, it lifts the loop-detection per-tool-type
+    frequency thresholds so legitimate high-volume single-tool work is not
+    force-stopped far below the budget; see the loop-detection block below.
+    """
     if app_config is None:
         from deerflow.config import get_app_config
 
@@ -170,7 +177,19 @@ def build_subagent_runtime_middlewares(
     if loop_detection_config.enabled:
         from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+        loop_mw = LoopDetectionMiddleware.from_config(loop_detection_config)
+        # A deep subagent turn budget must not be silently capped by the
+        # per-tool-type frequency guard. Legitimate high-volume single-tool work
+        # (bash batch pipelines, multi-file reads) would otherwise be
+        # force-stopped at the default 50 long before max_turns, defeating the
+        # raised budget. Lift the frequency thresholds to the budget while
+        # leaving the identical-call detector (warn_threshold / hard_limit) and
+        # any per-tool overrides untouched. We only raise, never lower, so a
+        # stricter operator config still wins.
+        if max_turns and max_turns > loop_mw.tool_freq_hard_limit:
+            loop_mw.tool_freq_hard_limit = max_turns
+            loop_mw.tool_freq_warn = max(loop_mw.tool_freq_warn, max_turns // 2)
+        middlewares.append(loop_mw)
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
