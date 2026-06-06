@@ -1,0 +1,136 @@
+---
+title: Subagents
+description: When a task is too broad for a single reasoning thread, or when parts of it can be done in parallel, the Lead Agent delegates work to **subagents**. A subagent is a self-contained agent invocation that receives a specific task, executes it, and returns the result.
+---
+
+import { Callout, Cards } from "nextra/components";
+
+# Subagents
+
+<Callout type="info" emoji="👥">
+  Subagents are focused workers that the Lead Agent delegates subtasks to. They
+  run with isolated context, keeping the main conversation clean while handling
+  parallel or specialized work.
+</Callout>
+
+When a task is too broad for a single reasoning thread, or when parts of it can be done in parallel, the Lead Agent delegates work to **subagents**. A subagent is a self-contained agent invocation that receives a specific task, executes it, and returns the result.
+
+## Why subagents matter
+
+Subagents solve two key problems in long-horizon workflows:
+
+1. **Context isolation**: a subagent only sees the information it needs for its piece of the task, not the entire parent conversation. This keeps each agent's working context focused and tractable.
+2. **Parallelism**: multiple subagents can run concurrently, allowing independent parts of a task (e.g., researching multiple topics simultaneously) to be processed in parallel.
+
+## Built-in subagents
+
+DeerFlow ships with two built-in subagents:
+
+### general-purpose
+
+A general-purpose reasoning and execution agent. Suitable for delegating complex subtasks that require multi-step reasoning, web search, file operations, and artifact production.
+
+- **Default timeout**: 900 seconds (15 minutes)
+- **Default max turns**: 160
+
+### bash
+
+A subagent specialized for command-line task execution inside the sandbox. Suitable for scripting, data processing, file transformation, and environment setup tasks.
+
+- **Default timeout**: 900 seconds (15 minutes)
+- **Default max turns**: 80
+- **Availability**: only exposed when the sandbox's `bash` tool is available (either `allow_host_bash: true` or a container sandbox is configured)
+
+## Delegation flow
+
+The Lead Agent delegates work to a subagent using the built-in `task` tool:
+
+```
+task(
+  agent="general-purpose",
+  task="Research the top 5 competitors of Acme Corp and summarize their pricing",
+  context="Focus on B2B SaaS pricing models"
+)
+```
+
+The runtime then:
+
+1. Looks up the subagent configuration from the registry, applying any `config.yaml` overrides.
+2. Creates a new agent invocation with the subagent's own prompt and tools.
+3. Runs the subagent to completion (or until timeout / max turns).
+4. Returns the subagent's final output to the Lead Agent as the tool result.
+
+## Configuration
+
+Subagent timeouts and max turns are controlled through the `subagents:` section in `config.yaml`:
+
+```yaml
+subagents:
+  # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
+  timeout_seconds: 900
+
+  # Optional: override max turns for all subagents
+  # max_turns: 120
+
+  # Optional: per-agent overrides
+  agents:
+    general-purpose:
+      timeout_seconds: 1800 # 30 minutes for complex tasks
+      max_turns: 160
+    bash:
+      timeout_seconds: 300 # 5 minutes for quick commands
+      max_turns: 80
+```
+
+Per-agent overrides take priority over the global `timeout_seconds` and `max_turns` settings.
+
+## Concurrency limits
+
+The `SubagentLimitMiddleware` controls how many subagents the Lead Agent can invoke in parallel in a single turn. This is controlled through the per-request configuration:
+
+- `subagent_enabled`: whether subagent delegation is active for this session
+- `max_concurrent_subagents`: maximum parallel task calls in one turn (default: 3)
+
+If the agent tries to call more subagents than the limit allows, the middleware trims the excess calls.
+
+## ACP agents (external agents)
+
+In addition to the built-in subagents, DeerFlow supports delegating to external agents through the **Agent Connect Protocol (ACP)**. ACP allows DeerFlow to invoke agents running as separate processes (including third-party CLI tools wrapped with an ACP adapter).
+
+Configure ACP agents in `config.yaml`:
+
+```yaml
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code for implementation, refactoring, and debugging
+    model: null
+    # auto_approve_permissions: false
+    # env:
+    #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    description: Codex CLI for repository tasks and code generation
+    model: null
+```
+
+The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
+
+<Callout type="tip">
+  ACP agents run as child processes managed by DeerFlow. They communicate over
+  the ACP wire protocol. The standard CLI tools (like the plain `claude` or
+  `codex` commands) are not ACP-compatible by default — use the adapter packages
+  listed above or a compatible ACP wrapper.
+</Callout>
+
+## Custom agents as subagents
+
+Custom agents created through the DeerFlow App UI can also be invoked as subagents using the `task` tool. When you specify `agent="my-custom-agent"`, the runtime loads that agent's configuration (skills, tool groups, model) and runs it as a subagent for the delegated task.
+
+<Cards num={2}>
+  <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />
+  <Cards.Card title="MCP Integration" href="/docs/harness/mcp" />
+</Cards>

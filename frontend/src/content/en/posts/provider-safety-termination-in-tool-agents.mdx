@@ -1,0 +1,124 @@
+---
+title: Tool-Using Agents Must Handle Provider Safety Termination Signals Correctly
+description: Why tool calls left in a safety-terminated model response must not be executed, and how to configure provider detectors in DeerFlow.
+date: 2026-05-22
+tags:
+  - Safety
+  - Agents
+  - Model Providers
+---
+
+## Tool-Using Agents Must Handle Provider Safety Termination Signals Correctly
+
+When a large model provider decides that an input or output has triggered a safety policy, the important outcome is not merely that the model says less. The application needs to know that the current generation turn has been terminated. In a normal chat interface, this may appear as a refusal, filtered text, or an error response. For an Agent that can call tools, the risk is higher: if the provider has already stopped generation while the response still contains `tool_calls`, those tool arguments may only be partially generated.
+
+These partial tool calls must not be executed as normal intent. A truncated `write_file` call may write an incomplete report. A truncated `bash` call may enter the sandbox with incomplete arguments. After seeing the failed result, the Agent may retry and trigger the same safety rule repeatedly.
+
+[PR #3035](https://github.com/bytedance/deer-flow/pull/3035) addresses this boundary: when a provider stops generation with a safety signal while the response still contains tool calls, DeerFlow should suppress those tool calls first and record the turn as a safety termination event.
+
+## Why Safety Termination Needs Dedicated Handling
+
+A safety termination is not a normal tool-call finish reason.
+
+In a healthy tool turn, the provider explicitly tells the application that it should call tools. A safety termination says something different: the output has been blocked by provider policy, or streaming generation has been cut off early. Even if tool-call fragments remain in the response object, the application cannot assume that their JSON arguments, file contents, or command text are complete.
+
+In a real Agent run, this creates two kinds of risk:
+
+| Risk | Impact |
+| --- | --- |
+| Runtime risk | Executing truncated tool arguments can create corrupted files, malformed commands, repeated retries, or tool loops |
+| Provider risk | Repeatedly sending similar violating inputs or outputs to a provider increases safety review and abuse-control pressure |
+
+The second risk matters. Providers enforce their policies differently, but their official materials already make clear that safety policy can affect more than a single completion. It can also affect end users, API access, or account status.
+
+## What Providers Expose and How They Respond
+
+Providers do not use one common field name, and they do not share one enforcement process. Deployments need to distinguish at least two layers:
+
+1. Which signal in this response says that generation was stopped by a safety policy.
+2. Which follow-up actions the provider has publicly described when safety problems keep recurring.
+
+| Provider | Runtime signal | Publicly documented response or recommendation |
+| --- | --- | --- |
+| GLM | Synchronous calls may return a safety audit error; streaming output may end with `finish_reason="sensitive"` | Pass `user_id` to distinguish end users; the platform may block violating end-user requests so enterprise accounts are not affected by end-user abuse |
+| OpenAI | Chat Completions may return `finish_reason="content_filter"` | Use Moderation and `safety_identifier`; repeated usage policy violations may lead to warnings, restrictions, or account deactivation |
+| Anthropic | Streaming refusals may be exposed through `stop_reason="refusal"` | Reset, rewrite, or narrow context after a refusal; the AUP describes request limiting, output modification, suspension, or termination |
+| Gemini | A safety-filtered candidate may return `finishReason=SAFETY`, and blocked content is not returned | Abuse monitoring covers prompts and outputs; follow-up actions can escalate from contacting the developer to temporary restrictions, suspension, or account closure |
+| DeepSeek | Chat completion `finish_reason` includes `content_filter` | The `user` field can help content safety review; potential usage guideline violations may trigger a temporary suspension protocol |
+
+GLM is the most direct example. Its safety audit documentation describes the streaming safety finish signal, the recommendation to identify end users, and the possibility of blocking requests from violating end users. [GLM safety audit documentation](https://docs.bigmodel.cn/cn/guide/platform/securityaudit)
+
+OpenAI defines `content_filter` as a Chat Completions finish reason. Its safety best practices recommend using `safety_identifier` for end users so policy violations can be attributed more precisely than a shared API key alone. OpenAI help documentation also says repeated usage policy violations may lead to account deactivation.  [Safety best practices](https://developers.openai.com/api/docs/guides/safety-best-practices/) [Why Was My OpenAI Account Deactivated?](https://help.openai.com/en/articles/10562188)
+
+Anthropic distinguishes ordinary stops from safety refusals in its Claude streaming refusal guidance: when the streaming classifier intervenes, the response can carry `stop_reason="refusal"`. It also recommends that applications do not keep feeding refused content back into later context, and instead reset the conversation, rewrite the prompt, or narrow the task. The Anthropic AUP says it may limit requests, block or modify outputs, and suspend or terminate access when necessary. [Handle streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals) [Acceptable Use Policy](https://www.anthropic.com/legal/aup)
+
+Gemini safety documentation emphasizes another shape of intervention. A prompt may be blocked before generation, and a candidate may be filtered after generation. When a response candidate is stopped by safety policy, the response can expose `finishReason=SAFETY` without returning the blocked content itself. Gemini API terms also say abuse monitoring covers prompts and outputs and list progressively stronger follow-up actions. [Gemini safety settings](https://ai.google.dev/gemini-api/docs/safety-settings) [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms)
+
+DeepSeek lists `content_filter` as a chat completion finish reason and describes the request `user` field as helpful for content safety review. Its FAQ also says potential usage guideline violations may trigger a temporary suspension process. [Create Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)
+
+Some providers intervene earlier or at a layer outside the model message. For example, Azure OpenAI tells applications to inspect `finish_reason` because `content_filter` may leave a completion incomplete. Amazon Bedrock Guardrails can return `stopReason="guardrail_intervened"` in a response. In Alibaba Cloud Model Studio guardrail examples, output-side blocking may also appear directly as a `DataInspectionFailed` error. Together, these examples show that a safety intervention may be a stop signal in a model message or an API-level error. Applications need more than one handling path. [Azure OpenAI content filtering](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/content-filter) [Amazon Bedrock Guardrails](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-use-converse-api.html)
+
+## What DeerFlow Does at This Boundary
+
+`SafetyFinishReasonMiddleware` has a narrow responsibility. It does not replace provider content review, and it does not rewrite every refusal into the same error. It only intervenes when both conditions below are true:
+
+1. The provider response carries a configured safety termination signal.
+2. The current `AIMessage` still contains non-empty `tool_calls`.
+
+When it intervenes, it:
+
+1. Clears structured tool calls and residual tool-call fields in raw provider metadata.
+2. Prevents those tool arguments from reaching the tool node for execution.
+3. Preserves already generated partial text and appends a user-facing explanation.
+4. Records the detector, reason field, reason value, and suppressed tool names and counts.
+5. Avoids writing tool arguments that may themselves contain filtered content into audit events again.
+
+This makes the safety termination signal take priority over the fact that tool calls are present in the response. For the Agent runtime, that is the more conservative and more correct control flow.
+
+## Default Configuration
+
+The default configuration only needs `safety_finish_reason` enabled:
+
+```yaml
+safety_finish_reason:
+  enabled: true
+```
+
+When `detectors` is not configured explicitly, DeerFlow uses the built-in detector set:
+
+| Detector | Default match |
+| --- | --- |
+| `OpenAICompatibleContentFilterDetector` | `finish_reason="content_filter"` |
+| `AnthropicRefusalDetector` | `stop_reason="refusal"` |
+| `GeminiSafetyDetector` | Gemini safety-related `finish_reason` values such as `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, and `RECITATION` |
+
+This default set covers common DeerFlow paths for OpenAI-compatible providers, Anthropic, and Gemini. It does not treat a normal `finish_reason="tool_calls"` as a safety termination, and it does not fold length truncation such as `length` or `max_tokens` into the safety category.
+
+## Example: Extend the Streaming Safety Finish Signal for GLM
+
+GLM streaming responses use `sensitive` as the safety finish value. If the current adapter preserves that value in `AIMessage.response_metadata.finish_reason` or `additional_kwargs.finish_reason`, it can be handled through the configurable finish reason set on the OpenAI-compatible detector:
+
+```yaml
+safety_finish_reason:
+  enabled: true
+  detectors:
+    - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
+      config:
+        finish_reasons: ["content_filter", "sensitive"]
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
+```
+
+Two configuration details matter here.
+
+First, `detectors` replaces the default list. It does not append one item to it. The example therefore keeps the Anthropic and Gemini detectors while adding GLM's `sensitive` value.
+
+Second, this middleware handles safety finish signals that have already reached a model message. If the provider returns a safety audit error at the API layer, such as a synchronous GLM safety audit error code, the caller still needs to handle it in the LLM or API error path.
+
+## Boundary
+
+`SafetyFinishReasonMiddleware` solves a specific Agent control-flow problem. It is not a complete content safety solution. It does not replace moderation, permission isolation, user governance, or provider-side review, and it does not cover every plain-text refusal.
+
+This boundary is still worth protecting explicitly: when a provider has already stopped output for safety reasons, a tool-using Agent should treat that turn as interrupted output, not executable tool intent.

@@ -1,8 +1,24 @@
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime.runs.worker import _rollback_to_pre_run_checkpoint
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.worker import (
+    RunContext,
+    _agent_factory_supports_app_config,
+    _build_runtime_context,
+    _extract_llm_error_fallback_message,
+    _install_runtime_context,
+    _rollback_to_pre_run_checkpoint,
+    _try_extract_from_message,
+    run_agent,
+)
 
 
 class FakeCheckpointer:
@@ -10,6 +26,231 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aput = AsyncMock(return_value=put_result)
         self.aput_writes = AsyncMock()
+
+
+def _make_checkpoint(checkpoint_id: str, messages: list[str], version: int):
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = checkpoint_id
+    checkpoint["channel_values"] = {"messages": messages}
+    checkpoint["channel_versions"] = {"messages": version}
+    return checkpoint
+
+
+def test_build_runtime_context_includes_app_config_when_present():
+    app_config = object()
+
+    context = _build_runtime_context("thread-1", "run-1", None, app_config)
+
+    assert context["thread_id"] == "thread-1"
+    assert context["run_id"] == "run-1"
+    assert context["app_config"] is app_config
+
+
+def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
+    app_config = object()
+    config = {"context": {"thread_id": "caller-thread"}}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+            "app_config": app_config,
+        },
+    )
+
+    assert config["context"]["thread_id"] == "caller-thread"
+    assert config["context"]["run_id"] == "run-1"
+    assert config["context"]["app_config"] is app_config
+
+
+@pytest.mark.anyio
+async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    app_config = object()
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_context"] = config["context"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_context"] = config["context"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert captured["factory_context"]["app_config"] is app_config
+    assert captured["astream_context"]["app_config"] is app_config
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_marks_llm_error_fallback_as_error_status():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                        additional_kwargs={
+                            "deerflow_error_fallback": True,
+                            "error_type": "APIConnectionError",
+                            "error_reason": "transient",
+                            "error_detail": "Connection error.",
+                        },
+                    )
+                ]
+            }
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.error == "Connection error."
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_assistant_id():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert captured["factory_run_name"] == "lead_agent"
+    assert captured["astream_run_name"] == "lead_agent"
+
+
+@pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_context_agent_name():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"context": {"agent_name": "finalis"}},
+    )
+
+    assert captured["factory_run_name"] == "finalis"
+    assert captured["astream_run_name"] == "finalis"
+
+
+@pytest.mark.anyio
+async def test_run_agent_defaults_root_run_name_from_configurable_agent_name():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", assistant_id="lead_agent")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_run_name"] = config["run_name"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_run_name"] = config["run_name"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"configurable": {"agent_name": "finalis"}},
+    )
+
+    assert captured["factory_run_name"] == "finalis"
+    assert captured["astream_run_name"] == "finalis"
 
 
 @pytest.mark.anyio
@@ -39,16 +280,16 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
     )
 
     checkpointer.adelete_thread.assert_not_awaited()
-    checkpointer.aput.assert_awaited_once_with(
-        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
-        {
-            "id": "ckpt-1",
-            "channel_versions": {"messages": 3},
-            "channel_values": {"messages": ["before"]},
-        },
-        {"source": "input"},
-        {"messages": 3},
-    )
+    checkpointer.aput.assert_awaited_once()
+    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
+    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restored_checkpoint["id"] != "ckpt-1"
+    assert "channel_versions" in restored_checkpoint
+    assert "channel_values" in restored_checkpoint
+    assert restored_checkpoint["channel_versions"] == {"messages": 3}
+    assert restored_checkpoint["channel_values"] == {"messages": ["before"]}
+    assert restored_metadata == {"source": "input"}
+    assert new_versions == {"messages": 3}
     assert checkpointer.aput_writes.await_args_list == [
         call(
             {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
@@ -61,6 +302,40 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
             task_id="task-b",
         ),
     ]
+
+
+@pytest.mark.anyio
+async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointer():
+    checkpointer = InMemorySaver()
+    thread_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    before_checkpoint = _make_checkpoint("0001", ["before"], 1)
+    before_config = checkpointer.put(thread_config, before_checkpoint, {"step": 1}, {"messages": 1})
+    after_checkpoint = _make_checkpoint("0002", ["after"], 2)
+    after_config = checkpointer.put(before_config, after_checkpoint, {"step": 2}, {"messages": 2})
+    checkpointer.put_writes(after_config, [("messages", "pending-after")], task_id="task-after")
+
+    await _rollback_to_pre_run_checkpoint(
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        pre_run_checkpoint_id="0001",
+        pre_run_snapshot={
+            "checkpoint_ns": "",
+            "checkpoint": before_checkpoint,
+            "metadata": {"step": 1},
+            "pending_writes": [("task-before", "messages", "pending-before")],
+        },
+        snapshot_capture_failed=False,
+    )
+
+    latest = checkpointer.get_tuple(thread_config)
+
+    assert latest is not None
+    assert latest.config["configurable"]["checkpoint_id"] != "0001"
+    assert latest.config["configurable"]["checkpoint_id"] != "0002"
+    assert latest.checkpoint["channel_values"] == {"messages": ["before"]}
+    assert latest.pending_writes == [("task-before", "messages", "pending-before")]
+    assert ("task-after", "messages", "pending-after") not in latest.pending_writes
 
 
 @pytest.mark.anyio
@@ -123,12 +398,13 @@ async def test_rollback_normalizes_none_checkpoint_ns_to_root_namespace():
         snapshot_capture_failed=False,
     )
 
-    checkpointer.aput.assert_awaited_once_with(
-        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
-        {"id": "ckpt-1", "channel_versions": {}},
-        {},
-        {},
-    )
+    checkpointer.aput.assert_awaited_once()
+    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
+    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restored_checkpoint["id"] != "ckpt-1"
+    assert restored_checkpoint["channel_versions"] == {}
+    assert restored_metadata == {}
+    assert new_versions == {}
 
 
 @pytest.mark.anyio
@@ -212,3 +488,187 @@ async def test_rollback_propagates_aput_writes_failure():
     # aput succeeded, aput_writes was called but failed
     checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_awaited_once()
+
+
+def test_agent_factory_supports_app_config_detects_supported_signature():
+    def factory(*, config, app_config=None):
+        return (config, app_config)
+
+    assert _agent_factory_supports_app_config(factory) is True
+
+
+def test_build_runtime_context_defaults_to_thread_and_run_id():
+    ctx = _build_runtime_context("thread-1", "run-1", None)
+    assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
+
+
+def test_build_runtime_context_merges_caller_context():
+    """Regression for issue #2677: keys from ``config['context']`` (e.g. ``agent_name``)
+    must be merged into the Runtime's context so that ``ToolRuntime.context`` — which
+    is what ``setup_agent`` reads — can see them."""
+    caller_context = {"agent_name": "my-agent", "is_bootstrap": True, "model_name": "gpt-4"}
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert ctx["thread_id"] == "thread-1"
+    assert ctx["run_id"] == "run-1"
+    assert ctx["agent_name"] == "my-agent"
+    assert ctx["is_bootstrap"] is True
+    assert ctx["model_name"] == "gpt-4"
+
+
+def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
+    """A malicious or buggy caller must not be able to overwrite the worker-assigned
+    ``thread_id`` / ``run_id`` by stuffing them into ``config['context']``."""
+    caller_context = {"thread_id": "spoofed", "run_id": "spoofed", "agent_name": "ok"}
+
+    ctx = _build_runtime_context("real-thread", "real-run", caller_context)
+
+    assert ctx["thread_id"] == "real-thread"
+    assert ctx["run_id"] == "real-run"
+    assert ctx["agent_name"] == "ok"
+
+
+def test_build_runtime_context_ignores_non_dict_caller_context():
+    ctx = _build_runtime_context("thread-1", "run-1", "not-a-dict")
+    assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
+
+
+def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_fails(monkeypatch):
+    class BrokenCallable:
+        def __call__(self, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker.inspect.signature", lambda _obj: (_ for _ in ()).throw(ValueError("boom")))
+
+    assert _agent_factory_supports_app_config(BrokenCallable()) is False
+
+
+# ---------------------------------------------------------------------------
+# _extract_llm_error_fallback_message coverage
+# ---------------------------------------------------------------------------
+
+
+def test_try_extract_from_message_finds_fallback_on_message_object():
+    msg = AIMessage(
+        content="fallback",
+        additional_kwargs={
+            "deerflow_error_fallback": True,
+            "error_detail": "Connection error.",
+            "error_reason": "transient",
+        },
+    )
+    assert _try_extract_from_message(msg) == "Connection error."
+
+
+def test_try_extract_from_message_finds_fallback_on_dict():
+    msg = {
+        "content": "fallback",
+        "additional_kwargs": {
+            "deerflow_error_fallback": True,
+            "error_detail": "Quota exceeded.",
+        },
+    }
+    assert _try_extract_from_message(msg) == "Quota exceeded."
+
+
+def test_try_extract_from_message_returns_none_for_normal_message():
+    msg = AIMessage(content="hello")
+    assert _try_extract_from_message(msg) is None
+
+
+def test_extract_llm_error_fallback_message_large_state_chunk_no_fallback():
+    """Normal-size state dict without fallback markers must not raise and should return None."""
+    large_state = {
+        "messages": [
+            AIMessage(content="Hello!"),
+            {"role": "user", "content": "Hi there"},
+        ],
+        "foo": "x" * 10_000,
+        "bar": {"nested": {"deep": {"data": list(range(1000))}}},
+        "baz": [{"id": i, "payload": "y" * 1000} for i in range(500)],
+    }
+    assert _extract_llm_error_fallback_message(large_state) is None
+
+
+def test_extract_llm_error_fallback_message_finds_fallback_in_messages_list():
+    state = {
+        "messages": [
+            AIMessage(content="Hello!"),
+            AIMessage(
+                content="Unavailable.",
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_detail": "Connection error.",
+                },
+            ),
+        ],
+        "other_state": "large_value" * 1000,
+    }
+    assert _extract_llm_error_fallback_message(state) == "Connection error."
+
+
+def test_extract_llm_error_fallback_message_finds_fallback_in_raw_message():
+    msg = AIMessage(
+        content="Unavailable.",
+        additional_kwargs={
+            "deerflow_error_fallback": True,
+            "error_reason": "quota",
+        },
+    )
+    assert _extract_llm_error_fallback_message(msg) == "quota"
+
+
+def test_extract_llm_error_fallback_message_finds_fallback_in_tuple():
+    item = (
+        "messages",
+        AIMessage(
+            content="Unavailable.",
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_detail": "Circuit open.",
+            },
+        ),
+    )
+    assert _extract_llm_error_fallback_message(item) == "Circuit open."
+
+
+def test_extract_llm_error_fallback_message_returns_none_for_empty_values():
+    assert _extract_llm_error_fallback_message({}) is None
+    assert _extract_llm_error_fallback_message([]) is None
+    assert _extract_llm_error_fallback_message(None) is None
+    assert _extract_llm_error_fallback_message("string") is None
+
+
+def test_extract_llm_error_fallback_message_finds_fallback_in_updates_mode():
+    """stream_mode='updates' yields dicts keyed by node name (e.g. {'call_model': {...}}).
+    Fallback marker is nested inside the node's state update, not at the top level."""
+    update_chunk = {
+        "call_model": {
+            "messages": [
+                AIMessage(
+                    content="Unavailable.",
+                    additional_kwargs={
+                        "deerflow_error_fallback": True,
+                        "error_detail": "Connection error.",
+                    },
+                )
+            ]
+        }
+    }
+    assert _extract_llm_error_fallback_message(update_chunk) == "Connection error."
+
+
+def test_extract_llm_error_fallback_message_updates_mode_no_fallback():
+    """Normal updates chunk without any fallback should return None safely."""
+    update_chunk = {
+        "__interrupt__": [
+            {
+                "value": "ask_human",
+                "resumable": True,
+                "ns": ["agent"],
+                "when": "during",
+            }
+        ]
+    }
+    assert _extract_llm_error_fallback_message(update_chunk) is None

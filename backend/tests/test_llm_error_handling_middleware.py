@@ -11,6 +11,13 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
+
+def _make_app_config() -> AppConfig:
+    """Minimal AppConfig for middleware tests; circuit_breaker uses defaults."""
+    return AppConfig(sandbox=SandboxConfig(use="test"))
 
 
 class FakeError(Exception):
@@ -31,7 +38,7 @@ class FakeError(Exception):
 
 
 def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
-    middleware = LLMErrorHandlingMiddleware()
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_app_config())
     for key, value in attrs.items():
         setattr(middleware, key, value)
     return middleware
@@ -87,6 +94,31 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
 
     assert isinstance(result, AIMessage)
     assert "out of quota" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "quota"
+    assert result.additional_kwargs["error_type"] == "FakeError"
+
+
+def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=25, retry_cap_delay_ms=25)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("Connection error.", status_code=503)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_detail"] == "Connection error."
 
 
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,9 +258,7 @@ def test_circuit_breaker_trips_and_recovers(monkeypatch: pytest.MonkeyPatch) -> 
     current_time = 1000.0
     monkeypatch.setattr("time.time", lambda: current_time)
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
-    middleware.circuit_recovery_timeout_sec = 10
+    middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     request: Any = {"messages": []}
@@ -284,8 +314,7 @@ def test_circuit_breaker_does_not_trip_on_non_retriable_errors(monkeypatch: pyte
     waits: list[float] = []
     monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
+    middleware = _build_middleware(circuit_failure_threshold=3)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_non_retriable)
 
     request: Any = {"messages": []}
@@ -386,9 +415,7 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     current_time = 1000.0
     monkeypatch.setattr("time.time", lambda: current_time)
 
-    middleware = LLMErrorHandlingMiddleware()
-    middleware.circuit_failure_threshold = 3
-    middleware.circuit_recovery_timeout_sec = 10
+    middleware = _build_middleware(circuit_failure_threshold=3, circuit_recovery_timeout_sec=10)
     monkeypatch.setattr(middleware, "_classify_error", mock_classify_retriable)
 
     async def async_failing_handler(request: Any) -> Any:

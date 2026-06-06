@@ -33,8 +33,8 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
 import {
   AgentNameCheckError,
+  AgentsApiDisabledError,
   checkAgentName,
-  createAgent,
   getAgent,
 } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
@@ -70,20 +70,6 @@ async function getAgentWithRetry(agentName: string) {
   return null;
 }
 
-function getCreateAgentErrorMessage(
-  error: unknown,
-  networkErrorMessage: string,
-  fallbackMessage: string,
-) {
-  if (error instanceof TypeError && error.message === "Failed to fetch") {
-    return networkErrorMessage;
-  }
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-  return fallbackMessage;
-}
-
 export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -92,7 +78,6 @@ export default function NewAgentPage() {
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
-  const [isCreatingAgent, setIsCreatingAgent] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
   const [showSaveHint, setShowSaveHint] = useState(false);
@@ -101,8 +86,8 @@ export default function NewAgentPage() {
 
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
-    threadId: step === "chat" ? threadId : undefined,
+  const { thread, sendMessage } = useThreadStream({
+    threadId: undefined,
     context: {
       mode: "flash",
       is_bootstrap: true,
@@ -154,11 +139,34 @@ export default function NewAgentPage() {
         return;
       }
     } catch (err) {
-      if (
+      if (err instanceof AgentsApiDisabledError) {
+        setNameError(t.agents.nameStepApiDisabledError);
+      } else if (
         err instanceof AgentNameCheckError &&
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) when
+        // one is present, wrapped in a localised prefix so zh-CN users
+        // don't see a bare English string next to the surrounding Chinese
+        // UI. Falls back to the generic localised fallback when the backend
+        // sent no detail — `err.message` is unreliable for this branch
+        // because `checkAgentName` substitutes a generated fallback string
+        // ("Failed to check agent name: ${statusText}") when `detail` is
+        // missing, so testing `err.message` would always be truthy and the
+        // generated fallback would leak through.
+        setNameError(
+          err.detail
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.detail,
+              )
+            : t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -167,39 +175,25 @@ export default function NewAgentPage() {
       setIsCheckingName(false);
     }
 
-    setIsCreatingAgent(true);
-    try {
-      await createAgent({
-        name: trimmed,
-        description: "",
-        soul: "",
-      });
-    } catch (err) {
-      setNameError(
-        getCreateAgentErrorMessage(
-          err,
-          t.agents.nameStepNetworkError,
-          t.agents.nameStepCheckError,
-        ),
-      );
-      return;
-    } finally {
-      setIsCreatingAgent(false);
-    }
-
     setAgentName(trimmed);
     setStep("chat");
-    await sendMessage(threadId, {
-      text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
-      files: [],
-    });
+    await sendMessage(
+      threadId,
+      {
+        text: t.agents.nameStepBootstrapMessage.replace("{name}", trimmed),
+        files: [],
+      },
+      { agent_name: trimmed },
+    );
   }, [
     nameInput,
     sendMessage,
     t.agents.nameStepAlreadyExistsError,
+    t.agents.nameStepApiDisabledError,
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
     t.agents.nameStepInvalidError,
     threadId,
   ]);
@@ -282,9 +276,11 @@ export default function NewAgentPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onSelect={() => void handleSaveAgent()}
-              disabled={
-                !!agent || thread.isLoading || setupAgentStatus !== "idle"
-              }
+              disabled={[
+                Boolean(agent),
+                thread.isLoading,
+                setupAgentStatus !== "idle",
+              ].some(Boolean)}
             >
               <SaveIcon className="h-4 w-4" />
               {setupAgentStatus === "requested"
@@ -335,9 +331,7 @@ export default function NewAgentPage() {
               <Button
                 className="w-full"
                 onClick={() => void handleConfirmName()}
-                disabled={
-                  !nameInput.trim() || isCheckingName || isCreatingAgent
-                }
+                disabled={!nameInput.trim() || isCheckingName}
               >
                 {t.agents.nameStepContinue}
               </Button>

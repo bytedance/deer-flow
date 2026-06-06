@@ -1,11 +1,14 @@
 """Tests for AioSandboxProvider mount helpers."""
 
+import asyncio
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.config.paths import Paths, join_host_path
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
@@ -57,6 +60,7 @@ def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-3")
 
@@ -95,6 +99,7 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setenv("DEER_FLOW_HOST_BASE_DIR", r"C:\Users\demo\deer-flow\backend\.deer-flow")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-10")
 
@@ -134,3 +139,298 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+@pytest.mark.anyio
+async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
+    """AioSandboxProvider async creation must not use sync readiness polling."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(None)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=aio_mod.SandboxInfo(sandbox_id="sandbox-async", sandbox_url="http://sandbox")),
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+
+    async_readiness_calls: list[tuple[str, int]] = []
+
+    async def fake_wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+        async_readiness_calls.append((sandbox_url, timeout))
+        return True
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", fake_wait_for_sandbox_ready_async)
+    monkeypatch.setattr(
+        aio_mod,
+        "wait_for_sandbox_ready",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sync readiness should not be used")),
+    )
+
+    sandbox_id = await provider._create_sandbox_async("thread-async", "sandbox-async")
+
+    assert sandbox_id == "sandbox-async"
+    assert async_readiness_calls == [("http://sandbox", 60)]
+    assert provider._backend.destroy.call_count == 0
+    assert provider._thread_sandboxes["thread-async"] == "sandbox-async"
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_close(tmp_path, monkeypatch):
+    """Async lock path must not open or close lock files on the event loop."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {"thread-async-lock": "sandbox-async-lock"}
+    provider._sandboxes = {"sandbox-async-lock": aio_mod.AioSandbox(id="sandbox-async-lock", base_url="http://sandbox")}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+
+    to_thread_calls: list[object] = []
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        to_thread_calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fake_to_thread)
+
+    sandbox_id = await provider._discover_or_create_with_lock_async("thread-async-lock", "sandbox-async-lock")
+
+    assert sandbox_id == "sandbox-async-lock"
+    assert aio_mod._open_lock_file in to_thread_calls
+    assert any(getattr(func, "__name__", "") == "close" for func in to_thread_calls)
+
+
+@pytest.mark.anyio
+async def test_acquire_thread_lock_async_uses_dedicated_executor(monkeypatch):
+    """Per-thread lock waits should not consume the default asyncio.to_thread pool."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    lock = aio_mod.threading.Lock()
+
+    async def fail_to_thread(*_args, **_kwargs):
+        raise AssertionError("thread-lock acquisition must not use asyncio.to_thread")
+
+    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fail_to_thread)
+
+    await aio_mod._acquire_thread_lock_async(lock)
+    try:
+        assert not lock.acquire(blocking=False)
+    finally:
+        lock.release()
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancellation_does_not_leak_thread_lock(tmp_path):
+    """Cancelled async lock waiters must not leave the per-thread lock held."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    thread_id = "thread-cancel-lock"
+    thread_lock = provider._get_thread_lock(thread_id)
+    thread_lock.acquire()
+
+    task = asyncio.create_task(provider.acquire_async(thread_id))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    thread_lock.release()
+    deadline = asyncio.get_running_loop().time() + 1
+    while asyncio.get_running_loop().time() < deadline:
+        acquired = thread_lock.acquire(blocking=False)
+        if acquired:
+            thread_lock.release()
+            return
+        await asyncio.sleep(0.01)
+
+    pytest.fail("provider thread lock was leaked after cancelling acquire_async")
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path, monkeypatch):
+    """A cancelled waiter must not prevent the next live waiter from acquiring."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    async def fake_acquire_internal_async(thread_id: str | None) -> str:
+        assert thread_id == "thread-successor-lock"
+        await asyncio.sleep(0)
+        return "sandbox-successor"
+
+    monkeypatch.setattr(provider, "_acquire_internal_async", fake_acquire_internal_async)
+
+    thread_id = "thread-successor-lock"
+    thread_lock = provider._get_thread_lock(thread_id)
+    thread_lock.acquire()
+
+    cancelled_waiter = asyncio.create_task(provider.acquire_async(thread_id))
+    await asyncio.sleep(0.05)
+    cancelled_waiter.cancel()
+    try:
+        await cancelled_waiter
+    except asyncio.CancelledError:
+        pass
+
+    live_waiter = asyncio.create_task(provider.acquire_async(thread_id))
+    thread_lock.release()
+
+    assert await asyncio.wait_for(live_waiter, timeout=1) == "sandbox-successor"
+
+    deadline = asyncio.get_running_loop().time() + 1
+    while asyncio.get_running_loop().time() < deadline:
+        acquired = thread_lock.acquire(blocking=False)
+        if acquired:
+            thread_lock.release()
+            return
+        await asyncio.sleep(0.01)
+
+    pytest.fail("provider thread lock was not released after successor acquire_async")
+
+
+def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
+    """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    token = set_current_user(SimpleNamespace(id="user-7"))
+    posted: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://sandbox.local"}
+
+    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+        posted.update({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "post", _post)
+
+    try:
+        backend.create("thread-42", "sandbox-42")
+    finally:
+        reset_current_user(token)
+
+    assert posted["url"] == "http://provisioner:8002/api/sandboxes"
+    assert posted["json"] == {
+        "sandbox_id": "sandbox-42",
+        "thread_id": "thread-42",
+        "user_id": "user-7",
+    }
+
+
+# ── Sandbox client teardown (#2872) ──────────────────────────────────────────
+
+
+def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
+    """Build a provider with one active sandbox suitable for release/destroy/shutdown tests."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._sandbox_infos = {
+        sandbox_id: aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
+    }
+    provider._thread_sandboxes = {}
+    provider._last_activity = {sandbox_id: 0.0}
+    provider._shutdown_called = False
+    provider._idle_checker_thread = None
+    provider._backend = SimpleNamespace(destroy=MagicMock())
+
+    sandbox = MagicMock()
+    sandbox.id = sandbox_id
+    sandbox.close = MagicMock()
+    provider._sandboxes = {sandbox_id: sandbox}
+    return provider, sandbox, aio_mod
+
+
+def test_release_closes_cached_sandbox_client(tmp_path):
+    """release() must close the host-side client owned by the cached AioSandbox (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel")
+
+    provider.release("sandbox-rel")
+
+    sandbox.close.assert_called_once_with()
+    # And the sandbox is parked in the warm pool (container still running).
+    assert "sandbox-rel" in provider._warm_pool
+    assert "sandbox-rel" not in provider._sandboxes
+
+
+def test_destroy_closes_cached_sandbox_client(tmp_path):
+    """destroy() must close the host-side client before backend container teardown (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-destroy")
+    backend_destroy = provider._backend.destroy
+
+    provider.destroy("sandbox-destroy")
+
+    sandbox.close.assert_called_once_with()
+    backend_destroy.assert_called_once()
+    assert "sandbox-destroy" not in provider._sandboxes
+    assert "sandbox-destroy" not in provider._sandbox_infos
+
+
+def test_shutdown_closes_all_active_sandbox_clients(tmp_path):
+    """shutdown() must close every cached AioSandbox client during teardown (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-shut")
+
+    provider.shutdown()
+
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once()
+    assert provider._sandboxes == {}
+
+
+def test_release_swallows_close_errors(tmp_path, caplog):
+    """A failure inside sandbox.close() must not break provider release()."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel-err")
+    sandbox.close.side_effect = RuntimeError("boom")
+
+    with caplog.at_level("WARNING"):
+        provider.release("sandbox-rel-err")
+
+    assert "Error closing sandbox sandbox-rel-err during release" in caplog.text
+    # Still moved to warm pool: client teardown failure must not block lifecycle.
+    assert "sandbox-rel-err" in provider._warm_pool
+
+
+def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, caplog):
+    """A failure in sandbox.close() must not skip backend container destruction."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dest-err")
+    sandbox.close.side_effect = RuntimeError("boom")
+
+    with caplog.at_level("WARNING"):
+        provider.destroy("sandbox-dest-err")
+
+    assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
+    provider._backend.destroy.assert_called_once()

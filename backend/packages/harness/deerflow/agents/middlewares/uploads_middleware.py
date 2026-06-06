@@ -7,9 +7,11 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_conversion import extract_outline
 
 logger = logging.getLogger(__name__)
@@ -221,7 +223,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
@@ -282,6 +284,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         updated_message = HumanMessage(
             content=updated_content,
             id=last_message.id,
+            name=last_message.name,
             additional_kwargs=last_message.additional_kwargs,
         )
 
@@ -291,3 +294,16 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             "uploaded_files": new_files,
             "messages": messages,
         }
+
+    @override
+    async def abefore_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
+        """Async hook that offloads the synchronous uploads scan off the event loop.
+
+        ``before_agent`` performs blocking filesystem IO (directory enumeration,
+        ``stat``, reading sibling ``.md`` outlines). When the graph runs async,
+        langgraph would otherwise execute the sync hook directly on the event
+        loop, so it is dispatched to a worker thread via ``run_in_executor``.
+        ``run_in_executor`` copies the current context, so the ``user_id``
+        contextvar read by ``get_effective_user_id()`` is preserved.
+        """
+        return await run_in_executor(None, self.before_agent, state, runtime)

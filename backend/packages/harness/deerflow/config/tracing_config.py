@@ -147,3 +147,15 @@ def validate_enabled_tracing_providers() -> None:
 def is_tracing_enabled() -> bool:
     """Check if any tracing provider is enabled and fully configured."""
     return get_tracing_config().is_configured
+
+
+def reset_tracing_config() -> None:
+    """Discard the cached :class:`TracingConfig` so the next call rebuilds it.
+
+    Public API so that tests do not have to reach into the private
+    ``_tracing_config`` module attribute. A future internal rename would
+    silently break callers that mutate the attribute directly.
+    """
+    global _tracing_config
+    with _config_lock:
+        _tracing_config = None
