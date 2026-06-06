@@ -108,12 +108,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             # User-provided disable settings take full precedence
             model_settings_from_config.update(model_config.when_thinking_disabled)
         elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
-            # OpenAI-compatible gateway: thinking is nested under extra_body
+            # OpenAI-compatible gateway: thinking is nested under extra_body.
+            # Only inject the disable flag — avoid adding reasoning_effort here
+            # because "minimal" is not a universally valid value across gateway
+            # providers (e.g. MiniMax returns HTTP 400 with error 2013).
+            # Callers who want a specific reasoning_effort when disabled should
+            # set it explicitly via when_thinking_disabled in config.yaml.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(

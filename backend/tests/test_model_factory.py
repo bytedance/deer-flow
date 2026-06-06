@@ -160,7 +160,10 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
 def test_thinking_disabled_openai_gateway_format(monkeypatch):
     """When thinking is configured via extra_body (OpenAI-compatible gateway),
-    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=minimal."""
+    disabling must inject extra_body.thinking.type=disabled.
+    reasoning_effort must NOT be auto-injected — providers like MiniMax reject
+    the 'minimal' value and the user can always set it explicitly via
+    when_thinking_disabled in config.yaml."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
     cfg = _make_app_config(
         [
@@ -186,8 +189,41 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
     factory_module.create_chat_model(name="openai-gw", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    assert captured.get("reasoning_effort") == "minimal"
+    assert captured.get("reasoning_effort") is None  # never auto-injected
     assert "thinking" not in captured  # must NOT set the direct thinking param
+
+
+def test_thinking_disabled_openai_gateway_no_reasoning_effort_even_when_supported(monkeypatch):
+    """Regression for #2704: models with supports_reasoning_effort=True must NOT
+    receive reasoning_effort='minimal' from the factory when thinking is auto-disabled
+    via the extra_body path.  MiniMax M2.7 returns HTTP 400 (error 2013) when
+    reasoning_effort='minimal' is injected this way."""
+    wte = {"extra_body": {"thinking": {"type": "enabled"}}}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "minimax-m27",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                when_thinking_enabled=wte,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m27", thinking_enabled=False)
+
+    assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
 
 
 def test_thinking_disabled_langchain_anthropic_format(monkeypatch):
@@ -281,7 +317,7 @@ def test_when_thinking_disabled_takes_precedence_over_hardcoded_disable(monkeypa
     factory_module.create_chat_model(name="custom-disable", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    # User overrode the hardcoded "minimal" with "low"
+    # User explicitly set reasoning_effort=low via when_thinking_disabled
     assert captured.get("reasoning_effort") == "low"
 
 
@@ -400,6 +436,10 @@ def test_reasoning_effort_cleared_when_not_supported(monkeypatch):
 
 
 def test_reasoning_effort_preserved_when_supported(monkeypatch):
+    """supports_reasoning_effort=True prevents the cleanup that would clear the
+    reasoning_effort kwarg.  When the model config provides no reasoning_effort
+    value and the factory no longer auto-injects 'minimal' on the disable path,
+    the captured value must be None (not cleared, just never set)."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
     cfg = _make_app_config(
         [
@@ -424,9 +464,10 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
 
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
-    # When supports_reasoning_effort=True, it should NOT be cleared to None
-    # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
-    assert captured.get("reasoning_effort") == "minimal"
+    # The factory no longer auto-injects reasoning_effort on the thinking-disable
+    # path; supports_reasoning_effort=True simply skips cleanup.  With no value
+    # in the model config, reasoning_effort is absent from the constructor kwargs.
+    assert captured.get("reasoning_effort") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1036,9 +1077,9 @@ def test_create_chat_model_resolves_patched_mimo_provider(model_id):
 
 
 def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disabled(monkeypatch):
-    """When reasoning_effort is set in config.yaml (extra field) AND the thinking-disabled
-    path also injects reasoning_effort=minimal into kwargs, the factory must not raise
-    TypeError: got multiple values for keyword argument 'reasoning_effort'."""
+    """When reasoning_effort is set in config.yaml (extra field) and thinking is disabled,
+    the factory must not raise TypeError: got multiple values for keyword argument.
+    Since the disable path no longer auto-injects 'minimal', the config value survives."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
     # ModelConfig.extra="allow" means extra fields from config.yaml land in model_dump()
     model = ModelConfig(
@@ -1067,5 +1108,5 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
-    assert captured.get("reasoning_effort") == "minimal"
+    # Config-provided reasoning_effort="high" is preserved; no "minimal" override
+    assert captured.get("reasoning_effort") == "high"
