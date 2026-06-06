@@ -8,6 +8,7 @@ from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg
+from langgraph.config import get_stream_writer
 from zens.community.dify.dify_client import DifyAPIError, DifyClient
 
 from deerflow.config import get_app_config
@@ -93,7 +94,7 @@ def _get_workflow_logger(tool_name: str) -> logging.Logger:
         return _workflow_loggers[tool_name]
 
 
-def invoke_workflow(
+async def invoke_workflow(
     tool_name: str,
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
@@ -103,6 +104,13 @@ def invoke_workflow(
     Routes to blocking or streaming mode based on the ``response_mode`` field
     in config.yaml for the given tool. Maintains conversation context in a
     thread-safe LRU cache keyed by (user_id, thread_id, workflow_name).
+
+    In streaming mode, the tool pushes ``dify_started`` / ``dify_chunk`` /
+    ``dify_completed`` / ``dify_failed`` events to the LangGraph custom stream
+    as Dify answer fragments arrive, so the UI can render partial output in
+    real time. The function still returns the joined full answer string for
+    the LLM — the workflow tool's ``return_direct=True`` keeps that string
+    terminal, no further agent turn.
     """
     logger = _get_workflow_logger(tool_name)
     cache_key = _get_cache_key(tool_name, config)
@@ -127,14 +135,27 @@ def invoke_workflow(
     client = DifyClient(api_key=tool_cfg.api_key, base_url=tool_cfg.base_url)
 
     if tool_cfg.response_mode == "streaming":
-        chunks, conv_id = client.chat_stream(query=query, conversation_id=conversation_id, user=user)
-        full_answer = "".join(chunks)
-        if conv_id:
-            _cache_conversation(cache_key, conv_id)
+        writer = get_stream_writer()
+        writer({"type": "dify_started", "tool": tool_name, "query_len": len(query)})
+        full: list[str] = []
+        last_conv = ""
+        try:
+            async for chunk in client.astream_chat(query=query, conversation_id=conversation_id, user=user):
+                full.append(chunk.answer)
+                if chunk.conversation_id:
+                    last_conv = chunk.conversation_id
+                writer({"type": "dify_chunk", "tool": tool_name, "delta": chunk.answer, "index": len(full) - 1})
+        except DifyAPIError as e:
+            writer({"type": "dify_failed", "tool": tool_name, "status_code": e.status_code, "message": e.message})
+            raise
+        if last_conv:
+            _cache_conversation(cache_key, last_conv)
+        full_answer = "".join(full)
+        writer({"type": "dify_completed", "tool": tool_name, "total_len": len(full_answer), "conversation_id": last_conv})
         logger.info(
             "invoke_workflow streaming completed: answer=%r, conversation_id=%s",
             full_answer[:50] if full_answer else "",
-            conv_id,
+            last_conv,
         )
         return full_answer
 

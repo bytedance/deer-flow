@@ -8,7 +8,7 @@ from langchain_core.tools import InjectedToolArg
 from zens.community.dify.router import invoke_workflow
 
 
-@tool("dify_general", parse_docstring=True)
+@tool("dify_general", parse_docstring=True, return_direct=True)
 def dify_general_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,

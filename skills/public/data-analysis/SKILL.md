@@ -1,13 +1,37 @@
 ---
 name: data-analysis
-version: 2.2.0-20250527
-description: Use this skill when the user uploads Excel (.xlsx/.xls) or CSV files and wants to perform data analysis, generate statistics, create summaries, pivot tables, SQL queries, or any form of structured data exploration. Supports multi-sheet Excel workbooks, aggregation, filtering, joins, and exporting results to CSV/JSON/Markdown.
-触发关键词: "分析文件、分析报表、分析这个Excel、分析这个xlsx、分析这个csv、看看数据、统计数据、数据汇总、生成报告、看看这个表、有多少行"
+version: 2.3.0-20250606
+description: |
+  Analyze, summarize, query, pivot, join, or filter Excel (.xlsx/.xls)
+  and CSV files using DuckDB SQL. Multi-sheet workbooks, cross-file joins,
+  CSV/JSON/Markdown export.
+
+  Triggers: "分析/分析报表/统计/汇总/透视 Excel/CSV", "analyze this spreadsheet",
+  "pivot by ...", "run SQL on CSV".
 ---
 
 # Data Analysis Skill
 
 使用 DuckDB 对 Excel/CSV 文件进行 SQL 分析，支持表结构检查、统计摘要、聚合查询、结果导出。
+
+## 触发匹配规则（Agent 加载后必读）
+
+> 本节是**给 LLM 的执行指令**，不是给人类阅读的。
+
+**Step 1 — 匹配判断**：如果用户消息**符合以下任一条件**，加载本 Skill 并继续：
+- 含以下中文动词之一 + 表格/文件路径：`分析 / 看看 / 统计 / 汇总 / 透视 / 拆解 / 跑一下 / 列一下`
+- 含以下英文动词之一：`analyze / summarize / inspect / query / aggregate / pivot / group by / filter / join`
+- 用户给出一个 `.xlsx / .xls / .csv` 路径并问"这是什么 / 多少行 / 长啥样"
+- 用户问"做个报告 / 生成图表 / 导出"且源数据是表格文件
+
+**Step 2 — 复杂度判定**：
+- **首轮对话 → 强制 Simple Mode**（见下一节），不要判断"是否复杂"
+- **追问 / 续轮** → 根据用户措辞判定 Simple / Medium / Complex（见下表）
+
+**Step 3 — 绝不主动扩大范围**：
+- 不主动加更多分析维度
+- 不主动建议"要不要也看看 XX"
+- 不追问"你还想了解什么"——用户没问就不答
 
 ## 强制 Simple Mode（首轮）
 

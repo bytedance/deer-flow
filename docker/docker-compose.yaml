@@ -109,12 +109,18 @@ services:
       # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      # ~/.claude.json — claude CLI 凭证 / session state (JSON 文件)
+      # ~/.claude/     — claude CLI 历史 / 缓存 / 扩展 / skills 等目录
+      # 两者都 bind-mount 到 host 的 docker/claude/ 下，recreate 容器不丢状态。
+      - ./claude/.claude.json:/root/.claude.json
+      - ./claude/.claude/:/root/.claude/
       # Dev: mount gateway source code for hot-reload
       - ../backend/app/gateway:/app/backend/app/gateway
+      - ../backend/packages/harness:/app/backend/packages/harness
     working_dir: /app
     environment:
       - CI=true
-      - HOME=${HOME:-/root}
+      - HOME=/root
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml

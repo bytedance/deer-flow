@@ -95,6 +95,31 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
+# ── Install Claude Code CLI (offline bundled) ──────────────────────────────
+# 离线环境：把 bundle 脚本产出的整个 npm prefix (bin/ + lib/node_modules/ 全量)
+# 一次性解压到 /usr/local。gateway 通过 claude_provider.py (import anthropic) 调
+# Anthropic API，claude CLI 仅用于容器内 `claude login` 生成 OAuth 凭据。
+# 产物路径：offline-claude/claude-code-bundled-${VERSION}-${PLATFORM}.tar.gz
+# 由 scripts/bundle-claude-code.sh 在 Linux x86 runner 上生成。
+# 切换到其它平台（如 linux-arm64、alpine/musl）只需改 CLAUDE_CODE_PLATFORM，
+# 并把对应 tarball 放到 offline-claude/ 下，无需改 Dockerfile 其它部分。
+ARG CLAUDE_CODE_VERSION=2.1.139
+ARG CLAUDE_CODE_PLATFORM=linux-x64
+COPY offline-claude/claude-code-bundled-${CLAUDE_CODE_VERSION}-${CLAUDE_CODE_PLATFORM}.tar.gz /tmp/claude-bundle.tar.gz
+RUN tar -xzf /tmp/claude-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/claude-bundle.tar.gz \
+    && claude --version
+
+# ── Install Claude Agent ACP (offline bundled) ─────────────────────────────
+# 离线环境：把 @agentclientprotocol/claude-agent-acp 整包 vendor 到镜像，
+# 这样 acp_agents.claude_code 配的 `npx -y @agentclientprotocol/claude-agent-acp`
+ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
+COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
+RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/acp-bundle.tar.gz \
+    && test -x /usr/local/bin/claude-agent-acp \
+    && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+
 EXPOSE 8001 2024
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
@@ -160,6 +185,31 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/docker:cli /usr/local/bin/docker /usr/local/bin/docker
+
+# ── Install Claude Code CLI (offline bundled) ──────────────────────────────
+# 离线环境：把 bundle 脚本产出的整个 npm prefix (bin/ + lib/node_modules/ 全量)
+# 一次性解压到 /usr/local。gateway 通过 claude_provider.py (import anthropic) 调
+# Anthropic API，claude CLI 仅用于容器内 `claude login` 生成 OAuth 凭据。
+# 产物路径：offline-claude/claude-code-bundled-${VERSION}-${PLATFORM}.tar.gz
+# 由 scripts/bundle-claude-code.sh 在 Linux x86 runner 上生成。
+# 切换到其它平台（如 linux-arm64、alpine/musl）只需改 CLAUDE_CODE_PLATFORM，
+# 并把对应 tarball 放到 offline-claude/ 下，无需改 Dockerfile 其它部分。
+ARG CLAUDE_CODE_VERSION=2.1.139
+ARG CLAUDE_CODE_PLATFORM=linux-x64
+COPY offline-claude/claude-code-bundled-${CLAUDE_CODE_VERSION}-${CLAUDE_CODE_PLATFORM}.tar.gz /tmp/claude-bundle.tar.gz
+RUN tar -xzf /tmp/claude-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/claude-bundle.tar.gz \
+    && claude --version
+
+# ── Install Claude Agent ACP (offline bundled) ─────────────────────────────
+# 离线环境：把 @agentclientprotocol/claude-agent-acp 整包 vendor 到镜像，
+# 这样 acp_agents.claude_code 配的 `npx -y @agentclientprotocol/claude-agent-acp`
+ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
+COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
+RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/acp-bundle.tar.gz \
+    && test -x /usr/local/bin/claude-agent-acp \
+    && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
 
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/

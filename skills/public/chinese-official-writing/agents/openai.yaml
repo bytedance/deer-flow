@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chinese Official Writing"
+  short_description: "Draft or review Chinese official work documents"
+  default_prompt: "Use $chinese-official-writing only for Chinese official or formal work documents, such as notices, requests, reports, plans, research reports, feasibility studies, or AI-compute procurement materials."

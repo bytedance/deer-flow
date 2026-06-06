@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,17 @@ class DifyResponse(BaseModel):
     answer: str
     conversation_id: str
     message_id: str
+
+
+class DifyChunk(BaseModel):
+    """A single streamed answer fragment from Dify.
+
+    Mirrors the per-line payload of Dify's SSE stream (``event: message`` lines).
+    """
+
+    answer: str
+    conversation_id: str
+    message_id: str = ""
 
 
 class DifyClient:
@@ -172,3 +184,92 @@ class DifyClient:
 
         logger.info("Dify streaming completed: chunks=%d, conversation_id=%s", len(chunks), conversation_id_result[0])
         return chunks, conversation_id_result[0]
+
+    async def astream_chat(
+        self,
+        query: str,
+        conversation_id: str,
+        user: str,
+        timeout: float = 60.0,
+    ) -> AsyncIterator[DifyChunk]:
+        """Streaming mode: yield each Dify answer fragment as it arrives.
+
+        Unlike ``chat_stream`` (which buffers the entire SSE response and returns
+        a list), this is a true async generator — each ``DifyChunk`` is yielded as
+        soon as Dify's server emits a ``event: message`` line. Callers that want
+        per-chunk side effects (e.g. pushing events to a UI stream) should use
+        this; callers that just need the final answer can keep using
+        ``chat_stream``.
+
+        Args:
+            query: User message to send.
+            conversation_id: Dify conversation_id for context continuity.
+            user: User identifier forwarded to Dify for analytics/auth.
+            timeout: Total HTTP timeout in seconds.
+
+        Yields:
+            ``DifyChunk`` for every ``event: message`` line whose payload
+            contains a non-empty ``answer`` field. Non-message events
+            (e.g. ``ping``) are silently ignored.
+
+        Raises:
+            DifyAPIError: On non-2xx HTTP response or request timeout.
+        """
+        logger.debug("Dify astream_chat request: query=%r, conversation_id=%r, user=%r", query, conversation_id, user)
+        url = f"{self.base_url}/v1/chat-messages"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "inputs": {},
+            "query": query,
+            "response_mode": "streaming",
+            "conversation_id": conversation_id,
+            "user": user,
+            "files": [],
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as ac:
+                async with ac.stream("POST", url, json=payload, headers=headers) as response:
+                    if not response.is_success:
+                        body = await response.aread()
+                        try:
+                            err = json.loads(body)
+                            message = err.get("message", body.decode(errors="replace"))
+                        except json.JSONDecodeError:
+                            message = body.decode(errors="replace")
+                        logger.error("Dify astream_chat API error: status=%d, message=%s", response.status_code, message)
+                        raise DifyAPIError(response.status_code, message)
+
+                    current_event: str | None = None
+                    async for raw_line in response.aiter_lines():
+                        # aiter_lines() yields bytes in some httpx versions and str in others.
+                        if isinstance(raw_line, bytes):
+                            line = raw_line.decode("utf-8", errors="replace")
+                        else:
+                            line = raw_line
+                        if line.startswith("event: "):
+                            current_event = line[7:].strip()
+                            continue
+                        if not line.startswith("data: ") or current_event != "message":
+                            continue
+                        data_str = line[6:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        answer = data.get("answer", "")
+                        if not answer:
+                            continue
+                        yield DifyChunk(
+                            answer=answer,
+                            conversation_id=data.get("conversation_id", "") or "",
+                            message_id=data.get("message_id", "") or "",
+                        )
+        except httpx.TimeoutException as exc:
+            logger.error("Dify astream_chat timed out (url=%s, timeout=%.1fs)", url, timeout)
+            raise DifyAPIError(0, "Request to Dify timed out") from exc

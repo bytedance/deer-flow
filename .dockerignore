@@ -59,6 +59,7 @@ tests/
 scripts/
 logs/
 docker/
+docker/claude/    # Claude CLI runtime auth credentials (OAuth + session state) — must NOT be baked into image
 skills/
 frontend/.next
 frontend/node_modules
