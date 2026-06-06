@@ -1,0 +1,397 @@
+{
+  "batchIndex": 35,
+  "nodes": [
+    {
+      "id": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "label": "openai_codex_provider.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 460,
+      "summary": "OpenAI Codex模型提供者实现，封装凭证加载、OAuth令牌解析和Codex CLI凭据管理等功能。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/models/patched_deepseek.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/models/patched_deepseek.py",
+      "label": "patched_deepseek.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 73,
+      "summary": "DeepSeek模型的补丁实现，修复上游LangChain DeepSeek集成中的已知问题。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/models/patched_minimax.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/models/patched_minimax.py",
+      "label": "patched_minimax.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 220,
+      "summary": "MiniMax模型的补丁实现，处理MiniMax API的特殊参数和响应格式兼容性。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/models/patched_openai.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/models/patched_openai.py",
+      "label": "patched_openai.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 132,
+      "summary": "OpenAI模型的补丁实现，修复流式响应和工具调用中的兼容性问题。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/models/vllm_provider.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/models/vllm_provider.py",
+      "label": "vllm_provider.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 258,
+      "summary": "vLLM推理引擎的模型提供者实现，支持本地部署的高性能LLM推理服务接入。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/agent/auth.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/agent/auth.py",
+      "label": "auth.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 18,
+      "summary": "Agent持久化层认证模块，提供OAuth令牌检测等基础认证辅助功能。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/marketplace/__init__.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/marketplace/__init__.py",
+      "label": "__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "Marketplace持久化包初始化文件，标记目录为Python包。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/alembic.ini",
+      "label": "alembic.ini",
+      "language": "ini",
+      "fileCategory": "config",
+      "sizeLines": 38,
+      "summary": "Alembic数据库迁移工具配置文件，定义迁移脚本路径和数据库连接参数。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/.gitkeep",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/.gitkeep",
+      "label": ".gitkeep",
+      "language": "unknown",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "Git占位文件，确保迁移版本目录被版本控制追踪。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/001_add_kb_visibility_tenant_index.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/001_add_kb_visibility_tenant_index.py",
+      "label": "001_add_kb_visibility_tenant_index.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 29,
+      "summary": "数据库迁移脚本001，为知识库表添加可见性字段和租户索引。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/002_add_closure_tickets.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/002_add_closure_tickets.py",
+      "label": "002_add_closure_tickets.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 149,
+      "summary": "数据库迁移脚本002，创建闭环工单表以支持问题分析后的跟踪处理流程。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/003_kb_usability_columns.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/003_kb_usability_columns.py",
+      "label": "003_kb_usability_columns.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 55,
+      "summary": "数据库迁移脚本003，为知识库表添加可用性相关字段以提升使用体验。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/004_add_memory_audit.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/004_add_memory_audit.py",
+      "label": "004_add_memory_audit.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 46,
+      "summary": "数据库迁移脚本004，创建记忆审计表以记录Agent记忆操作的变更历史。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/persistence/migrations/versions/005_add_marketplace.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/persistence/migrations/versions/005_add_marketplace.py",
+      "label": "005_add_marketplace.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 90,
+      "summary": "数据库迁移脚本005，创建市场相关表以支持Agent和技能的发布与共享。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/rag/__init__.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/rag/__init__.py",
+      "label": "__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "RAG模块包初始化文件，标记目录为Python包。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/rag/backends/__init__.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/rag/backends/__init__.py",
+      "label": "__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "RAG后端包初始化文件，标记目录为Python包。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/runtime/__init__.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/runtime/__init__.py",
+      "label": "__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 51,
+      "summary": "运行时模块包入口，导出核心运行时组件并提供模块级初始化逻辑。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/runtime/converters.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/runtime/converters.py",
+      "label": "converters.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 136,
+      "summary": "运行时数据转换器模块，负责在不同格式间转换Agent输入输出数据。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/runtime/journal.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/runtime/journal.py",
+      "label": "journal.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 382,
+      "summary": "运行时日志模块，记录Agent执行过程的事件流、状态变更和操作审计信息。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/tools/builtins/http_connector_cache.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/tools/builtins/http_connector_cache.py",
+      "label": "http_connector_cache.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 67,
+      "summary": "HTTP连接器缓存模块，管理HTTP请求的响应缓存以提升重复查询性能。"
+    },
+    {
+      "id": "file:backend/packages/harness/deerflow/tools/builtins/invoke_acp_agent_tool.py",
+      "type": "file",
+      "path": "backend/packages/harness/deerflow/tools/builtins/invoke_acp_agent_tool.py",
+      "label": "invoke_acp_agent_tool.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 257,
+      "summary": "ACP Agent调用工具，封装与外部ACP协议Agent的通信和任务委派逻辑。"
+    },
+    {
+      "id": "file:backend/packages/harness/pyproject.toml",
+      "type": "file",
+      "path": "backend/packages/harness/pyproject.toml",
+      "label": "pyproject.toml",
+      "language": "toml",
+      "fileCategory": "config",
+      "sizeLines": 60,
+      "summary": "Harness包的Python项目元数据配置，定义包依赖、版本和构建系统设置。"
+    },
+    {
+      "id": "file:backend/run.py",
+      "type": "file",
+      "path": "backend/run.py",
+      "label": "run.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 17,
+      "summary": "后端服务启动入口脚本，初始化应用并启动LangGraph服务进程。"
+    },
+    {
+      "id": "file:backend/scripts/cleanup_token_usage_json.py",
+      "type": "file",
+      "path": "backend/scripts/cleanup_token_usage_json.py",
+      "label": "cleanup_token_usage_json.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 335,
+      "summary": "Token使用量清理脚本，汇总JSON格式的令牌消耗数据并归档历史文件。"
+    },
+    {
+      "id": "file:backend/scripts/migrate_memory_to_store.py",
+      "type": "file",
+      "path": "backend/scripts/migrate_memory_to_store.py",
+      "label": "migrate_memory_to_store.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 202,
+      "summary": "记忆迁移脚本，将旧格式的记忆文件迁移到新的持久化存储中。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::is_oauth_token",
+      "type": "function",
+      "name": "is_oauth_token",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "检查给定令牌是否为OAuth格式的辅助函数。"
+    },
+    {
+      "id": "class:backend/packages/harness/deerflow/models/openai_codex_provider.py::ClaudeCodeCredential",
+      "type": "class",
+      "name": "ClaudeCodeCredential",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "Claude Code凭据数据类，封装从Claude Code环境获取的认证信息。"
+    },
+    {
+      "id": "class:backend/packages/harness/deerflow/models/openai_codex_provider.py::CodexCliCredential",
+      "type": "class",
+      "name": "CodexCliCredential",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "Codex CLI凭据数据类，封装从Codex命令行工具获取的认证信息。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_resolve_credential_path",
+      "type": "function",
+      "name": "_resolve_credential_path",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "解析凭据文件路径的内部辅助函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_home_dir",
+      "type": "function",
+      "name": "_home_dir",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "获取用户主目录路径的内部辅助函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_load_json_file",
+      "type": "function",
+      "name": "_load_json_file",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "从文件系统加载并解析JSON内容的内部辅助函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_read_secret_from_file_descriptor",
+      "type": "function",
+      "name": "_read_secret_from_file_descriptor",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "从文件描述符安全读取密钥信息的内部函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_credential_from_direct_token",
+      "type": "function",
+      "name": "_credential_from_direct_token",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "从直接提供的令牌创建凭据对象的内部工厂函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_iter_claude_code_credential_paths",
+      "type": "function",
+      "name": "_iter_claude_code_credential_paths",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "迭代遍历Claude Code凭据可能存储路径的内部函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_extract_claude_code_credential",
+      "type": "function",
+      "name": "_extract_claude_code_credential",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "从给定路径提取Claude Code凭据信息的内部函数。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::load_claude_code_credential",
+      "type": "function",
+      "name": "load_claude_code_credential",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "加载Claude Code凭据的公共函数，搜索标准路径并返回认证信息。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::load_codex_cli_credential",
+      "type": "function",
+      "name": "load_codex_cli_credential",
+      "filePath": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "startLine": 1,
+      "endLine": 460,
+      "summary": "加载Codex CLI凭据的公共函数，从Codex环境获取认证令牌。"
+    },
+    {
+      "id": "func:backend/packages/harness/deerflow/persistence/agent/auth.py::is_oauth_token",
+      "type": "function",
+      "name": "is_oauth_token",
+      "filePath": "backend/packages/harness/deerflow/persistence/agent/auth.py",
+      "startLine": 1,
+      "endLine": 18,
+      "summary": "检查给定令牌是否为OAuth格式。"
+    }
+  ],
+  "edges": [
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "file:backend/packages/harness/deerflow/models/credential_loader.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/marketplace/__init__.py", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/005_add_marketplace.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/rag/__init__.py", "to": "file:backend/packages/harness/deerflow/rag/backends/__init__.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/runtime/__init__.py", "to": "file:backend/packages/harness/deerflow/runtime/converters.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/runtime/__init__.py", "to": "file:backend/packages/harness/deerflow/runtime/journal.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/001_add_kb_visibility_tenant_index.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/002_add_closure_tickets.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/003_kb_usability_columns.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/004_add_memory_audit.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/migrations/alembic.ini", "to": "file:backend/packages/harness/deerflow/persistence/migrations/versions/005_add_marketplace.py", "type": "imports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::is_oauth_token", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "class:backend/packages/harness/deerflow/models/openai_codex_provider.py::ClaudeCodeCredential", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "class:backend/packages/harness/deerflow/models/openai_codex_provider.py::CodexCliCredential", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_resolve_credential_path", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_home_dir", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_load_json_file", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_read_secret_from_file_descriptor", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_credential_from_direct_token", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_iter_claude_code_credential_paths", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::_extract_claude_code_credential", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::load_claude_code_credential", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/models/openai_codex_provider.py", "to": "func:backend/packages/harness/deerflow/models/openai_codex_provider.py::load_codex_cli_credential", "type": "exports"},
+    {"from": "file:backend/packages/harness/deerflow/persistence/agent/auth.py", "to": "func:backend/packages/harness/deerflow/persistence/agent/auth.py::is_oauth_token", "type": "exports"}
+  ]
+}

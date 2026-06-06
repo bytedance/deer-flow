@@ -1,0 +1,1007 @@
+{
+  "batchIndex": 17,
+  "nodes": [
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "language": "python",
+      "summary": "aio_sandbox 包的初始化模块，导出异步沙箱相关的核心类和后端实现",
+      "tags": ["package-init", "sandbox"],
+      "metadata": {"sizeLines": 15}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "type": "file",
+      "name": "aio_sandbox_provider.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "language": "python",
+      "summary": "异步沙箱提供者的完整实现，管理沙箱生命周期并根据配置选择本地或远程后端",
+      "tags": ["provider", "sandbox", "async"],
+      "metadata": {"sizeLines": 707}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py::AioSandboxProvider",
+      "type": "class",
+      "name": "AioSandboxProvider",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "language": "python",
+      "summary": "异步沙箱提供者类，负责创建、管理和销毁沙箱实例",
+      "tags": ["class", "provider", "sandbox"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "type": "file",
+      "name": "aio_sandbox.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "language": "python",
+      "summary": "异步沙箱核心实现，封装异步操作的沙箱环境并提供文件搜索能力",
+      "tags": ["sandbox", "async"],
+      "metadata": {"sizeLines": 238}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py::AioSandbox",
+      "type": "class",
+      "name": "AioSandbox",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "language": "python",
+      "summary": "异步沙箱类，继承基础沙箱并添加异步操作支持",
+      "tags": ["class", "sandbox"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "type": "file",
+      "name": "backend.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "language": "python",
+      "summary": "定义异步沙箱后端的抽象基类接口，供本地和远程后端实现",
+      "tags": ["abstract", "backend", "sandbox"],
+      "metadata": {"sizeLines": 114}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py::BaseBackend",
+      "type": "class",
+      "name": "BaseBackend",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "language": "python",
+      "summary": "沙箱后端抽象基类，定义后端需实现的接口契约",
+      "tags": ["class", "abstract", "backend"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "type": "file",
+      "name": "local_backend.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "language": "python",
+      "summary": "本地沙箱后端实现，在宿主机文件系统中执行沙箱操作并包含网络工具支持",
+      "tags": ["backend", "local", "sandbox"],
+      "metadata": {"sizeLines": 632}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py::LocalBackend",
+      "type": "class",
+      "name": "LocalBackend",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "language": "python",
+      "summary": "本地后端类，实现基于本地文件系统的沙箱操作",
+      "tags": ["class", "backend", "local"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "type": "file",
+      "name": "remote_backend.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "language": "python",
+      "summary": "远程沙箱后端实现，通过远程连接协议执行沙箱操作",
+      "tags": ["backend", "remote", "sandbox"],
+      "metadata": {"sizeLines": 200}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py::RemoteBackend",
+      "type": "class",
+      "name": "RemoteBackend",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "language": "python",
+      "summary": "远程后端类，实现基于远程连接的沙箱操作",
+      "tags": ["class", "backend", "remote"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "file",
+      "name": "sandbox_info.py",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "language": "python",
+      "summary": "定义沙箱信息数据模型，存储沙箱实例的配置和状态元数据",
+      "tags": ["data-model", "sandbox"],
+      "metadata": {"sizeLines": 41}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py::SandboxInfo",
+      "type": "class",
+      "name": "SandboxInfo",
+      "path": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "language": "python",
+      "summary": "沙箱信息数据类，封装沙箱实例的配置参数和运行状态",
+      "tags": ["class", "data-model"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/sandbox/__init__.py",
+      "language": "python",
+      "summary": "sandbox 包的初始化模块，导出沙箱提供者和基础沙箱类",
+      "tags": ["package-init", "sandbox"],
+      "metadata": {"sizeLines": 8}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "type": "file",
+      "name": "exceptions.py",
+      "path": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "language": "python",
+      "summary": "定义沙箱模块的自定义异常类，涵盖操作错误和安全违规等场景",
+      "tags": ["exceptions", "sandbox"],
+      "metadata": {"sizeLines": 71}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxError",
+      "type": "class",
+      "name": "SandboxError",
+      "path": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "language": "python",
+      "summary": "沙箱基础异常类，所有沙箱相关错误的父类",
+      "tags": ["class", "exception"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxOperationError",
+      "type": "class",
+      "name": "SandboxOperationError",
+      "path": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "language": "python",
+      "summary": "沙箱操作执行失败时抛出的异常",
+      "tags": ["class", "exception"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxSecurityError",
+      "type": "class",
+      "name": "SandboxSecurityError",
+      "path": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "language": "python",
+      "summary": "沙箱安全策略违规时抛出的异常",
+      "tags": ["class", "exception", "security"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxPathTraversalError",
+      "type": "class",
+      "name": "SandboxPathTraversalError",
+      "path": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "language": "python",
+      "summary": "检测到路径遍历攻击时抛出的安全异常",
+      "tags": ["class", "exception", "security"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "type": "file",
+      "name": "file_operation_lock.py",
+      "path": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "language": "python",
+      "summary": "提供文件操作的锁机制，防止沙箱中并发文件操作的冲突",
+      "tags": ["locking", "concurrency", "sandbox"],
+      "metadata": {"sizeLines": 27}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py::file_operation_lock",
+      "type": "function",
+      "name": "file_operation_lock",
+      "path": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "language": "python",
+      "summary": "文件操作锁的上下文管理器，确保并发文件操作的安全性",
+      "tags": ["function", "lock", "context-manager"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/sandbox/local/__init__.py",
+      "language": "python",
+      "summary": "sandbox/local 子包的初始化模块，导出本地沙箱相关组件",
+      "tags": ["package-init", "sandbox", "local"],
+      "metadata": {"sizeLines": 3}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "type": "file",
+      "name": "list_dir.py",
+      "path": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "language": "python",
+      "summary": "实现沙箱内目录列表功能，安全地枚举目录内容并进行过滤",
+      "tags": ["filesystem", "directory", "sandbox"],
+      "metadata": {"sizeLines": 68}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/list_dir.py::list_dir",
+      "type": "function",
+      "name": "list_dir",
+      "path": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "language": "python",
+      "summary": "列出指定目录的内容，返回经过安全过滤的文件和子目录列表",
+      "tags": ["function", "filesystem"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "type": "file",
+      "name": "local_sandbox_provider.py",
+      "path": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "language": "python",
+      "summary": "本地沙箱提供者实现，管理基于本地文件系统的沙箱实例生命周期",
+      "tags": ["provider", "local", "sandbox"],
+      "metadata": {"sizeLines": 121}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py::LocalSandboxProvider",
+      "type": "class",
+      "name": "LocalSandboxProvider",
+      "path": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "language": "python",
+      "summary": "本地沙箱提供者类，实现基于提供者接口的本地沙箱管理",
+      "tags": ["class", "provider", "local"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "type": "file",
+      "name": "local_sandbox.py",
+      "path": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "language": "python",
+      "summary": "本地沙箱完整实现，提供文件读写、目录操作和搜索等沙箱功能",
+      "tags": ["sandbox", "local", "filesystem"],
+      "metadata": {"sizeLines": 436}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py::LocalSandbox",
+      "type": "class",
+      "name": "LocalSandbox",
+      "path": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "language": "python",
+      "summary": "本地沙箱类，实现完整的本地文件系统沙箱操作",
+      "tags": ["class", "sandbox", "local"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/middleware.py",
+      "type": "file",
+      "name": "middleware.py",
+      "path": "backend/packages/harness/deerflow/sandbox/middleware.py",
+      "language": "python",
+      "summary": "沙箱中间件，在 Agent 执行流程中集成沙箱状态的初始化与清理",
+      "tags": ["middleware", "sandbox", "agent"],
+      "metadata": {"sizeLines": 83}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "type": "file",
+      "name": "sandbox_provider.py",
+      "path": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "language": "python",
+      "summary": "定义沙箱提供者的抽象基类，规定沙箱管理的标准接口",
+      "tags": ["abstract", "provider", "sandbox"],
+      "metadata": {"sizeLines": 98}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py::BaseSandboxProvider",
+      "type": "class",
+      "name": "BaseSandboxProvider",
+      "path": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "language": "python",
+      "summary": "沙箱提供者抽象基类，定义创建和管理沙箱的接口契约",
+      "tags": ["class", "abstract", "provider"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "file",
+      "name": "sandbox.py",
+      "path": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "language": "python",
+      "summary": "定义沙箱的抽象基类，封装沙箱环境的核心操作接口",
+      "tags": ["abstract", "sandbox", "base"],
+      "metadata": {"sizeLines": 93}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/sandbox.py::BaseSandbox",
+      "type": "class",
+      "name": "BaseSandbox",
+      "path": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "language": "python",
+      "summary": "沙箱抽象基类，定义沙箱环境的文件操作和搜索接口",
+      "tags": ["class", "abstract", "sandbox"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "file",
+      "name": "search.py",
+      "path": "backend/packages/harness/deerflow/sandbox/search.py",
+      "language": "python",
+      "summary": "实现沙箱内文件搜索功能，支持模式匹配和结果过滤",
+      "tags": ["search", "filesystem", "sandbox"],
+      "metadata": {"sizeLines": 210}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/search.py::FileSearchResult",
+      "type": "class",
+      "name": "FileSearchResult",
+      "path": "backend/packages/harness/deerflow/sandbox/search.py",
+      "language": "python",
+      "summary": "文件搜索结果数据类，封装匹配文件的路径和相关元信息",
+      "tags": ["class", "data-model", "search"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/search.py::search_files",
+      "type": "function",
+      "name": "search_files",
+      "path": "backend/packages/harness/deerflow/sandbox/search.py",
+      "language": "python",
+      "summary": "在沙箱文件系统中执行文件搜索，返回匹配指定模式的结果列表",
+      "tags": ["function", "search", "filesystem"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "type": "file",
+      "name": "tools.py",
+      "path": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "language": "python",
+      "summary": "沙箱工具集的大型实现文件，为 Agent 提供完整的文件操作、搜索和沙箱管理工具",
+      "tags": ["tools", "sandbox", "agent", "langchain"],
+      "metadata": {"sizeLines": 1630}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/network.py",
+      "type": "file",
+      "name": "network.py",
+      "path": "backend/packages/harness/deerflow/utils/network.py",
+      "language": "python",
+      "summary": "网络工具模块，提供端口检测和网络连接相关的实用函数",
+      "tags": ["utility", "network"],
+      "metadata": {"sizeLines": 147}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/network.py::find_free_port",
+      "type": "function",
+      "name": "find_free_port",
+      "path": "backend/packages/harness/deerflow/utils/network.py",
+      "language": "python",
+      "summary": "查找系统中可用的空闲端口号",
+      "tags": ["function", "network", "port"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/network.py::is_port_available",
+      "type": "function",
+      "name": "is_port_available",
+      "path": "backend/packages/harness/deerflow/utils/network.py",
+      "language": "python",
+      "summary": "检测指定端口是否可用（未被占用）",
+      "tags": ["function", "network", "port"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/network.py::wait_for_port",
+      "type": "function",
+      "name": "wait_for_port",
+      "path": "backend/packages/harness/deerflow/utils/network.py",
+      "language": "python",
+      "summary": "等待指定端口变为可用状态，带超时控制",
+      "tags": ["function", "network", "port"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/config/paths.py::join_host_path",
+      "type": "function",
+      "name": "join_host_path",
+      "path": "backend/packages/harness/deerflow/config/paths.py",
+      "language": "python",
+      "summary": "安全地拼接宿主路径，确保路径在允许的目录范围内",
+      "tags": ["function", "path", "security"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/config/paths.py::Paths",
+      "type": "class",
+      "name": "Paths",
+      "path": "backend/packages/harness/deerflow/config/paths.py",
+      "language": "python",
+      "summary": "路径管理类，集中管理应用中的各类文件路径配置",
+      "tags": ["class", "config", "path"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/config/paths.py::get_paths",
+      "type": "function",
+      "name": "get_paths",
+      "path": "backend/packages/harness/deerflow/config/paths.py",
+      "language": "python",
+      "summary": "获取全局路径配置实例",
+      "tags": ["function", "config", "path"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/config/paths.py::resolve_path",
+      "type": "function",
+      "name": "resolve_path",
+      "path": "backend/packages/harness/deerflow/config/paths.py",
+      "language": "python",
+      "summary": "解析并规范化文件路径",
+      "tags": ["function", "path"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::CurrentUser",
+      "type": "class",
+      "name": "CurrentUser",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "当前用户上下文数据类，封装请求级别的用户身份信息",
+      "tags": ["class", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::set_current_user",
+      "type": "function",
+      "name": "set_current_user",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "设置当前请求的用户上下文",
+      "tags": ["function", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::get_current_user",
+      "type": "function",
+      "name": "get_current_user",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "获取当前请求的用户上下文",
+      "tags": ["function", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::reset_current_user",
+      "type": "function",
+      "name": "reset_current_user",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "重置当前请求的用户上下文",
+      "tags": ["function", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::require_current_user",
+      "type": "function",
+      "name": "require_current_user",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "获取当前用户上下文，若未设置则抛出异常",
+      "tags": ["function", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/runtime/user_context.py::resolve_user_id",
+      "type": "function",
+      "name": "resolve_user_id",
+      "path": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "language": "python",
+      "summary": "解析并返回有效的用户标识符",
+      "tags": ["function", "context", "user"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/thread_state.py::ThreadState",
+      "type": "class",
+      "name": "ThreadState",
+      "path": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "language": "python",
+      "summary": "线程状态类，管理 Agent 线程的完整状态包括沙箱和数据状态",
+      "tags": ["class", "state", "agent"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/thread_state.py::SandboxState",
+      "type": "class",
+      "name": "SandboxState",
+      "path": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "language": "python",
+      "summary": "沙箱状态数据类，跟踪沙箱的运行状态和元信息",
+      "tags": ["class", "state", "sandbox"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/thread_state.py::merge_artifacts",
+      "type": "function",
+      "name": "merge_artifacts",
+      "path": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "language": "python",
+      "summary": "合并线程状态中的工件数据",
+      "tags": ["function", "state", "merge"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/thread_state.py::merge_viewed_images",
+      "type": "function",
+      "name": "merge_viewed_images",
+      "path": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "language": "python",
+      "summary": "合并线程状态中已查看图片的记录",
+      "tags": ["function", "state", "merge"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/security.py::uses_local_sandbox_provider",
+      "type": "function",
+      "name": "uses_local_sandbox_provider",
+      "path": "backend/packages/harness/deerflow/sandbox/security.py",
+      "language": "python",
+      "summary": "检测当前是否使用本地沙箱提供者",
+      "tags": ["function", "security", "sandbox"],
+      "metadata": {}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/sandbox/security.py::is_host_bash_allowed",
+      "type": "function",
+      "name": "is_host_bash_allowed",
+      "path": "backend/packages/harness/deerflow/sandbox/security.py",
+      "language": "python",
+      "summary": "检查是否允许在宿主机上执行 bash 命令",
+      "tags": ["function", "security", "sandbox"],
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "target": "backend/packages/harness/deerflow/utils/network.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/__init__.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/__init__.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/middleware.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/middleware.py",
+      "target": "backend/packages/harness/deerflow/sandbox/__init__.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/reflection/__init__.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py::AioSandboxProvider",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py::AioSandbox",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py::BaseBackend",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py::LocalBackend",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py::RemoteBackend",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/sandbox_info.py::SandboxInfo",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "target": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxError",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "target": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxOperationError",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "target": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxSecurityError",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/exceptions.py",
+      "target": "backend/packages/harness/deerflow/sandbox/exceptions.py::SandboxPathTraversalError",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py",
+      "target": "backend/packages/harness/deerflow/sandbox/file_operation_lock.py::file_operation_lock",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/list_dir.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/list_dir.py::list_dir",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py::LocalSandboxProvider",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py::LocalSandbox",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py::BaseSandboxProvider",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox.py",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py::BaseSandbox",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/search.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py::FileSearchResult",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/search.py",
+      "target": "backend/packages/harness/deerflow/sandbox/search.py::search_files",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/network.py",
+      "target": "backend/packages/harness/deerflow/utils/network.py::find_free_port",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/network.py",
+      "target": "backend/packages/harness/deerflow/utils/network.py::is_port_available",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/network.py",
+      "target": "backend/packages/harness/deerflow/utils/network.py::wait_for_port",
+      "type": "contains"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox.py::AioSandbox",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py::BaseSandbox",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py::LocalBackend",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py::BaseBackend",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py::RemoteBackend",
+      "target": "backend/packages/harness/deerflow/community/aio_sandbox/backend.py::BaseBackend",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py::LocalSandboxProvider",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py::BaseSandboxProvider",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/local/local_sandbox.py::LocalSandbox",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox.py::BaseSandbox",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py::AioSandboxProvider",
+      "target": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py::BaseSandboxProvider",
+      "type": "extends"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/reflection/__init__.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/middleware.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "depends_on"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/sandbox/tools.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "depends_on"
+    }
+  ]
+}

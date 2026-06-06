@@ -1,0 +1,34 @@
+{
+  "batchIndex": 20,
+  "nodes": [
+    {"id":"backend/packages/harness/deerflow/config/nacos_config.py","type":"file","name":"nacos_config.py","path":"backend/packages/harness/deerflow/config/nacos_config.py","language":"python","summary":"Nacos 配置管理模块，提供从 Nacos 配置中心加载和解析应用配置的能力。","tags":["config","nacos"],"metadata":{"sizeLines":134}},
+    {"id":"backend/packages/harness/deerflow/config/rpc_config.py","type":"file","name":"rpc_config.py","path":"backend/packages/harness/deerflow/config/rpc_config.py","language":"python","summary":"RPC 配置模块，定义远程过程调用的连接参数和服务发现配置。","tags":["config","rpc"],"metadata":{"sizeLines":102}},
+
+    {"id":"backend/packages/harness/deerflow/integrations/adapters/ins/client_bridge.py","type":"file","name":"client_bridge.py","path":"backend/packages/harness/deerflow/integrations/adapters/ins/client_bridge.py","language":"python","summary":"INS 客户端桥接模块，封装与 INS 系统的 RPC 通信并提供统一的服务调用接口。","tags":["ins","rpc","adapter","bridge"],"metadata":{"sizeLines":314}},
+
+    {"id":"backend/packages/harness/deerflow/rpc/__init__.py","type":"file","name":"__init__.py","path":"backend/packages/harness/deerflow/rpc/__init__.py","language":"python","summary":"RPC 包的初始化模块，导出核心 RPC 客户端和服务注册组件。","tags":["rpc","init"],"metadata":{"sizeLines":8}},
+    {"id":"backend/packages/harness/deerflow/rpc/ins_base_auth_service.py","type":"file","name":"ins_base_auth_service.py","path":"backend/packages/harness/deerflow/rpc/ins_base_auth_service.py","language":"python","summary":"InsBase 认证 RPC 服务，封装用户登录、令牌验证等远程认证调用。","tags":["rpc","auth","insbase"],"metadata":{"sizeLines":81}},
+    {"id":"backend/packages/harness/deerflow/rpc/ins_base_org_service.py","type":"file","name":"ins_base_org_service.py","path":"backend/packages/harness/deerflow/rpc/ins_base_org_service.py","language":"python","summary":"InsBase 组织 RPC 服务，封装组织和部门相关的远程查询调用。","tags":["rpc","org","insbase"],"metadata":{"sizeLines":68}},
+    {"id":"backend/packages/harness/deerflow/rpc/machine_service.py","type":"file","name":"machine_service.py","path":"backend/packages/harness/deerflow/rpc/machine_service.py","language":"python","summary":"机器 RPC 服务，封装设备台账和机器数据的远程查询调用。","tags":["rpc","machine"],"metadata":{"sizeLines":176}},
+    {"id":"backend/packages/harness/deerflow/rpc/nacos_registry.py","type":"file","name":"nacos_registry.py","path":"backend/packages/harness/deerflow/rpc/nacos_registry.py","language":"python","summary":"Nacos 服务注册模块，实现服务实例的注册、发现和心跳维护。","tags":["rpc","nacos","registry"],"metadata":{"sizeLines":286}},
+    {"id":"backend/packages/harness/deerflow/rpc/organize_service.py","type":"file","name":"organize_service.py","path":"backend/packages/harness/deerflow/rpc/organize_service.py","language":"python","summary":"组织 RPC 服务，封装组织架构相关的远程查询调用。","tags":["rpc","organize"],"metadata":{"sizeLines":86}},
+    {"id":"backend/packages/harness/deerflow/rpc/point_service.py","type":"file","name":"point_service.py","path":"backend/packages/harness/deerflow/rpc/point_service.py","language":"python","summary":"测点 RPC 服务，封装设备测点数据的远程查询调用。","tags":["rpc","point"],"metadata":{"sizeLines":57}},
+    {"id":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"file","name":"rpc_client.py","path":"backend/packages/harness/deerflow/rpc/rpc_client.py","language":"python","summary":"RPC 客户端核心模块，提供服务发现、负载均衡和远程调用的统一客户端实现。","tags":["rpc","client"],"metadata":{"sizeLines":336}}
+  ],
+  "edges": [
+    {"source":"backend/packages/harness/deerflow/integrations/adapters/ins/client_bridge.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/__init__.py","target":"backend/packages/harness/deerflow/rpc/ins_base_auth_service.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/__init__.py","target":"backend/packages/harness/deerflow/rpc/machine_service.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/__init__.py","target":"backend/packages/harness/deerflow/rpc/nacos_registry.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/__init__.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/ins_base_auth_service.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/ins_base_org_service.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/machine_service.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/nacos_registry.py","target":"backend/packages/harness/deerflow/config/nacos_config.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/organize_service.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/point_service.py","target":"backend/packages/harness/deerflow/rpc/rpc_client.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/rpc_client.py","target":"backend/packages/harness/deerflow/config/nacos_config.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/rpc_client.py","target":"backend/packages/harness/deerflow/config/rpc_config.py","type":"imports","metadata":{}},
+    {"source":"backend/packages/harness/deerflow/rpc/rpc_client.py","target":"backend/packages/harness/deerflow/rpc/nacos_registry.py","type":"imports","metadata":{}}
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "batchIndex": 23,
+  "nodes": [
+    {"id": "file:backend/packages/harness/deerflow/config/cost_config.py", "type": "file", "name": "cost_config.py", "summary": "成本配置定义模块，定义 Token 定价、模型费率等成本计算相关配置。", "tags": ["python", "config", "cost", "pricing", "token-usage"], "complexity": "moderate"},
+    {"id": "file:backend/packages/harness/deerflow/cost/__init__.py", "type": "file", "name": "__init__.py", "summary": "成本模块初始化文件，汇总导出计算器、存储和持久化存储等公共接口。", "tags": ["python", "cost", "init", "exports"], "complexity": "simple"},
+    {"id": "file:backend/packages/harness/deerflow/cost/budget.py", "type": "file", "name": "budget.py", "summary": "预算控制模块，跟踪会话级 Token 消耗并在超出预算阈值时触发限制。", "tags": ["python", "cost", "budget", "limit", "token-tracking"], "complexity": "moderate"},
+    {"id": "file:backend/packages/harness/deerflow/cost/calculator.py", "type": "file", "name": "calculator.py", "summary": "成本计算器模块，根据 Token 用量和模型定价配置计算单次请求费用。", "tags": ["python", "cost", "calculator", "token", "pricing"], "complexity": "simple"},
+    {"id": "file:backend/packages/harness/deerflow/cost/notifications.py", "type": "file", "name": "notifications.py", "summary": "成本通知模块，在预算接近上限或超限时生成告警通知并触发回调。", "tags": ["python", "cost", "notifications", "alert", "budget-threshold"], "complexity": "moderate"},
+    {"id": "file:backend/packages/harness/deerflow/cost/pg_storage.py", "type": "file", "name": "pg_storage.py", "summary": "PostgreSQL 成本存储实现，将会话 Token 用量和成本记录持久化到数据库。", "tags": ["python", "cost", "storage", "postgresql", "persistence"], "complexity": "complex"},
+    {"id": "file:backend/packages/harness/deerflow/cost/storage.py", "type": "file", "name": "storage.py", "summary": "成本存储抽象层，定义成本记录的本地文件读写接口和数据结构。", "tags": ["python", "cost", "storage", "local-file", "abstraction"], "complexity": "complex"},
+
+    {"id": "function:backend/packages/harness/deerflow/config/cost_config.py:CostConfig", "type": "class", "name": "CostConfig", "summary": "成本配置类，封装模型 Token 单价和成本计算参数。", "tags": ["config", "cost", "dataclass"], "complexity": "simple", "parentFile": "backend/packages/harness/deerflow/config/cost_config.py"},
+    {"id": "function:backend/packages/harness/deerflow/cost/calculator.py:calculate_cost", "type": "function", "name": "calculate_cost", "summary": "根据输入输出 Token 数和模型定价计算请求成本。", "tags": ["cost", "calculation", "token"], "complexity": "simple", "parentFile": "backend/packages/harness/deerflow/cost/calculator.py"},
+    {"id": "function:backend/packages/harness/deerflow/cost/budget.py:BudgetTracker", "type": "class", "name": "BudgetTracker", "summary": "预算跟踪器类，累计 Token 消耗并判断是否超出预算限额。", "tags": ["budget", "tracker", "cost-control"], "complexity": "moderate", "parentFile": "backend/packages/harness/deerflow/cost/budget.py"},
+    {"id": "function:backend/packages/harness/deerflow/cost/storage.py:CostStorage", "type": "class", "name": "CostStorage", "summary": "成本存储类，提供本地文件级的成本记录读写操作。", "tags": ["storage", "cost", "local-file"], "complexity": "complex", "parentFile": "backend/packages/harness/deerflow/cost/storage.py"},
+    {"id": "function:backend/packages/harness/deerflow/cost/pg_storage.py:PgCostStorage", "type": "class", "name": "PgCostStorage", "summary": "PostgreSQL 成本存储类，实现数据库级的成本记录持久化。", "tags": ["storage", "cost", "postgresql", "persistence"], "complexity": "complex", "parentFile": "backend/packages/harness/deerflow/cost/pg_storage.py"},
+    {"id": "function:backend/packages/harness/deerflow/cost/notifications.py:CostNotifier", "type": "class", "name": "CostNotifier", "summary": "成本通知器类，根据预算阈值触发告警和通知回调。", "tags": ["notifications", "cost", "alert"], "complexity": "moderate", "parentFile": "backend/packages/harness/deerflow/cost/notifications.py"}
+  ],
+  "edges": [
+    {"source": "file:backend/packages/harness/deerflow/cost/__init__.py", "target": "file:backend/packages/harness/deerflow/cost/calculator.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/__init__.py", "target": "file:backend/packages/harness/deerflow/cost/pg_storage.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/__init__.py", "target": "file:backend/packages/harness/deerflow/cost/storage.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/budget.py", "target": "file:backend/packages/harness/deerflow/config/cost_config.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/budget.py", "target": "file:backend/packages/harness/deerflow/cost/storage.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/calculator.py", "target": "file:backend/packages/harness/deerflow/config/cost_config.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/notifications.py", "target": "file:backend/packages/harness/deerflow/config/cost_config.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/notifications.py", "target": "file:backend/packages/harness/deerflow/cost/budget.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/pg_storage.py", "target": "file:backend/packages/harness/deerflow/config/paths.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/pg_storage.py", "target": "file:backend/packages/harness/deerflow/cost/storage.py", "type": "imports", "weight": 0.7},
+    {"source": "file:backend/packages/harness/deerflow/cost/storage.py", "target": "file:backend/packages/harness/deerflow/config/paths.py", "type": "imports", "weight": 0.7},
+
+    {"source": "file:backend/packages/harness/deerflow/config/cost_config.py", "target": "function:backend/packages/harness/deerflow/config/cost_config.py:CostConfig", "type": "exports", "weight": 0.8},
+    {"source": "file:backend/packages/harness/deerflow/cost/calculator.py", "target": "function:backend/packages/harness/deerflow/cost/calculator.py:calculate_cost", "type": "exports", "weight": 0.8},
+    {"source": "file:backend/packages/harness/deerflow/cost/budget.py", "target": "function:backend/packages/harness/deerflow/cost/budget.py:BudgetTracker", "type": "exports", "weight": 0.8},
+    {"source": "file:backend/packages/harness/deerflow/cost/storage.py", "target": "function:backend/packages/harness/deerflow/cost/storage.py:CostStorage", "type": "exports", "weight": 0.8},
+    {"source": "file:backend/packages/harness/deerflow/cost/pg_storage.py", "target": "function:backend/packages/harness/deerflow/cost/pg_storage.py:PgCostStorage", "type": "exports", "weight": 0.8},
+    {"source": "file:backend/packages/harness/deerflow/cost/notifications.py", "target": "function:backend/packages/harness/deerflow/cost/notifications.py:CostNotifier", "type": "exports", "weight": 0.8}
+  ]
+}

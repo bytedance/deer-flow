@@ -1,0 +1,159 @@
+{
+  "batchIndex": 48,
+  "nodes": [
+    {
+      "id": "backend/tests/test_token_usage_middleware.py",
+      "type": "file",
+      "label": "test_token_usage_middleware.py",
+      "path": "backend/tests/test_token_usage_middleware.py",
+      "language": "python",
+      "sizeLines": 157,
+      "summary": "Token 用量统计中间件的单元测试，验证中间件对请求中 Token 消耗的跟踪与记录。"
+    },
+    {
+      "id": "backend/tests/test_token_usage.py",
+      "type": "file",
+      "label": "test_token_usage.py",
+      "path": "backend/tests/test_token_usage.py",
+      "language": "python",
+      "sizeLines": 291,
+      "summary": "Token 用量核心逻辑的单元测试，覆盖 Token 计数、统计和配额检查等功能。"
+    },
+    {
+      "id": "backend/tests/test_tool_deduplication.py",
+      "type": "file",
+      "label": "test_tool_deduplication.py",
+      "path": "backend/tests/test_tool_deduplication.py",
+      "language": "python",
+      "sizeLines": 106,
+      "summary": "工具去重逻辑的单元测试，验证重复工具调用的识别和过滤机制。"
+    },
+    {
+      "id": "backend/tests/test_tool_error_handling_middleware.py",
+      "type": "file",
+      "label": "test_tool_error_handling_middleware.py",
+      "path": "backend/tests/test_tool_error_handling_middleware.py",
+      "language": "python",
+      "sizeLines": 301,
+      "summary": "工具错误处理中间件的单元测试，验证中间件对工具执行异常的捕获、分类和恢复策略。"
+    },
+    {
+      "id": "backend/tests/test_tool_output_truncation.py",
+      "type": "file",
+      "label": "test_tool_output_truncation.py",
+      "path": "backend/tests/test_tool_output_truncation.py",
+      "language": "python",
+      "sizeLines": 230,
+      "summary": "工具输出截断功能的单元测试，验证超长输出内容的截断和摘要处理。"
+    },
+    {
+      "id": "backend/tests/test_tool_search.py",
+      "type": "file",
+      "label": "test_tool_search.py",
+      "path": "backend/tests/test_tool_search.py",
+      "language": "python",
+      "sizeLines": 609,
+      "summary": "工具搜索功能的综合测试，覆盖工具检索、过滤、排序和匹配等核心搜索逻辑。"
+    },
+    {
+      "id": "backend/tests/test_tracing_config.py",
+      "type": "file",
+      "label": "test_tracing_config.py",
+      "path": "backend/tests/test_tracing_config.py",
+      "language": "python",
+      "sizeLines": 146,
+      "summary": "链路追踪配置模块的单元测试，验证追踪参数的加载和校验逻辑。"
+    },
+    {
+      "id": "backend/tests/test_tracing_factory.py",
+      "type": "file",
+      "label": "test_tracing_factory.py",
+      "path": "backend/tests/test_tracing_factory.py",
+      "language": "python",
+      "sizeLines": 173,
+      "summary": "链路追踪工厂的单元测试，验证追踪器实例的创建和配置流程。"
+    },
+    {
+      "id": "backend/tests/test_unified_status_enums.py",
+      "type": "file",
+      "label": "test_unified_status_enums.py",
+      "path": "backend/tests/test_unified_status_enums.py",
+      "language": "python",
+      "sizeLines": 259,
+      "summary": "统一状态枚举的单元测试，验证各业务状态枚举的定义、转换和一致性。"
+    },
+    {
+      "id": "backend/tests/test_update_agent_tool.py",
+      "type": "file",
+      "label": "test_update_agent_tool.py",
+      "path": "backend/tests/test_update_agent_tool.py",
+      "language": "python",
+      "sizeLines": 310,
+      "summary": "智能体更新工具的单元测试，验证 Agent 配置和参数的修改操作。"
+    },
+    {
+      "id": "backend/tests/test_uploads_manager.py",
+      "type": "file",
+      "label": "test_uploads_manager.py",
+      "path": "backend/tests/test_uploads_manager.py",
+      "language": "python",
+      "sizeLines": 207,
+      "summary": "上传管理器的单元测试，验证文件上传的生命周期管理和存储操作。"
+    },
+    {
+      "id": "backend/tests/test_uploads_middleware_core_logic.py",
+      "type": "file",
+      "label": "test_uploads_middleware_core_logic.py",
+      "path": "backend/tests/test_uploads_middleware_core_logic.py",
+      "language": "python",
+      "sizeLines": 474,
+      "summary": "上传中间件核心逻辑的单元测试，覆盖文件上传请求的拦截、验证和处理流程。"
+    },
+    {
+      "id": "backend/tests/test_user_context.py",
+      "type": "file",
+      "label": "test_user_context.py",
+      "path": "backend/tests/test_user_context.py",
+      "language": "python",
+      "sizeLines": 111,
+      "summary": "用户上下文的单元测试，验证用户身份信息的传递、存储和获取。"
+    },
+    {
+      "id": "backend/tests/test_utils_time.py",
+      "type": "file",
+      "label": "test_utils_time.py",
+      "path": "backend/tests/test_utils_time.py",
+      "language": "python",
+      "sizeLines": 90,
+      "summary": "时间工具函数的单元测试，验证时间格式转换、计算和格式化等辅助功能。"
+    },
+    {
+      "id": "backend/tests/test_view_image_middleware.py",
+      "type": "file",
+      "label": "test_view_image_middleware.py",
+      "path": "backend/tests/test_view_image_middleware.py",
+      "language": "python",
+      "sizeLines": 398,
+      "summary": "图片查看中间件的单元测试，验证图片请求的拦截、处理和响应流程。"
+    },
+    {
+      "id": "backend/tests/test_view_image_tool.py",
+      "type": "file",
+      "label": "test_view_image_tool.py",
+      "path": "backend/tests/test_view_image_tool.py",
+      "language": "python",
+      "sizeLines": 164,
+      "summary": "图片查看工具的单元测试，验证图片读取、缩放和格式转换等操作。"
+    },
+    {
+      "id": "backend/tests/test_vllm_provider.py",
+      "type": "file",
+      "label": "test_vllm_provider.py",
+      "path": "backend/tests/test_vllm_provider.py",
+      "language": "python",
+      "sizeLines": 138,
+      "summary": "vLLM 提供者的单元测试，验证与 vLLM 推理服务的连接和调用逻辑。"
+    }
+  ],
+  "edges": []
+}

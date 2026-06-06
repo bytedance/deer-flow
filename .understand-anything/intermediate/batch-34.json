@@ -1,0 +1,268 @@
+{
+  "batchIndex": 34,
+  "nodes": [
+    {
+      "id": "backend/.python-version",
+      "type": "file",
+      "label": ".python-version",
+      "path": "backend/.python-version",
+      "language": "unknown",
+      "fileCategory": "config",
+      "sizeLines": 1,
+      "summary": "Python 版本锁定文件，指定项目使用的 Python 解释器版本。"
+    },
+    {
+      "id": "backend/app/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/app/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "应用主包的初始化文件，内容为空。"
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/app/gateway/auth/repositories/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "认证仓储包的初始化文件，内容为空。"
+    },
+    {
+      "id": "backend/app/gateway/middleware/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/app/gateway/middleware/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "中间件包的初始化文件，内容为空。"
+    },
+    {
+      "id": "backend/debug.py",
+      "type": "file",
+      "label": "debug.py",
+      "path": "backend/debug.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 148,
+      "summary": "本地调试入口脚本，提供开发环境下的应用启动与测试辅助功能。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/packages/harness/deerflow/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "deerflow 核心包的初始化文件，内容为空。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/genui_persistence.py",
+      "type": "file",
+      "label": "genui_persistence.py",
+      "path": "backend/packages/harness/deerflow/agents/genui_persistence.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 308,
+      "summary": "GenUI 持久化模块，负责代理界面生成内容的存储与检索操作。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/memory/domain_prompt.py",
+      "type": "file",
+      "label": "domain_prompt.py",
+      "path": "backend/packages/harness/deerflow/agents/memory/domain_prompt.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 99,
+      "summary": "领域提示词管理模块，定义和组装代理记忆系统中的领域特定提示模板。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/middlewares/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/packages/harness/deerflow/agents/middlewares/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 1,
+      "summary": "代理中间件包的初始化文件。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py",
+      "type": "file",
+      "label": "deferred_tool_filter_middleware.py",
+      "path": "backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 107,
+      "summary": "延迟工具过滤中间件，在代理执行链中过滤延迟加载的工具调用。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/middlewares/invalid_tool_call_fix_middleware.py",
+      "type": "file",
+      "label": "invalid_tool_call_fix_middleware.py",
+      "path": "backend/packages/harness/deerflow/agents/middlewares/invalid_tool_call_fix_middleware.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 192,
+      "summary": "无效工具调用修复中间件，检测并修正当代理产生格式错误的工具调用请求。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/middlewares/passthrough_params_middleware.py",
+      "type": "file",
+      "label": "passthrough_params_middleware.py",
+      "path": "backend/packages/harness/deerflow/agents/middlewares/passthrough_params_middleware.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 72,
+      "summary": "参数透传中间件，在代理调用链中自动传递额外参数到下游工具。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/agents/prompts/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/packages/harness/deerflow/agents/prompts/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 61,
+      "summary": "代理提示词包的初始化文件，汇总导出提示模板定义。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/audio/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/packages/harness/deerflow/audio/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 2,
+      "summary": "音频处理模块的初始化文件。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/jobs.py",
+      "type": "file",
+      "label": "jobs.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/jobs.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 243,
+      "summary": "闭环任务调度模块，定义和执行业务闭环中的后台定时作业。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/config/run_events_config.py",
+      "type": "file",
+      "label": "run_events_config.py",
+      "path": "backend/packages/harness/deerflow/config/run_events_config.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 33,
+      "summary": "运行事件配置模块，定义运行事件的类型映射与参数配置。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/insights/memory_integration.py",
+      "type": "file",
+      "label": "memory_integration.py",
+      "path": "backend/packages/harness/deerflow/insights/memory_integration.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 122,
+      "summary": "记忆集成模块，将洞察系统与代理记忆层对接，实现知识共享。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/insights/scheduler.py",
+      "type": "file",
+      "label": "scheduler.py",
+      "path": "backend/packages/harness/deerflow/insights/scheduler.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 81,
+      "summary": "洞察调度器，定时触发洞察分析任务的生成与执行。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_aggregator.py",
+      "type": "file",
+      "label": "kpi_aggregator.py",
+      "path": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_aggregator.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 266,
+      "summary": "KPI 聚合器，从 INS 系统采集并聚合关键绩效指标数据。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_map.py",
+      "type": "file",
+      "label": "kpi_map.py",
+      "path": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_map.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 337,
+      "summary": "KPI 映射配置模块，定义 INS 系统指标到内部 KPI 模型的映射规则。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/knowledge_base/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/packages/harness/deerflow/knowledge_base/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 1,
+      "summary": "知识库包的初始化文件。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/knowledge_base/thresholds.py",
+      "type": "file",
+      "label": "thresholds.py",
+      "path": "backend/packages/harness/deerflow/knowledge_base/thresholds.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 138,
+      "summary": "知识库阈值配置模块，定义知识检索和匹配的阈值参数。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/models/claude_provider.py",
+      "type": "file",
+      "label": "claude_provider.py",
+      "path": "backend/packages/harness/deerflow/models/claude_provider.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 359,
+      "summary": "Claude 模型提供者，封装 Anthropic Claude API 的调用、认证与模型适配逻辑。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/models/credential_loader.py",
+      "type": "file",
+      "label": "credential_loader.py",
+      "path": "backend/packages/harness/deerflow/models/credential_loader.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 219,
+      "summary": "凭证加载模块，从安全存储中读取并管理各 LLM 提供者的 API 密钥与认证信息。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/models/mindie_provider.py",
+      "type": "file",
+      "label": "mindie_provider.py",
+      "path": "backend/packages/harness/deerflow/models/mindie_provider.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 249,
+      "summary": "MindIE 模型提供者，封装华为 MindIE 推理引擎的 API 调用与模型适配逻辑。"
+    }
+  ],
+  "edges": [
+    {
+      "source": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_aggregator.py",
+      "target": "backend/packages/harness/deerflow/integrations/adapters/ins/kpi_map.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/packages/harness/deerflow/models/credential_loader.py",
+      "target": "backend/packages/harness/deerflow/models/openai_codex_provider.py",
+      "type": "imports",
+      "metadata": {"symbol": "_build_usage_metadata,CodexChatModel", "crossBatch": 36}
+    }
+  ]
+}

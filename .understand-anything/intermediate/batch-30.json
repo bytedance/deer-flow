@@ -1,0 +1,86 @@
+{
+  "batchIndex": 30,
+  "nodes": [
+    {
+      "id": "file-backend-AGENTS.md",
+      "type": "file",
+      "label": "AGENTS.md",
+      "path": "backend/AGENTS.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 1,
+      "summary": "代理配置文件，内容为空或仅含占位符。"
+    },
+    {
+      "id": "file-backend-CLAUDE.md",
+      "type": "file",
+      "label": "CLAUDE.md",
+      "path": "backend/CLAUDE.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 776,
+      "summary": "后端项目的 Claude Code 指导文档，包含架构说明、编码规范与开发指南。"
+    },
+    {
+      "id": "file-backend-CONTRIBUTING.md",
+      "type": "file",
+      "label": "CONTRIBUTING.md",
+      "path": "backend/CONTRIBUTING.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 426,
+      "summary": "后端项目贡献指南，描述开发流程、代码规范与提交要求。"
+    },
+    {
+      "id": "file-backend-langgraph.json",
+      "type": "file",
+      "label": "langgraph.json",
+      "path": "backend/langgraph.json",
+      "language": "json",
+      "fileCategory": "config",
+      "sizeLines": 17,
+      "summary": "LangGraph 服务配置文件，定义图应用的路由与部署参数。"
+    },
+    {
+      "id": "file-backend-Makefile",
+      "type": "file",
+      "label": "Makefile",
+      "path": "backend/Makefile",
+      "language": "makefile",
+      "fileCategory": "infra",
+      "sizeLines": 26,
+      "summary": "后端构建自动化脚本，提供常用开发命令的快捷入口。"
+    },
+    {
+      "id": "file-backend-pyproject.toml",
+      "type": "file",
+      "label": "pyproject.toml",
+      "path": "backend/pyproject.toml",
+      "language": "toml",
+      "fileCategory": "config",
+      "sizeLines": 54,
+      "summary": "Python 项目元数据与依赖配置文件，定义包信息与工具设置。"
+    },
+    {
+      "id": "file-backend-README.md",
+      "type": "file",
+      "label": "README.md",
+      "path": "backend/README.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 430,
+      "summary": "后端项目说明文档，介绍项目结构、部署方式与使用方法。"
+    },
+    {
+      "id": "file-backend-ruff.toml",
+      "type": "file",
+      "label": "ruff.toml",
+      "path": "backend/ruff.toml",
+      "language": "toml",
+      "fileCategory": "config",
+      "sizeLines": 13,
+      "summary": "Ruff 代码检查工具配置文件，定义 Python lint 规则与排除项。"
+    }
+  ],
+  "edges": []
+}

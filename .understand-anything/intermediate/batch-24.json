@@ -1,0 +1,90 @@
+{
+  "batchIndex": 24,
+  "nodes": [
+    {"id": "backend/packages/harness/deerflow/cache/__init__.py", "type": "file", "label": "__init__.py", "language": "python", "sizeLines": 7, "summary": "缓存层包的初始化模块，导出 RedisCache、EmbeddingCache 和 SemanticCache 三个核心类。"},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py", "type": "file", "label": "embedding_cache.py", "language": "python", "sizeLines": 47, "summary": "Embedding 缓存模块，通过 SHA-256 哈希将文本映射到向量，避免重复调用 API。"},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py", "type": "file", "label": "redis_client.py", "language": "python", "sizeLines": 85, "summary": "Redis 客户端封装，提供异步 get/set/delete/exists 操作，支持 Redis 不可用时回退到内存字典。"},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py", "type": "file", "label": "semantic_cache.py", "language": "python", "sizeLines": 74, "summary": "语义缓存模块，利用余弦相似度对查询向量进行近似匹配，返回缓存的响应结果。"},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py", "type": "file", "label": "cache_config.py", "language": "python", "sizeLines": 44, "summary": "缓存配置模块，使用 Pydantic 定义 Redis、Embedding 缓存和语义缓存的配置模型，并提供全局单例访问。"},
+
+    {"id": "backend/packages/harness/deerflow/cache/__init__.py::export::EmbeddingCache", "type": "export", "label": "EmbeddingCache", "kind": "class"},
+    {"id": "backend/packages/harness/deerflow/cache/__init__.py::export::RedisCache", "type": "export", "label": "RedisCache", "kind": "class"},
+    {"id": "backend/packages/harness/deerflow/cache/__init__.py::export::SemanticCache", "type": "export", "label": "SemanticCache", "kind": "class"},
+
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::func::_hash_text", "type": "function", "label": "_hash_text", "kind": "function", "line": 15},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "type": "class", "label": "EmbeddingCache", "kind": "class", "line": 19, "summary": "将文本到 embedding 向量的映射缓存到 Redis，避免重复 API 调用。"},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::__init__", "type": "function", "label": "__init__", "kind": "method", "line": 22},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::_key", "type": "function", "label": "_key", "kind": "method", "line": 26},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::get_embedding", "type": "function", "label": "get_embedding", "kind": "method", "line": 29},
+    {"id": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::set_embedding", "type": "function", "label": "set_embedding", "kind": "method", "line": 41},
+
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "type": "class", "label": "RedisCache", "kind": "class", "line": 14, "summary": "异步键值缓存，支持 Redis 后端，不可用时自动回退到内存字典。"},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::__init__", "type": "function", "label": "__init__", "kind": "method", "line": 17},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::is_available", "type": "function", "label": "is_available", "kind": "method", "line": 35},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::get", "type": "function", "label": "get", "kind": "method", "line": 38},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::set", "type": "function", "label": "set", "kind": "method", "line": 52},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::delete", "type": "function", "label": "delete", "kind": "method", "line": 62},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::exists", "type": "function", "label": "exists", "kind": "method", "line": 71},
+    {"id": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::close", "type": "function", "label": "close", "kind": "method", "line": 79},
+
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::func::_cosine_similarity", "type": "function", "label": "_cosine_similarity", "kind": "function", "line": 16},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::func::_hash_query", "type": "function", "label": "_hash_query", "kind": "function", "line": 27},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "type": "class", "label": "SemanticCache", "kind": "class", "line": 31, "summary": "基于余弦相似度的语义缓存，对查询 embedding 进行近似匹配以返回缓存响应。"},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::__init__", "type": "function", "label": "__init__", "kind": "method", "line": 34},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::_key", "type": "function", "label": "_key", "kind": "method", "line": 38},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::lookup", "type": "function", "label": "lookup", "kind": "method", "line": 41},
+    {"id": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::store", "type": "function", "label": "store", "kind": "method", "line": 62},
+
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::class::EmbeddingCacheSettings", "type": "class", "label": "EmbeddingCacheSettings", "kind": "class", "line": 8, "summary": "Embedding 缓存设置，包含启用开关和 TTL 配置。"},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::class::SemanticCacheSettings", "type": "class", "label": "SemanticCacheSettings", "kind": "class", "line": 13, "summary": "语义缓存设置，包含启用开关、相似度阈值和 TTL 配置。"},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::class::CacheConfig", "type": "class", "label": "CacheConfig", "kind": "class", "line": 19, "summary": "顶层缓存配置，聚合 Redis URL、Embedding 缓存和语义缓存的设置。"},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::func::get_cache_config", "type": "function", "label": "get_cache_config", "kind": "function", "line": 29},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::func::load_cache_config_from_dict", "type": "function", "label": "load_cache_config_from_dict", "kind": "function", "line": 36},
+    {"id": "backend/packages/harness/deerflow/config/cache_config.py::func::reset_cache_config", "type": "function", "label": "reset_cache_config", "kind": "function", "line": 42}
+  ],
+  "edges": [
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/__init__.py::export::EmbeddingCache", "type": "exports"},
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/__init__.py::export::RedisCache", "type": "exports"},
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/__init__.py::export::SemanticCache", "type": "exports"},
+
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::func::_hash_text", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::__init__", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::_key", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::get_embedding", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py::class::EmbeddingCache::method::set_embedding", "type": "contains"},
+
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::__init__", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::is_available", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::get", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::set", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::delete", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::exists", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache", "to": "backend/packages/harness/deerflow/cache/redis_client.py::class::RedisCache::method::close", "type": "contains"},
+
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::func::_cosine_similarity", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::func::_hash_query", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::__init__", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::_key", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::lookup", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py::class::SemanticCache::method::store", "type": "contains"},
+
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::class::EmbeddingCacheSettings", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::class::SemanticCacheSettings", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::class::CacheConfig", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::func::get_cache_config", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::func::load_cache_config_from_dict", "type": "contains"},
+    {"from": "backend/packages/harness/deerflow/config/cache_config.py", "to": "backend/packages/harness/deerflow/config/cache_config.py::func::reset_cache_config", "type": "contains"},
+
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/embedding_cache.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/redis_client.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/__init__.py", "to": "backend/packages/harness/deerflow/cache/semantic_cache.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py", "to": "backend/packages/harness/deerflow/cache/redis_client.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/embedding_cache.py", "to": "backend/packages/harness/deerflow/config/cache_config.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/redis_client.py", "to": "backend/packages/harness/deerflow/config/cache_config.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py", "to": "backend/packages/harness/deerflow/cache/redis_client.py", "type": "imports"},
+    {"from": "backend/packages/harness/deerflow/cache/semantic_cache.py", "to": "backend/packages/harness/deerflow/config/cache_config.py", "type": "imports"}
+  ]
+}

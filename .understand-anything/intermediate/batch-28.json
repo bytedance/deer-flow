@@ -1,0 +1,7 @@
+{
+  "batchIndex": 28,
+  "nodes": [
+    {"id": "backend/Dockerfile", "type": "file", "label": "Dockerfile", "language": "dockerfile", "sizeLines": 102, "summary": "后端服务的 Docker 镜像构建配置，定义多阶段构建流程、Python 依赖安装、环境变量设置及服务启动命令。"}
+  ],
+  "edges": []
+}

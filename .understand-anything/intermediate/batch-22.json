@@ -1,0 +1,1367 @@
+{
+  "batchIndex": 22,
+  "nodes": [
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "language": "python",
+      "summary": "闭环工单子系统的包入口，从permissions、schemas、service_factory和state_machine模块统一导出核心符号。",
+      "sizeLines": 63
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::CLOSURE_PERMISSIONS",
+      "type": "variable",
+      "name": "CLOSURE_PERMISSIONS",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从permissions模块重新导出的权限元组常量。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::CLOSURE_READ",
+      "type": "variable",
+      "name": "CLOSURE_READ",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从permissions模块重新导出的读取权限常量。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::CLOSURE_VERIFY",
+      "type": "variable",
+      "name": "CLOSURE_VERIFY",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从permissions模块重新导出的验证权限常量。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::CLOSURE_WRITE",
+      "type": "variable",
+      "name": "CLOSURE_WRITE",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从permissions模块重新导出的写入权限常量。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::ClosureAction",
+      "type": "class",
+      "name": "ClosureAction",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从state_machine模块重新导出的工单操作枚举。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::ClosureSourceType",
+      "type": "class",
+      "name": "ClosureSourceType",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的工单来源类型枚举。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::ClosureStatus",
+      "type": "class",
+      "name": "ClosureStatus",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从state_machine模块重新导出的工单生命周期状态枚举。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::CreateTicketRequest",
+      "type": "class",
+      "name": "CreateTicketRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的创建工单请求DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::ListTicketsFilter",
+      "type": "class",
+      "name": "ListTicketsFilter",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的工单列表筛选器DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::TicketEventDTO",
+      "type": "class",
+      "name": "TicketEventDTO",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的工单事件DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::TicketResponse",
+      "type": "class",
+      "name": "TicketResponse",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的工单响应DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::TransitionError",
+      "type": "class",
+      "name": "TransitionError",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从state_machine模块重新导出的状态转换错误异常类。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::TransitionRequest",
+      "type": "class",
+      "name": "TransitionRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的状态转换请求DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::UpdateTicketRequest",
+      "type": "class",
+      "name": "UpdateTicketRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从schemas模块重新导出的更新工单请求DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::get_default_service",
+      "type": "function",
+      "name": "get_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从service_factory模块重新导出的获取默认服务实例函数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::reset_default_service",
+      "type": "function",
+      "name": "reset_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从service_factory模块重新导出的重置默认服务实例函数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::set_default_service",
+      "type": "function",
+      "name": "set_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从service_factory模块重新导出的设置默认服务实例函数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/__init__.py::transition",
+      "type": "function",
+      "name": "transition",
+      "path": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "summary": "从state_machine模块重新导出的状态转换核心函数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/__init__.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "type": "file",
+      "name": "events.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "language": "python",
+      "summary": "基于run_event通道实现闭环工单生命周期事件的发布器，以closure.<action>格式发布审计事件。",
+      "sizeLines": 89
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/events.py::closure_thread_id",
+      "type": "function",
+      "name": "closure_thread_id",
+      "path": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "summary": "生成用于闭环事件发布的合成thread_id，格式为closure:<tenant_id>。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/events.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher",
+      "type": "class",
+      "name": "ClosureEventPublisher",
+      "path": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "summary": "封装RunEventStore的薄层包装器，用于发布closure.*类型的生命周期事件，发布失败时仅记录日志不抛异常。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/events.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher.__init__",
+      "type": "function",
+      "name": "__init__",
+      "path": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "summary": "初始化事件发布器，接收可选的RunEventStore实例。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher.publish",
+      "type": "function",
+      "name": "publish",
+      "path": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "summary": "尽力发布闭环事件到RunEventStore，失败时记录日志但不抛出异常。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "type": "file",
+      "name": "permissions.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "language": "python",
+      "summary": "定义闭环子系统的三个权限常量（读、写、验证），供服务层、REST路由和内置工具统一引用。",
+      "sizeLines": 27
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_READ",
+      "type": "variable",
+      "name": "CLOSURE_READ",
+      "path": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "summary": "查看闭环工单及列表的权限标识符。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/permissions.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_WRITE",
+      "type": "variable",
+      "name": "CLOSURE_WRITE",
+      "path": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "summary": "创建、分配、推进、拒绝、重开闭环工单的写入权限标识符。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/permissions.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_VERIFY",
+      "type": "variable",
+      "name": "CLOSURE_VERIFY",
+      "path": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "summary": "验证并关闭工单的权限标识符。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/permissions.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_PERMISSIONS",
+      "type": "variable",
+      "name": "CLOSURE_PERMISSIONS",
+      "path": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "summary": "将所有闭环权限汇总为元组，便于注册到RBAC层。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/permissions.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "type": "file",
+      "name": "schemas.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "language": "python",
+      "summary": "定义闭环子系统的Pydantic DTO和数据传输模型，包括来源类型/优先级枚举、基于source_type的判别式元数据联合类型，以及请求/响应/列表/通知摘要等数据结构。",
+      "sizeLines": 233
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosureSourceType",
+      "type": "class",
+      "name": "ClosureSourceType",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单来源类型枚举：diagnosis、report、inspection、manual、chat。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosurePriority",
+      "type": "class",
+      "name": "ClosurePriority",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单优先级枚举：urgent、important、normal、observe。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::_BaseMeta",
+      "type": "class",
+      "name": "_BaseMeta",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "元数据基类，允许额外字段并自动去除字符串两端空白。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::DiagnosisMetadata",
+      "type": "class",
+      "name": "DiagnosisMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "诊断来源的元数据结构，包含findings、confidence和fault_code字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ReportMetadata",
+      "type": "class",
+      "name": "ReportMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "报告来源的元数据结构，包含report_run_id、report_template_id和period字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::InspectionMetadata",
+      "type": "class",
+      "name": "InspectionMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "巡检来源的元数据结构，包含inspection_round和inspector_id字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ManualMetadata",
+      "type": "class",
+      "name": "ManualMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "手动来源的元数据结构，包含note字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ChatMetadata",
+      "type": "class",
+      "name": "ChatMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "对话来源的元数据结构，包含note字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosureMetadata",
+      "type": "variable",
+      "name": "ClosureMetadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "基于source_type判别器的联合类型注解，用于验证不同来源的元数据。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::CreateTicketRequest",
+      "type": "class",
+      "name": "CreateTicketRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "创建工单的请求DTO，包含标题、描述、优先级、设备信息、来源和元数据等字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::CreateTicketRequest._normalize_metadata",
+      "type": "function",
+      "name": "_normalize_metadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "验证并规范化metadata字段，确保其为字典类型。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py::CreateTicketRequest"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::UpdateTicketRequest",
+      "type": "class",
+      "name": "UpdateTicketRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "更新工单的请求DTO，不允许修改status（状态变更需通过transition接口）。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::TransitionRequest",
+      "type": "class",
+      "name": "TransitionRequest",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "状态转换请求DTO，包含action和payload字段。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::ListTicketsFilter",
+      "type": "class",
+      "name": "ListTicketsFilter",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单列表查询筛选器DTO，支持设备、状态、分配人、来源、优先级、日期范围等多维度筛选及分页排序。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketResponse",
+      "type": "class",
+      "name": "TicketResponse",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单读取DTO，包含工单全部字段及各生命周期时间戳。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketEventDTO",
+      "type": "class",
+      "name": "TicketEventDTO",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单审计事件DTO，记录操作、状态变更、操作者和附加信息。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::PageMeta",
+      "type": "class",
+      "name": "PageMeta",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "分页元数据模型，包含total、page和page_size。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketListResponse",
+      "type": "class",
+      "name": "TicketListResponse",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "工单列表响应模型，包含items列表和meta分页信息。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/schemas.py::NotificationsSummary",
+      "type": "class",
+      "name": "NotificationsSummary",
+      "path": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "summary": "通知摘要聚合响应模型，包含未关闭、逾期、待验证和分配给我的工单计数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/schemas.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "type": "file",
+      "name": "service_factory.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "language": "python",
+      "summary": "提供进程级ClosureService单例的延迟初始化与线程安全管理，Gateway启动时注入实例，工具和无Gateway场景可自动回退构建默认服务。",
+      "sizeLines": 96
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service_factory.py::set_default_service",
+      "type": "function",
+      "name": "set_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "summary": "注入或清除进程级ClosureService实例，Gateway启动时调用此函数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service_factory.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service_factory.py::get_default_service",
+      "type": "function",
+      "name": "get_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "summary": "获取缓存的服务实例，若未注入则延迟构建默认实例；无数据库会话工厂时返回None。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service_factory.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service_factory.py::reset_default_service",
+      "type": "function",
+      "name": "reset_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "summary": "清除缓存的服务实例，用作测试钩子。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service_factory.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service_factory.py::_build_default_service",
+      "type": "function",
+      "name": "_build_default_service",
+      "path": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "summary": "从持久化引擎和事件存储构建默认的ClosureService实例，无会话工厂时返回None。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service_factory.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "type": "file",
+      "name": "service.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "language": "python",
+      "summary": "闭环工单的高层编排服务，整合租户隔离、权限校验、状态机验证、持久化、审计事件和元数据校验，是REST路由、内置工具和后台任务的统一入口。",
+      "sizeLines": 547
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureServiceError",
+      "type": "class",
+      "name": "ClosureServiceError",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "服务层错误异常，携带code字段用于映射到HTTP状态码（permission_denied→403, not_found→404, validation→422, conflict→409）。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureServiceError.__init__",
+      "type": "function",
+      "name": "__init__",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "初始化服务层错误，接收消息和错误码。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureServiceError"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "type": "class",
+      "name": "ClosureService",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "闭环工单核心服务类，编排仓库、事件发布器和状态机，提供创建、查询、更新、状态转换、报告汇总和逾期扫描等全部业务操作。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.__init__",
+      "type": "function",
+      "name": "__init__",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "初始化服务，接收ClosureRepository和ClosureEventPublisher依赖。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._require",
+      "type": "function",
+      "name": "_require",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "校验调用者权限列表是否包含所需权限，不包含则抛出permission_denied错误。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._require_tenant",
+      "type": "function",
+      "name": "_require_tenant",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "校验tenant_id非空，为空则抛出validation错误。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._validate_metadata",
+      "type": "function",
+      "name": "_validate_metadata",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "使用判别式联合类型校验元数据与source_type的匹配性，返回清洗后的元数据。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._to_response",
+      "type": "function",
+      "name": "_to_response",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "将数据行字典转换为TicketResponse DTO。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.create_ticket",
+      "type": "function",
+      "name": "create_ticket",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "创建闭环工单，执行权限校验、元数据验证和幂等去重，返回工单及是否新建的标识。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.get_ticket",
+      "type": "function",
+      "name": "get_ticket",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "根据tenant_id和ticket_id获取单个工单详情，未找到则抛出not_found错误。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_tickets",
+      "type": "function",
+      "name": "list_tickets",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "按筛选条件分页查询工单列表，支持多维度过滤和排序。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_events",
+      "type": "function",
+      "name": "list_events",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "查询指定工单的全部审计事件列表。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.update_ticket",
+      "type": "function",
+      "name": "update_ticket",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "部分更新工单字段，明确禁止通过此接口修改status，同时检查原始请求体防止JSON级走私攻击。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.transition",
+      "type": "function",
+      "name": "transition",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "执行工单状态转换，依次进行权限校验、状态机验证、持久化和事件发布，verify_close后触发知识库候选提取。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._maybe_extract_kb_candidate",
+      "type": "function",
+      "name": "_maybe_extract_kb_candidate",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "在工单验证关闭后从事件中提取知识库候选条目，失败时仅记录警告不影响主流程。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_for_report",
+      "type": "function",
+      "name": "list_for_report",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "为报告模板提供工单列表数据，返回原始字典列表供渲染器直接使用。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.notifications_summary",
+      "type": "function",
+      "name": "notifications_summary",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "返回通知摘要聚合数据，包括未关闭、逾期、待验证和分配给我的工单计数。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.scan_overdue_once",
+      "type": "function",
+      "name": "scan_overdue_once",
+      "path": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "summary": "后台任务入口，扫描已到期工单并标记为逾期，发布closure.overdue生命周期事件。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "type": "file",
+      "name": "state_machine.py",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "language": "python",
+      "summary": "闭环工单的纯函数式状态机，定义状态/操作枚举、转换规则表和SLA到期时间计算，返回TransitionResult供调用者持久化。",
+      "sizeLines": 234
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::DEFAULT_SLA_HOURS",
+      "type": "variable",
+      "name": "DEFAULT_SLA_HOURS",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "各优先级的默认SLA小时数映射，与alembic迁移中的种子数据一致。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::ClosureStatus",
+      "type": "class",
+      "name": "ClosureStatus",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "工单生命周期全部合法状态枚举：pending、assigned、in_progress、pending_verification、closed、rejected、reopened。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::ClosureAction",
+      "type": "class",
+      "name": "ClosureAction",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "工单全部合法操作枚举：create、assign、start、submit_verification、verify_close、reject_verification、reject、reopen、mark_overdue。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::_TRANSITIONS",
+      "type": "variable",
+      "name": "_TRANSITIONS",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "状态转换规则表，定义(当前状态, 操作)到下一状态的映射。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::VERIFY_ACTIONS",
+      "type": "variable",
+      "name": "VERIFY_ACTIONS",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "需要验证者角色而非写入者角色的操作集合（verify_close和reject_verification）。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionError",
+      "type": "class",
+      "name": "TransitionError",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "状态转换无效或必填字段缺失时抛出的异常，服务层将其转为HTTP 409/422。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionError.__init__",
+      "type": "function",
+      "name": "__init__",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "初始化转换错误，接收消息和错误码（默认transition_invalid）。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionError"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TicketSnapshot",
+      "type": "class",
+      "name": "TicketSnapshot",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "状态机所需的工单只读快照数据类，使状态机与ORM框架解耦。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionResult",
+      "type": "class",
+      "name": "TransitionResult",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "状态转换结果的纯描述数据类，包含新状态、需持久化的列更新和审计事件负载。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::_compute_due_at",
+      "type": "function",
+      "name": "_compute_due_at",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "根据优先级和SLA配置计算工单到期时间。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/closed_loop/state_machine.py::transition",
+      "type": "function",
+      "name": "transition",
+      "path": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "summary": "核心转换函数，校验操作合法性并返回包含列更新和审计负载的TransitionResult，是纯函数无I/O。",
+      "parent": "backend/packages/harness/deerflow/closed_loop/state_machine.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "type": "file",
+      "name": "closure_ticket_tools.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "language": "python",
+      "summary": "为LLM提供4个闭环工单内置工具（创建、列表、更新、关闭），从LangGraph运行时上下文解析身份和权限，统一委托ClosureService处理并以JSON信封返回结果。",
+      "sizeLines": 447
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_err",
+      "type": "function",
+      "name": "_err",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "构建错误响应的JSON信封字符串。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_ok",
+      "type": "function",
+      "name": "_ok",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "构建成功响应的JSON信封字符串。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_Principal",
+      "type": "class",
+      "name": "_Principal",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "轻量级身份主体类，组合user_id、tenant_id和权限列表，保持闭环模块与报告模板子系统的独立性。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_Principal.__init__",
+      "type": "function",
+      "name": "__init__",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "初始化身份主体，接收user_id、tenant_id和permissions。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_Principal"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_principal_from_runnable_config",
+      "type": "function",
+      "name": "_principal_from_runnable_config",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "从LangGraph RunnableConfig运行时配置解析出user_id、tenant_id和权限集合。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_resolve_service",
+      "type": "function",
+      "name": "_resolve_service",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "解析并返回默认的ClosureService实例。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_service_unavailable",
+      "type": "function",
+      "name": "_service_unavailable",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "返回服务不可用的JSON错误信封。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_map_service_error",
+      "type": "function",
+      "name": "_map_service_error",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "将服务层错误码映射为LLM-facing的错误信封码（PERMISSION_DENIED、NOT_FOUND、VALIDATION、CONFLICT等）。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::create_closure_ticket_tool",
+      "type": "function",
+      "name": "create_closure_ticket_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "创建闭环工单的LLM工具，基于(tenant_id, source_type, source_run_id, device_id)天然键幂等，返回工单及是否新建标识。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::list_closure_tickets_tool",
+      "type": "function",
+      "name": "list_closure_tickets_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "列表查询闭环工单的LLM工具，支持与REST端点相同的多维度筛选、分页和排序。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_UPDATE_ALLOWED_FIELDS",
+      "type": "variable",
+      "name": "_UPDATE_ALLOWED_FIELDS",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "LLM通过更新工具允许修改的字段白名单集合，status明确排除在外。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::update_closure_ticket_tool",
+      "type": "function",
+      "name": "update_closure_ticket_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "部分更新闭环工单字段的LLM工具，明确禁止修改status，未知字段会被拒绝。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::close_closure_ticket_tool",
+      "type": "function",
+      "name": "close_closure_ticket_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "关闭闭环工单或拒绝验证的LLM工具，需要closure:verify权限，支持verify_close和reject两种决策。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::CLOSURE_TICKET_TOOLS",
+      "type": "variable",
+      "name": "CLOSURE_TICKET_TOOLS",
+      "path": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "summary": "四个闭环工单工具的注册列表，供tools/tools.py消费。",
+      "parent": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py"
+    }
+  ],
+  "edges": [
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/repository.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/config/tenant.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "type": "exports",
+      "label": "re-exports CLOSURE_PERMISSIONS, CLOSURE_READ, CLOSURE_VERIFY, CLOSURE_WRITE"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "type": "exports",
+      "label": "re-exports ClosureSourceType, CreateTicketRequest, ListTicketsFilter, TicketEventDTO, TicketResponse, TransitionRequest, UpdateTicketRequest"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "type": "exports",
+      "label": "re-exports get_default_service, reset_default_service, set_default_service"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/__init__.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "type": "exports",
+      "label": "re-exports ClosureAction, ClosureStatus, TransitionError, transition"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "type": "contains",
+      "label": "lazy-imports ClosureEventPublisher"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/repository.py",
+      "type": "contains",
+      "label": "lazy-imports ClosureRepository"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "type": "contains",
+      "label": "lazy-imports ClosureService"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py::closure_thread_id",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/events.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher.__init__",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher",
+      "to": "backend/packages/harness/deerflow/closed_loop/events.py::ClosureEventPublisher.publish",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_READ",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_WRITE",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_VERIFY",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/permissions.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/permissions.py::CLOSURE_PERMISSIONS",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosureSourceType",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosurePriority",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::_BaseMeta",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::DiagnosisMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ReportMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::InspectionMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ManualMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ChatMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ClosureMetadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::CreateTicketRequest",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::UpdateTicketRequest",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::TransitionRequest",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::ListTicketsFilter",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketResponse",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketEventDTO",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::PageMeta",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::TicketListResponse",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/schemas.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/schemas.py::NotificationsSummary",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py::set_default_service",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py::get_default_service",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py::reset_default_service",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service_factory.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service_factory.py::_build_default_service",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureServiceError",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.__init__",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._require",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._require_tenant",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._validate_metadata",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._to_response",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.create_ticket",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.get_ticket",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_tickets",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_events",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.update_ticket",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.transition",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService._maybe_extract_kb_candidate",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.list_for_report",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.notifications_summary",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService",
+      "to": "backend/packages/harness/deerflow/closed_loop/service.py::ClosureService.scan_overdue_once",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::DEFAULT_SLA_HOURS",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::ClosureStatus",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::ClosureAction",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::_TRANSITIONS",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::VERIFY_ACTIONS",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionError",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TicketSnapshot",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::TransitionResult",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::_compute_due_at",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/closed_loop/state_machine.py",
+      "to": "backend/packages/harness/deerflow/closed_loop/state_machine.py::transition",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_err",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_ok",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_Principal",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_principal_from_runnable_config",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_resolve_service",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_service_unavailable",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_map_service_error",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::create_closure_ticket_tool",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::list_closure_tickets_tool",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::_UPDATE_ALLOWED_FIELDS",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::update_closure_ticket_tool",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::close_closure_ticket_tool",
+      "type": "contains",
+      "label": "defines"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "to": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py::CLOSURE_TICKET_TOOLS",
+      "type": "contains",
+      "label": "defines"
+    }
+  ]
+}

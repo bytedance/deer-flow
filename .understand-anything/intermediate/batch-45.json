@@ -1,0 +1,31 @@
+{
+  "batchIndex": 45,
+  "nodes": [
+    {"id": "backend/tests/test_report_template_args_aliases.py", "type": "file", "name": "test_report_template_args_aliases.py", "language": "python", "fileCategory": "code", "summary": "报告模板参数别名功能的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_closure_section.py", "type": "file", "name": "test_report_template_closure_section.py", "language": "python", "fileCategory": "code", "summary": "报告模板闭包章节（closure section）功能的测试文件。"},
+    {"id": "backend/tests/test_report_template_generic_renderer.py", "type": "file", "name": "test_report_template_generic_renderer.py", "language": "python", "fileCategory": "code", "summary": "报告模板通用渲染器的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_lifecycle_tools.py", "type": "file", "name": "test_report_template_lifecycle_tools.py", "language": "python", "fileCategory": "code", "summary": "报告模板生命周期工具（创建、更新、删除等）的测试文件。"},
+    {"id": "backend/tests/test_report_template_permissions.py", "type": "file", "name": "test_report_template_permissions.py", "language": "python", "fileCategory": "code", "summary": "报告模板权限控制的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_push_block.py", "type": "file", "name": "test_report_template_push_block.py", "language": "python", "fileCategory": "code", "summary": "报告模板推送阻塞（push block）功能的测试文件。"},
+    {"id": "backend/tests/test_report_template_records.py", "type": "file", "name": "test_report_template_records.py", "language": "python", "fileCategory": "code", "summary": "报告模板记录管理功能的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_repository.py", "type": "file", "name": "test_report_template_repository.py", "language": "python", "fileCategory": "code", "summary": "报告模板仓储层（repository）数据访问的测试文件。"},
+    {"id": "backend/tests/test_report_template_routes.py", "type": "file", "name": "test_report_template_routes.py", "language": "python", "fileCategory": "code", "summary": "报告模板 API 路由的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_runtime_tools.py", "type": "file", "name": "test_report_template_runtime_tools.py", "language": "python", "fileCategory": "code", "summary": "报告模板运行时工具的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_runtime.py", "type": "file", "name": "test_report_template_runtime.py", "language": "python", "fileCategory": "code", "summary": "报告模板运行时执行逻辑的测试文件。"},
+    {"id": "backend/tests/test_report_template_schema.py", "type": "file", "name": "test_report_template_schema.py", "language": "python", "fileCategory": "code", "summary": "报告模板数据 Schema 定义与验证的测试文件。"},
+    {"id": "backend/tests/test_report_template_script_registry.py", "type": "file", "name": "test_report_template_script_registry.py", "language": "python", "fileCategory": "code", "summary": "报告模板脚本注册表（script registry）的测试文件。"},
+    {"id": "backend/tests/test_report_template_source_resolver.py", "type": "file", "name": "test_report_template_source_resolver.py", "language": "python", "fileCategory": "code", "summary": "报告模板数据源解析器（source resolver）的测试文件。"},
+    {"id": "backend/tests/test_report_template_status.py", "type": "file", "name": "test_report_template_status.py", "language": "python", "fileCategory": "code", "summary": "报告模板状态管理的单元测试文件。"},
+    {"id": "backend/tests/test_report_template_telemetry.py", "type": "file", "name": "test_report_template_telemetry.py", "language": "python", "fileCategory": "code", "summary": "报告模板遥测/监控（telemetry）功能的测试文件。"},
+    {"id": "backend/tests/test_report_template_traceability_e2e.py", "type": "file", "name": "test_report_template_traceability_e2e.py", "language": "python", "fileCategory": "code", "summary": "报告模板可追溯性端到端（e2e）测试文件。"},
+    {"id": "backend/tests/test_report_template_validator.py", "type": "file", "name": "test_report_template_validator.py", "language": "python", "fileCategory": "code", "summary": "报告模板验证器（validator）逻辑的单元测试文件。"},
+    {"id": "backend/tests/test_report_ticket_chain.py", "type": "file", "name": "test_report_ticket_chain.py", "language": "python", "fileCategory": "code", "summary": "报告与工单关联链（ticket chain）的测试文件。"},
+    {"id": "backend/tests/test_resolve_pdf_converter.py", "type": "file", "name": "test_resolve_pdf_converter.py", "language": "python", "fileCategory": "code", "summary": "PDF 转换器解析与选择逻辑的单元测试文件。"},
+    {"id": "backend/tests/test_retrieval_telemetry.py", "type": "file", "name": "test_retrieval_telemetry.py", "language": "python", "fileCategory": "code", "summary": "数据检索遥测/监控（telemetry）功能的测试文件。"},
+    {"id": "backend/tests/test_rpc_client.py", "type": "file", "name": "test_rpc_client.py", "language": "python", "fileCategory": "code", "summary": "RPC 客户端通信功能的单元测试文件。"},
+    {"id": "backend/tests/test_run_event_store_pagination.py", "type": "file", "name": "test_run_event_store_pagination.py", "language": "python", "fileCategory": "code", "summary": "运行事件存储分页查询功能的测试文件。"},
+    {"id": "backend/tests/test_run_event_store.py", "type": "file", "name": "test_run_event_store.py", "language": "python", "fileCategory": "code", "summary": "运行事件存储（event store）核心功能的测试文件。"},
+    {"id": "backend/tests/test_run_journal.py", "type": "file", "name": "test_run_journal.py", "language": "python", "fileCategory": "code", "summary": "运行日志（run journal）记录与管理功能的测试文件。"}
+  ],
+  "edges": []
+}

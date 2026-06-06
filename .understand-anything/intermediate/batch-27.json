@@ -1,0 +1,757 @@
+{
+  "batchIndex": 27,
+  "nodes": [
+    {
+      "id": "backend/tests/recall/conftest.py",
+      "type": "file",
+      "label": "conftest.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 284,
+      "summary": "L1 recall测试的共享fixtures模块，提供确定性哈希嵌入器、受控嵌入器和内存向量存储，用于在无外部依赖情况下测试RAG管道的工程正确性。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::_hash_to_vector",
+      "type": "function",
+      "label": "_hash_to_vector",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "将文本通过SHA-256哈希生成确定性单位高斯向量，用于可复现的嵌入测试。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::HashEmbedder",
+      "type": "class",
+      "label": "HashEmbedder",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "基于哈希的确定性嵌入器，相同输入始终产生相同向量，不同输入向量不相关。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::HashEmbedder.__init__",
+      "type": "function",
+      "label": "__init__",
+      "parent": "backend/tests/recall/conftest.py::HashEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::HashEmbedder.dimension",
+      "type": "function",
+      "label": "dimension",
+      "parent": "backend/tests/recall/conftest.py::HashEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::HashEmbedder.embed",
+      "type": "function",
+      "label": "embed",
+      "parent": "backend/tests/recall/conftest.py::HashEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "type": "class",
+      "label": "ControlledEmbedder",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "受控嵌入器，将目标文本固定到与查询相同的向量（余弦=1.0），其余文本使用哈希嵌入。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::ControlledEmbedder.__init__",
+      "type": "function",
+      "label": "__init__",
+      "parent": "backend/tests/recall/conftest.py::ControlledEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::ControlledEmbedder.dimension",
+      "type": "function",
+      "label": "dimension",
+      "parent": "backend/tests/recall/conftest.py::ControlledEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::ControlledEmbedder.embed",
+      "type": "function",
+      "label": "embed",
+      "parent": "backend/tests/recall/conftest.py::ControlledEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::ControlledEmbedder.embed_query",
+      "type": "function",
+      "label": "embed_query",
+      "parent": "backend/tests/recall/conftest.py::ControlledEmbedder"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::session_factory",
+      "type": "function",
+      "label": "session_factory",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "异步fixture，创建SQLite内存数据库引擎并返回异步会话工厂。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::repo",
+      "type": "function",
+      "label": "repo",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "异步fixture，基于session_factory返回KnowledgeBaseRepository实例。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::kb_factory",
+      "type": "function",
+      "label": "kb_factory",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "异步fixture，返回一个可创建知识库行记录的工厂函数，带有合理的默认值。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::chroma_tmpdir",
+      "type": "function",
+      "label": "chroma_tmpdir",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "Fixture，提供临时Chroma持久化目录，每个测试独立并自动清理。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "type": "class",
+      "label": "InMemoryVectorStore",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "基于哈希表的内存向量存储实现，支持精确余弦相似度搜索，替代ChromaDB用于L1测试。"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.__init__",
+      "type": "function",
+      "label": "__init__",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore._scoped",
+      "type": "function",
+      "label": "_scoped",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.add",
+      "type": "function",
+      "label": "add",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.search",
+      "type": "function",
+      "label": "search",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.delete",
+      "type": "function",
+      "label": "delete",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.list_collections",
+      "type": "function",
+      "label": "list_collections",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.delete_collection",
+      "type": "function",
+      "label": "delete_collection",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::InMemoryVectorStore.count",
+      "type": "function",
+      "label": "count",
+      "parent": "backend/tests/recall/conftest.py::InMemoryVectorStore"
+    },
+    {
+      "id": "backend/tests/recall/conftest.py::in_memory_store",
+      "type": "function",
+      "label": "in_memory_store",
+      "parent": "backend/tests/recall/conftest.py",
+      "summary": "Fixture，将get_vector_store替换为InMemoryVectorStore单例，并通过monkeypatch注入到相关模块。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py",
+      "type": "file",
+      "label": "test_recall_multi_kb.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 496,
+      "summary": "L1 recall测试用例#4/#5/#6/#7/#9，验证多知识库合并行为：文档级chunk上限、向量度量过期跳过、跨租户隔离、嵌入器缓存和评分策略（absolute vs per_kb_minmax）。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::_restore_rag_config",
+      "type": "function",
+      "label": "_restore_rag_config",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "自动使用的fixture，在测试结束后恢复RagConfig为默认值。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation",
+      "type": "class",
+      "label": "TestCrossTenantIsolation",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "测试用例#6：验证租户A的向量数据对租户B不可见，确保跨租户向量隔离。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation.test_tenant_b_cannot_retrieve_tenant_a_chunks",
+      "type": "function",
+      "label": "test_tenant_b_cannot_retrieve_tenant_a_chunks",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation.test_tenant_a_does_not_see_tenant_b_chunks_either",
+      "type": "function",
+      "label": "test_tenant_a_does_not_see_tenant_b_chunks_either",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "type": "class",
+      "label": "TestAbsoluteVsPerKbMinmax",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "测试用例#9：验证absolute和per_kb_minmax两种评分策略对跨KB排序的影响。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax._kb_result",
+      "type": "function",
+      "label": "_kb_result",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax._run",
+      "type": "function",
+      "label": "_run",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_absolute_lets_small_kb_win_with_high_confidence",
+      "type": "function",
+      "label": "test_absolute_lets_small_kb_win_with_high_confidence",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_per_kb_minmax_normalizes_top_of_each_kb_to_one",
+      "type": "function",
+      "label": "test_per_kb_minmax_normalizes_top_of_each_kb_to_one",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_per_kb_minmax_lets_large_kb_compete",
+      "type": "function",
+      "label": "test_per_kb_minmax_lets_large_kb_compete",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::_result_for_doc",
+      "type": "function",
+      "label": "_result_for_doc",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "辅助函数，构造同一document_id下多个chunk的RetrievalResult，用于文档级上限测试。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument",
+      "type": "class",
+      "label": "TestMaxChunksPerDocument",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "测试用例#4：验证单个文档不能主导合并后的top-K结果。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument._run",
+      "type": "function",
+      "label": "_run",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument.test_caps_chunks_from_dominant_document",
+      "type": "function",
+      "label": "test_caps_chunks_from_dominant_document",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument.test_cap_of_one_keeps_top_chunk_per_document",
+      "type": "function",
+      "label": "test_cap_of_one_keeps_top_chunk_per_document",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale",
+      "type": "class",
+      "label": "TestVectorMetricStale",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "测试用例#5：验证标记为vector_metric_stale的KB在检索前被跳过且不阻塞健康KB。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale._make_kb",
+      "type": "function",
+      "label": "_make_kb",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale.test_stale_kb_contributes_zero_chunks",
+      "type": "function",
+      "label": "test_stale_kb_contributes_zero_chunks",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale.test_stale_kb_does_not_block_healthy_siblings",
+      "type": "function",
+      "label": "test_stale_kb_does_not_block_healthy_siblings",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "type": "class",
+      "label": "TestEmbedderCache",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py",
+      "summary": "测试用例#7：验证嵌入器按embedding_model规格缓存，相同模型只创建一个provider实例。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache._kb",
+      "type": "function",
+      "label": "_kb",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache._patched_run",
+      "type": "function",
+      "label": "_patched_run",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_shared_model_creates_one_provider",
+      "type": "function",
+      "label": "test_shared_model_creates_one_provider",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_distinct_models_create_one_provider_each",
+      "type": "function",
+      "label": "test_distinct_models_create_one_provider_each",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_legacy_kbs_share_global_default",
+      "type": "function",
+      "label": "test_legacy_kbs_share_global_default",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_mix_of_legacy_and_explicit_models",
+      "type": "function",
+      "label": "test_mix_of_legacy_and_explicit_models",
+      "parent": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py",
+      "type": "file",
+      "label": "test_recall_single_kb.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 291,
+      "summary": "L1 recall测试用例#1/#2/#3，验证单知识库场景下的目标chunk排名、top-K上限和分数阈值过滤功能。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::_restore_rag_config",
+      "type": "function",
+      "label": "_restore_rag_config",
+      "parent": "backend/tests/recall/test_recall_single_kb.py",
+      "summary": "自动使用的fixture，在测试结束后恢复RagConfig为默认值。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall",
+      "type": "class",
+      "label": "TestSingleKbRecall",
+      "parent": "backend/tests/recall/test_recall_single_kb.py",
+      "summary": "验证单KB检索中目标chunk排名首位和空集合返回空结果。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall.test_target_chunk_ranks_first",
+      "type": "function",
+      "label": "test_target_chunk_ranks_first",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall.test_empty_collection_returns_empty",
+      "type": "function",
+      "label": "test_empty_collection_returns_empty",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "type": "class",
+      "label": "TestTopKCap",
+      "parent": "backend/tests/recall/test_recall_single_kb.py",
+      "summary": "测试用例#2：验证top_k参数严格限制返回结果数量。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap._seed_chunks",
+      "type": "function",
+      "label": "_seed_chunks",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_smaller_than_corpus",
+      "type": "function",
+      "label": "test_top_k_smaller_than_corpus",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_larger_than_corpus",
+      "type": "function",
+      "label": "test_top_k_larger_than_corpus",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_falls_back_to_config_default",
+      "type": "function",
+      "label": "test_top_k_falls_back_to_config_default",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold",
+      "type": "class",
+      "label": "TestScoreThreshold",
+      "parent": "backend/tests/recall/test_recall_single_kb.py",
+      "summary": "测试用例#3：验证score_threshold过滤低置信度命中。"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_drops_distractors",
+      "type": "function",
+      "label": "test_threshold_drops_distractors",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_above_one_drops_everything",
+      "type": "function",
+      "label": "test_threshold_above_one_drops_everything",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold"
+    },
+    {
+      "id": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_falls_back_to_config",
+      "type": "function",
+      "label": "test_threshold_falls_back_to_config",
+      "parent": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold"
+    }
+  ],
+  "edges": [
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::_hash_to_vector",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::HashEmbedder",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::HashEmbedder",
+      "target": "backend/tests/recall/conftest.py::HashEmbedder.__init__",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::HashEmbedder",
+      "target": "backend/tests/recall/conftest.py::HashEmbedder.dimension",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::HashEmbedder",
+      "target": "backend/tests/recall/conftest.py::HashEmbedder.embed",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "target": "backend/tests/recall/conftest.py::ControlledEmbedder.__init__",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "target": "backend/tests/recall/conftest.py::ControlledEmbedder.dimension",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "target": "backend/tests/recall/conftest.py::ControlledEmbedder.embed",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::ControlledEmbedder",
+      "target": "backend/tests/recall/conftest.py::ControlledEmbedder.embed_query",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::session_factory",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::repo",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::kb_factory",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::chroma_tmpdir",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.__init__",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore._scoped",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.add",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.search",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.delete",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.list_collections",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.delete_collection",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py::InMemoryVectorStore",
+      "target": "backend/tests/recall/conftest.py::InMemoryVectorStore.count",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/conftest.py",
+      "target": "backend/tests/recall/conftest.py::in_memory_store",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::_restore_rag_config",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation.test_tenant_b_cannot_retrieve_tenant_a_chunks",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestCrossTenantIsolation.test_tenant_a_does_not_see_tenant_b_chunks_either",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax._kb_result",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax._run",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_absolute_lets_small_kb_win_with_high_confidence",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_per_kb_minmax_normalizes_top_of_each_kb_to_one",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestAbsoluteVsPerKbMinmax.test_per_kb_minmax_lets_large_kb_compete",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::_result_for_doc",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument._run",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument.test_caps_chunks_from_dominant_document",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestMaxChunksPerDocument.test_cap_of_one_keeps_top_chunk_per_document",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale._make_kb",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale.test_stale_kb_contributes_zero_chunks",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestVectorMetricStale.test_stale_kb_does_not_block_healthy_siblings",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache._kb",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache._patched_run",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_shared_model_creates_one_provider",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_distinct_models_create_one_provider_each",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_legacy_kbs_share_global_default",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache",
+      "target": "backend/tests/recall/test_recall_multi_kb.py::TestEmbedderCache.test_mix_of_legacy_and_explicit_models",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py",
+      "target": "backend/tests/recall/test_recall_single_kb.py::_restore_rag_config",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall.test_target_chunk_ranks_first",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestSingleKbRecall.test_empty_collection_returns_empty",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap._seed_chunks",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_smaller_than_corpus",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_larger_than_corpus",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestTopKCap.test_top_k_falls_back_to_config_default",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_drops_distractors",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_above_one_drops_everything",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold",
+      "target": "backend/tests/recall/test_recall_single_kb.py::TestScoreThreshold.test_threshold_falls_back_to_config",
+      "type": "contains"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_multi_kb.py",
+      "target": "backend/tests/recall/conftest.py",
+      "type": "imports"
+    },
+    {
+      "source": "backend/tests/recall/test_recall_single_kb.py",
+      "target": "backend/tests/recall/conftest.py",
+      "type": "imports"
+    }
+  ]
+}

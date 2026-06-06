@@ -1,0 +1,94 @@
+{
+  "batchIndex": 25,
+  "nodes": [
+    {
+      "id": "backend/packages/harness/deerflow/config/webhook_config.py",
+      "type": "file",
+      "name": "webhook_config.py",
+      "path": "backend/packages/harness/deerflow/config/webhook_config.py",
+      "language": "python",
+      "sizeLines": 34,
+      "summary": "定义 Webhook 配置数据模型，包含 URL、事件类型过滤和重试策略等字段。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/events/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/events/__init__.py",
+      "language": "python",
+      "sizeLines": 7,
+      "summary": "事件模块包初始化文件，从 bus、models、webhook 子模块导出核心公共接口。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/events/bus.py",
+      "type": "file",
+      "name": "bus.py",
+      "path": "backend/packages/harness/deerflow/events/bus.py",
+      "language": "python",
+      "sizeLines": 79,
+      "summary": "实现事件总线，提供事件订阅、取消订阅和发布分发的核心机制。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/events/models.py",
+      "type": "file",
+      "name": "models.py",
+      "path": "backend/packages/harness/deerflow/events/models.py",
+      "language": "python",
+      "sizeLines": 50,
+      "summary": "定义事件数据模型，包括基础事件类和各类业务事件的数据结构。"
+    },
+    {
+      "id": "backend/packages/harness/deerflow/events/webhook.py",
+      "type": "file",
+      "name": "webhook.py",
+      "path": "backend/packages/harness/deerflow/events/webhook.py",
+      "language": "python",
+      "sizeLines": 85,
+      "summary": "实现 Webhook 事件分发器，将事件总线中的事件通过 HTTP 请求推送到外部配置的回调地址。"
+    }
+  ],
+  "edges": [
+    {
+      "from": "backend/packages/harness/deerflow/events/__init__.py",
+      "to": "backend/packages/harness/deerflow/events/bus.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/__init__.py",
+      "to": "backend/packages/harness/deerflow/events/models.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/__init__.py",
+      "to": "backend/packages/harness/deerflow/events/webhook.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/bus.py",
+      "to": "backend/packages/harness/deerflow/events/models.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/webhook.py",
+      "to": "backend/packages/harness/deerflow/config/webhook_config.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/webhook.py",
+      "to": "backend/packages/harness/deerflow/events/bus.py",
+      "type": "import",
+      "label": "imports"
+    },
+    {
+      "from": "backend/packages/harness/deerflow/events/webhook.py",
+      "to": "backend/packages/harness/deerflow/events/models.py",
+      "type": "import",
+      "label": "imports"
+    }
+  ]
+}

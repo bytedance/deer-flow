@@ -1,0 +1,11 @@
+{
+  "batchIndex": 33,
+  "nodes": [
+    {"id": "file:backend/tests/recall_l2/dataset/corpus/equipment_runbook.md", "type": "file", "name": "equipment_runbook.md", "summary": "设备运维手册测试语料文件，包含设备操作和维护的标准流程文档。", "tags": ["markdown", "test-data", "corpus", "equipment", "runbook"], "complexity": "simple"},
+    {"id": "file:backend/tests/recall_l2/dataset/corpus/fault_diagnosis.md", "type": "file", "name": "fault_diagnosis.md", "summary": "故障诊断测试语料文件，包含常见设备故障的诊断步骤和解决方案文档。", "tags": ["markdown", "test-data", "corpus", "fault", "diagnosis"], "complexity": "simple"},
+    {"id": "file:backend/tests/recall_l2/dataset/corpus/inspection_schedule.md", "type": "file", "name": "inspection_schedule.md", "summary": "巡检计划测试语料文件，包含设备定期巡检的时间安排和检查项目文档。", "tags": ["markdown", "test-data", "corpus", "inspection", "schedule"], "complexity": "simple"},
+    {"id": "file:backend/tests/recall_l2/dataset/corpus/safety_protocol.md", "type": "file", "name": "safety_protocol.md", "summary": "安全规程测试语料文件，包含工业安全生产的操作规范和应急预案文档。", "tags": ["markdown", "test-data", "corpus", "safety", "protocol"], "complexity": "simple"},
+    {"id": "file:backend/tests/recall_l2/dataset/corpus/sla_policy.md", "type": "file", "name": "sla_policy.md", "summary": "SLA策略测试语料文件，包含服务等级协议的响应时间和处理标准文档。", "tags": ["markdown", "test-data", "corpus", "sla", "policy"], "complexity": "simple"}
+  ],
+  "edges": []
+}

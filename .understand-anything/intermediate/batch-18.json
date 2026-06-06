@@ -1,0 +1,1397 @@
+{
+  "batchIndex": 18,
+  "nodes": [
+    {
+      "id": "backend/app/gateway/auth_middleware.py",
+      "type": "file",
+      "name": "auth_middleware.py",
+      "path": "backend/app/gateway/auth_middleware.py",
+      "language": "python",
+      "summary": "全局认证中间件，作为安全兜底拒绝未认证请求到非公开路径，并将JWT解析为用户对象注入请求上下文。",
+      "tags": ["auth", "middleware", "security"],
+      "metadata": {"sizeLines": 198}
+    },
+    {
+      "id": "backend/app/gateway/auth_middleware.py::_DefaultUser",
+      "type": "class",
+      "name": "_DefaultUser",
+      "path": "backend/app/gateway/auth_middleware.py",
+      "language": "python",
+      "summary": "认证禁用时使用的最小用户对象，满足CurrentUser协议以便仓库层owner过滤正常工作。",
+      "tags": ["auth", "internal"],
+      "metadata": {"lineNumber": 28}
+    },
+    {
+      "id": "backend/app/gateway/auth_middleware.py::_DictUser",
+      "type": "class",
+      "name": "_DictUser",
+      "path": "backend/app/gateway/auth_middleware.py",
+      "language": "python",
+      "summary": "将dict形式的用户对象适配为CurrentUser协议的包装器。",
+      "tags": ["auth", "adapter"],
+      "metadata": {"lineNumber": 45}
+    },
+    {
+      "id": "backend/app/gateway/auth_middleware.py::_is_public",
+      "type": "function",
+      "name": "_is_public",
+      "path": "backend/app/gateway/auth_middleware.py",
+      "language": "python",
+      "summary": "判断请求路径是否为公开路径（无需认证）。",
+      "tags": ["auth", "utility"],
+      "metadata": {"lineNumber": 80}
+    },
+    {
+      "id": "backend/app/gateway/auth_middleware.py::AuthMiddleware",
+      "type": "class",
+      "name": "AuthMiddleware",
+      "path": "backend/app/gateway/auth_middleware.py",
+      "language": "python",
+      "summary": "严格的认证网关中间件，对非公开路径执行cookie检查和JWT验证，拒绝无效请求。",
+      "tags": ["auth", "middleware", "starlette"],
+      "metadata": {"lineNumber": 87}
+    },
+    {
+      "id": "backend/app/gateway/auth/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/app/gateway/auth/__init__.py",
+      "language": "python",
+      "summary": "认证模块的公共导出入口，集中导出JWT、密码、模型、Provider和仓库等核心组件。",
+      "tags": ["auth", "module-init"],
+      "metadata": {"sizeLines": 42}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py",
+      "type": "file",
+      "name": "api_key_handler.py",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "API Key的生成、哈希、验证及JSON文件持久化，支持按租户管理API密钥。",
+      "tags": ["auth", "api-key", "security"],
+      "metadata": {"sizeLines": 157}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::generate_api_key",
+      "type": "function",
+      "name": "generate_api_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "生成带df-前缀的新API Key。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 23}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::hash_key",
+      "type": "function",
+      "name": "hash_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "对API Key进行SHA-256哈希用于存储。",
+      "tags": ["auth", "api-key", "hashing"],
+      "metadata": {"lineNumber": 33}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::verify_key",
+      "type": "function",
+      "name": "verify_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "将原始API Key与存储的哈希进行比对验证。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 38}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::load_api_keys",
+      "type": "function",
+      "name": "load_api_keys",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "从当前租户的JSON文件加载所有API Key。",
+      "tags": ["auth", "api-key", "persistence"],
+      "metadata": {"lineNumber": 49}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::save_api_keys",
+      "type": "function",
+      "name": "save_api_keys",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "原子写入当前租户的API Key数据到JSON文件。",
+      "tags": ["auth", "api-key", "persistence"],
+      "metadata": {"lineNumber": 66}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::create_api_key",
+      "type": "function",
+      "name": "create_api_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "为当前租户创建新的API Key并持久化。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 76}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::list_api_keys",
+      "type": "function",
+      "name": "list_api_keys",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "列出当前租户所有未吊销的API Key。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 110}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::revoke_api_key",
+      "type": "function",
+      "name": "revoke_api_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "按ID吊销指定的API Key。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 126}
+    },
+    {
+      "id": "backend/app/gateway/auth/api_key_handler.py::verify_and_track_api_key",
+      "type": "function",
+      "name": "verify_and_track_api_key",
+      "path": "backend/app/gateway/auth/api_key_handler.py",
+      "language": "python",
+      "summary": "验证原始API Key并更新最后使用时间戳。",
+      "tags": ["auth", "api-key"],
+      "metadata": {"lineNumber": 141}
+    },
+    {
+      "id": "backend/app/gateway/auth/config.py",
+      "type": "file",
+      "name": "config.py",
+      "path": "backend/app/gateway/auth/config.py",
+      "language": "python",
+      "summary": "认证配置模块，管理JWT密钥和令牌过期时间等参数，支持从环境变量和持久化文件加载。",
+      "tags": ["auth", "config"],
+      "metadata": {"sizeLines": 91}
+    },
+    {
+      "id": "backend/app/gateway/auth/config.py::AuthConfig",
+      "type": "class",
+      "name": "AuthConfig",
+      "path": "backend/app/gateway/auth/config.py",
+      "language": "python",
+      "summary": "JWT认证相关配置的Pydantic模型，启动时解析一次。",
+      "tags": ["auth", "config", "pydantic"],
+      "metadata": {"lineNumber": 12}
+    },
+    {
+      "id": "backend/app/gateway/auth/config.py::get_auth_config",
+      "type": "function",
+      "name": "get_auth_config",
+      "path": "backend/app/gateway/auth/config.py",
+      "language": "python",
+      "summary": "获取全局AuthConfig实例，首次调用时从环境变量解析，缺少密钥时自动持久化生成。",
+      "tags": ["auth", "config"],
+      "metadata": {"lineNumber": 33}
+    },
+    {
+      "id": "backend/app/gateway/auth/config.py::_load_or_generate_jwt_secret",
+      "type": "function",
+      "name": "_load_or_generate_jwt_secret",
+      "path": "backend/app/gateway/auth/config.py",
+      "language": "python",
+      "summary": "加载已持久化的JWT密钥，或生成新密钥并持久化到文件。",
+      "tags": ["auth", "config", "security"],
+      "metadata": {"lineNumber": 63}
+    },
+    {
+      "id": "backend/app/gateway/auth/credential_file.py",
+      "type": "file",
+      "name": "credential_file.py",
+      "path": "backend/app/gateway/auth/credential_file.py",
+      "language": "python",
+      "summary": "将初始管理员凭据写入受限权限文件（0600）而非日志，避免敏感信息泄露。",
+      "tags": ["auth", "security", "credentials"],
+      "metadata": {"sizeLines": 48}
+    },
+    {
+      "id": "backend/app/gateway/auth/credential_file.py::write_initial_credentials",
+      "type": "function",
+      "name": "write_initial_credentials",
+      "path": "backend/app/gateway/auth/credential_file.py",
+      "language": "python",
+      "summary": "以原子方式将管理员邮箱和密码写入0600权限文件。",
+      "tags": ["auth", "security"],
+      "metadata": {"lineNumber": 21}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py",
+      "type": "file",
+      "name": "errors.py",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "认证模块的类型化错误定义，包含错误码枚举、令牌错误枚举和结构化错误响应。",
+      "tags": ["auth", "errors", "types"],
+      "metadata": {"sizeLines": 106}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::AuthErrorCategory",
+      "type": "class",
+      "name": "AuthErrorCategory",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "面向用户的认证错误分类枚举（无效令牌/禁止访问/租户配置错误/上游不可用）。",
+      "tags": ["auth", "errors", "enum"],
+      "metadata": {"lineNumber": 14}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::AuthErrorCode",
+      "type": "class",
+      "name": "AuthErrorCode",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "详尽的认证错误条件枚举，涵盖凭据无效、令牌过期/无效、用户未找到、租户问题等。",
+      "tags": ["auth", "errors", "enum"],
+      "metadata": {"lineNumber": 30}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::TokenError",
+      "type": "class",
+      "name": "TokenError",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "JWT解码失败原因的穷举枚举（过期/签名无效/格式错误）。",
+      "tags": ["auth", "errors", "enum"],
+      "metadata": {"lineNumber": 52}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::AuthErrorResponse",
+      "type": "class",
+      "name": "AuthErrorResponse",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "结构化认证错误响应模型，根据错误码自动推导面向用户的分类。",
+      "tags": ["auth", "errors", "pydantic"],
+      "metadata": {"lineNumber": 60}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::auth_error_category",
+      "type": "function",
+      "name": "auth_error_category",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "将细粒度AuthErrorCode映射到面向用户的AuthErrorCategory。",
+      "tags": ["auth", "errors"],
+      "metadata": {"lineNumber": 79}
+    },
+    {
+      "id": "backend/app/gateway/auth/errors.py::token_error_to_code",
+      "type": "function",
+      "name": "token_error_to_code",
+      "path": "backend/app/gateway/auth/errors.py",
+      "language": "python",
+      "summary": "将TokenError映射到对应的AuthErrorCode。",
+      "tags": ["auth", "errors"],
+      "metadata": {"lineNumber": 102}
+    },
+    {
+      "id": "backend/app/gateway/auth/ins_base_provider.py",
+      "type": "file",
+      "name": "ins_base_provider.py",
+      "path": "backend/app/gateway/auth/ins_base_provider.py",
+      "language": "python",
+      "summary": "ins-base-rpc Java微服务认证提供者，实现登录、令牌认证和刷新的完整流程，支持RSA加密和组织租户解析。",
+      "tags": ["auth", "provider", "ins-base", "rpc"],
+      "metadata": {"sizeLines": 477}
+    },
+    {
+      "id": "backend/app/gateway/auth/ins_base_provider.py::RpcNotConfiguredError",
+      "type": "class",
+      "name": "RpcNotConfiguredError",
+      "path": "backend/app/gateway/auth/ins_base_provider.py",
+      "language": "python",
+      "summary": "RPC客户端未配置时抛出的异常。",
+      "tags": ["auth", "error"],
+      "metadata": {"lineNumber": 32}
+    },
+    {
+      "id": "backend/app/gateway/auth/ins_base_provider.py::AuthProviderUnavailableError",
+      "type": "class",
+      "name": "AuthProviderUnavailableError",
+      "path": "backend/app/gateway/auth/ins_base_provider.py",
+      "language": "python",
+      "summary": "ins-base上游认证服务不可用时抛出的异常。",
+      "tags": ["auth", "error"],
+      "metadata": {"lineNumber": 36}
+    },
+    {
+      "id": "backend/app/gateway/auth/ins_base_provider.py::_map_system_role",
+      "type": "function",
+      "name": "_map_system_role",
+      "path": "backend/app/gateway/auth/ins_base_provider.py",
+      "language": "python",
+      "summary": "将用户名映射为系统角色（superadmin/tenant_admin/user）。",
+      "tags": ["auth", "role-mapping"],
+      "metadata": {"lineNumber": 40}
+    },
+    {
+      "id": "backend/app/gateway/auth/ins_base_provider.py::InsBaseAuthProvider",
+      "type": "class",
+      "name": "InsBaseAuthProvider",
+      "path": "backend/app/gateway/auth/ins_base_provider.py",
+      "language": "python",
+      "summary": "基于ins-base-rpc的认证提供者，实现登录（RSA加密）、令牌认证（带缓存）和组织链租户解析。",
+      "tags": ["auth", "provider", "ins-base"],
+      "metadata": {"lineNumber": 55}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt_handler.py",
+      "type": "file",
+      "name": "jwt_handler.py",
+      "path": "backend/app/gateway/auth/jwt_handler.py",
+      "language": "python",
+      "summary": "JWT令牌的创建（访问令牌/刷新令牌）和解码验证，用于Bearer令牌认证路径。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"sizeLines": 70}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt_handler.py::TokenPayload",
+      "type": "class",
+      "name": "TokenPayload",
+      "path": "backend/app/gateway/auth/jwt_handler.py",
+      "language": "python",
+      "summary": "JWT令牌载荷的数据类（使用jose库），包含租户、角色和令牌类型。",
+      "tags": ["auth", "jwt", "model"],
+      "metadata": {"lineNumber": 12}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt_handler.py::create_access_token",
+      "type": "function",
+      "name": "create_access_token",
+      "path": "backend/app/gateway/auth/jwt_handler.py",
+      "language": "python",
+      "summary": "使用jose库创建签名的JWT访问令牌，包含租户、用户名和角色信息。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"lineNumber": 15}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt_handler.py::create_refresh_token",
+      "type": "function",
+      "name": "create_refresh_token",
+      "path": "backend/app/gateway/auth/jwt_handler.py",
+      "language": "python",
+      "summary": "创建更长有效期的JWT刷新令牌。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"lineNumber": 39}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt_handler.py::decode_token",
+      "type": "function",
+      "name": "decode_token",
+      "path": "backend/app/gateway/auth/jwt_handler.py",
+      "language": "python",
+      "summary": "使用jose库解码并验证JWT令牌，失败时抛出ValueError。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"lineNumber": 53}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt.py",
+      "type": "file",
+      "name": "jwt.py",
+      "path": "backend/app/gateway/auth/jwt.py",
+      "language": "python",
+      "summary": "基于PyJWT库的JWT令牌创建和解码，支持令牌版本控制和租户ID，用于cookie认证路径。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"sizeLines": 57}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt.py::TokenPayload",
+      "type": "class",
+      "name": "TokenPayload",
+      "path": "backend/app/gateway/auth/jwt.py",
+      "language": "python",
+      "summary": "JWT令牌载荷的Pydantic模型，包含sub/exp/ver/tenant_id等字段。",
+      "tags": ["auth", "jwt", "pydantic"],
+      "metadata": {"lineNumber": 12}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt.py::create_access_token",
+      "type": "function",
+      "name": "create_access_token",
+      "path": "backend/app/gateway/auth/jwt.py",
+      "language": "python",
+      "summary": "使用PyJWT创建JWT访问令牌，支持自定义过期时间和令牌版本号。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"lineNumber": 22}
+    },
+    {
+      "id": "backend/app/gateway/auth/jwt.py::decode_token",
+      "type": "function",
+      "name": "decode_token",
+      "path": "backend/app/gateway/auth/jwt.py",
+      "language": "python",
+      "summary": "解码并验证JWT令牌，返回TokenPayload或具体的TokenError枚举值。",
+      "tags": ["auth", "jwt"],
+      "metadata": {"lineNumber": 42}
+    },
+    {
+      "id": "backend/app/gateway/auth/local_provider.py",
+      "type": "file",
+      "name": "local_provider.py",
+      "path": "backend/app/gateway/auth/local_provider.py",
+      "language": "python",
+      "summary": "本地邮箱/密码认证提供者，支持多租户自动检测和显式租户指定两种认证模式。",
+      "tags": ["auth", "provider", "local"],
+      "metadata": {"sizeLines": 143}
+    },
+    {
+      "id": "backend/app/gateway/auth/local_provider.py::LocalAuthProvider",
+      "type": "class",
+      "name": "LocalAuthProvider",
+      "path": "backend/app/gateway/auth/local_provider.py",
+      "language": "python",
+      "summary": "本地数据库邮箱密码认证提供者，实现认证、用户CRUD、多租户检测和自动密码重哈希。",
+      "tags": ["auth", "provider"],
+      "metadata": {"lineNumber": 15}
+    },
+    {
+      "id": "backend/app/gateway/auth/middleware.py",
+      "type": "file",
+      "name": "middleware.py",
+      "path": "backend/app/gateway/auth/middleware.py",
+      "language": "python",
+      "summary": "认证中间件工厂，根据配置构建ASGI中间件函数，处理Bearer令牌/API Key/Cookie JWT/ins-base多种认证方式。",
+      "tags": ["auth", "middleware", "asgi"],
+      "metadata": {"sizeLines": 424}
+    },
+    {
+      "id": "backend/app/gateway/auth/middleware.py::_UserState",
+      "type": "class",
+      "name": "_UserState",
+      "path": "backend/app/gateway/auth/middleware.py",
+      "language": "python",
+      "summary": "可属性访问的用户状态包装器，将dict包装为支持getattr访问的对象。",
+      "tags": ["auth", "adapter"],
+      "metadata": {"lineNumber": 42}
+    },
+    {
+      "id": "backend/app/gateway/auth/middleware.py::_is_whitelisted",
+      "type": "function",
+      "name": "_is_whitelisted",
+      "path": "backend/app/gateway/auth/middleware.py",
+      "language": "python",
+      "summary": "检查请求路径是否在认证白名单中。",
+      "tags": ["auth", "utility"],
+      "metadata": {"lineNumber": 37}
+    },
+    {
+      "id": "backend/app/gateway/auth/middleware.py::_check_tenant_active",
+      "type": "function",
+      "name": "_check_tenant_active",
+      "path": "backend/app/gateway/auth/middleware.py",
+      "language": "python",
+      "summary": "检查租户是否存在且处于激活状态，非活跃租户返回403响应。",
+      "tags": ["auth", "tenant"],
+      "metadata": {"lineNumber": 79}
+    },
+    {
+      "id": "backend/app/gateway/auth/middleware.py::create_auth_middleware",
+      "type": "function",
+      "name": "create_auth_middleware",
+      "path": "backend/app/gateway/auth/middleware.py",
+      "language": "python",
+      "summary": "构建认证ASGI中间件，支持禁用模式、ins-base模式和本地JWT/API Key模式。",
+      "tags": ["auth", "middleware", "factory"],
+      "metadata": {"lineNumber": 116}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py",
+      "type": "file",
+      "name": "models.py",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "认证请求和响应的Pydantic模型定义，包含用户、登录、令牌和API Key相关模型。",
+      "tags": ["auth", "models", "pydantic"],
+      "metadata": {"sizeLines": 84}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::User",
+      "type": "class",
+      "name": "User",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "内部用户表示的Pydantic模型，包含邮箱、角色、OAuth关联、令牌版本和多租户字段。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 17}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::UserResponse",
+      "type": "class",
+      "name": "UserResponse",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "用户信息端点的响应模型。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 40}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::LoginRequest",
+      "type": "class",
+      "name": "LoginRequest",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "登录请求模型，包含用户名和密码字段。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 52}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::TokenResponse",
+      "type": "class",
+      "name": "TokenResponse",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "令牌响应模型，包含访问令牌、类型和过期时间。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 57}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::ApiKeyCreateRequest",
+      "type": "class",
+      "name": "ApiKeyCreateRequest",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "API Key创建请求模型。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 67}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::ApiKeyResponse",
+      "type": "class",
+      "name": "ApiKeyResponse",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "API Key响应模型，不包含原始密钥。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 71}
+    },
+    {
+      "id": "backend/app/gateway/auth/models.py::ApiKeyCreateResponse",
+      "type": "class",
+      "name": "ApiKeyCreateResponse",
+      "path": "backend/app/gateway/auth/models.py",
+      "language": "python",
+      "summary": "API Key创建响应模型，仅创建时返回完整原始密钥。",
+      "tags": ["auth", "model", "pydantic"],
+      "metadata": {"lineNumber": 79}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py",
+      "type": "file",
+      "name": "password.py",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "带版本号的密码哈希工具，v2使用SHA-256预哈希+bcrypt解决72字节截断问题，支持向后兼容v1。",
+      "tags": ["auth", "password", "security"],
+      "metadata": {"sizeLines": 81}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py::hash_password",
+      "type": "function",
+      "name": "hash_password",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "使用当前版本v2（SHA-256+bcrypt）哈希密码。",
+      "tags": ["auth", "password"],
+      "metadata": {"lineNumber": 32}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py::verify_password",
+      "type": "function",
+      "name": "verify_password",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "验证密码，自动检测哈希版本并兼容v1和裸bcrypt哈希。",
+      "tags": ["auth", "password"],
+      "metadata": {"lineNumber": 38}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py::needs_rehash",
+      "type": "function",
+      "name": "needs_rehash",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "判断密码哈希是否使用旧版本需要重新哈希。",
+      "tags": ["auth", "password"],
+      "metadata": {"lineNumber": 61}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py::hash_password_async",
+      "type": "function",
+      "name": "hash_password_async",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "异步版本的密码哈希，通过线程池避免阻塞事件循环。",
+      "tags": ["auth", "password", "async"],
+      "metadata": {"lineNumber": 66}
+    },
+    {
+      "id": "backend/app/gateway/auth/password.py::verify_password_async",
+      "type": "function",
+      "name": "verify_password_async",
+      "path": "backend/app/gateway/auth/password.py",
+      "language": "python",
+      "summary": "异步版本的密码验证，通过线程池避免阻塞事件循环。",
+      "tags": ["auth", "password", "async"],
+      "metadata": {"lineNumber": 75}
+    },
+    {
+      "id": "backend/app/gateway/auth/providers.py",
+      "type": "file",
+      "name": "providers.py",
+      "path": "backend/app/gateway/auth/providers.py",
+      "language": "python",
+      "summary": "认证提供者抽象基类定义和TenantSelectionRequired数据类，定义统一的认证接口。",
+      "tags": ["auth", "provider", "abstract"],
+      "metadata": {"sizeLines": 35}
+    },
+    {
+      "id": "backend/app/gateway/auth/providers.py::TenantSelectionRequired",
+      "type": "class",
+      "name": "TenantSelectionRequired",
+      "path": "backend/app/gateway/auth/providers.py",
+      "language": "python",
+      "summary": "当密码匹配多个租户时authenticate()的返回值，携带租户列表供用户选择。",
+      "tags": ["auth", "model"],
+      "metadata": {"lineNumber": 7}
+    },
+    {
+      "id": "backend/app/gateway/auth/providers.py::AuthProvider",
+      "type": "class",
+      "name": "AuthProvider",
+      "path": "backend/app/gateway/auth/providers.py",
+      "language": "python",
+      "summary": "认证提供者的抽象基类，定义authenticate和get_user接口。",
+      "tags": ["auth", "abstract"],
+      "metadata": {"lineNumber": 14}
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/base.py",
+      "type": "file",
+      "name": "base.py",
+      "path": "backend/app/gateway/auth/repositories/base.py",
+      "language": "python",
+      "summary": "用户仓库抽象接口定义，提供完整的用户CRUD和查询方法，以及UserNotFoundError异常。",
+      "tags": ["auth", "repository", "abstract"],
+      "metadata": {"sizeLines": 153}
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/base.py::UserNotFoundError",
+      "type": "class",
+      "name": "UserNotFoundError",
+      "path": "backend/app/gateway/auth/repositories/base.py",
+      "language": "python",
+      "summary": "用户不存在时抛出的异常，LookupError子类。",
+      "tags": ["auth", "error"],
+      "metadata": {"lineNumber": 8}
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/base.py::UserRepository",
+      "type": "class",
+      "name": "UserRepository",
+      "path": "backend/app/gateway/auth/repositories/base.py",
+      "language": "python",
+      "summary": "用户数据存储的抽象接口，定义create/get/update/delete/count/list等方法。",
+      "tags": ["auth", "repository", "abstract"],
+      "metadata": {"lineNumber": 18}
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/sqlite.py",
+      "type": "file",
+      "name": "sqlite.py",
+      "path": "backend/app/gateway/auth/repositories/sqlite.py",
+      "language": "python",
+      "summary": "基于SQLAlchemy异步会话的用户仓库实现，使用共享持久化引擎存储用户数据。",
+      "tags": ["auth", "repository", "sqlalchemy"],
+      "metadata": {"sizeLines": 159}
+    },
+    {
+      "id": "backend/app/gateway/auth/repositories/sqlite.py::SQLiteUserRepository",
+      "type": "class",
+      "name": "SQLiteUserRepository",
+      "path": "backend/app/gateway/auth/repositories/sqlite.py",
+      "language": "python",
+      "summary": "SQLAlchemy异步用户仓库实现，提供完整的用户CRUD操作及UserRow与User之间的转换。",
+      "tags": ["auth", "repository"],
+      "metadata": {"lineNumber": 27}
+    },
+    {
+      "id": "backend/app/gateway/auth/reset_admin.py",
+      "type": "file",
+      "name": "reset_admin.py",
+      "path": "backend/app/gateway/auth/reset_admin.py",
+      "language": "python",
+      "summary": "管理员密码重置CLI工具，生成新密码并写入受限权限文件，支持按邮箱或自动查找管理员。",
+      "tags": ["auth", "cli", "admin"],
+      "metadata": {"sizeLines": 91}
+    },
+    {
+      "id": "backend/app/gateway/auth/reset_admin.py::_run",
+      "type": "function",
+      "name": "_run",
+      "path": "backend/app/gateway/auth/reset_admin.py",
+      "language": "python",
+      "summary": "异步执行密码重置逻辑：初始化管理引擎、查找用户、重置密码并写入凭据文件。",
+      "tags": ["auth", "cli"],
+      "metadata": {"lineNumber": 27}
+    },
+    {
+      "id": "backend/app/gateway/auth/reset_admin.py::main",
+      "type": "function",
+      "name": "main",
+      "path": "backend/app/gateway/auth/reset_admin.py",
+      "language": "python",
+      "summary": "CLI入口函数，解析命令行参数并调用异步执行函数。",
+      "tags": ["auth", "cli"],
+      "metadata": {"lineNumber": 81}
+    },
+    {
+      "id": "backend/app/gateway/auth/rsa_utils.py",
+      "type": "file",
+      "name": "rsa_utils.py",
+      "path": "backend/app/gateway/auth/rsa_utils.py",
+      "language": "python",
+      "summary": "RSA加密工具，用于ins-base-rpc登录时对用户名和密码进行PKCS1v15加密。",
+      "tags": ["auth", "rsa", "encryption"],
+      "metadata": {"sizeLines": 49}
+    },
+    {
+      "id": "backend/app/gateway/auth/rsa_utils.py::normalize_pem",
+      "type": "function",
+      "name": "normalize_pem",
+      "path": "backend/app/gateway/auth/rsa_utils.py",
+      "language": "python",
+      "summary": "规范化RSA公钥PEM格式，处理单行/多行/含空白等多种输入。",
+      "tags": ["auth", "rsa"],
+      "metadata": {"lineNumber": 9}
+    },
+    {
+      "id": "backend/app/gateway/auth/rsa_utils.py::rsa_encrypt",
+      "type": "function",
+      "name": "rsa_encrypt",
+      "path": "backend/app/gateway/auth/rsa_utils.py",
+      "language": "python",
+      "summary": "使用RSA公钥和PKCS1v15填充加密明文，返回Base64编码的密文。",
+      "tags": ["auth", "rsa"],
+      "metadata": {"lineNumber": 27}
+    },
+    {
+      "id": "backend/app/gateway/internal_auth.py",
+      "type": "file",
+      "name": "internal_auth.py",
+      "path": "backend/app/gateway/internal_auth.py",
+      "language": "python",
+      "summary": "进程内部的认证机制，使用随机生成的令牌验证同进程Gateway内部调用。",
+      "tags": ["auth", "internal", "security"],
+      "metadata": {"sizeLines": 29}
+    },
+    {
+      "id": "backend/app/gateway/internal_auth.py::create_internal_auth_headers",
+      "type": "function",
+      "name": "create_internal_auth_headers",
+      "path": "backend/app/gateway/internal_auth.py",
+      "language": "python",
+      "summary": "返回用于同进程Gateway内部调用认证的请求头。",
+      "tags": ["auth", "internal"],
+      "metadata": {"lineNumber": 17}
+    },
+    {
+      "id": "backend/app/gateway/internal_auth.py::is_valid_internal_auth_token",
+      "type": "function",
+      "name": "is_valid_internal_auth_token",
+      "path": "backend/app/gateway/internal_auth.py",
+      "language": "python",
+      "summary": "使用常量时间比较验证内部认证令牌。",
+      "tags": ["auth", "internal", "security"],
+      "metadata": {"lineNumber": 22}
+    },
+    {
+      "id": "backend/app/gateway/internal_auth.py::get_internal_user",
+      "type": "function",
+      "name": "get_internal_user",
+      "path": "backend/app/gateway/internal_auth.py",
+      "language": "python",
+      "summary": "返回受信任内部通道调用使用的合成用户对象。",
+      "tags": ["auth", "internal"],
+      "metadata": {"lineNumber": 27}
+    }
+  ],
+  "edges": [
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/errors.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/jwt.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/local_provider.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/models.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/password.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/providers.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/__init__.py",
+      "target": "backend/app/gateway/auth/repositories/base.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/providers.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/rsa_utils.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt.py",
+      "target": "backend/app/gateway/auth/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt.py",
+      "target": "backend/app/gateway/auth/errors.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py",
+      "target": "backend/app/gateway/auth/models.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py",
+      "target": "backend/app/gateway/auth/password.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py",
+      "target": "backend/app/gateway/auth/providers.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py",
+      "target": "backend/app/gateway/auth/repositories/base.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/errors.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/jwt_handler.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/providers.py",
+      "target": "backend/app/gateway/auth/models.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/base.py",
+      "target": "backend/app/gateway/auth/models.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/sqlite.py",
+      "target": "backend/app/gateway/auth/models.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/sqlite.py",
+      "target": "backend/app/gateway/auth/repositories/base.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/reset_admin.py",
+      "target": "backend/app/gateway/auth/credential_file.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/reset_admin.py",
+      "target": "backend/app/gateway/auth/password.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/reset_admin.py",
+      "target": "backend/app/gateway/auth/repositories/sqlite.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/auth/errors.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/internal_auth.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/auth_middleware.py::_DefaultUser",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/auth_middleware.py::_DictUser",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/auth_middleware.py::_is_public",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/auth_middleware.py::AuthMiddleware",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::generate_api_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::hash_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::verify_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::load_api_keys",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::save_api_keys",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::create_api_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::list_api_keys",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::revoke_api_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/api_key_handler.py",
+      "target": "backend/app/gateway/auth/api_key_handler.py::verify_and_track_api_key",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/config.py",
+      "target": "backend/app/gateway/auth/config.py::AuthConfig",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/config.py",
+      "target": "backend/app/gateway/auth/config.py::get_auth_config",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/config.py",
+      "target": "backend/app/gateway/auth/config.py::_load_or_generate_jwt_secret",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/credential_file.py",
+      "target": "backend/app/gateway/auth/credential_file.py::write_initial_credentials",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::AuthErrorCategory",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::AuthErrorCode",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::TokenError",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::AuthErrorResponse",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::auth_error_category",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/errors.py",
+      "target": "backend/app/gateway/auth/errors.py::token_error_to_code",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/ins_base_provider.py::RpcNotConfiguredError",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/ins_base_provider.py::AuthProviderUnavailableError",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/ins_base_provider.py::_map_system_role",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py",
+      "target": "backend/app/gateway/auth/ins_base_provider.py::InsBaseAuthProvider",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt_handler.py",
+      "target": "backend/app/gateway/auth/jwt_handler.py::TokenPayload",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt_handler.py",
+      "target": "backend/app/gateway/auth/jwt_handler.py::create_access_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt_handler.py",
+      "target": "backend/app/gateway/auth/jwt_handler.py::create_refresh_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt_handler.py",
+      "target": "backend/app/gateway/auth/jwt_handler.py::decode_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt.py",
+      "target": "backend/app/gateway/auth/jwt.py::TokenPayload",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt.py",
+      "target": "backend/app/gateway/auth/jwt.py::create_access_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/jwt.py",
+      "target": "backend/app/gateway/auth/jwt.py::decode_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py",
+      "target": "backend/app/gateway/auth/local_provider.py::LocalAuthProvider",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/middleware.py::_UserState",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/middleware.py::_is_whitelisted",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/middleware.py::_check_tenant_active",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/middleware.py",
+      "target": "backend/app/gateway/auth/middleware.py::create_auth_middleware",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::User",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::UserResponse",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::LoginRequest",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::TokenResponse",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::ApiKeyCreateRequest",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::ApiKeyResponse",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/models.py",
+      "target": "backend/app/gateway/auth/models.py::ApiKeyCreateResponse",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/password.py",
+      "target": "backend/app/gateway/auth/password.py::hash_password",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/password.py",
+      "target": "backend/app/gateway/auth/password.py::verify_password",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/password.py",
+      "target": "backend/app/gateway/auth/password.py::needs_rehash",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/password.py",
+      "target": "backend/app/gateway/auth/password.py::hash_password_async",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/password.py",
+      "target": "backend/app/gateway/auth/password.py::verify_password_async",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/providers.py",
+      "target": "backend/app/gateway/auth/providers.py::TenantSelectionRequired",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/providers.py",
+      "target": "backend/app/gateway/auth/providers.py::AuthProvider",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/base.py",
+      "target": "backend/app/gateway/auth/repositories/base.py::UserNotFoundError",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/base.py",
+      "target": "backend/app/gateway/auth/repositories/base.py::UserRepository",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/sqlite.py",
+      "target": "backend/app/gateway/auth/repositories/sqlite.py::SQLiteUserRepository",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/reset_admin.py",
+      "target": "backend/app/gateway/auth/reset_admin.py::_run",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/reset_admin.py",
+      "target": "backend/app/gateway/auth/reset_admin.py::main",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/rsa_utils.py",
+      "target": "backend/app/gateway/auth/rsa_utils.py::normalize_pem",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/rsa_utils.py",
+      "target": "backend/app/gateway/auth/rsa_utils.py::rsa_encrypt",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/internal_auth.py",
+      "target": "backend/app/gateway/internal_auth.py::create_internal_auth_headers",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/internal_auth.py",
+      "target": "backend/app/gateway/internal_auth.py::is_valid_internal_auth_token",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/internal_auth.py",
+      "target": "backend/app/gateway/internal_auth.py::get_internal_user",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/ins_base_provider.py::InsBaseAuthProvider",
+      "target": "backend/app/gateway/auth/providers.py::AuthProvider",
+      "type": "extends",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/local_provider.py::LocalAuthProvider",
+      "target": "backend/app/gateway/auth/providers.py::AuthProvider",
+      "type": "extends",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth/repositories/sqlite.py::SQLiteUserRepository",
+      "target": "backend/app/gateway/auth/repositories/base.py::UserRepository",
+      "type": "implements",
+      "metadata": {}
+    },
+    {
+      "source": "backend/app/gateway/auth_middleware.py",
+      "target": "backend/app/gateway/authz.py",
+      "type": "imports",
+      "metadata": {"note": "from neighborMap cross-batch reference"}
+    }
+  ]
+}

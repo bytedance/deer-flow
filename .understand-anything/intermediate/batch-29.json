@@ -1,0 +1,200 @@
+{
+  "batchIndex": 29,
+  "nodes": [
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql",
+      "type": "file",
+      "path": "backend/migrations/001_enterprise_schema.sql",
+      "language": "sql",
+      "fileCategory": "data",
+      "summary": "PostgreSQL企业级迁移脚本，创建租户、用户、API密钥、限流、内容安全、Token用量、预算及成本汇总等核心表结构与辅助函数。",
+      "sizeLines": 196
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::tenants",
+      "type": "class",
+      "name": "tenants",
+      "kind": "table",
+      "summary": "租户表，存储多租户标识、名称及活跃状态。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::users",
+      "type": "class",
+      "name": "users",
+      "kind": "table",
+      "summary": "用户表，关联租户，存储用户名、密码哈希和角色（admin/member）。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::api_keys",
+      "type": "class",
+      "name": "api_keys",
+      "kind": "table",
+      "summary": "API密钥表，存储密钥哈希、前缀及吊销状态，关联租户。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::rate_limit_counters",
+      "type": "class",
+      "name": "rate_limit_counters",
+      "kind": "table",
+      "summary": "限流计数器表，用于数据库模式的请求速率限制。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::content_safety_logs",
+      "type": "class",
+      "name": "content_safety_logs",
+      "kind": "table",
+      "summary": "内容安全审计日志表，记录输入/输出的PII脱敏与审核结果。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::token_usage",
+      "type": "class",
+      "name": "token_usage",
+      "kind": "table",
+      "summary": "Token用量记录表，按租户/线程/模型记录输入输出Token及费用。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::budgets",
+      "type": "class",
+      "name": "budgets",
+      "kind": "table",
+      "summary": "预算配置表，设置租户每日/每月美元限额及超额策略（block/warn）。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::model_pricing",
+      "type": "class",
+      "name": "model_pricing",
+      "kind": "table",
+      "summary": "模型定价参考表，存储各LLM每千Token的输入/输出单价。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::table::cost_summary_daily",
+      "type": "class",
+      "name": "cost_summary_daily",
+      "kind": "table",
+      "summary": "每日成本汇总表（物化），按租户+日期聚合Token总量、费用和调用次数。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::function::refresh_cost_summary",
+      "type": "function",
+      "name": "refresh_cost_summary",
+      "signature": "refresh_cost_summary(target_date DATE DEFAULT CURRENT_DATE) RETURNS void",
+      "summary": "PL/pgSQL函数，从token_usage表聚合指定日期的成本数据并UPSERT到cost_summary_daily表。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_tenants_tenant_id",
+      "type": "variable",
+      "name": "idx_tenants_tenant_id",
+      "kind": "index",
+      "summary": "tenants表tenant_id列索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_users_tenant",
+      "type": "variable",
+      "name": "idx_users_tenant",
+      "kind": "index",
+      "summary": "users表tenant_id列索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_tenant",
+      "type": "variable",
+      "name": "idx_api_keys_tenant",
+      "kind": "index",
+      "summary": "api_keys表tenant_id列索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_hash",
+      "type": "variable",
+      "name": "idx_api_keys_hash",
+      "kind": "index",
+      "summary": "api_keys表key_hash列索引，用于快速查找密钥。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_rate_limit_expires",
+      "type": "variable",
+      "name": "idx_rate_limit_expires",
+      "kind": "index",
+      "summary": "rate_limit_counters表expires_at列索引，用于清理过期记录。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_tenant",
+      "type": "variable",
+      "name": "idx_cs_logs_tenant",
+      "kind": "index",
+      "summary": "content_safety_logs表(tenant_id, created_at DESC)复合索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_thread",
+      "type": "variable",
+      "name": "idx_cs_logs_thread",
+      "kind": "index",
+      "summary": "content_safety_logs表thread_id列索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_ts",
+      "type": "variable",
+      "name": "idx_usage_tenant_ts",
+      "kind": "index",
+      "summary": "token_usage表(tenant_id, timestamp DESC)复合索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_date",
+      "type": "variable",
+      "name": "idx_usage_tenant_date",
+      "kind": "index",
+      "summary": "token_usage表(tenant_id, timestamp::DATE)函数索引，按日期查询。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_model",
+      "type": "variable",
+      "name": "idx_usage_model",
+      "kind": "index",
+      "summary": "token_usage表model_name列索引。"
+    },
+    {
+      "id": "backend/migrations/001_enterprise_schema.sql::index::idx_budgets_tenant",
+      "type": "variable",
+      "name": "idx_budgets_tenant",
+      "kind": "index",
+      "summary": "budgets表tenant_id列索引。"
+    }
+  ],
+  "edges": [
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::tenants", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::users", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::api_keys", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::rate_limit_counters", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::content_safety_logs", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::token_usage", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::budgets", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::model_pricing", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::table::cost_summary_daily", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::function::refresh_cost_summary", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_tenants_tenant_id", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_users_tenant", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_tenant", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_hash", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_rate_limit_expires", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_tenant", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_thread", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_ts", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_date", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_model", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql::index::idx_budgets_tenant", "type": "contains"},
+    {"from": "backend/migrations/001_enterprise_schema.sql", "to": "backend/migrations/001_enterprise_schema.sql", "type": "exports"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::table::users", "to": "backend/migrations/001_enterprise_schema.sql::table::tenants", "type": "dependency", "label": "REFERENCES tenants(tenant_id)"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::table::api_keys", "to": "backend/migrations/001_enterprise_schema.sql::table::tenants", "type": "dependency", "label": "REFERENCES tenants(tenant_id)"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::function::refresh_cost_summary", "to": "backend/migrations/001_enterprise_schema.sql::table::token_usage", "type": "dependency", "label": "reads"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::function::refresh_cost_summary", "to": "backend/migrations/001_enterprise_schema.sql::table::cost_summary_daily", "type": "dependency", "label": "writes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_tenants_tenant_id", "to": "backend/migrations/001_enterprise_schema.sql::table::tenants", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_users_tenant", "to": "backend/migrations/001_enterprise_schema.sql::table::users", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_tenant", "to": "backend/migrations/001_enterprise_schema.sql::table::api_keys", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_api_keys_hash", "to": "backend/migrations/001_enterprise_schema.sql::table::api_keys", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_rate_limit_expires", "to": "backend/migrations/001_enterprise_schema.sql::table::rate_limit_counters", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_tenant", "to": "backend/migrations/001_enterprise_schema.sql::table::content_safety_logs", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_cs_logs_thread", "to": "backend/migrations/001_enterprise_schema.sql::table::content_safety_logs", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_ts", "to": "backend/migrations/001_enterprise_schema.sql::table::token_usage", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_tenant_date", "to": "backend/migrations/001_enterprise_schema.sql::table::token_usage", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_usage_model", "to": "backend/migrations/001_enterprise_schema.sql::table::token_usage", "type": "dependency", "label": "indexes"},
+    {"from": "backend/migrations/001_enterprise_schema.sql::index::idx_budgets_tenant", "to": "backend/migrations/001_enterprise_schema.sql::table::budgets", "type": "dependency", "label": "indexes"}
+  ]
+}

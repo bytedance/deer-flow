@@ -1,0 +1,180 @@
+{
+  "batchIndex": 40,
+  "nodes": [
+    {"id": "backend/tests/test_evaluation.py", "type": "file", "language": "python", "summary": "评估框架的回归测试，覆盖指标计算、数据集加载、LLM裁判评分和运行器执行流程。"},
+    {"id": "backend/tests/test_evaluation.py::TestEvaluationConfig", "type": "class", "name": "TestEvaluationConfig", "summary": "测试评估配置的默认值、加载和重置。"},
+    {"id": "backend/tests/test_evaluation.py::TestMetrics", "type": "class", "name": "TestMetrics", "summary": "测试MRR、NDCG、Precision@K、Recall@K等IR指标的计算正确性。"},
+    {"id": "backend/tests/test_evaluation.py::TestDataset", "type": "class", "name": "TestDataset", "summary": "测试JSONL数据集加载、注释跳过和EvalCase默认值。"},
+    {"id": "backend/tests/test_evaluation.py::TestLLMJudge", "type": "class", "name": "TestLLMJudge", "summary": "测试LLM裁判的评分解析、模型调用和错误处理。"},
+    {"id": "backend/tests/test_evaluation.py::TestEvalReport", "type": "class", "name": "TestEvalReport", "summary": "测试评估报告的序列化和保存。"},
+    {"id": "backend/tests/test_evaluation.py::TestEvalRunner", "type": "class", "name": "TestEvalRunner", "summary": "测试运行器的通过/失败/错误场景、空数据集、对比运行和维度均值。"},
+
+    {"id": "backend/tests/test_events.py", "type": "file", "language": "python", "summary": "事件系统的测试，覆盖EventBus发布/订阅、Webhook分发器和事件模型。"},
+    {"id": "backend/tests/test_events.py::TestWebhookConfig", "type": "class", "name": "TestWebhookConfig", "summary": "测试Webhook配置的默认值、字典加载和重置。"},
+    {"id": "backend/tests/test_events.py::TestEventModels", "type": "class", "name": "TestEventModels", "summary": "测试Event模型的序列化、反序列化和默认值。"},
+    {"id": "backend/tests/test_events.py::TestEventBus", "type": "class", "name": "TestEventBus", "summary": "测试EventBus的发布、通配订阅、退订、异步发布和异常处理。"},
+    {"id": "backend/tests/test_events.py::TestWebhookDispatcher", "type": "class", "name": "TestWebhookDispatcher", "summary": "测试Webhook分发器的签名、重试、启停行为。"},
+
+    {"id": "backend/tests/test_exa_tools.py", "type": "file", "language": "python", "summary": "Exa社区工具的单元测试，覆盖web_search和web_fetch工具的功能。"},
+    {"id": "backend/tests/test_exa_tools.py::TestWebSearchTool", "type": "class", "name": "TestWebSearchTool", "summary": "测试Exa web搜索工具的基础搜索、自定义配置、空结果和错误处理。"},
+    {"id": "backend/tests/test_exa_tools.py::TestWebFetchTool", "type": "class", "name": "TestWebFetchTool", "summary": "测试Exa web抓取工具的基础抓取、内容截断和独立API密钥。"},
+
+    {"id": "backend/tests/test_feedback.py", "type": "file", "language": "python", "summary": "用户反馈功能的测试，涵盖文件存储、路由端点、ORM仓库和后续关联。"},
+    {"id": "backend/tests/test_feedback.py::TestFeedbackStorage", "type": "class", "name": "TestFeedbackStorage", "summary": "测试FeedbackStorage的添加、查询、摘要和跨租户查询。"},
+    {"id": "backend/tests/test_feedback.py::TestFeedbackRouter", "type": "class", "name": "TestFeedbackRouter", "summary": "测试反馈路由的提交、验证和管理员权限控制。"},
+    {"id": "backend/tests/test_feedback.py::TestFeedbackRepository", "type": "class", "name": "TestFeedbackRepository", "summary": "测试反馈ORM仓库的CRUD、聚合、upsert和按线程分组。"},
+    {"id": "backend/tests/test_feedback.py::TestFollowUpAssociation", "type": "class", "name": "TestFollowUpAssociation", "summary": "测试运行记录的后续关联逻辑和自动检测机制。"},
+
+    {"id": "backend/tests/test_file_conversion.py", "type": "file", "language": "python", "summary": "文件转换工具的测试，覆盖PDF转换路由、稀疏检测、大纲提取和异步阈值。"},
+    {"id": "backend/tests/test_file_conversion.py::TestPymupdfOutputTooSparse", "type": "class", "name": "TestPymupdfOutputTooSparse", "summary": "测试pymupdf输出稀疏度启发式判断逻辑。"},
+    {"id": "backend/tests/test_file_conversion.py::TestDoConvert", "type": "class", "name": "TestDoConvert", "summary": "测试_do_convert的路由逻辑，含PDF自动模式、显式模式和回退策略。"},
+    {"id": "backend/tests/test_file_conversion.py::TestGetPdfConverter", "type": "class", "name": "TestGetPdfConverter", "summary": "测试PDF转换器配置读取和无效值回退。"},
+    {"id": "backend/tests/test_file_conversion.py::TestConvertFileToMarkdown", "type": "class", "name": "TestConvertFileToMarkdown", "summary": "测试convert_file_to_markdown的同步/异步执行、错误码映射和UTF-8输出。"},
+    {"id": "backend/tests/test_file_conversion.py::TestConversionResult", "type": "class", "name": "TestConversionResult", "summary": "测试ConversionResult工厂方法和错误码枚举。"},
+    {"id": "backend/tests/test_file_conversion.py::TestExtractOutline", "type": "class", "name": "TestExtractOutline", "summary": "测试Markdown大纲提取，含标准标题、SEC格式、中文标题和截断限制。"},
+
+    {"id": "backend/tests/test_firecrawl_tools.py", "type": "file", "language": "python", "summary": "Firecrawl社区工具的单元测试，验证搜索和抓取使用正确的配置。"},
+    {"id": "backend/tests/test_firecrawl_tools.py::TestWebSearchTool", "type": "class", "name": "TestWebSearchTool", "summary": "测试Firecrawl搜索工具使用web_search配置。"},
+    {"id": "backend/tests/test_firecrawl_tools.py::TestWebFetchTool", "type": "class", "name": "TestWebFetchTool", "summary": "测试Firecrawl抓取工具使用web_fetch配置。"},
+
+    {"id": "backend/tests/test_gateway_docs_toggle.py", "type": "file", "language": "python", "summary": "测试Gateway文档开关，验证Swagger UI和ReDoc可通过环境变量禁用。"},
+
+    {"id": "backend/tests/test_gateway_lifespan_shutdown.py", "type": "file", "language": "python", "summary": "测试Gateway生命周期关闭的有界性，确保挂起的channel stop不会阻塞uvicorn worker。"},
+
+    {"id": "backend/tests/test_gateway_nacos_integration.py", "type": "file", "language": "python", "summary": "Gateway生命周期Nacos集成的测试，覆盖配置加载和注册表创建。"},
+
+    {"id": "backend/tests/test_gateway_runtime_cleanup.py", "type": "file", "language": "python", "summary": "验证Gateway运行时清理的回归测试，确保Makefile和启动脚本不再暴露旧gateway目标。"},
+
+    {"id": "backend/tests/test_gateway_services.py", "type": "file", "language": "python", "summary": "Gateway服务层的测试，覆盖SSE格式化、输入规范化、运行配置构建和上下文合并。"},
+
+    {"id": "backend/tests/test_generic_renderer_s7.py", "type": "file", "language": "python", "summary": "通用渲染器S7增强的测试，覆盖横幅卡片、置信度徽章和回退逻辑。"},
+
+    {"id": "backend/tests/test_genui_middleware.py", "type": "file", "language": "python", "summary": "GenUI中间件交互回调隔离的测试，验证线程级callback作用域。"},
+
+    {"id": "backend/tests/test_genui_persistence.py", "type": "file", "language": "python", "summary": "GenUI块持久化和检查点恢复的测试，覆盖创建/更新/删除操作和消息提取。"},
+    {"id": "backend/tests/test_genui_persistence.py::TestInMemoryPersistence", "type": "class", "name": "TestInMemoryPersistence", "summary": "测试内存持久化的存取、清除、折叠和ID去重。"},
+    {"id": "backend/tests/test_genui_persistence.py::TestExtractBlocksFromMessages", "type": "class", "name": "TestExtractBlocksFromMessages", "summary": "测试从消息中提取UI块的逻辑，含合并、删除和容错。"},
+
+    {"id": "backend/tests/test_guardrail_middleware.py", "type": "file", "language": "python", "summary": "护栏中间件及内置提供者的测试，覆盖工具允许/拒绝、故障模式和异步执行。"},
+    {"id": "backend/tests/test_guardrail_middleware.py::TestAllowlistProvider", "type": "class", "name": "TestAllowlistProvider", "summary": "测试允许列表提供者的工具允许/拒绝规则。"},
+    {"id": "backend/tests/test_guardrail_middleware.py::TestGuardrailMiddleware", "type": "class", "name": "TestGuardrailMiddleware", "summary": "测试护栏中间件的通过/拒绝、故障开关、异步和GraphBubbleUp传播。"},
+    {"id": "backend/tests/test_guardrail_middleware.py::TestGuardrailsConfig", "type": "class", "name": "TestGuardrailsConfig", "summary": "测试护栏配置的默认值、字典加载和单例管理。"},
+
+    {"id": "backend/tests/test_harness_boundary.py", "type": "file", "language": "python", "summary": "边界检查测试，确保harness层不导入app层代码。"},
+
+    {"id": "backend/tests/test_http_connector_e2e.py", "type": "file", "language": "python", "summary": "HTTP连接器的端到端集成测试，模拟Agent发现-选择-获取数据平台的完整工作流。"},
+    {"id": "backend/tests/test_http_connector_e2e.py::TestHttpConnectorE2E", "type": "class", "name": "TestHttpConnectorE2E", "summary": "测试完整E2E流程、认证头、优雅降级、重试和大响应截断。"},
+
+    {"id": "backend/tests/test_http_connector.py", "type": "file", "language": "python", "summary": "HTTP连接器工具和配置的单元测试，覆盖认证头解析、请求执行和错误处理。"},
+    {"id": "backend/tests/test_http_connector.py::TestHttpConnectorConfig", "type": "class", "name": "TestHttpConnectorConfig", "summary": "测试HTTP连接器配置的默认值和认证头解析。"},
+    {"id": "backend/tests/test_http_connector.py::TestHttpConnectorTool", "type": "class", "name": "TestHttpConnectorTool", "summary": "测试HTTP连接器工具的未知连接器、GET/POST、截断、重试和超时。"},
+    {"id": "backend/tests/test_http_connector.py::TestAppConfigHttpConnectors", "type": "class", "name": "TestAppConfigHttpConnectors", "summary": "测试AppConfig中HTTP连接器的租户查找和列表。"},
+
+    {"id": "backend/tests/test_index_error_classifier.py", "type": "file", "language": "python", "summary": "索引错误分类器的单元测试，覆盖各种错误消息的模式匹配分类。"},
+    {"id": "backend/tests/test_index_error_classifier.py::TestClassifyIndexError", "type": "class", "name": "TestClassifyIndexError", "summary": "测试单条错误消息的分类逻辑。"},
+    {"id": "backend/tests/test_index_error_classifier.py::TestClassifyFailures", "type": "class", "name": "TestClassifyFailures", "summary": "测试批量失败分类和计数统计。"},
+
+    {"id": "backend/tests/test_indexing_dispatcher.py", "type": "file", "language": "python", "summary": "IndexingDispatcher的测试，覆盖提交执行、去重、恢复、禁用模式和背压处理。"},
+    {"id": "backend/tests/test_indexing_dispatcher.py::TestSubmitAndExecute", "type": "class", "name": "TestSubmitAndExecute", "summary": "测试提交标记pending并执行、预检失败和重复提交去重。"},
+    {"id": "backend/tests/test_indexing_dispatcher.py::TestRecover", "type": "class", "name": "TestRecover", "summary": "测试恢复机制重新入队孤立任务及KB缺失跳过。"},
+    {"id": "backend/tests/test_indexing_dispatcher.py::TestDisabledMode", "type": "class", "name": "TestDisabledMode", "summary": "测试workers=0禁用模式下提交拒绝和恢复空操作。"},
+    {"id": "backend/tests/test_indexing_dispatcher.py::TestBackpressure", "type": "class", "name": "TestBackpressure", "summary": "测试队列满时的背压处理和inflight槽位释放。"},
+
+    {"id": "backend/tests/test_indexing_kb_bound_embedding.py", "type": "file", "language": "python", "summary": "IndexingService KB绑定嵌入的测试，验证嵌入模型从KB行解析、维度回填和不匹配检测。"},
+    {"id": "backend/tests/test_indexing_kb_bound_embedding.py::TestKbBoundEmbedding", "type": "class", "name": "TestKbBoundEmbedding", "summary": "测试KB绑定嵌入模型选择、首次嵌入维度回填和已有维度跳过。"},
+    {"id": "backend/tests/test_indexing_kb_bound_embedding.py::TestDimMismatchRaises", "type": "class", "name": "TestDimMismatchRaises", "summary": "测试嵌入维度不匹配时标记失败且不写入向量存储。"},
+
+    {"id": "backend/tests/test_industrial_marketplace.py", "type": "file", "language": "python", "summary": "工业模板市场的测试，覆盖is_featured字段、工业分类自动精选和使用量追踪。"},
+    {"id": "backend/tests/test_industrial_marketplace.py::TestFeaturedField", "type": "class", "name": "TestFeaturedField", "summary": "测试模板记录和索引条目的is_featured字段。"},
+    {"id": "backend/tests/test_industrial_marketplace.py::TestAutoFeatureIndustrial", "type": "class", "name": "TestAutoFeatureIndustrial", "summary": "测试工业分类模板自动设为featured。"},
+    {"id": "backend/tests/test_industrial_marketplace.py::TestUsageTracking", "type": "class", "name": "TestUsageTracking", "summary": "测试install_count和run_count使用量字段。"},
+    {"id": "backend/tests/test_industrial_marketplace.py::TestSearchBoost", "type": "class", "name": "TestSearchBoost", "summary": "测试featured模板在列表中优先排序。"},
+
+    {"id": "backend/tests/test_infoquest_client.py", "type": "file", "language": "python", "summary": "InfoQuest客户端和工具的测试，覆盖网页搜索、抓取和图片搜索功能。"},
+    {"id": "backend/tests/test_infoquest_client.py::TestInfoQuestClient", "type": "class", "name": "TestInfoQuestClient", "summary": "测试InfoQuestClient的初始化、fetch、web_search和结果清洗。"},
+    {"id": "backend/tests/test_infoquest_client.py::TestImageSearch", "type": "class", "name": "TestImageSearch", "summary": "测试图片搜索的原始结果获取、参数传递和错误处理。"},
+
+    {"id": "backend/tests/test_ins_base_org_tenant.py", "type": "file", "language": "python", "summary": "InsBase认证提供者的组织租户解析测试，覆盖orgId提取、工厂查找和租户自动创建。"},
+    {"id": "backend/tests/test_ins_base_org_tenant.py::TestExtractOrgId", "type": "class", "name": "TestExtractOrgId", "summary": "测试从用户数据中提取orgId的各种情况。"},
+    {"id": "backend/tests/test_ins_base_org_tenant.py::TestResolveTenantId", "type": "class", "name": "TestResolveTenantId", "summary": "测试通过RPC查询父组织来解析租户ID及自动创建逻辑。"},
+    {"id": "backend/tests/test_ins_base_org_tenant.py::TestGetUserTenantResolution", "type": "class", "name": "TestGetUserTenantResolution", "summary": "测试get_user流程中的租户解析集成。"},
+
+    {"id": "backend/tests/test_insights_e2e.py", "type": "file", "language": "python", "summary": "洞察反馈闭环的端到端集成测试，覆盖反馈聚合、改进建议、闭环知识提取、租户隔离和API权限。"},
+    {"id": "backend/tests/test_insights_e2e.py::TestE2EFeedbackLoop", "type": "class", "name": "TestE2EFeedbackLoop", "summary": "测试完整反馈闭环：提交反馈到聚合到改进到memory fact。"},
+    {"id": "backend/tests/test_insights_e2e.py::TestE2EClosureKnowledge", "type": "class", "name": "TestE2EClosureKnowledge", "summary": "测试闭环知识管道：关单事件到KB候选到提升。"},
+    {"id": "backend/tests/test_insights_e2e.py::TestE2ETenantIsolation", "type": "class", "name": "TestE2ETenantIsolation", "summary": "测试各层的租户数据隔离：分析、KB候选、改进建议和memory facts。"},
+    {"id": "backend/tests/test_insights_e2e.py::TestE2EAPIIntegration", "type": "class", "name": "TestE2EAPIIntegration", "summary": "测试API集成的权限控制和跨租户访问防护。"}
+  ],
+  "edges": [
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestEvaluationConfig", "type": "contains"},
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestMetrics", "type": "contains"},
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestDataset", "type": "contains"},
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestLLMJudge", "type": "contains"},
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestEvalReport", "type": "contains"},
+    {"source": "backend/tests/test_evaluation.py", "target": "backend/tests/test_evaluation.py::TestEvalRunner", "type": "contains"},
+
+    {"source": "backend/tests/test_events.py", "target": "backend/tests/test_events.py::TestWebhookConfig", "type": "contains"},
+    {"source": "backend/tests/test_events.py", "target": "backend/tests/test_events.py::TestEventModels", "type": "contains"},
+    {"source": "backend/tests/test_events.py", "target": "backend/tests/test_events.py::TestEventBus", "type": "contains"},
+    {"source": "backend/tests/test_events.py", "target": "backend/tests/test_events.py::TestWebhookDispatcher", "type": "contains"},
+
+    {"source": "backend/tests/test_exa_tools.py", "target": "backend/tests/test_exa_tools.py::TestWebSearchTool", "type": "contains"},
+    {"source": "backend/tests/test_exa_tools.py", "target": "backend/tests/test_exa_tools.py::TestWebFetchTool", "type": "contains"},
+
+    {"source": "backend/tests/test_feedback.py", "target": "backend/tests/test_feedback.py::TestFeedbackStorage", "type": "contains"},
+    {"source": "backend/tests/test_feedback.py", "target": "backend/tests/test_feedback.py::TestFeedbackRouter", "type": "contains"},
+    {"source": "backend/tests/test_feedback.py", "target": "backend/tests/test_feedback.py::TestFeedbackRepository", "type": "contains"},
+    {"source": "backend/tests/test_feedback.py", "target": "backend/tests/test_feedback.py::TestFollowUpAssociation", "type": "contains"},
+
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestPymupdfOutputTooSparse", "type": "contains"},
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestDoConvert", "type": "contains"},
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestGetPdfConverter", "type": "contains"},
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestConvertFileToMarkdown", "type": "contains"},
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestConversionResult", "type": "contains"},
+    {"source": "backend/tests/test_file_conversion.py", "target": "backend/tests/test_file_conversion.py::TestExtractOutline", "type": "contains"},
+
+    {"source": "backend/tests/test_firecrawl_tools.py", "target": "backend/tests/test_firecrawl_tools.py::TestWebSearchTool", "type": "contains"},
+    {"source": "backend/tests/test_firecrawl_tools.py", "target": "backend/tests/test_firecrawl_tools.py::TestWebFetchTool", "type": "contains"},
+
+    {"source": "backend/tests/test_genui_persistence.py", "target": "backend/tests/test_genui_persistence.py::TestInMemoryPersistence", "type": "contains"},
+    {"source": "backend/tests/test_genui_persistence.py", "target": "backend/tests/test_genui_persistence.py::TestExtractBlocksFromMessages", "type": "contains"},
+
+    {"source": "backend/tests/test_guardrail_middleware.py", "target": "backend/tests/test_guardrail_middleware.py::TestAllowlistProvider", "type": "contains"},
+    {"source": "backend/tests/test_guardrail_middleware.py", "target": "backend/tests/test_guardrail_middleware.py::TestGuardrailMiddleware", "type": "contains"},
+    {"source": "backend/tests/test_guardrail_middleware.py", "target": "backend/tests/test_guardrail_middleware.py::TestGuardrailsConfig", "type": "contains"},
+
+    {"source": "backend/tests/test_http_connector_e2e.py", "target": "backend/tests/test_http_connector_e2e.py::TestHttpConnectorE2E", "type": "contains"},
+
+    {"source": "backend/tests/test_http_connector.py", "target": "backend/tests/test_http_connector.py::TestHttpConnectorConfig", "type": "contains"},
+    {"source": "backend/tests/test_http_connector.py", "target": "backend/tests/test_http_connector.py::TestHttpConnectorTool", "type": "contains"},
+    {"source": "backend/tests/test_http_connector.py", "target": "backend/tests/test_http_connector.py::TestAppConfigHttpConnectors", "type": "contains"},
+
+    {"source": "backend/tests/test_index_error_classifier.py", "target": "backend/tests/test_index_error_classifier.py::TestClassifyIndexError", "type": "contains"},
+    {"source": "backend/tests/test_index_error_classifier.py", "target": "backend/tests/test_index_error_classifier.py::TestClassifyFailures", "type": "contains"},
+
+    {"source": "backend/tests/test_indexing_dispatcher.py", "target": "backend/tests/test_indexing_dispatcher.py::TestSubmitAndExecute", "type": "contains"},
+    {"source": "backend/tests/test_indexing_dispatcher.py", "target": "backend/tests/test_indexing_dispatcher.py::TestRecover", "type": "contains"},
+    {"source": "backend/tests/test_indexing_dispatcher.py", "target": "backend/tests/test_indexing_dispatcher.py::TestDisabledMode", "type": "contains"},
+    {"source": "backend/tests/test_indexing_dispatcher.py", "target": "backend/tests/test_indexing_dispatcher.py::TestBackpressure", "type": "contains"},
+
+    {"source": "backend/tests/test_indexing_kb_bound_embedding.py", "target": "backend/tests/test_indexing_kb_bound_embedding.py::TestKbBoundEmbedding", "type": "contains"},
+    {"source": "backend/tests/test_indexing_kb_bound_embedding.py", "target": "backend/tests/test_indexing_kb_bound_embedding.py::TestDimMismatchRaises", "type": "contains"},
+
+    {"source": "backend/tests/test_industrial_marketplace.py", "target": "backend/tests/test_industrial_marketplace.py::TestFeaturedField", "type": "contains"},
+    {"source": "backend/tests/test_industrial_marketplace.py", "target": "backend/tests/test_industrial_marketplace.py::TestAutoFeatureIndustrial", "type": "contains"},
+    {"source": "backend/tests/test_industrial_marketplace.py", "target": "backend/tests/test_industrial_marketplace.py::TestUsageTracking", "type": "contains"},
+    {"source": "backend/tests/test_industrial_marketplace.py", "target": "backend/tests/test_industrial_marketplace.py::TestSearchBoost", "type": "contains"},
+
+    {"source": "backend/tests/test_infoquest_client.py", "target": "backend/tests/test_infoquest_client.py::TestInfoQuestClient", "type": "contains"},
+    {"source": "backend/tests/test_infoquest_client.py", "target": "backend/tests/test_infoquest_client.py::TestImageSearch", "type": "contains"},
+
+    {"source": "backend/tests/test_ins_base_org_tenant.py", "target": "backend/tests/test_ins_base_org_tenant.py::TestExtractOrgId", "type": "contains"},
+    {"source": "backend/tests/test_ins_base_org_tenant.py", "target": "backend/tests/test_ins_base_org_tenant.py::TestResolveTenantId", "type": "contains"},
+    {"source": "backend/tests/test_ins_base_org_tenant.py", "target": "backend/tests/test_ins_base_org_tenant.py::TestGetUserTenantResolution", "type": "contains"},
+
+    {"source": "backend/tests/test_insights_e2e.py", "target": "backend/tests/test_insights_e2e.py::TestE2EFeedbackLoop", "type": "contains"},
+    {"source": "backend/tests/test_insights_e2e.py", "target": "backend/tests/test_insights_e2e.py::TestE2EClosureKnowledge", "type": "contains"},
+    {"source": "backend/tests/test_insights_e2e.py", "target": "backend/tests/test_insights_e2e.py::TestE2ETenantIsolation", "type": "contains"},
+    {"source": "backend/tests/test_insights_e2e.py", "target": "backend/tests/test_insights_e2e.py::TestE2EAPIIntegration", "type": "contains"}
+  ]
+}

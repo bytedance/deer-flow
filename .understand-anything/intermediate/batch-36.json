@@ -1,0 +1,256 @@
+{
+  "batchIndex": 36,
+  "nodes": [
+    {
+      "id": "backend/scripts/migrate_sqlite_to_postgres.py",
+      "type": "file",
+      "label": "migrate_sqlite_to_postgres.py",
+      "path": "backend/scripts/migrate_sqlite_to_postgres.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 296,
+      "summary": "SQLite到PostgreSQL的数据迁移脚本，将本地开发数据库迁移至生产级PostgreSQL。"
+    },
+    {
+      "id": "backend/scripts/migrate_user_isolation.py",
+      "type": "file",
+      "label": "migrate_user_isolation.py",
+      "path": "backend/scripts/migrate_user_isolation.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 242,
+      "summary": "用户数据隔离迁移脚本，为现有用户数据添加租户隔离字段。"
+    },
+    {
+      "id": "backend/scripts/reindex_rag_to_pgvector.py",
+      "type": "file",
+      "label": "reindex_rag_to_pgvector.py",
+      "path": "backend/scripts/reindex_rag_to_pgvector.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 378,
+      "summary": "RAG向量索引重建脚本，将文档嵌入迁移至pgvector进行高效相似度检索。"
+    },
+    {
+      "id": "backend/tests/conftest.py",
+      "type": "file",
+      "label": "conftest.py",
+      "path": "backend/tests/conftest.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 143,
+      "summary": "全局测试配置文件，定义共享fixture、测试数据库设置与清理逻辑。"
+    },
+    {
+      "id": "backend/tests/fixtures/pump_rule/no_findings.json",
+      "type": "file",
+      "label": "no_findings.json",
+      "path": "backend/tests/fixtures/pump_rule/no_findings.json",
+      "language": "json",
+      "fileCategory": "config",
+      "sizeLines": 2170,
+      "summary": "泵规则测试夹具，模拟无异常发现场景的完整数据输入。"
+    },
+    {
+      "id": "backend/tests/fixtures/pump_rule/unbalance.json",
+      "type": "file",
+      "label": "unbalance.json",
+      "path": "backend/tests/fixtures/pump_rule/unbalance.json",
+      "language": "json",
+      "fileCategory": "config",
+      "sizeLines": 2170,
+      "summary": "泵规则测试夹具，模拟设备不平衡运行故障场景的完整数据输入。"
+    },
+    {
+      "id": "backend/tests/recall_l2/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/tests/recall_l2/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "recall_l2测试包初始化文件，为空包标记。"
+    },
+    {
+      "id": "backend/tests/recall_l2/conftest.py",
+      "type": "file",
+      "label": "conftest.py",
+      "path": "backend/tests/recall_l2/conftest.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 18,
+      "summary": "L2召回率测试的pytest配置文件，提供测试专用fixture。"
+    },
+    {
+      "id": "backend/tests/recall_l2/dataset/queries.jsonl",
+      "type": "file",
+      "label": "queries.jsonl",
+      "path": "backend/tests/recall_l2/dataset/queries.jsonl",
+      "language": "jsonl",
+      "fileCategory": "code",
+      "sizeLines": 8,
+      "summary": "L2召回率评估的查询测试集，包含8条JSON格式的查询用例。"
+    },
+    {
+      "id": "backend/tests/recall_l2/eval_recall.py",
+      "type": "file",
+      "label": "eval_recall.py",
+      "path": "backend/tests/recall_l2/eval_recall.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 503,
+      "summary": "L2层级召回率评估脚本，衡量检索系统对复杂查询的召回能力。"
+    },
+    {
+      "id": "backend/tests/recall_l2/README.md",
+      "type": "file",
+      "label": "README.md",
+      "path": "backend/tests/recall_l2/README.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 208,
+      "summary": "L2召回率测试说明文档，描述评估方法、数据集结构和使用方式。"
+    },
+    {
+      "id": "backend/tests/recall_l2/reports/.gitkeep",
+      "type": "file",
+      "label": ".gitkeep",
+      "path": "backend/tests/recall_l2/reports/.gitkeep",
+      "language": "unknown",
+      "fileCategory": "code",
+      "sizeLines": 1,
+      "summary": "Git占位文件，确保reports目录被版本控制跟踪。"
+    },
+    {
+      "id": "backend/tests/recall/__init__.py",
+      "type": "file",
+      "label": "__init__.py",
+      "path": "backend/tests/recall/__init__.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 0,
+      "summary": "recall测试包初始化文件，为空包标记。"
+    },
+    {
+      "id": "backend/tests/smoke_test_tenant.py",
+      "type": "file",
+      "label": "smoke_test_tenant.py",
+      "path": "backend/tests/smoke_test_tenant.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 125,
+      "summary": "多租户冒烟测试，验证租户隔离和基本功能的正确性。"
+    },
+    {
+      "id": "backend/tests/test_acp_config.py",
+      "type": "file",
+      "label": "test_acp_config.py",
+      "path": "backend/tests/test_acp_config.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 165,
+      "summary": "ACP（Agent Communication Protocol）配置测试，验证代理通信协议设置。"
+    },
+    {
+      "id": "backend/tests/test_agents_config_starters.py",
+      "type": "file",
+      "label": "test_agents_config_starters.py",
+      "path": "backend/tests/test_agents_config_starters.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 95,
+      "summary": "代理配置启动器测试，验证各代理的初始配置加载是否正确。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_custom_soul.py",
+      "type": "file",
+      "label": "test_ai_report_custom_soul.py",
+      "path": "backend/tests/test_ai_report_custom_soul.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 193,
+      "summary": "AI报告自定义灵魂配置测试，验证个性化报告模板的生成逻辑。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_export.py",
+      "type": "file",
+      "label": "test_ai_report_daily_export.py",
+      "path": "backend/tests/test_ai_report_daily_export.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 458,
+      "summary": "AI日报导出功能测试，验证报告导出为多种格式的完整流程。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_kpi.py",
+      "type": "file",
+      "label": "test_ai_report_daily_kpi.py",
+      "path": "backend/tests/test_ai_report_daily_kpi.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 307,
+      "summary": "AI日报KPI指标测试，验证关键性能指标的数据查询与计算。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_list_equipment.py",
+      "type": "file",
+      "label": "test_ai_report_daily_list_equipment.py",
+      "path": "backend/tests/test_ai_report_daily_list_equipment.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 205,
+      "summary": "AI日报设备列表测试，验证报告中的设备清单查询与展示逻辑。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_pipeline.py",
+      "type": "file",
+      "label": "test_ai_report_daily_pipeline.py",
+      "path": "backend/tests/test_ai_report_daily_pipeline.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 261,
+      "summary": "AI日报生成管道测试，验证报告从数据查询到生成的完整流水线。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_query.py",
+      "type": "file",
+      "label": "test_ai_report_daily_query.py",
+      "path": "backend/tests/test_ai_report_daily_query.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 476,
+      "summary": "AI日报数据查询测试，验证各类运营数据的SQL查询正确性。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_sms_kpi.py",
+      "type": "file",
+      "label": "test_ai_report_daily_sms_kpi.py",
+      "path": "backend/tests/test_ai_report_daily_sms_kpi.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 302,
+      "summary": "AI短信日报KPI测试，验证短信摘要中关键指标的数据准确性。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_daily_sms_query.py",
+      "type": "file",
+      "label": "test_ai_report_daily_sms_query.py",
+      "path": "backend/tests/test_ai_report_daily_sms_query.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 277,
+      "summary": "AI短信日报查询测试，验证短信格式报告的数据查询逻辑。"
+    },
+    {
+      "id": "backend/tests/test_ai_report_legacy_sms_soul.py",
+      "type": "file",
+      "label": "test_ai_report_legacy_sms_soul.py",
+      "path": "backend/tests/test_ai_report_legacy_sms_soul.py",
+      "language": "python",
+      "fileCategory": "code",
+      "sizeLines": 76,
+      "summary": "旧版短信报告灵魂配置测试，验证传统SMS报告模板的兼容性。"
+    }
+  ],
+  "edges": []
+}

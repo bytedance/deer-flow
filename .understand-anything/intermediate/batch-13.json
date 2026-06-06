@@ -1,0 +1,1265 @@
+{
+  "batchIndex": 13,
+  "nodes": [
+    {
+      "id": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "language": "python",
+      "summary": "子代理内置模块的包初始化文件，导出bash_agent和general_purpose内置子代理。",
+      "tags": ["package-init", "subagents", "builtins"],
+      "metadata": {"sizeLines": 15}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/builtins/bash_agent.py",
+      "type": "file",
+      "name": "bash_agent.py",
+      "path": "backend/packages/harness/deerflow/subagents/builtins/bash_agent.py",
+      "language": "python",
+      "summary": "定义基于Bash命令执行的内置子代理，使用子代理配置来构建shell执行代理。",
+      "tags": ["subagent", "bash", "builtins"],
+      "metadata": {"sizeLines": 50}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/builtins/general_purpose.py",
+      "type": "file",
+      "name": "general_purpose.py",
+      "path": "backend/packages/harness/deerflow/subagents/builtins/general_purpose.py",
+      "language": "python",
+      "summary": "定义通用目的的内置子代理，提供多功能的代理执行能力。",
+      "tags": ["subagent", "general-purpose", "builtins"],
+      "metadata": {"sizeLines": 50}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "file",
+      "name": "config.py",
+      "path": "backend/packages/harness/deerflow/subagents/config.py",
+      "language": "python",
+      "summary": "定义子代理的配置数据模型，包含子代理运行所需的参数和设置。",
+      "tags": ["config", "subagent", "data-model"],
+      "metadata": {"sizeLines": 56}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/executor.py",
+      "type": "file",
+      "name": "executor.py",
+      "path": "backend/packages/harness/deerflow/subagents/executor.py",
+      "language": "python",
+      "summary": "子代理执行器核心模块，负责创建和管理子代理执行流程，处理沙箱状态、线程状态和模型调用。",
+      "tags": ["executor", "subagent", "core", "runtime"],
+      "metadata": {"sizeLines": 791}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/executor.py::execute_subagent",
+      "type": "function",
+      "name": "execute_subagent",
+      "path": "backend/packages/harness/deerflow/subagents/executor.py",
+      "language": "python",
+      "summary": "执行子代理的核心函数，协调代理创建、工具绑定和结果返回。",
+      "tags": ["executor", "subagent", "main-function"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/registry.py",
+      "type": "file",
+      "name": "registry.py",
+      "path": "backend/packages/harness/deerflow/subagents/registry.py",
+      "language": "python",
+      "summary": "子代理注册表，管理和注册可用的内置子代理，提供安全检查和代理发现功能。",
+      "tags": ["registry", "subagent", "discovery"],
+      "metadata": {"sizeLines": 165}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/registry.py::get_subagent",
+      "type": "function",
+      "name": "get_subagent",
+      "path": "backend/packages/harness/deerflow/subagents/registry.py",
+      "language": "python",
+      "summary": "根据名称获取已注册的子代理配置。",
+      "tags": ["registry", "lookup"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/subagents/registry.py::list_subagents",
+      "type": "function",
+      "name": "list_subagents",
+      "path": "backend/packages/harness/deerflow/subagents/registry.py",
+      "language": "python",
+      "summary": "列出所有已注册的可用子代理。",
+      "tags": ["registry", "listing"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/tools/__init__.py",
+      "language": "python",
+      "summary": "工具模块的包初始化文件，导出主要的工具聚合函数。",
+      "tags": ["package-init", "tools"],
+      "metadata": {"sizeLines": 11}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "language": "python",
+      "summary": "内置工具集合的包初始化文件，汇总导出所有内置工具包括澄清、工单、HTTP连接器、文件展示、图表渲染等。",
+      "tags": ["package-init", "tools", "builtins", "aggregator"],
+      "metadata": {"sizeLines": 73}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+      "type": "file",
+      "name": "clarification_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+      "language": "python",
+      "summary": "提供澄清工具，允许代理向用户请求额外信息以消除任务歧义。",
+      "tags": ["tool", "clarification", "user-interaction"],
+      "metadata": {"sizeLines": 55}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py::clarification_tool",
+      "type": "function",
+      "name": "clarification_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+      "language": "python",
+      "summary": "创建澄清工具实例，用于向用户提出澄清问题。",
+      "tags": ["tool", "factory"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "type": "file",
+      "name": "http_connector_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "language": "python",
+      "summary": "HTTP连接器工具，提供安全的HTTP请求能力，支持租户隔离和安全校验。",
+      "tags": ["tool", "http", "connector", "security"],
+      "metadata": {"sizeLines": 188}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py::create_http_connector_tool",
+      "type": "function",
+      "name": "create_http_connector_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "language": "python",
+      "summary": "创建HTTP连接器工具实例，配置租户ID和安全策略。",
+      "tags": ["tool", "factory", "http"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "type": "file",
+      "name": "present_file_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "language": "python",
+      "summary": "文件展示工具，将生成的文件呈现给用户，处理文件路径解析和线程状态中的工件合并。",
+      "tags": ["tool", "file", "presentation", "artifact"],
+      "metadata": {"sizeLines": 122}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py::present_file_tool",
+      "type": "function",
+      "name": "present_file_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "language": "python",
+      "summary": "创建文件展示工具，将文件路径映射为用户可见的工件输出。",
+      "tags": ["tool", "factory"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "type": "file",
+      "name": "render_charts_batch.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "language": "python",
+      "summary": "批量图表渲染工具，支持一次性渲染多个图表以提高效率，依赖render_ui_tool进行实际渲染。",
+      "tags": ["tool", "chart", "rendering", "batch"],
+      "metadata": {"sizeLines": 118}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py::render_charts_batch",
+      "type": "function",
+      "name": "render_charts_batch",
+      "path": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "language": "python",
+      "summary": "批量渲染图表工具，接收多个图表配置并统一渲染输出。",
+      "tags": ["tool", "batch", "chart"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "type": "file",
+      "name": "render_ui_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "language": "python",
+      "summary": "UI渲染工具，将可视化组件（图表、表格等）渲染为前端可展示的UI元素，并收集渲染指标。",
+      "tags": ["tool", "ui", "rendering", "visualization"],
+      "metadata": {"sizeLines": 144}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py::render_ui_tool",
+      "type": "function",
+      "name": "render_ui_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "language": "python",
+      "summary": "创建UI渲染工具实例，处理可视化内容的渲染和指标记录。",
+      "tags": ["tool", "factory", "ui"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "type": "file",
+      "name": "report_template_telemetry_tools.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "language": "python",
+      "summary": "报告模板遥测工具，收集和记录报告模板使用情况的遥测数据。",
+      "tags": ["tool", "telemetry", "report-template"],
+      "metadata": {"sizeLines": 75}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py::report_template_telemetry_tool",
+      "type": "function",
+      "name": "report_template_telemetry_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "language": "python",
+      "summary": "创建报告模板遥测工具，记录模板使用事件。",
+      "tags": ["tool", "telemetry"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "type": "file",
+      "name": "setup_agent_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "language": "python",
+      "summary": "代理设置工具，允许动态配置和切换当前会话使用的代理，支持代理配置加载和验证。",
+      "tags": ["tool", "agent", "setup", "configuration"],
+      "metadata": {"sizeLines": 82}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py::setup_agent_tool",
+      "type": "function",
+      "name": "setup_agent_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "language": "python",
+      "summary": "创建代理设置工具实例，加载代理配置并应用到当前会话。",
+      "tags": ["tool", "factory", "agent"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "type": "file",
+      "name": "task_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "language": "python",
+      "summary": "任务工具，实现子代理任务调度和执行，协调子代理执行器完成复杂任务分解与并行处理。",
+      "tags": ["tool", "task", "subagent", "orchestration"],
+      "metadata": {"sizeLines": 308}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/task_tool.py::task_tool",
+      "type": "function",
+      "name": "task_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "language": "python",
+      "summary": "创建任务工具实例，支持子代理任务的创建、调度和执行。",
+      "tags": ["tool", "factory", "task"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/tool_search.py",
+      "type": "file",
+      "name": "tool_search.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/tool_search.py",
+      "language": "python",
+      "summary": "工具搜索模块，提供工具发现和搜索功能，帮助代理找到合适的工具来完成任务。",
+      "tags": ["tool", "search", "discovery"],
+      "metadata": {"sizeLines": 202}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/tool_search.py::tool_search",
+      "type": "function",
+      "name": "tool_search",
+      "path": "backend/packages/harness/deerflow/tools/builtins/tool_search.py",
+      "language": "python",
+      "summary": "工具搜索函数，根据查询条件查找匹配的工具。",
+      "tags": ["tool", "search"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "type": "file",
+      "name": "update_agent_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "language": "python",
+      "summary": "代理更新工具，支持在运行时动态更新代理的配置、系统提示词和工具集。",
+      "tags": ["tool", "agent", "update", "runtime"],
+      "metadata": {"sizeLines": 241}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py::update_agent_tool",
+      "type": "function",
+      "name": "update_agent_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "language": "python",
+      "summary": "创建代理更新工具实例，支持动态修改代理行为和配置。",
+      "tags": ["tool", "factory", "agent"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "type": "file",
+      "name": "view_image_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "language": "python",
+      "summary": "图片查看工具，允许代理查看和引用图片文件，将图片信息合并到线程状态中。",
+      "tags": ["tool", "image", "view", "thread-state"],
+      "metadata": {"sizeLines": 162}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py::view_image_tool",
+      "type": "function",
+      "name": "view_image_tool",
+      "path": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "language": "python",
+      "summary": "创建图片查看工具，解析图片路径并记录到线程状态。",
+      "tags": ["tool", "factory", "image"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/render_ui_metrics.py",
+      "type": "file",
+      "name": "render_ui_metrics.py",
+      "path": "backend/packages/harness/deerflow/tools/render_ui_metrics.py",
+      "language": "python",
+      "summary": "UI渲染指标收集模块，记录和统计UI组件渲染的性能和使用数据。",
+      "tags": ["metrics", "ui", "rendering", "telemetry"],
+      "metadata": {"sizeLines": 87}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/render_ui_metrics.py::record_render_metric",
+      "type": "function",
+      "name": "record_render_metric",
+      "path": "backend/packages/harness/deerflow/tools/render_ui_metrics.py",
+      "language": "python",
+      "summary": "记录单次UI渲染的指标数据。",
+      "tags": ["metrics", "recording"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "type": "file",
+      "name": "skill_manage_tool.py",
+      "path": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "language": "python",
+      "summary": "技能管理工具，提供技能的CRUD操作，包括创建、读取、更新、删除技能，以及安全扫描和系统提示词集成。",
+      "tags": ["tool", "skill", "management", "crud", "security"],
+      "metadata": {"sizeLines": 239}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/skill_manage_tool.py::create_skill_tool",
+      "type": "function",
+      "name": "create_skill_tool",
+      "path": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "language": "python",
+      "summary": "创建技能工具，支持新建技能并进行安全扫描。",
+      "tags": ["tool", "skill", "create"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/skill_manage_tool.py::list_skills_tool",
+      "type": "function",
+      "name": "list_skills_tool",
+      "path": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "language": "python",
+      "summary": "列出所有可用技能的工具。",
+      "tags": ["tool", "skill", "list"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/tools.py",
+      "type": "file",
+      "name": "tools.py",
+      "path": "backend/packages/harness/deerflow/tools/tools.py",
+      "language": "python",
+      "summary": "工具聚合模块，根据应用配置和安全策略组装所有可用工具集，包括内置工具、MCP工具和搜索工具。",
+      "tags": ["tools", "aggregator", "configuration", "factory"],
+      "metadata": {"sizeLines": 217}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/tools/tools.py::get_tools",
+      "type": "function",
+      "name": "get_tools",
+      "path": "backend/packages/harness/deerflow/tools/tools.py",
+      "language": "python",
+      "summary": "根据配置获取完整的工具集列表，整合内置工具和外部工具。",
+      "tags": ["tools", "factory", "aggregator"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/uploads/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "path": "backend/packages/harness/deerflow/uploads/__init__.py",
+      "language": "python",
+      "summary": "上传模块的包初始化文件，导出上传管理器以供外部使用。",
+      "tags": ["package-init", "uploads"],
+      "metadata": {"sizeLines": 29}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/uploads/manager.py",
+      "type": "file",
+      "name": "manager.py",
+      "path": "backend/packages/harness/deerflow/uploads/manager.py",
+      "language": "python",
+      "summary": "上传管理器，处理文件上传的完整生命周期，包括文件保存、路径解析、用户隔离和流式事件通知。",
+      "tags": ["upload", "manager", "file", "storage"],
+      "metadata": {"sizeLines": 272}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/uploads/manager.py::UploadManager",
+      "type": "class",
+      "name": "UploadManager",
+      "path": "backend/packages/harness/deerflow/uploads/manager.py",
+      "language": "python",
+      "summary": "上传管理器类，封装文件上传、存储和检索的核心逻辑。",
+      "tags": ["class", "upload", "manager"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "type": "file",
+      "name": "file_conversion.py",
+      "path": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "language": "python",
+      "summary": "文件转换工具集，将各类文件格式（PDF、DOCX、PPTX、图片等）转换为LLM可处理的文本或结构化数据。",
+      "tags": ["utils", "file-conversion", "document", "etl"],
+      "metadata": {"sizeLines": 575}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/file_conversion.py::convert_file_to_text",
+      "type": "function",
+      "name": "convert_file_to_text",
+      "path": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "language": "python",
+      "summary": "将各种文件格式转换为纯文本，支持PDF、DOCX、PPTX等多种格式。",
+      "tags": ["conversion", "document", "text"],
+      "metadata": {"lineNumber": 1}
+    },
+    {
+      "id": "backend/packages/harness/deerflow/utils/file_conversion.py::convert_image_to_description",
+      "type": "function",
+      "name": "convert_image_to_description",
+      "path": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "language": "python",
+      "summary": "将图片文件转换为文字描述，支持OCR和图像理解。",
+      "tags": ["conversion", "image", "ocr"],
+      "metadata": {"lineNumber": 1}
+    }
+  ],
+  "edges": [
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/subagents/builtins/bash_agent.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/subagents/builtins/general_purpose.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/bash_agent.py",
+      "target": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/general_purpose.py",
+      "target": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/models/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py::ThreadState",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py::SandboxState",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py::ThreadDataState",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py::AppConfig",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py::uses_local_sandbox_provider",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py::is_host_bash_allowed",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/closure_ticket_tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/report_template_runtime_tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/report_template_tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "target": "backend/packages/harness/deerflow/config/tenant.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "target": "backend/packages/harness/deerflow/config/tenant.py::get_current_tenant_id",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py::merge_artifacts",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::join_host_path",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py::get_current_user",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::resolve_path",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py::require_current_user",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/render_ui_metrics.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "target": "backend/packages/harness/deerflow/report_templates/telemetry.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "target": "backend/packages/harness/deerflow/report_templates/telemetry.py::ReportTemplateTelemetry",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "target": "backend/packages/harness/deerflow/report_templates/telemetry.py::get_telemetry",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/agents_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/agents_config.py::load_agent_config",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/agents_config.py::validate_agent_name",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::resolve_path",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py::get_current_user",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/subagents/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/subagents/config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/subagents/executor.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py::is_host_bash_allowed",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/agents_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/agents_config.py::load_agent_config",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py::get_app_config",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::resolve_path",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py::merge_viewed_images",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::resolve_path",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/lead_agent/prompt.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/thread_state.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/mcp/tools.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/security_scanner.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/storage/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/storage/skill_storage.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/types.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/security_scanner.py::scan_skill_content",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/storage/skill_storage.py::SkillStorage",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/skills/types.py::Skill",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/agents/lead_agent/prompt.py::_invalidate_enabled_skills_cache",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/config/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/reflection/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/__init__.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/tool_search.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py::get_app_config",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/sandbox/security.py::is_host_bash_allowed",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/__init__.py",
+      "target": "backend/packages/harness/deerflow/uploads/manager.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/config/paths.py::get_paths",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/runtime/user_context.py::get_current_user",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/client.py::DeerFlowClient",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py",
+      "type": "imports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "target": "backend/packages/harness/deerflow/config/app_config.py::get_app_config",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "target": "backend/packages/harness/deerflow/agents/middlewares/uploads_middleware.py::UploadsMiddleware",
+      "type": "depends_on",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/subagents/builtins/bash_agent.py",
+      "type": "exports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/builtins/__init__.py",
+      "target": "backend/packages/harness/deerflow/subagents/builtins/general_purpose.py",
+      "type": "exports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/__init__.py",
+      "target": "backend/packages/harness/deerflow/tools/tools.py",
+      "type": "exports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/__init__.py",
+      "target": "backend/packages/harness/deerflow/uploads/manager.py",
+      "type": "exports",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/executor.py",
+      "target": "backend/packages/harness/deerflow/subagents/executor.py::execute_subagent",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/subagents/registry.py::get_subagent",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/subagents/registry.py",
+      "target": "backend/packages/harness/deerflow/subagents/registry.py::list_subagents",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/clarification_tool.py::clarification_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py::create_http_connector_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/present_file_tool.py::present_file_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_charts_batch.py::render_charts_batch",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py::render_ui_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/report_template_telemetry_tools.py::report_template_telemetry_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py::setup_agent_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/task_tool.py::task_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/tool_search.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/tool_search.py::tool_search",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/update_agent_tool.py::update_agent_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/builtins/view_image_tool.py::view_image_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/render_ui_metrics.py",
+      "target": "backend/packages/harness/deerflow/tools/render_ui_metrics.py::record_render_metric",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/skill_manage_tool.py::create_skill_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/skill_manage_tool.py",
+      "target": "backend/packages/harness/deerflow/tools/skill_manage_tool.py::list_skills_tool",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/tools/tools.py",
+      "target": "backend/packages/harness/deerflow/tools/tools.py::get_tools",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/uploads/manager.py",
+      "target": "backend/packages/harness/deerflow/uploads/manager.py::UploadManager",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "target": "backend/packages/harness/deerflow/utils/file_conversion.py::convert_file_to_text",
+      "type": "contains",
+      "metadata": {}
+    },
+    {
+      "source": "backend/packages/harness/deerflow/utils/file_conversion.py",
+      "target": "backend/packages/harness/deerflow/utils/file_conversion.py::convert_image_to_description",
+      "type": "contains",
+      "metadata": {}
+    }
+  ]
+}

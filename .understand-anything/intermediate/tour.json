@@ -1,0 +1,316 @@
+{
+  "steps": [
+    {
+      "title": "系统入口：FastAPI 应用工厂与生命周期",
+      "description": "整个后端从 gateway/app.py 的应用工厂启动。它负责创建 FastAPI 实例、注册所有路由模块、挂载中间件链（认证、CSRF、限流），并通过 deps.py 的依赖注入容器连接下游的智能体运行时和领域服务。这是理解系统自上而下架构的最佳起点。",
+      "keyNodes": [
+        "file:backend/app/gateway/app.py",
+        "file:backend/app/gateway/config.py",
+        "file:backend/app/gateway/deps.py",
+        "file:backend/app/gateway/__init__.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/app/gateway/__init__.py", "target": "file:backend/app/gateway/config.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/config.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/deps.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/__init__.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/auth_middleware.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/csrf_middleware.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/middleware/rate_limit.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "认证鉴权：JWT/API Key 双通道与中间件链",
+      "description": "网关层通过 auth/dependencies.py 提供 FastAPI 依赖注入函数，支持 JWT 令牌验证和 API Key 鉴权两条路径。auth_middleware.py 和 csrf_middleware.py 作为全局中间件拦截所有请求，形成请求进入系统的第一道安全防线。",
+      "keyNodes": [
+        "file:backend/app/gateway/auth/dependencies.py",
+        "file:backend/app/gateway/auth/jwt.py",
+        "file:backend/app/gateway/auth/jwt_handler.py",
+        "file:backend/app/gateway/auth/api_key_handler.py",
+        "file:backend/app/gateway/auth/middleware.py",
+        "file:backend/app/gateway/csrf_middleware.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/app/gateway/auth/dependencies.py", "target": "file:backend/app/gateway/auth/jwt_handler.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/auth/dependencies.py", "target": "file:backend/app/gateway/auth/api_key_handler.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/auth/middleware.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/csrf_middleware.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/auth/jwt.py", "target": "file:backend/app/gateway/auth/config.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "路由分发：30+ 业务域 API 组织",
+      "description": "app.py 注册了 30 多个路由模块，按业务域清晰拆分：thread_runs 处理智能体会话运行、agents 管理智能体配置、knowledge_bases 管理知识库、report_templates 管理报告模板。每个路由文件是一个独立的 FastAPI Router，通过 deps.py 获取所需的服务依赖。",
+      "keyNodes": [
+        "file:backend/app/gateway/routers/__init__.py",
+        "file:backend/app/gateway/routers/thread_runs.py",
+        "file:backend/app/gateway/routers/agents.py",
+        "file:backend/app/gateway/routers/knowledge_bases.py",
+        "file:backend/app/gateway/routers/report_templates.py",
+        "file:backend/app/gateway/routers/feedback.py",
+        "file:backend/app/gateway/routers/closure_tickets.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/thread_runs.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/agents.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/knowledge_bases.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/report_templates.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/feedback.py", "type": "imports"},
+        {"source": "file:backend/app/gateway/app.py", "target": "file:backend/app/gateway/routers/closure_tickets.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "IM 渠道集成：消息总线与多平台桥接",
+      "description": "channels 层桥接飞书、钉钉、Slack、Telegram 等外部消息平台。message_bus.py 提供统一的消息总线，manager.py 管理各渠道实例的生命周期，base.py 定义渠道抽象基类。外部消息通过 ChannelManager 转发至 LangGraph 智能体运行时，实现 IM 到 AI 的无缝对接。",
+      "keyNodes": [
+        "file:backend/app/channels/manager.py",
+        "file:backend/app/channels/message_bus.py",
+        "file:backend/app/channels/base.py",
+        "file:backend/app/channels/service.py",
+        "file:backend/app/channels/feishu.py",
+        "file:backend/app/channels/dingtalk.py",
+        "file:backend/app/channels/slack.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/app/channels/manager.py", "target": "file:backend/app/channels/message_bus.py", "type": "imports"},
+        {"source": "file:backend/app/channels/manager.py", "target": "file:backend/app/channels/commands.py", "type": "imports"},
+        {"source": "file:backend/app/channels/manager.py", "target": "file:backend/app/channels/store.py", "type": "imports"},
+        {"source": "file:backend/app/channels/service.py", "target": "file:backend/app/channels/base.py", "type": "imports"},
+        {"source": "file:backend/app/channels/service.py", "target": "file:backend/app/channels/manager.py", "type": "imports"},
+        {"source": "file:backend/app/channels/service.py", "target": "file:backend/app/channels/message_bus.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "智能体工厂与 Lead Agent 编排引擎",
+      "description": "agents/factory.py 是智能体的创建入口，负责组装中间件链和注册工具集。lead_agent/agent.py 实现了核心 Lead Agent，它通过 LangGraph 编排推理流程，引入多种中间件（循环检测、澄清、摘要、标题生成等）。thread_state.py 定义了线程状态的完整 Schema，是所有中间件共享的数据契约。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/agents/factory.py",
+        "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py",
+        "file:backend/packages/harness/deerflow/agents/lead_agent/prompt.py",
+        "file:backend/packages/harness/deerflow/agents/thread_state.py",
+        "file:backend/packages/harness/deerflow/agents/features.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/agents/factory.py", "target": "file:backend/packages/harness/deerflow/agents/thread_state.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/factory.py", "target": "file:backend/packages/harness/deerflow/agents/features.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/factory.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/factory.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/lead_agent/prompt.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/genui_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/title_middleware.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "18 层中间件链：线程数据、记忆与循环检测",
+      "description": "智能体运行时的核心设计模式是中间件链。每个中间件负责一个横切关注点：thread_data_middleware 加载线程上下文数据，memory_middleware 注入持久化记忆，rag_middleware 执行知识库检索增强，loop_detection_middleware 检测并打断死循环，summarization_middleware 管理对话摘要。这种洋葱模型让每层职责单一且可插拔。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/title_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/clarification_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py",
+        "file:backend/packages/harness/deerflow/agents/middlewares/token_usage_middleware.py",
+        "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py",
+        "service:backend/packages/harness/deerflow/agents/middlewares/rag_middleware.py",
+        "service:backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py", "target": "file:backend/packages/harness/deerflow/agents/thread_state.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py", "target": "file:backend/packages/harness/deerflow/runtime/user_context.py", "type": "imports"},
+        {"source": "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py", "target": "service:backend/packages/harness/deerflow/agents/memory/queue.py", "type": "imports"},
+        {"source": "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py", "target": "service:backend/packages/harness/deerflow/agents/memory/message_processing.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/token_usage_middleware.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/agents/lead_agent/agent.py", "target": "file:backend/packages/harness/deerflow/agents/middlewares/todo_middleware.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "运行时管理：RunManager 与流式桥接",
+      "description": "runtime 层管理智能体的执行生命周期。RunManager 调度后台任务，worker.py 在独立线程中运行 LangGraph 图，StreamBridge 将流式事件从运行时桥接到前端 SSE 连接。Checkpointer 持久化线程状态使对话可恢复，serialization 层处理状态的序列化与反序列化。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/runtime/runs/manager.py",
+        "file:backend/packages/harness/deerflow/runtime/runs/worker.py",
+        "file:backend/packages/harness/deerflow/runtime/runs/schemas.py",
+        "file:backend/packages/harness/deerflow/runtime/stream_bridge/base.py",
+        "file:backend/packages/harness/deerflow/runtime/stream_bridge/memory.py",
+        "file:backend/packages/harness/deerflow/runtime/checkpointer/provider.py",
+        "file:backend/packages/harness/deerflow/runtime/serialization.py",
+        "file:backend/packages/harness/deerflow/client.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/manager.py", "target": "file:backend/packages/harness/deerflow/runtime/runs/schemas.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/worker.py", "target": "file:backend/packages/harness/deerflow/runtime/runs/manager.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/worker.py", "target": "file:backend/packages/harness/deerflow/runtime/runs/schemas.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/worker.py", "target": "file:backend/packages/harness/deerflow/runtime/serialization.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/worker.py", "target": "file:backend/packages/harness/deerflow/runtime/stream_bridge/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/runs/worker.py", "target": "file:backend/packages/harness/deerflow/config/app_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/runtime/user_context.py", "target": "file:backend/packages/harness/deerflow/client.py", "type": "depends_on"}
+      ]
+    },
+    {
+      "title": "工具生态系统：内置工具、MCP 协议与社区搜索",
+      "description": "tools/tools.py 是工具的统一组装入口，它将内置工具（present_file、clarification、view_image、task_tool）、MCP 协议工具、社区搜索工具（Tavily、Jina、Firecrawl）和 HTTP 连接器工具合并为一个完整工具集。MCP 子系统通过 client.py 连接外部 MCP 服务器，支持 OAuth 认证和工具缓存。这展示了系统如何通过插件化架构扩展 AI 能力边界。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/tools/tools.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/present_file_tool.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/clarification_tool.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/task_tool.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py",
+        "file:backend/packages/harness/deerflow/mcp/tools.py",
+        "file:backend/packages/harness/deerflow/mcp/client.py",
+        "file:backend/packages/harness/deerflow/community/tavily/tools.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/tools/builtins/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/tools/builtins/present_file_tool.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/tools/builtins/http_connector_tool.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/tools/builtins/task_tool.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/tools/builtins/render_ui_tool.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/sandbox/security.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/tools/tools.py", "target": "file:backend/packages/harness/deerflow/config/app_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/mcp/tools.py", "target": "file:backend/packages/harness/deerflow/mcp/client.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/mcp/tools.py", "target": "file:backend/packages/harness/deerflow/mcp/oauth.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/mcp/client.py", "target": "file:backend/packages/harness/deerflow/config/extensions_config.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "子智能体委派：通用与 Bash 专用智能体",
+      "description": "子智能体系统允许 Lead Agent 将复杂任务委派给专用子智能体执行。general_purpose 子智能体处理通用推理任务，bash_agent 专攻命令行操作。subagents/__init__.py 通过 registry 注册可用智能体，executor 管理双线程池异步执行并限制最大并发数。task_tool 作为 LangGraph 工具暴露给 Lead Agent 调用。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/subagents/__init__.py",
+        "file:backend/packages/harness/deerflow/subagents/config.py",
+        "file:backend/packages/harness/deerflow/subagents/executor.py",
+        "file:backend/packages/harness/deerflow/subagents/registry.py",
+        "file:backend/packages/harness/deerflow/tools/builtins/task_tool.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/subagents/__init__.py", "target": "file:backend/packages/harness/deerflow/subagents/config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/subagents/__init__.py", "target": "file:backend/packages/harness/deerflow/subagents/executor.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/subagents/__init__.py", "target": "file:backend/packages/harness/deerflow/subagents/registry.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "沙箱执行：隔离环境与安全防护",
+      "description": "sandbox 层提供隔离的代码执行环境。sandbox.py 定义抽象 Sandbox 接口，sandbox_provider.py 通过反射机制动态加载本地或 Docker 实现。security.py 实施安全策略审计文件操作，middleware.py 作为智能体中间件拦截工具调用进行沙箱检查。配合 guardrails 护栏系统和 content_safety 内容安全层，形成三层纵深防御体系。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/sandbox/sandbox.py",
+        "file:backend/packages/harness/deerflow/sandbox/sandbox_provider.py",
+        "file:backend/packages/harness/deerflow/sandbox/security.py",
+        "file:backend/packages/harness/deerflow/sandbox/middleware.py",
+        "file:backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py",
+        "file:backend/packages/harness/deerflow/guardrails/middleware.py",
+        "file:backend/packages/harness/deerflow/guardrails/provider.py",
+        "file:backend/packages/harness/deerflow/content_safety/provider.py",
+        "file:backend/packages/harness/deerflow/content_safety/prompt_injection.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/sandbox/sandbox_provider.py", "target": "file:backend/packages/harness/deerflow/sandbox/sandbox.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/sandbox/sandbox_provider.py", "target": "file:backend/packages/harness/deerflow/config/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/sandbox/sandbox_provider.py", "target": "file:backend/packages/harness/deerflow/reflection/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/sandbox/security.py", "target": "file:backend/packages/harness/deerflow/config/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/sandbox/middleware.py", "target": "file:backend/packages/harness/deerflow/agents/thread_state.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/sandbox/middleware.py", "target": "file:backend/packages/harness/deerflow/sandbox/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/content_safety/prompt_injection.py", "target": "file:backend/packages/harness/deerflow/content_safety/provider.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "记忆系统：LLM 驱动的持久化学习",
+      "description": "记忆系统让智能体具备跨对话学习能力。updater.py 通过 LLM 从对话中提取事实和上下文，storage.py 按用户隔离持久化存储，retrieval.py 在每次对话开始时检索相关记忆注入 prompt。queue.py 实现防抖更新队列避免频繁写入，session_storage 和 domain_storage 分别支持会话级和领域级记忆粒度。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/agents/memory/__init__.py",
+        "file:backend/packages/harness/deerflow/agents/memory/updater.py",
+        "file:backend/packages/harness/deerflow/agents/memory/storage.py",
+        "file:backend/packages/harness/deerflow/agents/memory/retrieval.py",
+        "file:backend/packages/harness/deerflow/agents/memory/queue.py",
+        "file:backend/packages/harness/deerflow/agents/memory/prompt.py",
+        "file:backend/packages/harness/deerflow/agents/memory/session_storage.py",
+        "file:backend/packages/harness/deerflow/agents/memory/domain_storage.py",
+        "file:backend/packages/harness/deerflow/agents/memory/domain_retrieval.py"
+      ],
+      "relatedEdges": [
+        {"source": "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py", "target": "service:backend/packages/harness/deerflow/agents/memory/domain_queue.py", "type": "imports"},
+        {"source": "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py", "target": "service:backend/packages/harness/deerflow/agents/memory/session_queue.py", "type": "imports"},
+        {"source": "service:backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py", "target": "service:backend/packages/harness/deerflow/agents/memory/message_processing.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "知识库 RAG：文档摄取与向量检索",
+      "description": "RAG 系统为智能体提供外部知识检索能力。ingestion.py 处理文档上传和分块，embeddings.py 绑定嵌入模型，vector_store.py 抽象向量存储后端（支持 Chroma 和 pgvector），retrieval.py 实现多知识库联合检索。knowledge_base 层在其上提供调度器、索引服务和访问控制。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/rag/tools.py",
+        "file:backend/packages/harness/deerflow/rag/ingestion.py",
+        "file:backend/packages/harness/deerflow/rag/retrieval.py",
+        "file:backend/packages/harness/deerflow/rag/embeddings.py",
+        "file:backend/packages/harness/deerflow/rag/vector_store.py",
+        "file:backend/packages/harness/deerflow/rag/chunking.py",
+        "file:backend/packages/harness/deerflow/knowledge_base/service.py",
+        "file:backend/packages/harness/deerflow/knowledge_base/dispatcher.py",
+        "file:backend/packages/harness/deerflow/knowledge_base/indexing.py",
+        "file:backend/packages/harness/deerflow/knowledge_base/access_control.py"
+      ],
+      "relatedEdges": []
+    },
+    {
+      "title": "报告模板引擎：DSL 驱动的自动化报告",
+      "description": "报告模板引擎通过 YAML DSL 定义报告结构，包含表单步骤、数据查询步骤、转换逻辑和章节渲染。schema.py 定义 DSL 元模型，service.py 提供模板管理服务，repository.py 持久化模板。运行时 data_runner.py 执行数据查询，generic_renderer.py 和 step_renderer.py 流式渲染报告内容，exporter.py 导出为 Markdown/PDF。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/report_templates/schema.py",
+        "file:backend/packages/harness/deerflow/report_templates/service.py",
+        "file:backend/packages/harness/deerflow/report_templates/repository.py",
+        "file:backend/packages/harness/deerflow/report_templates/validator.py",
+        "file:backend/packages/harness/deerflow/report_templates/generic_renderer.py",
+        "file:backend/packages/harness/deerflow/report_templates/runtime/data_runner.py",
+        "file:backend/packages/harness/deerflow/report_templates/runtime/state.py",
+        "file:backend/packages/harness/deerflow/report_templates/runtime/exporter.py",
+        "file:backend/packages/harness/deerflow/report_templates/permissions.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/report_templates/service.py", "target": "file:backend/packages/harness/deerflow/report_templates/repository.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/report_templates/service.py", "target": "file:backend/packages/harness/deerflow/report_templates/permissions.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "工业系统集成：多适配器与工具构建器",
+      "description": "integrations 层通过统一适配器模式接入 CRM、ERP、INS（设备监控）、SMS、XSY 等工业数据源。registry.py 管理适配器注册，routing.py 根据数据源类型路由请求，tool_builder.py 将适配器能力动态构建为 LangGraph 工具。每个适配器包含 transform.py 实现数据模型转换，实现外部系统到智能体工具链的无缝桥接。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/integrations/registry.py",
+        "file:backend/packages/harness/deerflow/integrations/routing.py",
+        "file:backend/packages/harness/deerflow/integrations/config.py",
+        "file:backend/packages/harness/deerflow/integrations/tools/tool_builder.py",
+        "file:backend/packages/harness/deerflow/integrations/adapters/base.py",
+        "file:backend/packages/harness/deerflow/integrations/adapters/ins/adapter.py",
+        "file:backend/packages/harness/deerflow/integrations/adapters/crm/adapter.py",
+        "file:backend/packages/harness/deerflow/integrations/adapters/erp/adapter.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/integrations/registry.py", "target": "file:backend/packages/harness/deerflow/integrations/config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/integrations/routing.py", "target": "file:backend/packages/harness/deerflow/integrations/models/provenance.py", "type": "imports"}
+      ]
+    },
+    {
+      "title": "基础设施：配置系统、模型工厂与反射加载",
+      "description": "foundation 层为整个系统提供底层支撑。app_config.py 是统一配置入口，聚合 20+ 子配置模块（模型、沙箱、认证、限流等）。models/factory.py 通过 reflection/resolvers.py 的反射机制从配置动态创建 LLM 聊天模型实例，支持思维链开关和凭证加载。persistence 层基于 SQLAlchemy 异步引擎管理所有数据库实体。这套基础设施体现了「配置驱动 + 反射加载」的核心设计哲学。",
+      "keyNodes": [
+        "file:backend/packages/harness/deerflow/config/app_config.py",
+        "file:backend/packages/harness/deerflow/config/model_config.py",
+        "file:backend/packages/harness/deerflow/config/tool_config.py",
+        "file:backend/packages/harness/deerflow/config/extensions_config.py",
+        "file:backend/packages/harness/deerflow/models/factory.py",
+        "file:backend/packages/harness/deerflow/reflection/resolvers.py",
+        "file:backend/packages/harness/deerflow/persistence/engine.py",
+        "file:backend/packages/harness/deerflow/persistence/base.py"
+      ],
+      "relatedEdges": [
+        {"source": "file:backend/packages/harness/deerflow/config/app_config.py", "target": "file:backend/packages/harness/deerflow/config/model_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/config/app_config.py", "target": "file:backend/packages/harness/deerflow/config/auth_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/config/app_config.py", "target": "file:backend/packages/harness/deerflow/config/extensions_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/models/factory.py", "target": "file:backend/packages/harness/deerflow/config/app_config.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/models/factory.py", "target": "file:backend/packages/harness/deerflow/reflection/__init__.py", "type": "imports"},
+        {"source": "file:backend/packages/harness/deerflow/models/factory.py", "target": "file:backend/packages/harness/deerflow/tracing/__init__.py", "type": "imports"}
+      ]
+    }
+  ]
+}

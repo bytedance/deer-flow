@@ -1,0 +1,126 @@
+{
+  "batchIndex": 32,
+  "nodes": [
+    {
+      "id": "backend/docs/data_catalog_mcp_protocol.md",
+      "type": "file",
+      "name": "data_catalog_mcp_protocol.md",
+      "path": "backend/docs/data_catalog_mcp_protocol.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 333,
+      "summary": "数据目录MCP协议的规范文档，定义了数据源的发现、查询和访问接口协议。"
+    },
+    {
+      "id": "backend/docs/memory-settings-sample.json",
+      "type": "file",
+      "name": "memory-settings-sample.json",
+      "path": "backend/docs/memory-settings-sample.json",
+      "language": "json",
+      "fileCategory": "config",
+      "sizeLines": 114,
+      "summary": "记忆系统配置的示例JSON文件，展示了记忆存储和检索的参数模板。"
+    },
+    {
+      "id": "backend/docs/middleware-execution-flow.md",
+      "type": "file",
+      "name": "middleware-execution-flow.md",
+      "path": "backend/docs/middleware-execution-flow.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 291,
+      "summary": "中间件执行流程文档，描述了请求处理链中各中间件的调用顺序和执行机制。"
+    },
+    {
+      "id": "backend/docs/plan_mode_usage.md",
+      "type": "file",
+      "name": "plan_mode_usage.md",
+      "path": "backend/docs/plan_mode_usage.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 204,
+      "summary": "计划模式使用指南，说明如何启用和使用Agent的计划模式进行任务规划。"
+    },
+    {
+      "id": "backend/docs/rfc-create-deerflow-agent.md",
+      "type": "file",
+      "name": "rfc-create-deerflow-agent.md",
+      "path": "backend/docs/rfc-create-deerflow-agent.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 503,
+      "summary": "RFC提案文档，提出创建DeerFlow Agent的设计方案和实现路径。"
+    },
+    {
+      "id": "backend/docs/rfc-extract-shared-modules.md",
+      "type": "file",
+      "name": "rfc-extract-shared-modules.md",
+      "path": "backend/docs/rfc-extract-shared-modules.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 190,
+      "summary": "RFC提案文档，建议将共享模块提取为独立组件以提高代码复用性。"
+    },
+    {
+      "id": "backend/docs/rfc-grep-glob-tools.md",
+      "type": "file",
+      "name": "rfc-grep-glob-tools.md",
+      "path": "backend/docs/rfc-grep-glob-tools.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 446,
+      "summary": "RFC提案文档，规划了grep和glob搜索工具的实现方案和使用场景。"
+    },
+    {
+      "id": "backend/docs/STREAMING.md",
+      "type": "file",
+      "name": "STREAMING.md",
+      "path": "backend/docs/STREAMING.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 351,
+      "summary": "流式传输实现文档，描述了后端SSE流式响应和事件推送的技术细节。"
+    },
+    {
+      "id": "backend/docs/summarization.md",
+      "type": "file",
+      "name": "summarization.md",
+      "path": "backend/docs/summarization.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 381,
+      "summary": "对话摘要文档，说明了长对话上下文的压缩和摘要生成策略。"
+    },
+    {
+      "id": "backend/docs/task_tool_improvements.md",
+      "type": "file",
+      "name": "task_tool_improvements.md",
+      "path": "backend/docs/task_tool_improvements.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 174,
+      "summary": "任务工具改进文档，提出了对现有任务执行工具的优化建议。"
+    },
+    {
+      "id": "backend/docs/TITLE_GENERATION_IMPLEMENTATION.md",
+      "type": "file",
+      "name": "TITLE_GENERATION_IMPLEMENTATION.md",
+      "path": "backend/docs/TITLE_GENERATION_IMPLEMENTATION.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 222,
+      "summary": "标题生成功能的实现文档，描述了自动为对话生成标题的算法和流程。"
+    },
+    {
+      "id": "backend/docs/TODO.md",
+      "type": "file",
+      "name": "TODO.md",
+      "path": "backend/docs/TODO.md",
+      "language": "markdown",
+      "fileCategory": "docs",
+      "sizeLines": 34,
+      "summary": "待办事项清单，记录了后端开发中尚未完成的任务和改进点。"
+    }
+  ],
+  "edges": []
+}
