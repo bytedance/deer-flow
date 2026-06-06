@@ -204,12 +204,12 @@ RUN tar -xzf /tmp/claude-bundle.tar.gz -C /usr/local --no-same-owner \
 # ── Install Claude Agent ACP (offline bundled) ─────────────────────────────
 # 离线环境：把 @agentclientprotocol/claude-agent-acp 整包 vendor 到镜像，
 # 这样 acp_agents.claude_code 配的 `npx -y @agentclientprotocol/claude-agent-acp`
-ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
-COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
-RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
-    && rm /tmp/acp-bundle.tar.gz \
-    && test -x /usr/local/bin/claude-agent-acp \
-    && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+# ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
+# COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
+# RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
+#     && rm /tmp/acp-bundle.tar.gz \
+#     && test -x /usr/local/bin/claude-agent-acp \
+#     && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
 
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
