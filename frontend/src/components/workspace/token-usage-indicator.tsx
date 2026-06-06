@@ -26,13 +26,18 @@ import {
   type TokenUsagePreferences,
   type TokenUsageViewPreset,
 } from "@/core/messages/usage-model";
+import type { ContextUsage } from "@/core/threads/token-usage";
 import { cn } from "@/lib/utils";
+
+import { ContextUsageBreakdown } from "./context-usage-breakdown";
+import { formatContextUsagePercentage } from "./context-usage-format";
 
 interface TokenUsageIndicatorProps {
   threadId?: string;
   messages: Message[];
   pendingMessages?: Message[];
   backendUsage?: TokenUsage | null;
+  contextUsage?: ContextUsage | null;
   enabled?: boolean;
   preferences: TokenUsagePreferences;
   onPreferencesChange: (preferences: TokenUsagePreferences) => void;
@@ -44,6 +49,7 @@ export function TokenUsageIndicator({
   messages,
   pendingMessages,
   backendUsage,
+  contextUsage,
   enabled = false,
   preferences,
   onPreferencesChange,
@@ -61,6 +67,9 @@ export function TokenUsageIndicator({
     [backendUsage, messages, pendingMessages, threadId],
   );
   const preset = getTokenUsageViewPreset(preferences);
+  const contextPercentage = formatContextUsagePercentage(
+    contextUsage?.percentage,
+  );
 
   if (!enabled) {
     return null;
@@ -86,10 +95,18 @@ export function TokenUsageIndicator({
                 : "-"
               : t.tokenUsage.presets[presetKeyToTranslationKey(preset)]}
           </span>
+          {contextPercentage != null && (
+            <span
+              className="text-muted-foreground/80 border-l pl-1.5 font-mono"
+              aria-label={t.contextUsage.badgeAriaLabel(contextPercentage)}
+            >
+              {contextPercentage}%
+            </span>
+          )}
           <ChevronDownIcon className="size-3" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="end" className="w-80">
+      <DropdownMenuContent side="bottom" align="end" className="w-96">
         <DropdownMenuLabel>{t.tokenUsage.title}</DropdownMenuLabel>
         <div className="px-2 py-1 text-xs">
           {usage ? (
@@ -121,6 +138,12 @@ export function TokenUsageIndicator({
             </div>
           )}
         </div>
+        {contextUsage && contextUsage.breakdown.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <ContextUsageBreakdown contextUsage={contextUsage} />
+          </>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuLabel>{t.tokenUsage.view}</DropdownMenuLabel>
         <DropdownMenuRadioGroup

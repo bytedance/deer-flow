@@ -1,6 +1,9 @@
 import { expect, test } from "vitest";
 
-import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import {
+  selectContextUsage,
+  threadTokenUsageToTokenUsage,
+} from "@/core/threads/token-usage";
 import type { ThreadTokenUsageResponse } from "@/core/threads/types";
 
 test("maps backend thread token usage to UI token usage", () => {
@@ -28,4 +31,69 @@ test("maps backend thread token usage to UI token usage", () => {
 test("returns null when backend thread token usage is unavailable", () => {
   expect(threadTokenUsageToTokenUsage(null)).toBeNull();
   expect(threadTokenUsageToTokenUsage(undefined)).toBeNull();
+});
+
+const _baseResponse = {
+  thread_id: "thread-1",
+  total_input_tokens: 0,
+  total_output_tokens: 0,
+  total_tokens: 0,
+  total_runs: 0,
+  by_model: {},
+  by_caller: { lead_agent: 0, subagent: 0, middleware: 0 },
+} satisfies ThreadTokenUsageResponse;
+
+test("selectContextUsage projects the backend block to UI shape", () => {
+  const response: ThreadTokenUsageResponse = {
+    ..._baseResponse,
+    context_usage: {
+      used_tokens: 350,
+      max_context_tokens: 1000,
+      percentage: 35,
+      breakdown: [
+        { key: "messages", tokens: 200, active: true },
+        { key: "system_prompt", tokens: 150, active: true },
+        { key: "free_space", tokens: 650, active: false },
+      ],
+    },
+  };
+
+  expect(selectContextUsage(response)).toEqual({
+    usedTokens: 350,
+    maxContextTokens: 1000,
+    percentage: 35,
+    breakdown: [
+      { key: "messages", tokens: 200, active: true },
+      { key: "system_prompt", tokens: 150, active: true },
+      { key: "free_space", tokens: 650, active: false },
+    ],
+  });
+});
+
+test("selectContextUsage preserves nullable capacity and percentage", () => {
+  const response: ThreadTokenUsageResponse = {
+    ..._baseResponse,
+    context_usage: {
+      used_tokens: 200,
+      max_context_tokens: null,
+      percentage: null,
+      breakdown: [{ key: "messages", tokens: 200, active: true }],
+    },
+  };
+
+  expect(selectContextUsage(response)).toEqual({
+    usedTokens: 200,
+    maxContextTokens: null,
+    percentage: null,
+    breakdown: [{ key: "messages", tokens: 200, active: true }],
+  });
+});
+
+test("selectContextUsage returns null when context_usage is missing", () => {
+  expect(selectContextUsage(_baseResponse)).toBeNull();
+  expect(
+    selectContextUsage({ ..._baseResponse, context_usage: null }),
+  ).toBeNull();
+  expect(selectContextUsage(null)).toBeNull();
+  expect(selectContextUsage(undefined)).toBeNull();
 });

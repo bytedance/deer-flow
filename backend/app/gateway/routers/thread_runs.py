@@ -20,6 +20,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.context_usage import build_context_usage
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
@@ -88,6 +89,19 @@ class ThreadTokenUsageCallerBreakdown(BaseModel):
     middleware: int = 0
 
 
+class ThreadContextUsageBreakdownItem(BaseModel):
+    key: str
+    tokens: int
+    active: bool
+
+
+class ThreadContextUsage(BaseModel):
+    max_context_tokens: int | None = None
+    used_tokens: int = 0
+    percentage: float | None = None
+    breakdown: list[ThreadContextUsageBreakdownItem] = Field(default_factory=list)
+
+
 class ThreadTokenUsageResponse(BaseModel):
     thread_id: str
     total_tokens: int = 0
@@ -96,6 +110,7 @@ class ThreadTokenUsageResponse(BaseModel):
     total_runs: int = 0
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+    context_usage: ThreadContextUsage | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -435,4 +450,5 @@ async def thread_token_usage(
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    return ThreadTokenUsageResponse(thread_id=thread_id, **agg)
+    context_usage = await build_context_usage(request, thread_id, run_store)
+    return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)

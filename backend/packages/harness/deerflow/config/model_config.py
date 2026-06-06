@@ -32,6 +32,15 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is disabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    context_window: int | None = Field(
+        default=None,
+        description=(
+            "Total context window size in tokens (prompt + completion). Used to compute the real-time "
+            "context usage percentage displayed in the chat UI. Distinct from `max_tokens`, which is the "
+            "per-call output cap passed to the provider. Leave unset if unknown; the UI will hide the "
+            "percentage."
+        ),
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

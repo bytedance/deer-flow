@@ -335,6 +335,32 @@ export const enUS: Translations = {
     removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
+  contextUsage: {
+    label: "Context",
+    title: "Context window",
+    used: "Used",
+    capacity: "Capacity",
+    capacityUnknown:
+      "Context window not configured for this model. Set `context_window` on the model in config.yaml to enable the percentage.",
+    badgeAriaLabel: (percentage: string) =>
+      `Context window ${percentage}% full`,
+    summary: (used: string, total: string, percentage: string) =>
+      `${used} / ${total} (${percentage}%)`,
+    categories: {
+      messages: "Messages",
+      system_prompt: "System prompt",
+      skills: "Skills",
+      system_tools: "System tools",
+      mcp_tools: "MCP tools",
+      custom_agents: "Custom agents",
+      memory_files: "Memory files",
+      mcp_tools_deferred: "MCP tools (deferred)",
+      system_tools_deferred: "System tools (deferred)",
+      autocompact_buffer: "Autocompact buffer",
+      free_space: "Free space",
+    },
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",

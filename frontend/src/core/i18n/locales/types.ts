@@ -263,6 +263,29 @@ export interface Translations {
     removeTodo: (content: string) => string;
   };
 
+  contextUsage: {
+    label: string;
+    title: string;
+    used: string;
+    capacity: string;
+    capacityUnknown: string;
+    badgeAriaLabel: (percentage: string) => string;
+    summary: (used: string, total: string, percentage: string) => string;
+    categories: {
+      messages: string;
+      system_prompt: string;
+      skills: string;
+      system_tools: string;
+      mcp_tools: string;
+      custom_agents: string;
+      memory_files: string;
+      mcp_tools_deferred: string;
+      system_tools_deferred: string;
+      autocompact_buffer: string;
+      free_space: string;
+    };
+  };
+
   // Shortcuts
   shortcuts: {
     searchActions: string;

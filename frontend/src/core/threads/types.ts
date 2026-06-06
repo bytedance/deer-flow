@@ -33,6 +33,42 @@ export interface RunMessage {
   created_at: string;
 }
 
+/**
+ * Stable identifier for each row in the context-window breakdown. New
+ * categories must be added at both the backend (`_BREAKDOWN_ORDER` in
+ * `backend/app/gateway/context_usage.py`) and here.
+ */
+export type ContextUsageBreakdownKey =
+  | "messages"
+  | "system_prompt"
+  | "skills"
+  | "system_tools"
+  | "mcp_tools"
+  | "custom_agents"
+  | "memory_files"
+  | "mcp_tools_deferred"
+  | "system_tools_deferred"
+  | "autocompact_buffer"
+  | "free_space";
+
+export interface ThreadContextUsageBreakdownItem {
+  key: ContextUsageBreakdownKey | string;
+  tokens: number;
+  /**
+   * Whether this row contributes to the "% used" total. `false` means the
+   * row is shown as reserved / unoccupied (deferred tool schemas, autocompact
+   * buffer, free space).
+   */
+  active: boolean;
+}
+
+export interface ThreadContextUsage {
+  max_context_tokens: number | null;
+  used_tokens: number;
+  percentage: number | null;
+  breakdown: ThreadContextUsageBreakdownItem[];
+}
+
 export interface ThreadTokenUsageResponse {
   thread_id: string;
   total_tokens: number;
@@ -45,4 +81,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage?: ThreadContextUsage | null;
 }

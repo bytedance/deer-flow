@@ -320,6 +320,31 @@ export const zhCN: Translations = {
     removeTodo: (content: string) => `移除 To-do：${content}`,
   },
 
+  contextUsage: {
+    label: "上下文",
+    title: "上下文窗口",
+    used: "已使用",
+    capacity: "容量",
+    capacityUnknown:
+      "该模型未配置上下文窗口大小。在 config.yaml 中为该模型设置 `context_window` 以启用百分比显示。",
+    badgeAriaLabel: (percentage: string) => `上下文窗口已使用 ${percentage}%`,
+    summary: (used: string, total: string, percentage: string) =>
+      `${used} / ${total} (${percentage}%)`,
+    categories: {
+      messages: "对话消息",
+      system_prompt: "系统提示词",
+      skills: "Skills",
+      system_tools: "系统工具",
+      mcp_tools: "MCP 工具",
+      custom_agents: "自定义子代理",
+      memory_files: "记忆注入",
+      mcp_tools_deferred: "MCP 工具（延迟加载）",
+      system_tools_deferred: "系统工具（延迟加载）",
+      autocompact_buffer: "自动压缩预留",
+      free_space: "剩余空间",
+    },
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",
