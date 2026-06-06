@@ -348,3 +348,89 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "thread_id": "thread-42",
         "user_id": "user-7",
     }
+
+
+# ── Sandbox client teardown (#2872) ──────────────────────────────────────────
+
+
+def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
+    """Build a provider with one active sandbox suitable for release/destroy/shutdown tests."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._sandbox_infos = {
+        sandbox_id: aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
+    }
+    provider._thread_sandboxes = {}
+    provider._last_activity = {sandbox_id: 0.0}
+    provider._shutdown_called = False
+    provider._idle_checker_thread = None
+    provider._backend = SimpleNamespace(destroy=MagicMock())
+
+    sandbox = MagicMock()
+    sandbox.id = sandbox_id
+    sandbox.close = MagicMock()
+    provider._sandboxes = {sandbox_id: sandbox}
+    return provider, sandbox, aio_mod
+
+
+def test_release_closes_cached_sandbox_client(tmp_path):
+    """release() must close the host-side client owned by the cached AioSandbox (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel")
+
+    provider.release("sandbox-rel")
+
+    sandbox.close.assert_called_once_with()
+    # And the sandbox is parked in the warm pool (container still running).
+    assert "sandbox-rel" in provider._warm_pool
+    assert "sandbox-rel" not in provider._sandboxes
+
+
+def test_destroy_closes_cached_sandbox_client(tmp_path):
+    """destroy() must close the host-side client before backend container teardown (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-destroy")
+    backend_destroy = provider._backend.destroy
+
+    provider.destroy("sandbox-destroy")
+
+    sandbox.close.assert_called_once_with()
+    backend_destroy.assert_called_once()
+    assert "sandbox-destroy" not in provider._sandboxes
+    assert "sandbox-destroy" not in provider._sandbox_infos
+
+
+def test_shutdown_closes_all_active_sandbox_clients(tmp_path):
+    """shutdown() must close every cached AioSandbox client during teardown (#2872)."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-shut")
+
+    provider.shutdown()
+
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once()
+    assert provider._sandboxes == {}
+
+
+def test_release_swallows_close_errors(tmp_path, caplog):
+    """A failure inside sandbox.close() must not break provider release()."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel-err")
+    sandbox.close.side_effect = RuntimeError("boom")
+
+    with caplog.at_level("WARNING"):
+        provider.release("sandbox-rel-err")
+
+    assert "Error closing sandbox sandbox-rel-err during release" in caplog.text
+    # Still moved to warm pool: client teardown failure must not block lifecycle.
+    assert "sandbox-rel-err" in provider._warm_pool
+
+
+def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, caplog):
+    """A failure in sandbox.close() must not skip backend container destruction."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dest-err")
+    sandbox.close.side_effect = RuntimeError("boom")
+
+    with caplog.at_level("WARNING"):
+        provider.destroy("sandbox-dest-err")
+
+    assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
+    provider._backend.destroy.assert_called_once()
