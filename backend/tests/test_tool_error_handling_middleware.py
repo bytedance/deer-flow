@@ -13,7 +13,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
-from deerflow.config.loop_detection_config import LoopDetectionConfig
+from deerflow.config.loop_detection_config import LoopDetectionConfig, ToolFreqOverride
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -202,6 +202,32 @@ def test_build_subagent_runtime_middlewares_does_not_lower_tool_freq(monkeypatch
     loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
     assert loop.tool_freq_hard_limit == 5000
     assert loop.tool_freq_warn == 200
+
+
+def test_build_subagent_runtime_middlewares_lifts_low_global_cap_preserving_overrides(monkeypatch: pytest.MonkeyPatch):
+    """A deliberately-low *global* tool_freq cap is intentionally lifted to the budget
+    for deep subagents — the global per-tool-type guard is relaxed so legitimate
+    high-volume single-tool work is not force-stopped far below ``max_turns``. This is
+    a documented relaxation: per-tool ``tool_freq_overrides`` remain the supported way
+    to cap a specific tool and are left untouched.
+    """
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(
+        enabled=True,
+        tool_freq_warn=10,
+        tool_freq_hard_limit=20,
+        tool_freq_overrides={"bash": ToolFreqOverride(warn=5, hard_limit=8)},
+    )
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    # Low global cap is raised to the budget (relaxed, never made stricter).
+    assert loop.tool_freq_hard_limit == 1000
+    assert loop.tool_freq_warn == 500
+    # The per-tool override is the supported cap and is preserved verbatim.
+    assert loop._tool_freq_overrides["bash"] == (5, 8)
 
 
 def test_wrap_tool_call_passthrough_on_success():

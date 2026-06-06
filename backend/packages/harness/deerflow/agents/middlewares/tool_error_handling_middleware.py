@@ -182,10 +182,14 @@ def build_subagent_runtime_middlewares(
         # per-tool-type frequency guard. Legitimate high-volume single-tool work
         # (bash batch pipelines, multi-file reads) would otherwise be
         # force-stopped at the default 50 long before max_turns, defeating the
-        # raised budget. Lift the frequency thresholds to the budget while
-        # leaving the identical-call detector (warn_threshold / hard_limit) and
-        # any per-tool overrides untouched. We only raise, never lower, so a
-        # stricter operator config still wins.
+        # raised budget. Lift the global frequency thresholds to the budget.
+        #
+        # This intentionally relaxes the *global* per-tool-type guard for deep
+        # subagents — a deliberately-low operator value is raised too. The
+        # identical-call detector (warn_threshold / hard_limit) and per-tool
+        # ``tool_freq_overrides`` are left untouched and remain the supported way
+        # to cap a specific tool. We only ever raise, never lower, so we never
+        # make detection stricter than the operator configured.
         if max_turns and max_turns > loop_mw.tool_freq_hard_limit:
             loop_mw.tool_freq_hard_limit = max_turns
             loop_mw.tool_freq_warn = max(loop_mw.tool_freq_warn, max_turns // 2)
