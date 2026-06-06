@@ -25,6 +25,7 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { getCollapsedThinkingSummary } from "@/core/messages/thinking";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
@@ -42,8 +43,6 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
-
-const COLLAPSED_THINKING_SUMMARY_MAX_CHARS = 180;
 
 export function MessageGroup({
   className,
@@ -228,14 +227,19 @@ export function MessageGroup({
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
-  const shouldComputeCollapsedThinkingSummary =
-    localSettings.appearance.showCollapsedThinkingStep && !showLastThinking;
   const collapsedThinkingSummary = useMemo(
     () =>
-      shouldComputeCollapsedThinkingSummary
-        ? summarizeCollapsedThinkingStep(lastReasoningStep?.reasoning)
-        : "",
-    [lastReasoningStep?.reasoning, shouldComputeCollapsedThinkingSummary],
+      getCollapsedThinkingSummary({
+        reasoning: lastReasoningStep?.reasoning,
+        showCollapsedThinkingStep:
+          localSettings.appearance.showCollapsedThinkingStep,
+        showLastThinking,
+      }),
+    [
+      lastReasoningStep?.reasoning,
+      localSettings.appearance.showCollapsedThinkingStep,
+      showLastThinking,
+    ],
   );
   const collapsedThinkingSummaryToShow = collapsedThinkingSummary || undefined;
 
@@ -446,24 +450,6 @@ function ThinkingStepLabel({
       ) : null}
     </div>
   );
-}
-
-function summarizeCollapsedThinkingStep(reasoning?: string | null): string {
-  if (!reasoning) {
-    return "";
-  }
-
-  const summary = reasoning
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/[#>*_\-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return summary.length > COLLAPSED_THINKING_SUMMARY_MAX_CHARS
-    ? `${summary.slice(0, COLLAPSED_THINKING_SUMMARY_MAX_CHARS).trimEnd()}...`
-    : summary;
 }
 
 function ToolCall({
