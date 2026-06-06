@@ -20,6 +20,7 @@ class LLMProvider:
     # Extra config fields beyond the common ones (merged into YAML)
     extra_config: dict = field(default_factory=dict)
     auth_hint: str | None = None
+    ask_supports_thinking: bool = False
 
 
 @dataclass
@@ -103,6 +104,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "max_tokens": 8192,
             "temperature": 0.7,
         },
+        ask_supports_thinking=True,
     ),
     LLMProvider(
         name="vllm",
@@ -128,6 +130,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
                 }
             },
         },
+        ask_supports_thinking=True,
     ),
     LLMProvider(
         name="codex",
@@ -163,6 +166,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         default_model="gpt-4o",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
+        ask_supports_thinking=True,
     ),
 ]
 
