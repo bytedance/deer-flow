@@ -148,6 +148,23 @@ def _request_subagent_enabled(request_config: dict[str, Any] | None) -> bool:
     return isinstance(configurable, dict) and bool(configurable.get("subagent_enabled"))
 
 
+def _reconcile_recursion_limit(config: dict[str, Any], request_config: dict[str, Any] | None) -> None:
+    """Recompute the recursion limit after ``body.context`` overrides are merged.
+
+    ``build_run_config`` derives the limit from ``body.config`` alone, before
+    :func:`merge_run_context_overrides` folds the documented top-level ``body.context``
+    (which may carry ``subagent_enabled``) into ``config``. Without this reconciliation a
+    client that enables subagents only via ``body.context`` keeps the shallow default and
+    its deep agent is force-stopped far below its turn budget.
+
+    An explicit client ``recursion_limit`` in ``body.config`` is authoritative and left
+    untouched.
+    """
+    if isinstance(request_config, dict) and "recursion_limit" in request_config:
+        return
+    config["recursion_limit"] = default_recursion_limit(subagent_enabled=_request_subagent_enabled(config))
+
+
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -368,6 +385,9 @@ async def start_run(
     # that carries agent configuration (model_name, thinking_enabled, etc.).
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     merge_run_context_overrides(config, getattr(body, "context", None))
+    # ``subagent_enabled`` may arrive via the top-level ``body.context`` merged above,
+    # which ``build_run_config`` could not see when it set the recursion limit.
+    _reconcile_recursion_limit(config, body.config)
     inject_authenticated_user_context(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
