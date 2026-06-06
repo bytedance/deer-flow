@@ -970,6 +970,10 @@ skill_evolution:
 #
 # If both `checkpointer` and `database` are present, `checkpointer`
 # takes precedence for LangGraph state persistence only.
+# This is intentional for backward compatibility, but upgraded installs can
+# accidentally keep writing checkpoints to the legacy database. Remove the
+# `checkpointer` section when you want checkpoint state to use the unified
+# `database` backend below.
 #
 # checkpointer:
 #   type: sqlite
