@@ -150,6 +150,7 @@ def get_store() -> BaseStore:
         _store = store
     return _store
 
+
 def reset_store() -> None:
     """Reset the sync singleton, forcing recreation on the next call.
 

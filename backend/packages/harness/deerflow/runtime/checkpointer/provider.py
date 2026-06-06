@@ -155,6 +155,7 @@ def get_checkpointer() -> Checkpointer:
 
     return _checkpointer
 
+
 def reset_checkpointer() -> None:
     """Reset the sync singleton, forcing recreation on the next call.
 
