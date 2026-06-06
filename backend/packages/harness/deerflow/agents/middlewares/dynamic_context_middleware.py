@@ -28,6 +28,7 @@ Date-update format:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -201,4 +202,9 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+        # _inject() performs synchronous file I/O (memory JSON loading) and
+        # potentially blocking network calls (tiktoken encoding download on
+        # first use).  Offload to a thread so the event loop is never blocked
+        # — a blocking call here starves all concurrent HTTP handlers (auth,
+        # SSE heartbeats, etc.).  See issue #3402.
+        return await asyncio.to_thread(self._inject, state)
