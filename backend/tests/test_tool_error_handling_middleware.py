@@ -4,6 +4,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
@@ -171,6 +172,72 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
     assert "network down" in result.text
+
+
+def test_wrap_tool_call_normalizes_returned_error_string():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_fetch", tool_call_id="tc-fetch")
+    returned = ToolMessage(
+        content="Error: Jina API returned status 401: Unauthorized",
+        tool_call_id="tc-fetch",
+        name="web_fetch",
+    )
+
+    result = middleware.wrap_tool_call(req, lambda _req: returned)
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert result.content == returned.content
+    assert result.additional_kwargs["deerflow_tool_error"] == {
+        "source": "tool_return",
+        "error_type": "auth",
+        "retryable": False,
+        "recoverable_by_model": False,
+    }
+
+
+def test_wrap_tool_call_marks_recoverable_no_results_with_structured_metadata():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-search")
+    returned = ToolMessage(
+        content="Error: No results found",
+        tool_call_id="tc-search",
+        name="web_search",
+    )
+
+    result = middleware.wrap_tool_call(req, lambda _req: returned)
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert result.additional_kwargs["deerflow_tool_error"]["error_type"] == "no_results"
+    assert result.additional_kwargs["deerflow_tool_error"]["recoverable_by_model"] is True
+
+
+def test_wrap_tool_call_normalizes_error_messages_inside_command():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="view_image", tool_call_id="tc-image")
+    returned = Command(
+        update={
+            "viewed_images": [],
+            "messages": [
+                ToolMessage(
+                    content="Error: Permission denied: /mnt/data/private.png",
+                    tool_call_id="tc-image",
+                    name="view_image",
+                )
+            ],
+        }
+    )
+
+    result = middleware.wrap_tool_call(req, lambda _req: returned)
+
+    assert isinstance(result, Command)
+    assert result is not returned
+    assert result.update["viewed_images"] == []
+    message = result.update["messages"][0]
+    assert isinstance(message, ToolMessage)
+    assert message.status == "error"
+    assert message.additional_kwargs["deerflow_tool_error"]["error_type"] == "permission"
 
 
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():

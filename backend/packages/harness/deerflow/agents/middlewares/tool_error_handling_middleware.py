@@ -2,7 +2,8 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import override
+from dataclasses import replace
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -16,6 +17,37 @@ from deerflow.config.app_config import AppConfig
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
+_ERROR_PREFIX = "Error:"
+
+
+def _classify_tool_error(text: str) -> dict[str, Any]:
+    """Classify a tool-returned ``Error:`` string without parsing display text downstream."""
+    normalized = text.lower()
+    if any(token in normalized for token in ("401", "unauthorized", "authentication", "invalid api key", "api key")):
+        return {"error_type": "auth", "retryable": False, "recoverable_by_model": False}
+    if any(token in normalized for token in ("429", "rate limit", "rate limited", "timeout", "timed out", "connection", "network", "temporarily", "unavailable")):
+        return {"error_type": "transient", "retryable": True, "recoverable_by_model": False}
+    if any(token in normalized for token in ("not configured", "not installed", "missing required", "disabled", "configuration")):
+        return {"error_type": "config", "retryable": False, "recoverable_by_model": False}
+    if any(token in normalized for token in ("permission denied", "access denied", "path traversal", "not allowed", "forbidden")):
+        return {"error_type": "permission", "retryable": False, "recoverable_by_model": True}
+    if any(token in normalized for token in ("no results found", "no content found", "no images found")):
+        return {"error_type": "no_results", "retryable": False, "recoverable_by_model": True}
+    if any(token in normalized for token in ("not found", "no such file", "does not exist")):
+        return {"error_type": "not_found", "retryable": False, "recoverable_by_model": True}
+    if "unexpected" in normalized:
+        return {"error_type": "internal", "retryable": False, "recoverable_by_model": False}
+    return {"error_type": "unknown", "retryable": False, "recoverable_by_model": True}
+
+
+def _normalizable_error_text(message: ToolMessage) -> str | None:
+    content = message.content
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if not text.startswith(_ERROR_PREFIX):
+        return None
+    return text
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -36,6 +68,47 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             status="error",
         )
 
+    def _normalize_tool_message(self, message: ToolMessage) -> ToolMessage:
+        text = _normalizable_error_text(message)
+        if text is None:
+            return message
+
+        additional_kwargs = dict(message.additional_kwargs or {})
+        additional_kwargs.setdefault(
+            "deerflow_tool_error",
+            {
+                "source": "tool_return",
+                **_classify_tool_error(text),
+            },
+        )
+        return message.model_copy(
+            update={
+                "status": "error",
+                "additional_kwargs": additional_kwargs,
+            }
+        )
+
+    def _normalize_tool_result(self, result: ToolMessage | Command) -> ToolMessage | Command:
+        if isinstance(result, ToolMessage):
+            return self._normalize_tool_message(result)
+        if not isinstance(result.update, dict):
+            return result
+
+        messages = result.update.get("messages")
+        if not isinstance(messages, list):
+            return result
+
+        normalized_messages = [
+            self._normalize_tool_message(message) if isinstance(message, ToolMessage) else message
+            for message in messages
+        ]
+        if normalized_messages == messages:
+            return result
+
+        update = dict(result.update)
+        update["messages"] = normalized_messages
+        return replace(result, update=update)
+
     @override
     def wrap_tool_call(
         self,
@@ -43,7 +116,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         try:
-            return handler(request)
+            return self._normalize_tool_result(handler(request))
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
@@ -58,7 +131,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         try:
-            return await handler(request)
+            return self._normalize_tool_result(await handler(request))
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
