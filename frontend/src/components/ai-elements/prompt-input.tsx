@@ -911,7 +911,6 @@ export const PromptInputTextarea = ({
 
       form?.requestSubmit();
     }
-
   };
 
   const handlePaste: ClipboardEventHandler<HTMLTextAreaElement> = (event) => {
