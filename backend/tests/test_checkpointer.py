@@ -345,6 +345,13 @@ class TestGetCheckpointer:
 
 
 class TestSyncSingletonThreadSafety:
+    def test_store_reset_clears_singleton(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        store1 = get_store()
+        reset_store()
+        store2 = get_store()
+        assert store1 is not store2
+
     def test_concurrent_checkpointer_getter_creates_one_instance(self):
         load_checkpointer_config_from_dict({"type": "memory"})
         factory = _BlockingSingletonFactory()
