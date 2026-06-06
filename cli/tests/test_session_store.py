@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from session_store import SessionStore
+from deerflow_cli.session_store import SessionStore
 
 
 # ---------------------------------------------------------------------------

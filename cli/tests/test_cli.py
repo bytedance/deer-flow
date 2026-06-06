@@ -1,4 +1,4 @@
-"""Integration tests for cli.py — command parsing and user interaction."""
+"""Integration tests for deerflow_cli.py — command parsing and user interaction."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ class TestSafeInput:
     """Input handling with UTF-8 encoding recovery."""
 
     def test_returns_stripped_input(self):
-        from cli.cli import safe_input
+        from deerflow_cli.cli import safe_input
 
-        with patch("cli.cli.input", return_value="  hello  \n"):
+        with patch("deerflow_cli.cli.input", return_value="  hello  \n"):
             result = safe_input("> ")
         assert result == "  hello  "
 
     def test_handles_unicode_decode_error(self):
-        from cli.cli import safe_input
+        from deerflow_cli.cli import safe_input
 
         call_count = [0]
 
@@ -33,14 +33,14 @@ class TestSafeInput:
                 raise UnicodeDecodeError("utf-8", b"", 0, 1, "mock error")
             return "recovered"
 
-        with patch("cli.cli.input", side_effect=broken_input):
+        with patch("deerflow_cli.cli.input", side_effect=broken_input):
             result = safe_input("> ")
         assert result == "recovered"
 
     def test_handles_eof(self):
-        from cli.cli import safe_input
+        from deerflow_cli.cli import safe_input
 
-        with patch("cli.cli.input", side_effect=EOFError()):
+        with patch("deerflow_cli.cli.input", side_effect=EOFError()):
             result = safe_input("> ")
         assert result == ""
 
@@ -53,25 +53,25 @@ class TestMultiLineInput:
     """Multi-line input mode with !end sentinel."""
 
     def test_reads_until_end_sentinel(self):
-        from cli.cli import multi_line_input
+        from deerflow_cli.cli import multi_line_input
 
         lines = iter(["line1", "line2", "!end"])
 
-        with patch("cli.cli.input", side_effect=lambda: next(lines)):
+        with patch("deerflow_cli.cli.input", side_effect=lambda: next(lines)):
             result = multi_line_input("Enter:")
 
         assert result == "line1\nline2"
 
     def test_handles_eof(self):
-        from cli.cli import multi_line_input
+        from deerflow_cli.cli import multi_line_input
 
-        with patch("cli.cli.input", side_effect=EOFError()):
+        with patch("deerflow_cli.cli.input", side_effect=EOFError()):
             result = multi_line_input("Enter:")
 
         assert result == ""
 
     def test_handles_unicode_decode_error(self):
-        from cli.cli import multi_line_input
+        from deerflow_cli.cli import multi_line_input
 
         call_count = [0]
 
@@ -81,7 +81,7 @@ class TestMultiLineInput:
                 raise UnicodeDecodeError("utf-8", b"", 0, 1, "mock error")
             return "!end"
 
-        with patch("cli.cli.input", side_effect=broken_input):
+        with patch("deerflow_cli.cli.input", side_effect=broken_input):
             result = multi_line_input("Enter:")
 
         assert result == ""
@@ -97,7 +97,7 @@ class TestMainCommandDispatch:
     @pytest.fixture(autouse=True)
     def _reset_singleton(self):
         """Reset the engine singleton before each test."""
-        from engine import DeerFlowProductionEngine
+        from deerflow_cli.engine import DeerFlowProductionEngine
         DeerFlowProductionEngine._instance = None
         DeerFlowProductionEngine._initialized = False
         yield
@@ -117,11 +117,11 @@ class TestMainCommandDispatch:
             except StopIteration:
                 raise KeyboardInterrupt
 
-        with patch("cli.cli.DeerFlowProductionEngine", return_value=mock_engine), \
-             patch("cli.cli.safe_input", side_effect=mock_input), \
-             patch("cli.cli.multi_line_input", return_value="multi line content"):
+        with patch("deerflow_cli.cli.DeerFlowProductionEngine", return_value=mock_engine), \
+             patch("deerflow_cli.cli.safe_input", side_effect=mock_input), \
+             patch("deerflow_cli.cli.multi_line_input", return_value="multi line content"):
             try:
-                from cli.cli import main
+                from deerflow_cli.cli import main
                 main()
             except (KeyboardInterrupt, SystemExit):
                 pass
@@ -202,11 +202,11 @@ class TestMainCommandDispatch:
         engine = MagicMock()
         engine.current_session_id = "test1234"
 
-        with patch("cli.cli.DeerFlowProductionEngine", return_value=engine), \
-             patch("cli.cli.safe_input", side_effect=["!multi", KeyboardInterrupt]), \
-             patch("cli.cli.multi_line_input", return_value=""):
+        with patch("deerflow_cli.cli.DeerFlowProductionEngine", return_value=engine), \
+             patch("deerflow_cli.cli.safe_input", side_effect=["!multi", KeyboardInterrupt]), \
+             patch("deerflow_cli.cli.multi_line_input", return_value=""):
             try:
-                from cli.cli import main
+                from deerflow_cli.cli import main
                 main()
             except (KeyboardInterrupt, SystemExit):
                 pass
@@ -233,10 +233,10 @@ class TestMainCommandDispatch:
             return "new12345"
         engine.create_session.side_effect = _create
 
-        with patch("cli.cli.DeerFlowProductionEngine", return_value=engine), \
-             patch("cli.cli.safe_input", side_effect=["Hello", "!exit"]):
+        with patch("deerflow_cli.cli.DeerFlowProductionEngine", return_value=engine), \
+             patch("deerflow_cli.cli.safe_input", side_effect=["Hello", "!exit"]):
             try:
-                from cli.cli import main
+                from deerflow_cli.cli import main
                 main()
             except (KeyboardInterrupt, SystemExit):
                 pass
@@ -263,7 +263,7 @@ class TestMainNullSession:
 
     @pytest.fixture(autouse=True)
     def _reset_singleton(self):
-        from engine import DeerFlowProductionEngine
+        from deerflow_cli.engine import DeerFlowProductionEngine
         DeerFlowProductionEngine._instance = None
         DeerFlowProductionEngine._initialized = False
         yield
@@ -280,10 +280,10 @@ class TestMainNullSession:
             return "new12345"
         engine.create_session.side_effect = _create
 
-        with patch("cli.cli.DeerFlowProductionEngine", return_value=engine), \
-             patch("cli.cli.safe_input", side_effect=["!sessions", KeyboardInterrupt]):
+        with patch("deerflow_cli.cli.DeerFlowProductionEngine", return_value=engine), \
+             patch("deerflow_cli.cli.safe_input", side_effect=["!sessions", KeyboardInterrupt]):
             try:
-                from cli.cli import main
+                from deerflow_cli.cli import main
                 main()
             except (KeyboardInterrupt, SystemExit):
                 pass

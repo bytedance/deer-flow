@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from engine import (
+from deerflow_cli.engine import (
     SESSIONS_DIR,
     ARCHIVE_DIR,
     DeerFlowProductionEngine,
@@ -44,9 +44,9 @@ def _make_engine(mock_store, tmp_path: Path) -> DeerFlowProductionEngine:
     DeerFlowProductionEngine._instance = None
     DeerFlowProductionEngine._initialized = False
 
-    p_store = patch("engine.SessionStore", return_value=mock_store)
-    p_sessions = patch("engine.SESSIONS_DIR", tmp_path / "sessions")
-    p_archive = patch("engine.ARCHIVE_DIR", tmp_path / "archive")
+    p_store = patch("deerflow_cli.engine.SessionStore", return_value=mock_store)
+    p_sessions = patch("deerflow_cli.engine.SESSIONS_DIR", tmp_path / "sessions")
+    p_archive = patch("deerflow_cli.engine.ARCHIVE_DIR", tmp_path / "archive")
 
     p_store.start()
     p_sessions.start()

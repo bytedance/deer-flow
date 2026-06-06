@@ -9,7 +9,8 @@ License: MIT
 """
 
 import sys
-from engine import DeerFlowProductionEngine
+
+from .engine import DeerFlowProductionEngine
 
 
 def safe_input(prompt):

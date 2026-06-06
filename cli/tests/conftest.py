@@ -10,8 +10,11 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Make 'cli' package importable from any working directory
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Make the project directory importable so `from deerflow_cli.engine import ...`
+# resolves to cli/deerflow_cli/engine.py regardless of where pytest is launched from.
+_project_dir = str(Path(__file__).resolve().parent.parent)
+if _project_dir not in sys.path:
+    sys.path.insert(0, _project_dir)
 
 # ---------------------------------------------------------------------------
 # Pre-mock DeerFlowClient — each constructor call returns a fresh mock so

@@ -31,7 +31,6 @@ Author: heart-scalpel
 License: MIT
 """
 
-import os
 import time
 import re
 import uuid
@@ -39,7 +38,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from deerflow.client import DeerFlowClient
-from session_store import SessionStore
+from .session_store import SessionStore
 
 # Configuration constants
 WORK_DIR = Path("./.deer-flow")

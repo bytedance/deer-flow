@@ -95,10 +95,10 @@ class SessionStore:
     def save_async(self, session_id: str):
         """
         Queue a session for asynchronous saving to disk.
-        
+
         Multiple rapid calls to save_async for the same session will be
         coalesced into a single write operation.
-        
+
         Args:
             session_id: ID of the session to save
         """
