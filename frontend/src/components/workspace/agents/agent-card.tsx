@@ -52,7 +52,7 @@ function TruncatedTooltip({
 }) {
   const [truncated, setTruncated] = useState(false);
   return (
-    <Tooltip delayDuration={500}>
+    <Tooltip>
       <TooltipTrigger
         asChild
         onPointerEnter={(e) => {
