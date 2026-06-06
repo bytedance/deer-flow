@@ -30,21 +30,28 @@ class TestGetTiktokenEncoding:
         monkeypatch.setattr("deerflow.agents.memory.prompt.TIKTOKEN_AVAILABLE", False)
         assert _get_tiktoken_encoding("cl100k_base") is None
 
-    def test_returns_encoding_on_success(self):
+    def test_returns_encoding_on_success(self, monkeypatch):
         # Clear cache to ensure a fresh call
         _tiktoken_encoding_cache.pop("cl100k_base", None)
-        enc = _get_tiktoken_encoding("cl100k_base")
-        assert enc is not None
 
-    def test_populates_cache_on_success(self):
+        fake_enc = mock.Mock()
+        monkeypatch.setattr("deerflow.agents.memory.prompt.tiktoken.get_encoding", mock.Mock(return_value=fake_enc))
+
+        enc = _get_tiktoken_encoding("cl100k_base")
+        assert enc is fake_enc
+
+    def test_populates_cache_on_success(self, monkeypatch):
         _tiktoken_encoding_cache.pop("cl100k_base", None)
+
+        fake_enc = mock.Mock()
+        monkeypatch.setattr("deerflow.agents.memory.prompt.tiktoken.get_encoding", mock.Mock(return_value=fake_enc))
+
         _get_tiktoken_encoding("cl100k_base")
-        assert "cl100k_base" in _tiktoken_encoding_cache
+        assert _tiktoken_encoding_cache["cl100k_base"] is fake_enc
 
     def test_returns_cached_encoding_without_calling_get_encoding(self, monkeypatch):
-        # Ensure cache is populated
-        _tiktoken_encoding_cache.pop("cl100k_base", None)
-        _get_tiktoken_encoding("cl100k_base")
+        fake_enc = mock.Mock()
+        monkeypatch.setitem(_tiktoken_encoding_cache, "cl100k_base", fake_enc)
 
         # Now patch tiktoken.get_encoding to raise if called
         import tiktoken
@@ -52,7 +59,7 @@ class TestGetTiktokenEncoding:
         monkeypatch.setattr(tiktoken, "get_encoding", mock.Mock(side_effect=RuntimeError("should not be called")))
         # Cached path — should NOT call get_encoding
         enc = _get_tiktoken_encoding("cl100k_base")
-        assert enc is not None
+        assert enc is fake_enc
         tiktoken.get_encoding.assert_not_called()
 
     def test_returns_none_and_warns_on_get_encoding_failure(self, monkeypatch):
@@ -88,15 +95,14 @@ class TestCountTokens:
         result = _count_tokens(text)
         assert result == len(text) // 4
 
-    def test_returns_token_count_on_success(self):
-        # ENSURE cache is warm (encoding downloaded in test environment)
-        _get_tiktoken_encoding("cl100k_base")
+    def test_returns_token_count_on_success(self, monkeypatch):
+        fake_enc = mock.Mock()
+        fake_enc.encode.return_value = [0, 1, 2, 3]
+        monkeypatch.setattr("deerflow.agents.memory.prompt._get_tiktoken_encoding", mock.Mock(return_value=fake_enc))
+
         text = "Hello, world!"
         result = _count_tokens(text)
-        # tiktoken's cl100k_base tokenises "Hello, world!" as 4 tokens
-        assert isinstance(result, int)
-        assert result > 0
-        # Character estimate is a loose upper bound
+        assert result == 4
         assert result <= len(text)
 
     def test_falls_back_on_encode_exception(self, monkeypatch):
@@ -118,15 +124,24 @@ class TestCountTokens:
 class TestWarmTiktokenCache:
     """Tests for warm_tiktoken_cache startup helper."""
 
-    def test_returns_true_on_success(self):
+    def test_returns_true_on_success(self, monkeypatch):
         _tiktoken_encoding_cache.pop("cl100k_base", None)
-        assert warm_tiktoken_cache() is True
-        assert "cl100k_base" in _tiktoken_encoding_cache
 
-    def test_returns_true_if_already_cached(self):
-        # Ensure cached
-        _get_tiktoken_encoding("cl100k_base")
+        fake_enc = mock.Mock()
+        monkeypatch.setattr("deerflow.agents.memory.prompt.tiktoken.get_encoding", mock.Mock(return_value=fake_enc))
+
         assert warm_tiktoken_cache() is True
+        assert _tiktoken_encoding_cache["cl100k_base"] is fake_enc
+
+    def test_returns_true_if_already_cached(self, monkeypatch):
+        fake_enc = mock.Mock()
+        monkeypatch.setitem(_tiktoken_encoding_cache, "cl100k_base", fake_enc)
+
+        import tiktoken
+
+        monkeypatch.setattr(tiktoken, "get_encoding", mock.Mock(side_effect=RuntimeError("should not be called")))
+        assert warm_tiktoken_cache() is True
+        tiktoken.get_encoding.assert_not_called()
 
     def test_returns_false_when_tiktoken_unavailable(self, monkeypatch):
         monkeypatch.setattr("deerflow.agents.memory.prompt.TIKTOKEN_AVAILABLE", False)

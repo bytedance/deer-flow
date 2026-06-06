@@ -185,11 +185,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from deerflow.agents.memory.prompt import warm_tiktoken_cache
 
-        warmed = await asyncio.to_thread(warm_tiktoken_cache)
+        warmed = await asyncio.wait_for(
+            asyncio.to_thread(warm_tiktoken_cache),
+            timeout=5,
+        )
         if warmed:
             logger.info("tiktoken encoding cache warmed successfully")
         else:
             logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback")
+    except asyncio.TimeoutError:
+        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback")
     except Exception:
         logger.warning("tiktoken warm-up skipped", exc_info=True)
 
