@@ -259,6 +259,28 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert events[-1]["result"] == "all done"
 
 
+def test_subagent_diagnostics_returns_decoupled_snapshot():
+    """The diagnostics emitted into a task event must be decoupled from the live dict
+    the background subagent thread keeps mutating (executor bumps ``tool_call_count``
+    and appends to ``recent_tools``). Sharing the reference risks a torn read or
+    ``list changed size during iteration`` when the event is serialized for SSE or
+    persisted by the run journal.
+    """
+    from deerflow.tools.builtins.task_tool import _subagent_diagnostics
+
+    live = {"tool_call_count": 1, "recent_tools": ["read_file"]}
+    snapshot = _subagent_diagnostics(SimpleNamespace(diagnostics=live))
+    assert snapshot == live
+
+    # Mutations the background thread performs after the snapshot is taken must not
+    # leak into the already-emitted event.
+    live["tool_call_count"] = 2
+    live["recent_tools"].append("bash")
+
+    assert snapshot["tool_call_count"] == 1
+    assert snapshot["recent_tools"] == ["read_file"]
+
+
 def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     """Verify tool_groups from parent metadata are passed to get_available_tools(groups=...)."""
     config = _make_subagent_config()

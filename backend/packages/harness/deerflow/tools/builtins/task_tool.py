@@ -143,8 +143,18 @@ def _summarize_usage(records: list[dict] | None) -> dict | None:
 
 
 def _subagent_diagnostics(result: Any) -> dict:
+    # Return a decoupled snapshot: the background subagent thread keeps mutating the
+    # live ``diagnostics`` dict (tool_call_count, recent_tools) while this event is
+    # serialized for SSE and persisted by the run journal. A shared reference risks a
+    # torn read / "list changed size during iteration".
     diagnostics = getattr(result, "diagnostics", None)
-    return diagnostics if isinstance(diagnostics, dict) else {}
+    if not isinstance(diagnostics, dict):
+        return {}
+    snapshot = dict(diagnostics)
+    recent_tools = snapshot.get("recent_tools")
+    if isinstance(recent_tools, list):
+        snapshot["recent_tools"] = list(recent_tools)
+    return snapshot
 
 
 def _initial_subagent_diagnostics(config: Any) -> dict:
