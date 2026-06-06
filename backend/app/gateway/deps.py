@@ -36,8 +36,12 @@ logger = logging.getLogger(__name__)
 
 # Upper bound (seconds) for draining in-flight runs during shutdown, before the
 # AsyncExitStack tears down the checkpointer (and its connection pool). Kept
-# local to avoid an app -> deps -> app import cycle; mirrors the intent of
-# ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``.
+# local to avoid an app -> deps -> app import cycle. This is a *separate* budget
+# from ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS`` (currently also 5.0s,
+# which bounds channel-service stop): the two govern independent teardown steps
+# and may diverge, but both count toward the lifespan shutdown window — revisit
+# them together if their sum must stay within the server's graceful-shutdown
+# timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
 

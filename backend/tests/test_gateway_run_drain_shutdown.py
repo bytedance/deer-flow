@@ -315,3 +315,39 @@ async def test_shutdown_preserves_status_of_run_completed_during_drain():
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
+    """A failed interrupted-status persist during the drain must be surfaced (with
+    the run_id), not silently swallowed by the gather (maintainer review on
+    PR #3381)."""
+    import logging
+
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _FailingStore(MemoryRunStore):
+        async def update_status(self, *args, **kwargs):
+            raise RuntimeError("store unavailable")
+
+    rm = RunManager(store=_FailingStore())
+    record = await rm.create("t-failpersist")
+    record.status = RunStatus.running  # set in memory; the failing store is exercised by the drain
+
+    started = asyncio.Event()
+
+    async def worker() -> None:
+        started.set()
+        await asyncio.Event().wait()  # blocks until cancelled by the drain
+
+    record.task = asyncio.create_task(worker())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.runs.manager"):
+            await rm.shutdown(timeout=5.0)
+        assert "Could not persist interrupted status for run" in caplog.text, caplog.text
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await record.task

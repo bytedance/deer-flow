@@ -716,12 +716,22 @@ class RunManager:
                 logger.warning("Run drain budget exhausted before persisting %d interrupted run(s) on shutdown", len(to_persist))
             else:
                 try:
-                    await asyncio.wait_for(
+                    results = await asyncio.wait_for(
                         asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
                         timeout=remaining,
                     )
                 except TimeoutError:
                     logger.warning("Run drain status persistence exceeded the %.1fs budget; %d record(s) may not be persisted", timeout, len(to_persist))
+                else:
+                    # ``_persist_status`` is best-effort: it catches and logs its
+                    # own failures, returning ``False``. Inspect the aggregate so a
+                    # partial failure is surfaced at shutdown level (with the
+                    # run_id) instead of being silently swallowed by the gather.
+                    for record, result in zip(to_persist, results):
+                        if isinstance(result, Exception):
+                            logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
+                        elif result is False:
+                            logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
 
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
