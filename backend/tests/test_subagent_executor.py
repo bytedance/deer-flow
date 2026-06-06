@@ -287,6 +287,7 @@ class TestAgentConstruction:
             "app_config": app_config,
             "model_name": "parent-model",
             "lazy_init": True,
+            "max_turns": 10,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
