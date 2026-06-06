@@ -2,7 +2,9 @@
 
 import sys
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +18,7 @@ from deerflow.config.checkpointer_config import (
 )
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
+from deerflow.runtime.store import get_store, reset_store
 from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
 
 
@@ -25,10 +28,64 @@ def reset_state():
     app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
+    reset_store()
     yield
     app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
+    reset_store()
+
+
+class _BlockingSingletonContext:
+    def __init__(self, value: object, entered: Event, release: Event, stats: dict[str, object]):
+        self._value = value
+        self._entered = entered
+        self._release = release
+        self._stats = stats
+
+    def __enter__(self):
+        with self._stats["lock"]:
+            self._stats["enters"] += 1
+            self._entered.set()
+        assert self._release.wait(timeout=3), "timed out waiting to release singleton initialization"
+        return self._value
+
+    def __exit__(self, exc_type, exc, tb):
+        with self._stats["lock"]:
+            self._stats["exits"] += 1
+        return False
+
+
+class _BlockingSingletonFactory:
+    def __init__(self):
+        self.value = object()
+        self.entered = Event()
+        self.release = Event()
+        self.stats = {"enters": 0, "exits": 0, "lock": Lock()}
+
+    def context_manager(self, _config):
+        return _BlockingSingletonContext(self.value, self.entered, self.release, self.stats)
+
+    def enter_count(self) -> int:
+        with self.stats["lock"]:
+            return self.stats["enters"]
+
+    def exit_count(self) -> int:
+        with self.stats["lock"]:
+            return self.stats["exits"]
+
+
+def _call_getter_concurrently(getter, workers: int = 8) -> list[object]:
+    ready = Barrier(workers + 1)
+
+    def worker():
+        ready.wait(timeout=3)
+        return getter()
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(worker) for _ in range(workers)]
+        ready.wait(timeout=3)
+        return [future.result(timeout=3) for future in futures]
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +342,104 @@ class TestGetCheckpointer:
         assert cp is mock_saver_instance
         mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
+
+
+class TestSyncSingletonThreadSafety:
+    def test_concurrent_checkpointer_getter_creates_one_instance(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", side_effect=factory.context_manager):
+            futures_started = ThreadPoolExecutor(max_workers=1)
+            try:
+                result_future = futures_started.submit(_call_getter_concurrently, get_checkpointer)
+                assert factory.entered.wait(timeout=3)
+                factory.release.wait(timeout=0.05)
+                factory.release.set()
+                results = result_future.result(timeout=3)
+            finally:
+                futures_started.shutdown(wait=True)
+
+        assert all(result is factory.value for result in results)
+        assert factory.enter_count() == 1
+
+    def test_concurrent_store_getter_creates_one_instance(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with patch("deerflow.runtime.store.provider._sync_store_cm", side_effect=factory.context_manager):
+            futures_started = ThreadPoolExecutor(max_workers=1)
+            try:
+                result_future = futures_started.submit(_call_getter_concurrently, get_store)
+                assert factory.entered.wait(timeout=3)
+                factory.release.wait(timeout=0.05)
+                factory.release.set()
+                results = result_future.result(timeout=3)
+            finally:
+                futures_started.shutdown(wait=True)
+
+        assert all(result is factory.value for result in results)
+        assert factory.enter_count() == 1
+
+    def test_checkpointer_reset_waits_for_initialization(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", side_effect=factory.context_manager),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            get_future = executor.submit(get_checkpointer)
+            assert factory.entered.wait(timeout=3)
+
+            reset_started = Event()
+
+            def reset_worker():
+                reset_started.set()
+                reset_checkpointer()
+
+            reset_future = executor.submit(reset_worker)
+            assert reset_started.wait(timeout=3)
+            factory.release.wait(timeout=0.05)
+
+            assert not reset_future.done()
+            assert factory.exit_count() == 0
+
+            factory.release.set()
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
+
+        assert factory.exit_count() == 1
+
+    def test_store_reset_waits_for_initialization(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with (
+            patch("deerflow.runtime.store.provider._sync_store_cm", side_effect=factory.context_manager),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            get_future = executor.submit(get_store)
+            assert factory.entered.wait(timeout=3)
+
+            reset_started = Event()
+
+            def reset_worker():
+                reset_started.set()
+                reset_store()
+
+            reset_future = executor.submit(reset_worker)
+            assert reset_started.wait(timeout=3)
+            factory.release.wait(timeout=0.05)
+
+            assert not reset_future.done()
+            assert factory.exit_count() == 0
+
+            factory.release.set()
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
+
+        assert factory.exit_count() == 1
 
 
 class TestAsyncCheckpointer:

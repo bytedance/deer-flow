@@ -101,7 +101,7 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
 
 _store: BaseStore | None = None
 _store_ctx = None  # open context manager keeping the connection alive
-_store_lock = threading.Lock()
+_store_lock = threading.RLock()
 
 
 def get_store() -> BaseStore:
@@ -123,6 +123,8 @@ def get_store() -> BaseStore:
         if _store is not None:
             return _store
 
+        # Lazily load app config, mirroring the checkpointer singleton pattern so
+        # that tests that set the global checkpointer config explicitly remain isolated.
         from deerflow.config.app_config import _app_config
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
@@ -142,10 +144,11 @@ def get_store() -> BaseStore:
             _store = InMemoryStore()
             return _store
 
-        _store_ctx = _sync_store_cm(config)
-        _store = _store_ctx.__enter__()
-        return _store
-
+        store_ctx = _sync_store_cm(config)
+        store = store_ctx.__enter__()
+        _store_ctx = store_ctx
+        _store = store
+    return _store
 
 def reset_store() -> None:
     """Reset the sync singleton, forcing recreation on the next call.

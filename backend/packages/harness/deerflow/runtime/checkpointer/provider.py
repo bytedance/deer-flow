@@ -101,7 +101,7 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 
 _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
-_checkpointer_lock = threading.Lock()
+_checkpointer_lock = threading.RLock()
 
 
 def get_checkpointer() -> Checkpointer:
@@ -122,15 +122,23 @@ def get_checkpointer() -> Checkpointer:
         if _checkpointer is not None:
             return _checkpointer
 
+        # Ensure app config is loaded before checking checkpointer config
+        # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
+        # but hasn't been loaded yet
         from deerflow.config.app_config import _app_config
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         config = get_checkpointer_config()
 
         if config is None and _app_config is None:
+            # Only load app config lazily when neither the app config nor an explicit
+            # checkpointer config has been initialized yet. This keeps tests that
+            # intentionally set the global checkpointer config isolated from any
+            # ambient config.yaml on disk.
             try:
                 get_app_config()
             except FileNotFoundError:
+                # In test environments without config.yaml, this is expected.
                 pass
             config = get_checkpointer_config()
         if config is None:
@@ -140,11 +148,12 @@ def get_checkpointer() -> Checkpointer:
             _checkpointer = InMemorySaver()
             return _checkpointer
 
-        _checkpointer_ctx = _sync_checkpointer_cm(config)
-        _checkpointer = _checkpointer_ctx.__enter__()
+        checkpointer_ctx = _sync_checkpointer_cm(config)
+        checkpointer = checkpointer_ctx.__enter__()
+        _checkpointer_ctx = checkpointer_ctx
+        _checkpointer = checkpointer
 
-        return _checkpointer
-
+    return _checkpointer
 
 def reset_checkpointer() -> None:
     """Reset the sync singleton, forcing recreation on the next call.
