@@ -436,6 +436,9 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
+    # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
+    # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
+    # safesearch: moderate   # on, moderate, off
 
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
   # Serper provides real-time Google Search results. Sign up at https://serper.dev
