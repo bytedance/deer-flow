@@ -32,6 +32,7 @@ from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.redaction_middleware import RedactionMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
@@ -310,6 +311,9 @@ def _build_middlewares(
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
+
+    # Add RedactionMiddleware before Title and Memory to ensure they only see safe text
+    middlewares.append(RedactionMiddleware())
 
     # Add TokenUsageMiddleware when token_usage tracking is enabled
     if resolved_app_config.token_usage.enabled:
