@@ -12,10 +12,45 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
+from deerflow.subagents.status_contract import (
+    extract_subagent_status,
+    make_subagent_additional_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
+_TASK_TOOL_NAME = "task"
+
+
+def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: str | None = None) -> ToolMessage:
+    """Centralised stamping of ``additional_kwargs.subagent_status``.
+
+    Bytedance/deer-flow issue #3146: the frontend now reads the subagent
+    status from a structured field instead of parsing the leading text of
+    the task tool's return string. That contract is enforced here, in the
+    one place every task tool result flows through, rather than at the 5
+    normal-return + 3 ``Error:`` pre-execution branches inside
+    ``task_tool.py``. Centralisation prevents the "added a new return
+    path, forgot the stamp" drift mode.
+
+    For non-``task`` tools this is a no-op so other tools' additional_kwargs
+    conventions are untouched.
+    """
+    if tool_name != _TASK_TOOL_NAME:
+        return message
+    content = message.content if isinstance(message.content, str) else ""
+    status = extract_subagent_status(content)
+    if status is None:
+        # Non-terminal streaming chunks or unrecognised shapes leave the
+        # field unset so the frontend can keep the card on its in-progress
+        # placeholder until a real terminal frame arrives.
+        return message
+    stamp = make_subagent_additional_kwargs(status, error=error)
+    existing = dict(message.additional_kwargs or {})
+    existing.update(stamp)
+    message.additional_kwargs = existing
+    return message
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -29,12 +64,31 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             detail = detail[:497] + "..."
 
         content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
-        return ToolMessage(
+        message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
         )
+        # Stamp the structured subagent status on the wrapper too: the
+        # frontend would otherwise have to fall back to prefix-matching
+        # ``Error: Tool 'task' failed ...`` on the wire. The ``subagent_error``
+        # carries the same ``ExcClass: detail`` shape the wrapper string
+        # uses so debugging artifacts stay aligned.
+        structured_error = f"{exc.__class__.__name__}: {detail}"
+        return _stamp_task_subagent_status(message, tool_name=tool_name, error=structured_error)
+
+    @staticmethod
+    def _maybe_stamp(result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+        """Apply the subagent stamp to successful task tool returns.
+
+        ``Command`` results bypass the stamp — they encode LangGraph
+        control flow rather than user-facing tool output.
+        """
+        if not isinstance(result, ToolMessage):
+            return result
+        tool_name = str(request.tool_call.get("name") or "")
+        return _stamp_task_subagent_status(result, tool_name=tool_name)
 
     @override
     def wrap_tool_call(
@@ -43,13 +97,14 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         try:
-            return handler(request)
+            result = handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
+        return self._maybe_stamp(result, request)
 
     @override
     async def awrap_tool_call(
@@ -58,13 +113,14 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         try:
-            return await handler(request)
+            result = await handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
+        return self._maybe_stamp(result, request)
 
 
 def _build_runtime_middlewares(
