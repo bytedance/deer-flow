@@ -152,9 +152,7 @@ def reset_mcp_tools_cache() -> None:
     #   * idle/closed loops are handled or skipped.
     # We deliberately do NOT try to synchronously wait for the current running
     # loop to finish teardown here: that is a self-deadlock (the loop can only
-    # run the teardown after this synchronous call returns control to it). When
-    # an async caller needs deterministic teardown, use
-    # ``reset_mcp_tools_cache_async()`` instead.
+    # run the teardown after this synchronous call returns control to it).
     try:
         from deerflow.mcp.session_pool import get_session_pool
 
@@ -166,30 +164,3 @@ def reset_mcp_tools_cache() -> None:
 
     reset_session_pool()
     logger.info("MCP tools cache reset")
-
-
-async def reset_mcp_tools_cache_async() -> None:
-    """Reset the MCP tools cache with deterministic session teardown.
-
-    Unlike :func:`reset_mcp_tools_cache`, this awaits ``close_all()`` directly
-    on the current event loop, so sessions owned by this loop are fully torn
-    down (their ``__aexit__`` has run) before this coroutine returns. Because it
-    awaits rather than blocks, there is no self-deadlock. Use this from inside a
-    running loop when you need the old sessions gone before recreating them.
-    """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
-    _mcp_tools_cache = None
-    _cache_initialized = False
-    _config_mtime = None
-
-    try:
-        from deerflow.mcp.session_pool import get_session_pool
-
-        await get_session_pool().close_all()
-    except Exception:
-        logger.debug("Could not close MCP session pool on async cache reset", exc_info=True)
-
-    from deerflow.mcp.session_pool import reset_session_pool
-
-    reset_session_pool()
-    logger.info("MCP tools cache reset (async)")

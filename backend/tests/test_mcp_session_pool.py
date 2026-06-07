@@ -643,9 +643,7 @@ class _CancelScopeCm:
 
     async def __aexit__(self, *args):
         if asyncio.current_task() is not self.enter_task:
-            raise RuntimeError(
-                "Attempted to exit cancel scope in a different task than it was entered in"
-            )
+            raise RuntimeError("Attempted to exit cancel scope in a different task than it was entered in")
         self.closed = True
         return False
 
@@ -774,9 +772,7 @@ def test_get_session_replaces_session_from_closed_loop():
 
         # Now request the same key from a fresh loop: the stale entry (closed
         # loop) must be evicted and replaced with a fresh session.
-        session = asyncio.run(
-            pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []})
-        )
+        session = asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
 
     assert session is not None
     assert len(cms) == 2
@@ -827,9 +823,7 @@ async def test_get_session_cancelled_while_initializing_does_not_leak():
         return cm
 
     with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
-        call = asyncio.create_task(
-            pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []})
-        )
+        call = asyncio.create_task(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
         # Let the owner task enter the CM and reach the blocking initialize().
         await asyncio.sleep(0.01)
         call.cancel()
@@ -850,11 +844,7 @@ async def test_get_session_cancelled_while_initializing_does_not_leak():
     assert len(pool._entries) == 0
 
     current = asyncio.current_task()
-    leaked = [
-        t
-        for t in asyncio.all_tasks()
-        if t is not current and not t.done() and "_run_session" in str(t.get_coro())
-    ]
+    leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
     assert not leaked, "owner task must not be left pending after cancellation"
 
 
@@ -983,11 +973,7 @@ async def test_close_all_during_in_flight_creation_does_not_resurrect_session():
     assert cms[0].closed is True, "in-flight session's __aexit__ must run on teardown"
 
     current = asyncio.current_task()
-    leaked = [
-        t
-        for t in asyncio.all_tasks()
-        if t is not current and not t.done() and "_run_session" in str(t.get_coro())
-    ]
+    leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
     assert not leaked, "in-flight owner task must not leak after close_all"
 
 
@@ -1107,9 +1093,7 @@ def test_cross_loop_preempting_blocked_in_flight_does_not_hang_owner():
         assert not ta.is_alive(), "preempted owner A must not hang forever"
 
     assert [n for n, _ in results] == ["B"], "only B produces a usable session"
-    assert any(isinstance(e, asyncio.CancelledError) for _, e in errors), (
-        "preempted A must unwind via CancelledError"
-    )
+    assert any(isinstance(e, asyncio.CancelledError) for _, e in errors), "preempted A must unwind via CancelledError"
     assert "blocking" in closed, "preempted owner's __aexit__ must run on teardown"
 
 
@@ -1125,23 +1109,6 @@ async def test_close_all_sync_from_running_loop_does_not_wait_on_itself():
     pool = MCPSessionPool()
     pool.SESSION_CLOSE_TIMEOUT = 0.2
     conn = {"transport": "stdio", "command": "x", "args": []}
-
-    class _CloseTrackingCm:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def __aenter__(self):
-            session = MagicMock()
-
-            async def init():
-                return None
-
-            session.initialize = init
-            return session
-
-        async def __aexit__(self, *args):
-            self.closed = True
-            return False
 
     cm = _CloseTrackingCm()
 
@@ -1231,20 +1198,3 @@ def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
 
     assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
     assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
-
-
-@pytest.mark.asyncio
-async def test_reset_mcp_tools_cache_async_closes_sessions_deterministically():
-    """The async reset entry awaits close_all() on the current loop, so sessions
-    owned by this loop are fully torn down before it returns (#3392).
-    """
-    from deerflow.mcp.cache import reset_mcp_tools_cache_async
-    from deerflow.mcp.session_pool import get_session_pool
-
-    conn = {"transport": "stdio", "command": "x", "args": []}
-    cm = _CloseTrackingCm()
-    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
-        pool = get_session_pool()
-        await pool.get_session("s", "t1", conn)
-        await reset_mcp_tools_cache_async()
-        assert cm.closed is True, "async reset must close the session before returning"

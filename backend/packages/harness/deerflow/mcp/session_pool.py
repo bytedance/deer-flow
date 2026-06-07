@@ -152,9 +152,7 @@ class MCPSessionPool:
         # Each item: (loop, owner_task, close_event, cancel). ``cancel`` is True
         # for in-flight creations, whose owner may be blocked inside
         # ``initialize()`` where close_evt cannot wake it — it must be cancelled.
-        evicted: list[
-            tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool]
-        ] = []
+        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool]] = []
         join: asyncio.Future[ClientSession] | None = None
         ready: asyncio.Future[ClientSession] | None = None
         close_evt: asyncio.Event | None = None
@@ -234,9 +232,7 @@ class MCPSessionPool:
             #
             # The session is never registered yet, so nobody else can close it;
             # waiting here guarantees we never leak a session or owner task.
-            owner_already_failed = (
-                ready.done() and not ready.cancelled() and ready.exception() is not None
-            )
+            owner_already_failed = ready.done() and not ready.cancelled() and ready.exception() is not None
             if not owner_already_failed:
                 close_evt.set()
                 task.cancel()
@@ -262,9 +258,7 @@ class MCPSessionPool:
                 self._entries[key] = (session, current_loop, task, close_evt)
         if not still_ours:
             await self._shutdown(close_evt, task)
-            raise asyncio.CancelledError(
-                "MCP session pool was closed while the session was being created"
-            )
+            raise asyncio.CancelledError("MCP session pool was closed while the session was being created")
         logger.info("Created persistent MCP session for %s/%s", server_name, scope_key)
         return session
 
@@ -322,9 +316,7 @@ class MCPSessionPool:
         if loop is current_loop:
             await self._shutdown(close_evt, task, cancel)
         elif loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._shutdown(close_evt, task, cancel), loop
-            )
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel), loop)
             try:
                 await asyncio.wrap_future(future)
             except Exception:
@@ -339,9 +331,7 @@ class MCPSessionPool:
             # is running) or a short-lived asyncio.run loop (which is closed and
             # caught above). Fall back to a best-effort thread-safe signal so the
             # owner task tears down if/when its loop runs again.
-            logger.debug(
-                "Owning loop for MCP session is idle; signalling close best-effort"
-            )
+            logger.warning("Owning loop for MCP session is idle; signalling close best-effort. Session may leak until the loop runs again.")
             self._signal_close(loop, close_evt)
             if cancel:
                 try:
@@ -433,9 +423,7 @@ class MCPSessionPool:
                         task.cancel()
                 elif loop.is_running():
                     # Schedule the shutdown on the owning loop from this thread.
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._shutdown(close_evt, task, cancel), loop
-                    )
+                    future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel), loop)
                     future.result(timeout=self.SESSION_CLOSE_TIMEOUT)
                 else:
                     loop.run_until_complete(self._shutdown(close_evt, task, cancel))

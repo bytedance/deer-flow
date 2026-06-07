@@ -4,7 +4,6 @@ from .cache import (
     get_cached_mcp_tools,
     initialize_mcp_tools,
     reset_mcp_tools_cache,
-    reset_mcp_tools_cache_async,
 )
 from .client import build_server_params, build_servers_config
 from .tools import get_mcp_tools
@@ -16,5 +15,4 @@ __all__ = [
     "initialize_mcp_tools",
     "get_cached_mcp_tools",
     "reset_mcp_tools_cache",
-    "reset_mcp_tools_cache_async",
 ]
