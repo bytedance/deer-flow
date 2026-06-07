@@ -119,6 +119,16 @@ def get_config() -> AppConfig:
     split-brain where the worker / lead-agent thread saw a stale startup
     snapshot.
 
+    Hot-reload boundary: fields backed by startup-time singletons
+    (engines, sandbox provider, IM channels, logging handler) require a
+    process restart to change at runtime. The authoritative list lives in
+    :mod:`deerflow.config.reload_boundary` and is mirrored by the
+    standardised ``"startup-only:"`` prefix on the matching
+    ``Field(description=...)`` in :class:`AppConfig` — IDE hover on those
+    fields will surface the boundary inline. See
+    ``backend/CLAUDE.md`` "Config Hot-Reload Boundary" for the operator
+    summary.
+
     Any failure to materialise the config (missing file, permission denied,
     YAML parse error, validation error) is reported as 503 — semantically
     "the gateway cannot serve requests without a usable configuration" — and
