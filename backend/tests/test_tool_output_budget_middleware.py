@@ -121,11 +121,17 @@ class TestExternalize:
                 assert f.read() == "full content here"
 
     def test_returns_none_on_invalid_path(self):
+        # ``/dev/null`` is a character device on both Linux and macOS, so
+        # ``os.makedirs`` cannot create any subdirectory under it for any
+        # user (including root). The previously-used ``/nonexistent/...``
+        # path was silently created by ``mkdir -p`` when the test process
+        # ran as root inside the CI container, which made this test fail
+        # in CI independently of the externalization logic under test.
         path = _externalize(
             "data",
             tool_name="test",
             tool_call_id="tc-1",
-            outputs_path="/nonexistent/path/that/should/not/exist",
+            outputs_path="/dev/null/cannot-mkdir-here",
             storage_subdir=".tool-results",
         )
         assert path is None
@@ -370,7 +376,7 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/nonexistent/impossible/path")
+        req = _make_request(outputs_path="/dev/null/cannot-mkdir-here")
 
         result = mw.wrap_tool_call(req, lambda _: msg)
 
