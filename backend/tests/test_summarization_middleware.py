@@ -9,6 +9,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware
@@ -176,18 +177,18 @@ def test_summary_model_is_tagged_nostream_to_avoid_stream_pollution() -> None:
         token_counter=len,
     )
 
-    # The dedicated summary model must carry the "nostream" tag so LangGraph's
+    # The dedicated summary model must carry TAG_NOSTREAM so LangGraph's
     # messages-tuple stream handler skips its tokens, while the raw model used by
     # the parent for profile / token inspection stays untagged.
-    assert "nostream" in (middleware._summary_model.config.get("tags") or [])
-    assert "nostream" not in (getattr(middleware.model, "config", {}).get("tags") or [])
+    assert TAG_NOSTREAM in (middleware._summary_model.config.get("tags") or [])
+    assert TAG_NOSTREAM not in (getattr(middleware.model, "config", {}).get("tags") or [])
 
     result = middleware.before_model({"messages": _messages()}, _runtime())
 
     # The summary LLM call must actually run with the nostream tag (this is what the
     # stream handler inspects), and the shared self.model must remain the raw,
     # untagged model so parent logic (profile / _get_ls_params) keeps working.
-    assert tags_during_summary == [["nostream"]]
+    assert tags_during_summary == [[TAG_NOSTREAM]]
     assert middleware.model is model
     assert result["messages"][1].content.startswith("Here is a summary")
 
@@ -203,11 +204,13 @@ def test_summarization_does_not_mutate_shared_model_across_concurrent_runs() -> 
     import asyncio
 
     observed_models: list[object] = []
+    started = asyncio.Event()
     release = asyncio.Event()
 
     class _BlockingChatModel(_StaticChatModel):
         async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
             # Hold the summary call open so a concurrent run can inspect self.model.
+            started.set()
             await release.wait()
             return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -221,8 +224,8 @@ def test_summarization_does_not_mutate_shared_model_across_concurrent_runs() -> 
 
     async def _run() -> None:
         summarizing = asyncio.create_task(middleware.abefore_model({"messages": _messages()}, _runtime()))
-        # Let the summary task reach the (blocked) LLM call.
-        await asyncio.sleep(0)
+        # Wait until the summary task reaches the blocked LLM call.
+        await started.wait()
         # A concurrent run reads the shared model while summarization is in flight.
         observed_models.append(middleware.model)
         release.set()
@@ -251,11 +254,11 @@ def test_raw_model_is_preserved_for_parent_profile_inspection() -> None:
 
 
 def test_summary_model_preserves_existing_tags_when_adding_nostream() -> None:
-    """Adding "nostream" must not clobber tags already bound on the model.
+    """Adding TAG_NOSTREAM must not clobber tags already bound on the model.
 
     lead_agent/agent.py binds "middleware:summarize" for RunJournal attribution. Because
     RunnableBinding.with_config shallow-merges config, the summary model must explicitly
-    preserve existing tags instead of overwriting them with just ["nostream"].
+    preserve existing tags instead of overwriting them with just [TAG_NOSTREAM].
     """
     tagged_model = _StaticChatModel(text="compressed summary").with_config(tags=["middleware:summarize"])
     middleware = DeerFlowSummarizationMiddleware(
@@ -267,9 +270,9 @@ def test_summary_model_preserves_existing_tags_when_adding_nostream() -> None:
 
     summary_tags = middleware._summary_model.config.get("tags") or []
     assert "middleware:summarize" in summary_tags
-    assert "nostream" in summary_tags
-    # No duplicate "nostream" even if invoked when one was already present.
-    assert summary_tags.count("nostream") == 1
+    assert TAG_NOSTREAM in summary_tags
+    # No duplicate TAG_NOSTREAM even if invoked when one was already present.
+    assert summary_tags.count(TAG_NOSTREAM) == 1
 
 
 def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:

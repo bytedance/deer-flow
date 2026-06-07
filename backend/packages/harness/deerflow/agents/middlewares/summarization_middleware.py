@@ -11,6 +11,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage, get_buffer_string
 from langgraph.config import get_config
+from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
@@ -119,14 +120,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
         # stream would otherwise be captured by the messages-tuple stream callback and
         # broadcast to the frontend as a phantom AI message. Tag a dedicated model copy
-        # with "nostream" so the streaming handler skips it (see langgraph TAG_NOSTREAM).
+        # with TAG_NOSTREAM so the streaming handler skips it.
         # Keep self.model untagged so the parent's profile / ls_params inspection still works.
         #
         # Preserve any tags already bound on the model (e.g. "middleware:summarize" set in
         # lead_agent/agent.py for RunJournal attribution): RunnableBinding.with_config does a
         # shallow merge that would otherwise overwrite the existing tags list entirely.
         existing_tags = list((getattr(self.model, "config", None) or {}).get("tags") or [])
-        merged_tags = [*existing_tags, "nostream"] if "nostream" not in existing_tags else existing_tags
+        merged_tags = [*existing_tags, TAG_NOSTREAM] if TAG_NOSTREAM not in existing_tags else existing_tags
         self._summary_model = self.model.with_config(tags=merged_tags)
 
     @override
