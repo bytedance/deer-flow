@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
-  setTasks: (tasks: Record<string, Subtask>) => void;
+  setTasks: Dispatch<SetStateAction<Record<string, Subtask>>>;
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
@@ -38,16 +39,36 @@ export function useSubtask(id: string) {
   return tasks[id];
 }
 
+export function mergeSubtaskUpdate(
+  tasks: Record<string, Subtask>,
+  task: Partial<Subtask> & { id: string },
+): Record<string, Subtask> {
+  const current = tasks[task.id];
+  const next = { ...current, ...task } as Subtask;
+  const unchanged =
+    current !== undefined &&
+    Object.entries(next).every(
+      ([key, value]) => current[key as keyof Subtask] === value,
+    ) &&
+    Object.keys(current).length === Object.keys(next).length;
+
+  if (unchanged) {
+    return tasks;
+  }
+
+  return {
+    ...tasks,
+    [task.id]: next,
+  };
+}
+
 export function useUpdateSubtask() {
-  const { tasks, setTasks } = useSubtaskContext();
+  const { setTasks } = useSubtaskContext();
   const updateSubtask = useCallback(
     (task: Partial<Subtask> & { id: string }) => {
-      tasks[task.id] = { ...tasks[task.id], ...task } as Subtask;
-      if (task.latestMessage) {
-        setTasks({ ...tasks });
-      }
+      setTasks((tasks) => mergeSubtaskUpdate(tasks, task));
     },
-    [tasks, setTasks],
+    [setTasks],
   );
   return updateSubtask;
 }

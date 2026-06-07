@@ -5,7 +5,7 @@ import {
   Loader2Icon,
   XCircleIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Streamdown } from "streamdown";
 
 import {
@@ -20,6 +20,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
+import type { Subtask } from "@/core/tasks";
 import { useSubtask } from "@/core/tasks/context";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
@@ -33,24 +34,29 @@ export function SubtaskCard({
   className,
   taskId,
   isLoading,
+  fallbackTask,
 }: {
   className?: string;
   taskId: string;
   isLoading: boolean;
+  fallbackTask?: Subtask;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
-  const icon = useMemo(() => {
-    if (task.status === "completed") {
-      return <CheckCircleIcon className="size-3" />;
-    } else if (task.status === "failed") {
-      return <XCircleIcon className="size-3 text-red-500" />;
-    } else if (task.status === "in_progress") {
-      return <Loader2Icon className="size-3 animate-spin" />;
-    }
-  }, [task.status]);
+  const task = useSubtask(taskId) ?? fallbackTask;
+
+  if (!task) {
+    return null;
+  }
+  const icon =
+    task.status === "completed" ? (
+      <CheckCircleIcon className="size-3" />
+    ) : task.status === "failed" ? (
+      <XCircleIcon className="size-3 text-red-500" />
+    ) : (
+      <Loader2Icon className="size-3 animate-spin" />
+    );
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
