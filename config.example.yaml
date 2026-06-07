@@ -197,6 +197,26 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: MiMo reasoning model (with thinking support)
+  # MiMo requires assistant ``reasoning_content`` to be echoed back on later
+  # turns, so use the patched adapter instead of plain ``ChatOpenAI``.
+  # - name: mimo-v2-5-pro
+  #   display_name: MiMo V2.5 Pro
+  #   use: deerflow.models.patched_mimo:PatchedMimoChatModel
+  #   model: mimo-v2.5-pro
+  #   api_key: $MIMO_API_KEY
+  #   base_url: $MIMO_BASE_URL
+  #   max_tokens: 8192              # Conservative sample value; MiMo supports much larger outputs, so tune this per task
+  #   supports_thinking: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
@@ -1076,8 +1096,8 @@ run_events:
 #     bot_token: $DISCORD_BOT_TOKEN
 #     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
 #     mention_only: false             # If true, only respond when the bot is mentioned
-#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
-#     thread_mode: false               # If true, group a channel conversation into a thread
+#     allowed_channels: []            # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     thread_mode: false              # If true, group a channel conversation into a thread
 
 # ============================================================================
 # Guardrails Configuration
