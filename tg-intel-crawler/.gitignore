@@ -1,0 +1,51 @@
+# ===== Secrets / credentials (NEVER commit) =====
+config/config.yaml
+*.session
+*.session-journal
+config/crawler_session*
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+*.key
+*.pem
+
+# ===== Runtime data (agent generates it after deploy) =====
+# Code IS committed (so the agent can crawl), but data is NOT — each
+# deployment crawls its own data into output/ and intel.db.
+output/
+config/discovered_groups.yaml
+logs/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.claude/

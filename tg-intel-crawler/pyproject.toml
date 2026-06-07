@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg-intel-crawler"
+version = "1.0.0"
+description = "Telegram黑灰产情报爬虫工具 - 字节跳动相关"
+requires-python = ">=3.11"
+dependencies = [
+    "telethon>=1.36",
+    "openai>=1.30",
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "aiofiles>=24.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+tg-crawler = "tg_intel_crawler.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["tg_intel_crawler*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

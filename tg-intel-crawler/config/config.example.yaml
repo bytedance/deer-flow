@@ -1,0 +1,81 @@
+# ============================================================================
+# tg-intel-crawler 配置模板
+# 使用方法：cp config/config.example.yaml config/config.yaml 后填入真实凭证
+# 真实的 config/config.yaml 已被 .gitignore 屏蔽，请勿提交到代码仓库。
+# ============================================================================
+
+telegram:
+  # 从 https://my.telegram.org 申请
+  api_id: 0
+  api_hash: "YOUR_TELEGRAM_API_HASH"
+  # 必须带国家代码，例如 +8613800138000
+  phone: "+86xxxxxxxxxxx"
+  session_name: crawler_session
+  # 可选：HTTP/SOCKS 代理（不需要可整段删除）
+  # proxy:
+  #   type: socks5
+  #   host: 127.0.0.1
+  #   port: 7890
+
+llm:
+  # 兼容 OpenAI Chat Completions 协议的任意服务（火山方舟 / DeepSeek / OpenAI / Moonshot 等）
+  api_key: "YOUR_LLM_API_KEY"
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model: "YOUR_MODEL_ID"
+  batch_size: 15
+
+crawl:
+  delay_min: 2          # 限流：每 100 条消息随机 sleep 的最小秒数
+  delay_max: 5          # 最大秒数。不要调成 0，否则容易被 FloodWait
+  history_days: 7
+  download_media: false
+
+twitter:
+  # 从 https://tikhub.io 申请
+  api_base: https://api.tikhub.io
+  api_key: "YOUR_TIKHUB_API_KEY"
+  search_type: Latest
+  max_pages: 5
+  page_size: 20
+  search_keywords:
+    - 杀猪盘
+    - 刷单诈骗
+    - 抖音 买号
+  monitor_users: []     # 可选：要监控的 Twitter 用户名列表，例如 ["elonmusk"]
+
+# 监控的 Telegram 群组链接（也可以用 `tg-crawler discover` 命令自动发现并写入此处）
+groups: []
+
+# 群组自动扩展（candidates 候选池 + 已加入群扫描）
+discovery:
+  fetch_sender_bio: false                          # 是否抽取发送者 bio 里的链接（耗 API quota）
+  bio_rate_limit_per_minute: 30
+  candidates_path: ./config/discovered_groups.yaml # 候选池存储位置
+  include_joined: false                            # crawl 默认是否并入账号已加入的所有群
+  exclude_joined: []                               # 永久黑名单（username 或 chat_id）
+  scan_includes_channels: true                     # 频道是否纳入扫描
+
+# 加群限流（candidates approve / discover --auto-join 都会走这套）
+join:
+  min_interval: 30      # 加群最小间隔（秒）
+  max_interval: 90      # 最大间隔
+  daily_limit: 20       # 每天最多加多少个群
+  flood_retry: true     # FloodWaitError 自动重试一次
+
+# 通过 Telegram 搜群 bot（@JISOU 等）做关键词检索情报
+bot_search:
+  enabled: false                            # 显式开关
+  bots:                                     # 优先顺序，不可达自动 fallback 下一个
+    - "@JISOU"
+  max_queries_per_run: 30                   # 单轮最多发多少 query 给 bot
+  query_interval_seconds: 10                # 两次 query 之间间隔（秒）
+  conversation_timeout_seconds: 15          # 对话超时
+  fetch_detail: true                        # 是否回访深链拿原文（默认开）
+  detail_max_per_query: 20                  # 单 query 最多回访 N 条原文
+  detail_interval_seconds: 1                # 回访间隔（秒）
+
+output:
+  dir: ./output
+  format:
+    - json
+    - csv
