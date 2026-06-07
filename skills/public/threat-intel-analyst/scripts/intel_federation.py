@@ -50,6 +50,12 @@ FILTERED_COLUMNS = [
     "source_url", "suffix",
 ]
 
+# Canonical column set every <source>_intel_raw table must expose
+# (pre-filter archive: full original message payload as JSON).
+RAW_COLUMNS = [
+    "day", "identity", "group_name", "subdir", "msg_date", "payload",
+]
+
 
 @dataclass
 class DBEntry:
@@ -67,6 +73,7 @@ class IntelFederation:
         self._conn.row_factory = sqlite3.Row
         self._attached: list[str] = []
         self._select_parts: list[str] = []
+        self._raw_select_parts: list[str] = []
         self._build()
 
     # ---------- construction ----------
@@ -129,11 +136,23 @@ class IntelFederation:
                 self._select_parts.append(
                     f"SELECT '{e.alias}' AS __db, {cols} FROM {e.alias}.{table}"
                 )
+            for table in self._raw_tables(e.alias):
+                cols = ", ".join(RAW_COLUMNS)
+                self._raw_select_parts.append(
+                    f"SELECT '{e.alias}' AS __db, {cols} FROM {e.alias}.{table}"
+                )
 
     def _filtered_tables(self, alias: str) -> list[str]:
         rows = self._conn.execute(
             f"SELECT name FROM {alias}.sqlite_master "
             f"WHERE type='table' AND name LIKE '%_intel_filtered'"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def _raw_tables(self, alias: str) -> list[str]:
+        rows = self._conn.execute(
+            f"SELECT name FROM {alias}.sqlite_master "
+            f"WHERE type='table' AND name LIKE '%_intel_raw'"
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -143,6 +162,11 @@ class IntelFederation:
     def union_sql(self) -> str:
         """The UNION ALL'd view body. Empty string if no data sources."""
         return " UNION ALL ".join(self._select_parts)
+
+    @property
+    def raw_union_sql(self) -> str:
+        """The UNION ALL'd body for the raw-message view (intel_raw)."""
+        return " UNION ALL ".join(self._raw_select_parts)
 
     @property
     def databases(self) -> list[dict]:
@@ -168,8 +192,9 @@ class IntelFederation:
 
     # ---------- agent-facing SQL (read-only, validated) ----------
 
-    # The federated view is exposed to user SQL under this name.
-    VIEW_NAME = "intel"
+    # The federated views exposed to user SQL under these names.
+    VIEW_NAME = "intel"          # post-LLM structured intel (*_intel_filtered)
+    RAW_VIEW_NAME = "intel_raw"  # pre-filter raw archive (*_intel_raw)
 
     # Statement keywords that mutate or escape the sandbox — hard-blocked.
     _FORBIDDEN = (
@@ -179,24 +204,43 @@ class IntelFederation:
     )
 
     def schema_info(self) -> dict:
-        """Describe the queryable view + columns so an agent can write SQL.
+        """Describe the queryable views + columns so an agent can write SQL.
 
-        Returns the logical view name (``intel``), its columns, and the list of
-        underlying source databases. Agents should SELECT ... FROM intel.
+        Two views:
+          - ``intel``     → structured intel (one row per LLM-judged record)
+          - ``intel_raw`` → raw message archive (full original payload as JSON)
+        Agents SELECT ... FROM intel  (or FROM intel_raw for原始消息).
         """
+        attached = [d["alias"] for d in self.databases if d["attached"]]
         return {
-            "view": self.VIEW_NAME,
-            "columns": ["__db"] + FILTERED_COLUMNS,
+            "views": {
+                self.VIEW_NAME: {
+                    "desc": "结构化情报(LLM判定后)，分析主用",
+                    "columns": ["__db"] + FILTERED_COLUMNS,
+                    "available": bool(self._select_parts),
+                },
+                self.RAW_VIEW_NAME: {
+                    "desc": "原始消息归档(未过滤全量)，payload 为完整 JSON",
+                    "columns": ["__db"] + RAW_COLUMNS,
+                    "available": bool(self._raw_select_parts),
+                },
+            },
             "column_notes": {
                 "__db": "which source database the row came from",
                 "day": "partition date YYYY-MM-DD",
-                "source_platform": "telegram / bot / twitter / weibo / ...",
-                "risk_level": "high / medium / low",
-                "entities": "JSON string: {accounts,contacts,links,tools,prices}",
+                "source_platform": "telegram / bot / twitter / weibo / ... (intel only)",
+                "risk_level": "high / medium / low (intel only)",
+                "entities": "JSON string {accounts,contacts,links,tools,prices} (intel only)",
+                "payload": "full original message dict as JSON string (intel_raw only)",
+                "group_name": "source group name (intel_raw)",
             },
-            "databases": [d["alias"] for d in self.databases if d["attached"]],
-            "example": f"SELECT day, COUNT(*) n FROM {self.VIEW_NAME} "
-                       f"WHERE risk_level='high' GROUP BY day ORDER BY day DESC",
+            "databases": attached,
+            "examples": [
+                f"SELECT day, COUNT(*) n FROM {self.VIEW_NAME} "
+                f"WHERE risk_level='high' GROUP BY day ORDER BY day DESC",
+                f"SELECT group_name, COUNT(*) n FROM {self.RAW_VIEW_NAME} "
+                f"WHERE day='2026-06-07' GROUP BY group_name ORDER BY n DESC LIMIT 10",
+            ],
         }
 
     def _validate_select(self, sql: str) -> None:
@@ -216,18 +260,37 @@ class IntelFederation:
 
     def run_select(self, user_sql: str, *, max_rows: int = 500) -> dict:
         """Execute an agent-written read-only SELECT against the federated
-        ``intel`` view. Validates it's a single read-only statement, substitutes
-        the view, caps rows, and runs on a read-only connection.
+        views ``intel`` (structured) and/or ``intel_raw`` (raw archive).
+        Validates it's a single read-only statement, substitutes the view(s),
+        caps rows, and runs read-only.
         """
-        if self.is_empty():
+        if not self._select_parts and not self._raw_select_parts:
             return {"columns": [], "rows": [], "row_count": 0,
                     "note": "no data sources attached"}
         self._validate_select(user_sql)
         body = user_sql.strip().rstrip(";").strip()
-        # Replace the logical view name with the real unioned subquery.
+
         import re
-        view_sub = f"(SELECT * FROM ({self.union_sql})) AS {self.VIEW_NAME}"
-        replaced = re.sub(rf"\b{self.VIEW_NAME}\b", view_sub, body, count=0)
+        # Substitute intel_raw FIRST (longer name) so the plain-intel pass
+        # below doesn't clip its prefix; use a placeholder to avoid the
+        # intel-pass touching the just-inserted subqueries.
+        if self._raw_select_parts:
+            raw_sub = f"(SELECT * FROM ({self.raw_union_sql})) AS {self.RAW_VIEW_NAME}"
+        else:
+            raw_sub = f"(SELECT NULL WHERE 0) AS {self.RAW_VIEW_NAME}"
+        if self._select_parts:
+            intel_sub = f"(SELECT * FROM ({self.union_sql})) AS {self.VIEW_NAME}"
+        else:
+            intel_sub = f"(SELECT NULL WHERE 0) AS {self.VIEW_NAME}"
+
+        # Order matters: replace intel_raw → placeholder, then intel, then
+        # restore placeholder. Word boundaries keep e.g. 'intel_raw' from being
+        # split by the 'intel' pass.
+        PH = "\x00RAWVIEW\x00"
+        replaced = re.sub(rf"\b{self.RAW_VIEW_NAME}\b", PH, body)
+        replaced = re.sub(rf"\b{self.VIEW_NAME}\b", intel_sub, replaced)
+        replaced = replaced.replace(PH, raw_sub)
+
         wrapped = f"SELECT * FROM ({replaced}) LIMIT {int(max_rows)}"
         cur = self._conn.execute(wrapped)
         cols = [d[0] for d in cur.description] if cur.description else []

@@ -78,27 +78,36 @@ python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action repor
 
 ### 把库当知识库：自由 SQL 查询（agent 自己写 SELECT）
 
-当预设聚合不够用时，agent 可以**直接写只读 SQL** 查整个情报库。先看表结构，再写查询：
+当预设聚合不够用时，agent 可以**直接写只读 SQL** 查整个情报库。库暴露两个逻辑视图：
+
+| 视图 | 内容 | 主要列 |
+|---|---|---|
+| `intel` | LLM 判定后的**结构化情报**(分析主用) | `__db, day, source_platform, source_group, risk_type, risk_level, entities(JSON), summary, ...` |
+| `intel_raw` | 关键词过滤前的**原始消息归档**(全量) | `__db, day, identity, group_name, payload(完整消息JSON)` |
+
+先看结构，再写查询：
 
 ```bash
-# 1) 看可查询的视图/列（统一视图名为 intel，含 __db/day/source_platform/risk_*/entities/summary...）
+# 1) 看可查询的视图/列
 python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action schema
 
-# 2) 写任意只读 SELECT（FROM intel）。例：每个高发群的 high 占比
+# 2) 查结构化情报：每个高发群的 high 占比
 python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
   --sql "SELECT source_group, COUNT(*) total, SUM(CASE WHEN risk_level='high' THEN 1 ELSE 0 END) high FROM intel WHERE day>='2026-06-06' GROUP BY source_group HAVING total>5 ORDER BY high DESC LIMIT 10"
 
-# 跨源、限行数
+# 3) 查原始消息归档：某群某天的原始消息量 / 原文
 python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
-  --sql "SELECT __db, source_platform, COUNT(*) n FROM intel GROUP BY __db, source_platform" --max-rows 100
+  --sql "SELECT group_name, COUNT(*) n FROM intel_raw WHERE day='2026-06-07' GROUP BY group_name ORDER BY n DESC LIMIT 10"
+python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
+  --sql "SELECT payload FROM intel_raw WHERE group_name='某群' AND day='2026-06-07' LIMIT 5"
 ```
 
 **SQL 安全约束（脚本强制）**：
 - 只允许 **单条** `SELECT` / `WITH`（只读）；`INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/ATTACH/PRAGMA/...`
-  及多语句(`;`)一律拒绝并返回错误。
-- 查询对象是逻辑视图 **`intel`**（所有数据源 `*_intel_filtered` 的只读 UNION），
-  agent 只需 `FROM intel`，不用关心物理表名/多库。
-- 结果默认最多 500 行（`--max-rows` 可调），数据库以只读方式打开，绝不被修改。
+  及多语句(`;`)一律拒绝。
+- 可查 **`intel`**（结构化情报）和 **`intel_raw`**（原始归档）两个视图，均为各数据源对应表的只读 UNION，
+  agent 不用关心物理表名/多库。
+- 结果默认最多 500 行（`--max-rows` 可调），数据库只读打开，绝不被修改。
 
 ## 多数据源协作
 
