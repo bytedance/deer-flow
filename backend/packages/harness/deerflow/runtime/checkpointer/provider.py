@@ -27,7 +27,7 @@ from collections.abc import Iterator
 from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import get_app_config
-from deerflow.config.checkpointer_config import CheckpointerConfig
+from deerflow.config.checkpointer_config import CheckpointerConfig, ensure_config_loaded
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -104,26 +104,6 @@ _checkpointer_ctx = None  # open context manager keeping the connection alive
 _checkpointer_lock = threading.Lock()
 
 
-def _ensure_checkpointer_config_loaded() -> None:
-    """Load app config before entering the singleton lock if needed."""
-    from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config
-
-    config = get_checkpointer_config()
-    if config is not None or _app_config is not None:
-        return
-
-    # Only load app config lazily when neither the app config nor an explicit
-    # checkpointer config has been initialized yet. This keeps tests that
-    # intentionally set the global checkpointer config isolated from any
-    # ambient config.yaml on disk.
-    try:
-        get_app_config()
-    except FileNotFoundError:
-        # In test environments without config.yaml, this is expected.
-        pass
-
-
 def get_checkpointer() -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
@@ -140,7 +120,7 @@ def get_checkpointer() -> Checkpointer:
 
     # Config loading can reset both persistence singletons. Keep it outside
     # this provider lock to avoid cross-provider lock-order inversion.
-    _ensure_checkpointer_config_loaded()
+    ensure_config_loaded()
 
     with _checkpointer_lock:
         if _checkpointer is not None:

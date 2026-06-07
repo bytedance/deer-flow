@@ -12,6 +12,7 @@ import pytest
 import deerflow.config.app_config as app_config_module
 from deerflow.config.checkpointer_config import (
     CheckpointerConfig,
+    ensure_config_loaded,
     get_checkpointer_config,
     load_checkpointer_config_from_dict,
     set_checkpointer_config,
@@ -150,6 +151,26 @@ class TestCheckpointerConfig:
         set_checkpointer_config(None)
         assert get_checkpointer_config() is None
 
+    def test_ensure_config_loaded_loads_app_config_when_uninitialized(self):
+        def fake_get_app_config():
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with patch("deerflow.config.app_config.get_app_config", side_effect=fake_get_app_config) as mock_get_app_config:
+            ensure_config_loaded()
+
+        mock_get_app_config.assert_called_once()
+        config = get_checkpointer_config()
+        assert config is not None
+        assert config.type == "memory"
+
+    def test_ensure_config_loaded_skips_explicit_config(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+
+        with patch("deerflow.config.app_config.get_app_config") as mock_get_app_config:
+            ensure_config_loaded()
+
+        mock_get_app_config.assert_not_called()
+
     def test_invalid_type_raises(self):
         with pytest.raises(Exception):
             load_checkpointer_config_from_dict({"type": "unknown"})
@@ -201,7 +222,7 @@ class TestGetCheckpointer:
         """get_checkpointer should return InMemorySaver when not configured."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        with patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
+        with patch("deerflow.config.app_config.get_app_config", side_effect=FileNotFoundError):
             cp = get_checkpointer()
         assert cp is not None
         assert isinstance(cp, InMemorySaver)
@@ -417,13 +438,13 @@ class TestSyncSingletonThreadSafety:
     def test_checkpointer_loads_config_outside_singleton_lock(self):
         tracking_lock = _TrackingLock()
 
-        def fake_get_app_config():
+        def fake_ensure_config_loaded():
             assert not tracking_lock.locked()
             load_checkpointer_config_from_dict({"type": "memory"})
 
         with (
             patch("deerflow.runtime.checkpointer.provider._checkpointer_lock", tracking_lock),
-            patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=fake_get_app_config),
+            patch("deerflow.runtime.checkpointer.provider.ensure_config_loaded", side_effect=fake_ensure_config_loaded),
         ):
             checkpointer = get_checkpointer()
 
@@ -433,13 +454,13 @@ class TestSyncSingletonThreadSafety:
     def test_store_loads_config_outside_singleton_lock(self):
         tracking_lock = _TrackingLock()
 
-        def fake_get_app_config():
+        def fake_ensure_config_loaded():
             assert not tracking_lock.locked()
             load_checkpointer_config_from_dict({"type": "memory"})
 
         with (
             patch("deerflow.runtime.store.provider._store_lock", tracking_lock),
-            patch("deerflow.runtime.store.provider.get_app_config", side_effect=fake_get_app_config),
+            patch("deerflow.runtime.store.provider.ensure_config_loaded", side_effect=fake_ensure_config_loaded),
         ):
             store = get_store()
 

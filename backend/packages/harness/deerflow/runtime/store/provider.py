@@ -28,6 +28,7 @@ from collections.abc import Iterator
 from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import get_app_config
+from deerflow.config.checkpointer_config import ensure_config_loaded
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -104,21 +105,6 @@ _store_ctx = None  # open context manager keeping the connection alive
 _store_lock = threading.Lock()
 
 
-def _ensure_store_config_loaded() -> None:
-    """Load app config before entering the singleton lock if needed."""
-    from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config
-
-    config = get_checkpointer_config()
-    if config is not None or _app_config is not None:
-        return
-
-    try:
-        get_app_config()
-    except FileNotFoundError:
-        pass
-
-
 def get_store() -> BaseStore:
     """Return the global sync Store singleton, creating it on first call.
 
@@ -136,7 +122,7 @@ def get_store() -> BaseStore:
 
     # Config loading can reset both persistence singletons. Keep it outside
     # this provider lock to avoid cross-provider lock-order inversion.
-    _ensure_store_config_loaded()
+    ensure_config_loaded()
 
     with _store_lock:
         if _store is not None:
