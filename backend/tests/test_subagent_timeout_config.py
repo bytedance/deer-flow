@@ -103,26 +103,39 @@ class TestSubagentsAppConfigDefaults:
         config = SubagentsAppConfig()
         assert config.max_turns is None
 
+    def test_default_max_concurrent(self):
+        config = SubagentsAppConfig()
+        assert config.max_concurrent == 3
+
     def test_default_agents_empty(self):
         config = SubagentsAppConfig()
         assert config.agents == {}
 
     def test_custom_global_runtime_overrides(self):
-        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120)
+        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120, max_concurrent=2)
         assert config.timeout_seconds == 1800
         assert config.max_turns == 120
+        assert config.max_concurrent == 2
 
     def test_rejects_zero_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=0)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=0)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_concurrent=1)
 
     def test_rejects_negative_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=-60)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=-60)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_concurrent=-3)
+
+    def test_rejects_too_large_max_concurrent(self):
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_concurrent=5)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +338,7 @@ class TestRegistryGetSubagentConfig:
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
-        assert config.max_turns == 100
+        assert config.max_turns == 50
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config

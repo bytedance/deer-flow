@@ -338,7 +338,7 @@ def _build_middlewares(
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = cfg.get("max_concurrent_subagents", resolved_app_config.subagents.max_concurrent)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
@@ -426,7 +426,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", resolved_app_config.subagents.max_concurrent)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 

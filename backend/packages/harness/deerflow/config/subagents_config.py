@@ -81,6 +81,12 @@ class SubagentsAppConfig(BaseModel):
         ge=1,
         description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
     )
+    max_concurrent: int = Field(
+        default=3,
+        ge=2,
+        le=4,
+        description="Maximum number of subagents that can run concurrently",
+    )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
         description="Per-agent configuration overrides keyed by agent name",
@@ -173,9 +179,10 @@ def load_subagents_config_from_dict(config_dict: dict) -> None:
 
     if overrides_summary or custom_agents_names:
         logger.info(
-            "Subagents config loaded: default timeout=%ss, default max_turns=%s, per-agent overrides=%s, custom_agents=%s",
+            "Subagents config loaded: default timeout=%ss, default max_turns=%s, max_concurrent=%s, per-agent overrides=%s, custom_agents=%s",
             _subagents_config.timeout_seconds,
             _subagents_config.max_turns,
+            _subagents_config.max_concurrent,
             overrides_summary or "none",
             custom_agents_names or "none",
         )

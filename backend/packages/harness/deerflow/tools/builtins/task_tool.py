@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
@@ -282,9 +283,7 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
-    resolved_app_config = runtime_app_config
-    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+    resolved_app_config = runtime_app_config or get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
@@ -314,6 +313,7 @@ async def task_tool(
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
     task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    task_started_at = datetime.now()
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -364,32 +364,35 @@ async def task_tool(
 
             # Check if task completed, failed, or timed out
             usage = _summarize_usage(getattr(result, "token_usage_records", None))
+            completed_at = getattr(result, "completed_at", None) or datetime.now()
+            started_at = getattr(result, "started_at", None) or task_started_at
+            duration_seconds = round((completed_at - started_at).total_seconds(), 2)
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage})
-                logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
+                logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls in {duration_seconds}s")
                 cleanup_background_task(task_id)
                 return f"Task Succeeded. Result: {result.result}"
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                logger.error(f"[trace={trace_id}] Task {task_id} failed after {duration_seconds}s: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task failed. Error: {result.error}"
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                logger.info(f"[trace={trace_id}] Task {task_id} cancelled after {duration_seconds}s: {result.error}")
                 cleanup_background_task(task_id)
                 return "Task cancelled by user."
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                logger.warning(f"[trace={trace_id}] Task {task_id} timed out after {duration_seconds}s: {result.error}")
                 cleanup_background_task(task_id)
                 return f"Task timed out. Error: {result.error}"
 

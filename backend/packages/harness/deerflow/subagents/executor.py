@@ -130,8 +130,12 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
+MAX_CONCURRENT_SUBAGENTS = 3
+
 # Thread pool for background task scheduling and orchestration
-_scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
+_scheduler_pool: ThreadPoolExecutor | None = None
+_scheduler_pool_max_workers: int | None = None
+_scheduler_pool_lock = threading.Lock()
 
 # Persistent event loop for isolated subagent executions triggered from an
 # already-running parent loop. Reusing one long-lived loop avoids creating a
@@ -140,6 +144,18 @@ _isolated_subagent_loop: asyncio.AbstractEventLoop | None = None
 _isolated_subagent_loop_thread: threading.Thread | None = None
 _isolated_subagent_loop_started: threading.Event | None = None
 _isolated_subagent_loop_lock = threading.Lock()
+
+
+def _get_scheduler_pool(max_workers: int = MAX_CONCURRENT_SUBAGENTS) -> ThreadPoolExecutor:
+    global _scheduler_pool, _scheduler_pool_max_workers
+
+    with _scheduler_pool_lock:
+        if _scheduler_pool is None or _scheduler_pool_max_workers != max_workers:
+            if _scheduler_pool is not None:
+                _scheduler_pool.shutdown(wait=False, cancel_futures=False)
+            _scheduler_pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="subagent-scheduler-")
+            _scheduler_pool_max_workers = max_workers
+        return _scheduler_pool
 
 
 def _run_isolated_subagent_loop(
@@ -157,7 +173,7 @@ def _run_isolated_subagent_loop(
 
 def _shutdown_isolated_subagent_loop() -> None:
     """Stop and close the persistent isolated subagent loop."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _scheduler_pool, _scheduler_pool_max_workers
 
     with _isolated_subagent_loop_lock:
         loop = _isolated_subagent_loop
@@ -165,6 +181,12 @@ def _shutdown_isolated_subagent_loop() -> None:
         _isolated_subagent_loop = None
         _isolated_subagent_loop_thread = None
         _isolated_subagent_loop_started = None
+
+    with _scheduler_pool_lock:
+        if _scheduler_pool is not None:
+            _scheduler_pool.shutdown(wait=False, cancel_futures=False)
+            _scheduler_pool = None
+            _scheduler_pool_max_workers = None
 
     if loop is None:
         return
@@ -742,12 +764,15 @@ class SubagentExecutor:
             status=SubagentStatus.PENDING,
         )
 
-        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
+        max_concurrent = self.app_config.subagents.max_concurrent if self.app_config is not None else MAX_CONCURRENT_SUBAGENTS
+        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s, max_concurrent={max_concurrent}")
 
         with _background_tasks_lock:
             _background_tasks[task_id] = result
 
         parent_context = copy_context()
+
+        scheduler_pool = _get_scheduler_pool(max_concurrent)
 
         # Submit to scheduler pool
         def run_task():
@@ -781,11 +806,8 @@ class SubagentExecutor:
                     task_result = _background_tasks[task_id]
                 task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
-        _scheduler_pool.submit(run_task)
+        scheduler_pool.submit(run_task)
         return task_id
-
-
-MAX_CONCURRENT_SUBAGENTS = 3
 
 
 def request_cancel_background_task(task_id: str) -> None:
