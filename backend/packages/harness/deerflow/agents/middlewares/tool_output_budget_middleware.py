@@ -181,7 +181,7 @@ def _externalize_to_sandbox(
         # to create the directory, and write_file backends differ. Refuse to
         # hand the model an unreadable read_file path.
         check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
-        if not isinstance(check, str) or "OK" not in check:
+        if not isinstance(check, str) or check.strip() != "OK":
             logger.warning(
                 "Sandbox externalize validation failed: path=%s, check=%r",
                 virtual_path,
@@ -340,8 +340,13 @@ def _budget_content(
 
     if threshold > 0 and len(content) > threshold:
         virtual_path: str | None = None
-        provider = get_sandbox_provider()
-        if getattr(provider, "uses_thread_data_mounts", False):
+        provider = None
+        if outputs_path or sandbox is not None:
+            try:
+                provider = get_sandbox_provider()
+            except Exception:
+                logger.exception("Failed to get sandbox provider for tool-output externalization; falling back to inline truncation")
+        if provider is not None and getattr(provider, "uses_thread_data_mounts", False):
             # Host-mounted sandbox: the host outputs path is bind-mounted into
             # the sandbox at the same virtual path, so writing host-side is
             # equivalent to writing sandbox-side. Preserve the original
@@ -355,8 +360,6 @@ def _budget_content(
                     storage_subdir=config.storage_subdir,
                 )
         elif sandbox is not None:
-            # Non-mounted (remote) sandbox: write into the sandbox itself so
-            # the model's read_file tool can read it back. Issue #3416.
             virtual_path = _externalize_to_sandbox(
                 content,
                 tool_name=tool_name,
