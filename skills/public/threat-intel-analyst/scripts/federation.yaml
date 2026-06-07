@@ -1,0 +1,27 @@
+# IntelFederation 数据源注册表（threat-intel-analyst）
+#
+# 每个数据源一个独立 SQLite 库，结构遵循 SCHEMA_CONTRACT.md：
+#   <source>_intel_filtered / <source>_intel_raw，day 分区，(day,id) 去重。
+# path 支持绝对路径，或相对本文件的相对路径。缺失/不可达的库会被自动跳过。
+#
+# 部署提示：把下面 telegram 的 path 改成你环境里 tg-intel-crawler/output/intel.db 的
+# 真实绝对路径（推荐绝对路径，避免 deer-flow 部署后相对路径错位）。
+# 也可设环境变量 INTEL_FEDERATION_REGISTRY 指向你自定义的注册表文件。
+
+databases:
+  # —— 你的库（Telegram/bot/twitter）——
+  # path: AUTO  → 自动解析为 $TG_INTEL_CRAWLER_HOME/output/intel.db
+  # 也可直接写真实绝对路径替代 AUTO。
+  - alias: telegram
+    path: AUTO
+    owner: me
+
+  # —— 队友 A 的数据源（填好真实路径后取消注释）——
+  # - alias: weibo
+  #   path: /abs/path/to/teammateA/weibo.db
+  #   owner: teammateA
+
+  # —— 队友 B 的数据源 ——
+  # - alias: forum
+  #   path: /abs/path/to/teammateB/forum.db
+  #   owner: teammateB
