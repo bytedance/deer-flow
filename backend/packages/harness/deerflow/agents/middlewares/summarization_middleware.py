@@ -10,6 +10,7 @@ from typing import Any, Protocol, override, runtime_checkable
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages.utils import get_buffer_string
 from langgraph.config import get_config
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
@@ -176,11 +177,92 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         }
 
     @override
+    def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
+        """Generate summary without emitting streaming events to the client.
+
+        Suppresses callbacks to prevent the internal summarization LLM call from
+        producing visible AI message chunks in the frontend's ``messages-tuple``
+        stream (issue #2804).
+        """
+        if not messages_to_summarize:
+            return "No previous conversation history."
+
+        trimmed = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed:
+            return "Previous conversation was too long to summarize."
+
+        formatted = get_buffer_string(trimmed)
+
+        try:
+            response = self.model.with_config(callbacks=[]).invoke(
+                self.summary_prompt.format(messages=formatted).rstrip(),
+                config={
+                    "metadata": {"lc_source": "summarization"},
+                    "callbacks": [],
+                },
+            )
+            return self._extract_summary_text(response)
+        except Exception as e:
+            return f"Error generating summary: {e!s}"
+
+    @override
+    async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
+        """Generate summary without emitting streaming events to the client.
+
+        Suppresses callbacks to prevent the internal summarization LLM call from
+        producing visible AI message chunks in the frontend's ``messages-tuple``
+        stream (issue #2804).
+        """
+        if not messages_to_summarize:
+            return "No previous conversation history."
+
+        trimmed = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed:
+            return "Previous conversation was too long to summarize."
+
+        formatted = get_buffer_string(trimmed)
+
+        try:
+            response = await self.model.with_config(callbacks=[]).ainvoke(
+                self.summary_prompt.format(messages=formatted).rstrip(),
+                config={
+                    "metadata": {"lc_source": "summarization"},
+                    "callbacks": [],
+                },
+            )
+            return self._extract_summary_text(response)
+        except Exception as e:
+            return f"Error generating summary: {e!s}"
+
+    def _extract_summary_text(self, response: Any) -> str:
+        # Prefer .text which normalizes list content blocks (e.g. [{"type": "text", "text": "..."}]).
+        # Fall back to .content for non-LangChain responses, with explicit list handling
+        # to avoid producing Python repr strings like "[{'type': 'text', ...}]".
+        summary_text = getattr(response, "text", None)
+        if summary_text is None:
+            summary_text = getattr(response, "content", "")
+        if isinstance(summary_text, list):
+            parts: list[str] = []
+            for block in summary_text:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            summary_text = "".join(parts)
+        return summary_text.strip() if isinstance(summary_text, str) else str(summary_text).strip()
+
+    @override
     def _build_new_messages(self, summary: str) -> list[HumanMessage]:
         """Override the base implementation to let the human message with the special name 'summary'.
         And this message will be ignored to display in the frontend, but still can be used as context for the model.
         """
-        return [HumanMessage(content=f"Here is a summary of the conversation to date:\n\n{summary}", name="summary")]
+        return [
+            HumanMessage(
+                content=f"Here is a summary of the conversation to date:\n\n{summary}",
+                name="summary",
+                additional_kwargs={"hide_from_ui": True},
+            )
+        ]
 
     def _preserve_dynamic_context_reminders(
         self,

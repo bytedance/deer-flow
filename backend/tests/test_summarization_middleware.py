@@ -76,7 +76,8 @@ def _middleware(
     preserve_recent_skill_tokens_per_skill: int = 0,
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
-    model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.invoke.return_value = AIMessage(content="compressed summary")
+    model.with_config.return_value.invoke.return_value = AIMessage(content="compressed summary")
     return DeerFlowSummarizationMiddleware(
         model=model,
         trigger=trigger,
@@ -688,6 +689,69 @@ def test_memory_flush_hook_preserves_agent_scoped_memory(monkeypatch: pytest.Mon
     assert queue.add_nowait.call_args.kwargs["agent_name"] == "research-agent"
 
 
+# ---------------------------------------------------------------------------
+# Issue #2804: summary text must not leak to the frontend via streaming
+# ---------------------------------------------------------------------------
+
+
+def test_build_new_messages_sets_hide_from_ui() -> None:
+    """The summary HumanMessage must carry hide_from_ui so the frontend filters it."""
+    middleware = _middleware()
+    messages = middleware._build_new_messages("test summary")
+
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg.name == "summary"
+    assert msg.additional_kwargs.get("hide_from_ui") is True
+    assert "test summary" in msg.content
+
+
+def test_create_summary_suppresses_callbacks() -> None:
+    """_create_summary must bind callbacks=[] on the model AND pass callbacks=[]
+    in the invoke config to suppress inherited LangGraph stream callbacks."""
+    middleware = _middleware()
+
+    middleware._create_summary(_messages())
+
+    middleware.model.with_config.assert_called_once_with(callbacks=[])
+    bound = middleware.model.with_config.return_value
+    bound.invoke.assert_called_once()
+    call_config = bound.invoke.call_args.kwargs.get("config") or bound.invoke.call_args[1].get("config")
+    assert call_config is not None
+    assert call_config.get("callbacks") == []
+    assert call_config.get("metadata", {}).get("lc_source") == "summarization"
+
+
+@pytest.mark.anyio
+async def test_acreate_summary_suppresses_callbacks() -> None:
+    """_acreate_summary must bind callbacks=[] on the model AND pass callbacks=[]
+    in the ainvoke config to suppress inherited LangGraph stream callbacks."""
+    middleware = _middleware()
+    middleware.model.with_config.return_value.ainvoke = mock.AsyncMock(return_value=AIMessage(content="async summary"))
+
+    await middleware._acreate_summary(_messages())
+
+    middleware.model.with_config.assert_called_once_with(callbacks=[])
+    bound = middleware.model.with_config.return_value
+    bound.ainvoke.assert_called_once()
+    call_config = bound.ainvoke.call_args.kwargs.get("config") or bound.ainvoke.call_args[1].get("config")
+    assert call_config is not None
+    assert call_config.get("callbacks") == []
+    assert call_config.get("metadata", {}).get("lc_source") == "summarization"
+
+
+def test_before_model_summary_message_has_hide_from_ui() -> None:
+    """End-to-end: the emitted state update contains a summary message with hide_from_ui."""
+    middleware = _middleware()
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    emitted = result["messages"]
+    summary_msg = emitted[1]
+    assert summary_msg.name == "summary"
+    assert summary_msg.additional_kwargs.get("hide_from_ui") is True
+
+
 def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
     queue = MagicMock()
     monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
@@ -705,3 +769,48 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
 
     queue.add_nowait.assert_called_once()
     assert queue.add_nowait.call_args.kwargs["user_id"] == "alice"
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        # String content — straight through
+        ("Plain summary", "Plain summary"),
+        # Single text block
+        ([{"type": "text", "text": "A summary of the chat."}], "A summary of the chat."),
+        # Multiple text blocks concatenated
+        (
+            [{"type": "text", "text": "Part one. "}, {"type": "text", "text": "Part two."}],
+            "Part one. Part two.",
+        ),
+        # Mixed blocks: reasoning should be skipped, only text extracted
+        (
+            [
+                {"type": "thinking", "thinking": "internal reasoning"},
+                {"type": "text", "text": "Visible summary."},
+            ],
+            "Visible summary.",
+        ),
+        # Empty list → empty string
+        ([], ""),
+    ],
+)
+def test_extract_summary_text_normalizes_list_content_blocks(content, expected) -> None:
+    """AIMessage.content can be a list of content blocks; _extract_summary_text
+    must normalize to plain text instead of producing a Python repr like
+    [{'type': 'text', 'text': 'summary'}]."""
+    middleware = _middleware()
+    response = AIMessage(content=content)
+    assert middleware._extract_summary_text(response) == expected
+
+
+def test_extract_summary_text_handles_non_aimessage_with_list_content() -> None:
+    """When response has no .text attribute and .content is a list, the explicit
+    list normalization must still extract text instead of falling through to repr."""
+    middleware = _middleware()
+
+    class FakeResponse:
+        text = None  # type: ignore[assignment]
+        content = [{"type": "text", "text": "Summary from non-AIMessage."}]
+
+    assert middleware._extract_summary_text(FakeResponse()) == "Summary from non-AIMessage."
