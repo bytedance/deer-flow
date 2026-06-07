@@ -60,3 +60,4 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+/tg-intel-crawler/

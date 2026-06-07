@@ -29,6 +29,8 @@ description: Use this skill to ANALYZE collected black/gray-industry intelligenc
 | 能力 | --action | LLM |
 |---|---|---|
 | 列出已注册数据源 | `list-sources` | 否 |
+| 查看可查询的表结构/列 | `schema` | 否 |
+| **自由读只读 SQL 查询** | `sql` | 否 |
 | 按天/风险/来源查记录 | `query` | 否 |
 | 量级趋势 | `trends` | 否 |
 | Top 风险来源群 | `top-groups` | 否 |
@@ -73,6 +75,30 @@ python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action repor
 
 报告基于真实 SQL 聚合（不编数据），含风险概览/重点群/实体线索/趋势研判/处置建议，
 落 `output/reports/intel_report_<scope>_<时间戳>.md`，并在 stdout 输出全文。
+
+### 把库当知识库：自由 SQL 查询（agent 自己写 SELECT）
+
+当预设聚合不够用时，agent 可以**直接写只读 SQL** 查整个情报库。先看表结构，再写查询：
+
+```bash
+# 1) 看可查询的视图/列（统一视图名为 intel，含 __db/day/source_platform/risk_*/entities/summary...）
+python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action schema
+
+# 2) 写任意只读 SELECT（FROM intel）。例：每个高发群的 high 占比
+python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
+  --sql "SELECT source_group, COUNT(*) total, SUM(CASE WHEN risk_level='high' THEN 1 ELSE 0 END) high FROM intel WHERE day>='2026-06-06' GROUP BY source_group HAVING total>5 ORDER BY high DESC LIMIT 10"
+
+# 跨源、限行数
+python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
+  --sql "SELECT __db, source_platform, COUNT(*) n FROM intel GROUP BY __db, source_platform" --max-rows 100
+```
+
+**SQL 安全约束（脚本强制）**：
+- 只允许 **单条** `SELECT` / `WITH`（只读）；`INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/ATTACH/PRAGMA/...`
+  及多语句(`;`)一律拒绝并返回错误。
+- 查询对象是逻辑视图 **`intel`**（所有数据源 `*_intel_filtered` 的只读 UNION），
+  agent 只需 `FROM intel`，不用关心物理表名/多库。
+- 结果默认最多 500 行（`--max-rows` 可调），数据库以只读方式打开，绝不被修改。
 
 ## 多数据源协作
 

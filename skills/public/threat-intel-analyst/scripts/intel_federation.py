@@ -166,6 +166,75 @@ class IntelFederation:
         rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
+    # ---------- agent-facing SQL (read-only, validated) ----------
+
+    # The federated view is exposed to user SQL under this name.
+    VIEW_NAME = "intel"
+
+    # Statement keywords that mutate or escape the sandbox — hard-blocked.
+    _FORBIDDEN = (
+        "insert", "update", "delete", "drop", "alter", "create", "replace",
+        "attach", "detach", "pragma", "vacuum", "reindex", "truncate",
+        "grant", "revoke", "begin", "commit", "rollback", "savepoint",
+    )
+
+    def schema_info(self) -> dict:
+        """Describe the queryable view + columns so an agent can write SQL.
+
+        Returns the logical view name (``intel``), its columns, and the list of
+        underlying source databases. Agents should SELECT ... FROM intel.
+        """
+        return {
+            "view": self.VIEW_NAME,
+            "columns": ["__db"] + FILTERED_COLUMNS,
+            "column_notes": {
+                "__db": "which source database the row came from",
+                "day": "partition date YYYY-MM-DD",
+                "source_platform": "telegram / bot / twitter / weibo / ...",
+                "risk_level": "high / medium / low",
+                "entities": "JSON string: {accounts,contacts,links,tools,prices}",
+            },
+            "databases": [d["alias"] for d in self.databases if d["attached"]],
+            "example": f"SELECT day, COUNT(*) n FROM {self.VIEW_NAME} "
+                       f"WHERE risk_level='high' GROUP BY day ORDER BY day DESC",
+        }
+
+    def _validate_select(self, sql: str) -> None:
+        s = sql.strip().rstrip(";").strip()
+        if not s:
+            raise ValueError("empty SQL")
+        if ";" in s:
+            raise ValueError("multiple statements are not allowed")
+        low = s.lower()
+        if not (low.startswith("select") or low.startswith("with")):
+            raise ValueError("only SELECT / WITH (read-only) queries are allowed")
+        # Word-boundary check so 'created_at' won't trip 'create', etc.
+        import re
+        for kw in self._FORBIDDEN:
+            if re.search(rf"\b{kw}\b", low):
+                raise ValueError(f"forbidden keyword in query: {kw}")
+
+    def run_select(self, user_sql: str, *, max_rows: int = 500) -> dict:
+        """Execute an agent-written read-only SELECT against the federated
+        ``intel`` view. Validates it's a single read-only statement, substitutes
+        the view, caps rows, and runs on a read-only connection.
+        """
+        if self.is_empty():
+            return {"columns": [], "rows": [], "row_count": 0,
+                    "note": "no data sources attached"}
+        self._validate_select(user_sql)
+        body = user_sql.strip().rstrip(";").strip()
+        # Replace the logical view name with the real unioned subquery.
+        import re
+        view_sub = f"(SELECT * FROM ({self.union_sql})) AS {self.VIEW_NAME}"
+        replaced = re.sub(rf"\b{self.VIEW_NAME}\b", view_sub, body, count=0)
+        wrapped = f"SELECT * FROM ({replaced}) LIMIT {int(max_rows)}"
+        cur = self._conn.execute(wrapped)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = [dict(r) for r in cur.fetchall()]
+        return {"columns": cols, "rows": rows, "row_count": len(rows),
+                "truncated": len(rows) >= max_rows}
+
     def is_empty(self) -> bool:
         return not self._select_parts
 

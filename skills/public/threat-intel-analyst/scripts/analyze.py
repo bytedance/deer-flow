@@ -96,9 +96,11 @@ def _llm_report(facts: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Threat-intel analysis (federated)")
     ap.add_argument("--action", required=True,
-                    choices=["list-sources", "trends", "top-groups", "top-entities",
-                             "keyword-heat", "query", "report"])
+                    choices=["list-sources", "schema", "sql", "trends", "top-groups",
+                             "top-entities", "keyword-heat", "query", "report"])
     ap.add_argument("--registry", default=None)
+    ap.add_argument("--sql", default="", help="Read-only SELECT for --action sql.")
+    ap.add_argument("--max-rows", type=int, default=500)
     ap.add_argument("--day-from", default="")
     ap.add_argument("--day-to", default="")
     ap.add_argument("--day", default="")
@@ -116,6 +118,14 @@ def main() -> int:
             fed.close()
         print(json.dumps(out, ensure_ascii=False, indent=2)); return 0
 
+    if a.action == "schema":
+        fed = _fed(a.registry)
+        try:
+            out = {"ok": True, "action": "schema", **fed.schema_info()}
+        finally:
+            fed.close()
+        print(json.dumps(out, ensure_ascii=False, indent=2)); return 0
+
     fed = _fed(a.registry)
     if fed.is_empty():
         fed.close()
@@ -124,7 +134,18 @@ def main() -> int:
               ensure_ascii=False, indent=2))
         return 1
     try:
-        if a.action == "trends":
+        if a.action == "sql":
+            if not a.sql.strip():
+                out = {"ok": False, "error": "--sql is required for --action sql"}
+            else:
+                try:
+                    res = fed.run_select(a.sql, max_rows=a.max_rows)
+                    out = {"ok": True, "action": "sql", "query": a.sql, **res}
+                except ValueError as e:
+                    out = {"ok": False, "action": "sql", "error": str(e),
+                           "hint": "only read-only SELECT/WITH over the 'intel' view; "
+                                   "run --action schema to see columns."}
+        elif a.action == "trends":
             out = {"ok": True, "action": "trends", **analytics.trends(fed, **_scope(a))}
         elif a.action == "top-groups":
             out = {"ok": True, "action": "top-groups",
