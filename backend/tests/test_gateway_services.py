@@ -431,6 +431,49 @@ def test_inject_authenticated_user_context_overrides_client_user_id():
     assert config["context"]["user_id"] == "auth-user-42"
 
 
+def test_merge_run_context_overrides_propagates_user_id():
+    """Regression for PR #3294: ``user_id`` from ``body.context`` must land in
+    ``config['context']`` so non-web callers (e.g. IM channels) keep their identity
+    on ``ToolRuntime.context``.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"user_id": "channel-user-7"})
+
+    assert config["context"]["user_id"] == "channel-user-7"
+
+
+def test_merge_run_context_overrides_does_not_clobber_existing_user_id():
+    """``merge_run_context_overrides`` must not override an already-stamped
+    authenticated ``context.user_id`` with the client-supplied value.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"context": {"user_id": "auth-user-42"}}, None)
+    merge_run_context_overrides(config, {"user_id": "spoofed-client"})
+
+    assert config["context"]["user_id"] == "auth-user-42"
+
+
+def test_inject_authenticated_user_context_skips_internal_role():
+    """Regression for PR #3294: internal system-role callers must not overwrite an
+    already-present ``context.user_id`` (e.g. a channel-supplied identity), so the
+    real end user keeps owning the per-user storage bucket.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"user_id": "channel-user-7"}
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="internal-bot", system_role="internal")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "channel-user-7"
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

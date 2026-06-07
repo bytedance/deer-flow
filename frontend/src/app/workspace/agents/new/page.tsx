@@ -146,6 +146,27 @@ export default function NewAgentPage() {
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) when
+        // one is present, wrapped in a localised prefix so zh-CN users
+        // don't see a bare English string next to the surrounding Chinese
+        // UI. Falls back to the generic localised fallback when the backend
+        // sent no detail — `err.message` is unreliable for this branch
+        // because `checkAgentName` substitutes a generated fallback string
+        // ("Failed to check agent name: ${statusText}") when `detail` is
+        // missing, so testing `err.message` would always be truthy and the
+        // generated fallback would leak through.
+        setNameError(
+          err.detail
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.detail,
+              )
+            : t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -172,6 +193,7 @@ export default function NewAgentPage() {
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
     t.agents.nameStepInvalidError,
     threadId,
   ]);

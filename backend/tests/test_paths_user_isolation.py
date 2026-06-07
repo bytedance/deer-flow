@@ -30,6 +30,41 @@ class TestValidateUserId:
             paths.user_dir("")
 
 
+class TestMakeSafeUserId:
+    def test_already_safe_id_is_unchanged(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        assert make_safe_user_id("ou_abc-123") == "ou_abc-123"
+        assert make_safe_user_id("123456") == "123456"
+
+    def test_unsafe_chars_are_sanitized_with_stable_suffix(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        result = make_safe_user_id("user@example.com")
+        # Sanitized prefix plus a stable digest of the original.
+        assert result.startswith("user-example-com-")
+        assert len(result.rsplit("-", 1)[1]) == 16
+        assert make_safe_user_id("user@example.com") == result
+
+    def test_sanitized_id_passes_validation(self, paths: Paths):
+        from deerflow.config.paths import make_safe_user_id
+
+        safe = make_safe_user_id("用户/../etc")
+        # Must be usable as a filesystem-scoped bucket without raising.
+        assert paths.user_dir(safe) == paths.base_dir / "users" / safe
+
+    def test_distinct_unsafe_ids_do_not_collide(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        assert make_safe_user_id("a.b") != make_safe_user_id("a/b")
+
+    def test_empty_id_rejected(self):
+        from deerflow.config.paths import make_safe_user_id
+
+        with pytest.raises(ValueError, match="non-empty"):
+            make_safe_user_id("")
+
+
 class TestUserDir:
     def test_user_dir(self, paths: Paths):
         assert paths.user_dir("alice") == paths.base_dir / "users" / "alice"

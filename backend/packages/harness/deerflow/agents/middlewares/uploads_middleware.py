@@ -7,6 +7,7 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
@@ -293,3 +294,16 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             "uploaded_files": new_files,
             "messages": messages,
         }
+
+    @override
+    async def abefore_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
+        """Async hook that offloads the synchronous uploads scan off the event loop.
+
+        ``before_agent`` performs blocking filesystem IO (directory enumeration,
+        ``stat``, reading sibling ``.md`` outlines). When the graph runs async,
+        langgraph would otherwise execute the sync hook directly on the event
+        loop, so it is dispatched to a worker thread via ``run_in_executor``.
+        ``run_in_executor`` copies the current context, so the ``user_id``
+        contextvar read by ``get_effective_user_id()`` is preserved.
+        """
+        return await run_in_executor(None, self.before_agent, state, runtime)
