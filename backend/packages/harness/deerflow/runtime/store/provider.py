@@ -131,10 +131,16 @@ def get_store() -> BaseStore:
         config = get_checkpointer_config()
 
         if config is None and _app_config is None:
+            _store_lock.release()
             try:
-                get_app_config()
-            except FileNotFoundError:
-                pass
+                try:
+                    get_app_config()
+                except FileNotFoundError:
+                    pass
+            finally:
+                _store_lock.acquire()
+            if _store is not None:
+                return _store
             config = get_checkpointer_config()
 
         if config is None:

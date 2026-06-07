@@ -135,11 +135,17 @@ def get_checkpointer() -> Checkpointer:
             # checkpointer config has been initialized yet. This keeps tests that
             # intentionally set the global checkpointer config isolated from any
             # ambient config.yaml on disk.
+            _checkpointer_lock.release()
             try:
-                get_app_config()
-            except FileNotFoundError:
-                # In test environments without config.yaml, this is expected.
-                pass
+                try:
+                    get_app_config()
+                except FileNotFoundError:
+                    # In test environments without config.yaml, this is expected.
+                    pass
+            finally:
+                _checkpointer_lock.acquire()
+            if _checkpointer is not None:
+                return _checkpointer
             config = get_checkpointer_config()
         if config is None:
             from langgraph.checkpoint.memory import InMemorySaver
