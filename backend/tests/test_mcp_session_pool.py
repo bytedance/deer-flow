@@ -1,5 +1,7 @@
 """Tests for the MCP persistent-session pool."""
 
+import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -614,3 +616,585 @@ async def test_http_transport_tools_not_pooled():
     stdio_tools = [t for t in tools if t.name == "playwright_navigate"]
     assert len(stdio_tools) == 1
     assert stdio_tools[0].coroutine is not stdio_tool.coroutine
+
+
+# ---------------------------------------------------------------------------
+# Regression for #3379: cancel scope must be exited in the entering task
+# ---------------------------------------------------------------------------
+
+
+class _CancelScopeCm:
+    """Fake session context manager that mimics anyio's cancel-scope rule.
+
+    ``ClientSession`` is built on an anyio task group, which requires the cancel
+    scope to be exited from the *same asyncio task* that entered it. This fake
+    records the task that runs ``__aenter__`` and raises the exact RuntimeError
+    anyio would raise if ``__aexit__`` runs in a different task — reproducing the
+    crash reported in GitHub issue #3379.
+    """
+
+    def __init__(self) -> None:
+        self.enter_task: object | None = None
+        self.closed = False
+
+    async def __aenter__(self):
+        self.enter_task = asyncio.current_task()
+        return AsyncMock()
+
+    async def __aexit__(self, *args):
+        if asyncio.current_task() is not self.enter_task:
+            raise RuntimeError("Attempted to exit cancel scope in a different task than it was entered in")
+        self.closed = True
+        return False
+
+
+async def _get_session_in_own_task(pool, *args):
+    """Create a pooled session from a *dedicated* child task.
+
+    In production every stdio session is entered from its own short-lived task
+    (the sync-tool path runs each call through a fresh ``asyncio.run``). This
+    helper reproduces that so the close paths are exercised from a *different*
+    task than the one that entered the session — the exact condition that
+    triggered #3379.
+    """
+    return await asyncio.create_task(pool.get_session(*args))
+
+
+@pytest.mark.asyncio
+async def test_close_all_does_not_cross_tasks():
+    """close_all must not raise the cross-task cancel-scope RuntimeError (#3379)."""
+    pool = MCPSessionPool()
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await _get_session_in_own_task(pool, "s1", "t1", {"transport": "stdio", "command": "x", "args": []})
+        await _get_session_in_own_task(pool, "s2", "t2", {"transport": "stdio", "command": "x", "args": []})
+
+    # close_all runs in this task, which is *not* the task that entered either
+    # session. The owner task must perform __aexit__ so each CM closes cleanly.
+    await pool.close_all()
+
+    assert all(cm.closed for cm in cms)
+    assert len(pool._entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_close_scope_does_not_cross_tasks():
+    """close_scope must respect the same-task cancel-scope rule (#3379)."""
+    pool = MCPSessionPool()
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await _get_session_in_own_task(pool, "s", "t1", {"transport": "stdio", "command": "x", "args": []})
+        await _get_session_in_own_task(pool, "s", "t2", {"transport": "stdio", "command": "x", "args": []})
+
+    await pool.close_scope("t1")
+
+    assert cms[0].closed is True
+    assert cms[1].closed is False
+    assert ("s", "t2") in pool._entries
+
+
+@pytest.mark.asyncio
+async def test_lru_eviction_does_not_cross_tasks():
+    """LRU eviction must close the victim without a cross-task RuntimeError (#3379)."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 2
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await _get_session_in_own_task(pool, "s", "t1", {"transport": "stdio", "command": "x", "args": []})
+        await _get_session_in_own_task(pool, "s", "t2", {"transport": "stdio", "command": "x", "args": []})
+        # Adding t3 evicts t1 — its own owner task must run __aexit__, even
+        # though the eviction is driven from t3's get_session call.
+        await _get_session_in_own_task(pool, "s", "t3", {"transport": "stdio", "command": "x", "args": []})
+
+    assert cms[0].closed is True
+    assert cms[1].closed is False
+    assert cms[2].closed is False
+
+
+def test_close_all_sync_across_loops_does_not_cross_tasks():
+    """close_all_sync, the path hit by the sync tool wrapper, must close sessions
+    created in earlier (now-finished) asyncio.run loops without crashing (#3379).
+    """
+    pool = MCPSessionPool()
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        # Simulate the sync-tool path: a session created inside one short-lived
+        # event loop, then a second one in a different loop.
+        asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
+        asyncio.run(pool.get_session("s", "t2", {"transport": "stdio", "command": "x", "args": []}))
+
+    # The owning loops are already closed; close_all_sync must not raise.
+    pool.close_all_sync()
+
+    assert len(pool._entries) == 0
+
+
+def test_get_session_replaces_session_from_closed_loop():
+    """A pooled session whose owning loop has closed is evicted and recreated."""
+    pool = MCPSessionPool()
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        # First session created in a throwaway loop that is torn down by
+        # asyncio.run (mirrors the sync-tool path). asyncio.run cancels the
+        # pending owner task and runs its __aexit__ on the same loop.
+        asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
+        assert ("s", "t1") in pool._entries
+
+        # Now request the same key from a fresh loop: the stale entry (closed
+        # loop) must be evicted and replaced with a fresh session.
+        session = asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
+
+    assert session is not None
+    assert len(cms) == 2
+    assert pool._entries[("s", "t1")][0] is session
+
+
+class _BlockingInitCm:
+    """Fake session CM whose ``initialize`` blocks until released.
+
+    Lets a test cancel ``get_session`` while the owner task is still
+    initializing, reproducing the caller-cancellation window.
+    """
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        self._gate = gate
+        self.entered = False
+        self.closed = False
+
+    async def __aenter__(self):
+        self.entered = True
+        session = MagicMock()
+        session.initialize = self._initialize
+        return session
+
+    async def _initialize(self):
+        await self._gate.wait()
+
+    async def __aexit__(self, *args):
+        self.closed = True
+        return False
+
+
+@pytest.mark.asyncio
+async def test_get_session_cancelled_while_initializing_does_not_leak():
+    """Cancelling get_session mid-init must not leak the owner task/session (#3379 CR).
+
+    The session is not registered yet, so if cancellation skipped the cleanup
+    the owner task would block forever on close_evt.wait() and the CM's
+    __aexit__ would never run — an unreachable, unclosable session.
+    """
+    pool = MCPSessionPool()
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        call = asyncio.create_task(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
+        # Let the owner task enter the CM and reach the blocking initialize().
+        await asyncio.sleep(0.01)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        # Release initialize() so the owner task can finish its shutdown path.
+        gate.set()
+        # Give the owner task a chance to run __aexit__ and complete.
+        for _ in range(10):
+            if cms and cms[0].closed:
+                break
+            await asyncio.sleep(0.01)
+
+    assert len(cms) == 1
+    assert cms[0].entered is True
+    assert cms[0].closed is True, "owner task must run __aexit__ after cancellation"
+    assert len(pool._entries) == 0
+
+    current = asyncio.current_task()
+    leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+    assert not leaked, "owner task must not be left pending after cancellation"
+
+
+class _InitFailCm:
+    """Fake session CM whose ``initialize`` fails, with a slow ``__aexit__``.
+
+    The slow __aexit__ lets a test observe whether cleanup is allowed to run to
+    completion (closed=True) or is interrupted by a stray cancellation.
+    """
+
+    def __init__(self) -> None:
+        self.entered = False
+        self.exit_started = False
+        self.closed = False
+
+    async def __aenter__(self):
+        self.entered = True
+        session = MagicMock()
+        session.initialize = self._initialize
+        return session
+
+    async def _initialize(self):
+        raise RuntimeError("init boom")
+
+    async def __aexit__(self, *args):
+        self.exit_started = True
+        # Yield control so a buggy double-cancel would interrupt us here.
+        await asyncio.sleep(0.02)
+        self.closed = True
+        return False
+
+
+@pytest.mark.asyncio
+async def test_get_session_init_failure_runs_full_cleanup():
+    """On initialize() failure the owner task's __aexit__ must complete (#3379 CR P1).
+
+    The caller must NOT cancel the owner task on a reported failure, otherwise
+    the in-progress __aexit__ cleanup gets interrupted and leaks resources.
+    """
+    pool = MCPSessionPool()
+    cms: list[_InitFailCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _InitFailCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        with pytest.raises(RuntimeError, match="init boom"):
+            await pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []})
+
+    assert len(cms) == 1
+    assert cms[0].entered is True
+    assert cms[0].exit_started is True
+    assert cms[0].closed is True, "__aexit__ must run to completion, not be interrupted"
+    assert len(pool._entries) == 0
+    assert len(pool._inflight) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_session_same_key_creates_single_session():
+    """Concurrent get_session for the same key must share one session (#3379 CR P1)."""
+    pool = MCPSessionPool()
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        conn = {"transport": "stdio", "command": "x", "args": []}
+        t1 = asyncio.create_task(pool.get_session("s", "same", conn))
+        t2 = asyncio.create_task(pool.get_session("s", "same", conn))
+        # Let both calls pass Phase 1 and reach the (gated) initialize().
+        await asyncio.sleep(0.02)
+        gate.set()
+        s1, s2 = await asyncio.gather(t1, t2)
+
+    # Only one CM/session created, both callers got the same object.
+    assert len(cms) == 1, "concurrent same-key calls must not create duplicate sessions"
+    assert s1 is s2
+    assert len(pool._entries) == 1
+    assert len(pool._inflight) == 0
+
+
+@pytest.mark.asyncio
+async def test_close_all_during_in_flight_creation_does_not_resurrect_session():
+    """close_all while a creation is in-flight must not leave a live session (#3379 CR P1).
+
+    The in-flight record must be removed and its owner task torn down, so when
+    the (blocked) creator finishes initializing it does NOT register the session
+    back into _entries — otherwise the pool resurrects an unclosable session.
+    """
+    pool = MCPSessionPool()
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        conn = {"transport": "stdio", "command": "x", "args": []}
+        call = asyncio.create_task(pool.get_session("s", "t1", conn))
+        # Let the owner task enter the CM and reach the blocking initialize().
+        await asyncio.sleep(0.01)
+        assert ("s", "t1") in pool._inflight
+
+        # Close everything while the creation is still in-flight.
+        await pool.close_all()
+
+        # The in-flight creation must be gone, not promoted to an entry.
+        assert len(pool._inflight) == 0
+        assert len(pool._entries) == 0
+
+        # Even if the gate is released afterwards, nothing must come back.
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    assert len(pool._entries) == 0
+    assert len(pool._inflight) == 0
+    assert cms[0].closed is True, "in-flight session's __aexit__ must run on teardown"
+
+    current = asyncio.current_task()
+    leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+    assert not leaked, "in-flight owner task must not leak after close_all"
+
+
+def test_get_session_cross_loop_in_flight_does_not_raise_assertion():
+    """A same-key request from another loop must not hit the in-flight assertion (#3379 CR P1).
+
+    Loop A starts (and leaves running) an in-flight creation, then loop B
+    requests the same key. The stale in-flight record (owned by loop A) must be
+    dropped and loop B must become a fresh creator — never fall through to an
+    AssertionError.
+    """
+    pool = MCPSessionPool()
+    cms: list[_CancelScopeCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _CancelScopeCm()
+        cms.append(cm)
+        return cm
+
+    conn = {"transport": "stdio", "command": "x", "args": []}
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def run_in_own_loop():
+        try:
+            results.append(asyncio.run(pool.get_session("s", "t1", conn)))
+        except BaseException as e:  # noqa: BLE001 - capture for assertion
+            errors.append(e)
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        # First loop creates and registers an entry, then its loop is torn down
+        # by asyncio.run, leaving a stale (closed-loop) record behind.
+        t1 = threading.Thread(target=run_in_own_loop)
+        t1.start()
+        t1.join()
+
+        # Second loop requests the same key. It must evict the stale record and
+        # create a fresh session instead of raising AssertionError.
+        t2 = threading.Thread(target=run_in_own_loop)
+        t2.start()
+        t2.join()
+
+    assert not errors, f"cross-loop same-key request must not raise: {errors}"
+    assert len(results) == 2
+    assert all(r is not None for r in results)
+
+
+def test_cross_loop_preempting_blocked_in_flight_does_not_hang_owner():
+    """A foreign-loop request must not leave a still-initializing owner hung (#3379 CR P1).
+
+    Loop A starts a creation that blocks inside initialize() (the in-flight
+    record stays live). Loop B then requests the same key. B must tear A's owner
+    down — cancelling it, because close_evt alone cannot wake a task blocked in
+    initialize() — so that A's get_session unwinds instead of hanging forever.
+    """
+    pool = MCPSessionPool()
+    conn = {"transport": "stdio", "command": "x", "args": []}
+    first_gate = threading.Event()
+    entered = threading.Event()
+    results: list[tuple[str, object]] = []
+    errors: list[tuple[str, BaseException]] = []
+    closed: list[str] = []
+
+    class _BlockingForeverCm:
+        async def __aenter__(self):
+            session = MagicMock()
+            session.initialize = self._initialize
+            entered.set()
+            return session
+
+        async def _initialize(self):
+            # Block until released, simulating a slow/stuck server handshake.
+            while not first_gate.is_set():
+                await asyncio.sleep(0.005)
+
+        async def __aexit__(self, *args):
+            closed.append("blocking")
+            return False
+
+    class _FastCm:
+        async def __aenter__(self):
+            session = MagicMock()
+
+            async def init():
+                return None
+
+            session.initialize = init
+            return session
+
+        async def __aexit__(self, *args):
+            return False
+
+    cms: list[object] = [_BlockingForeverCm(), _FastCm()]
+
+    def make_cm(*a, **kw):
+        return cms.pop(0)
+
+    def run_get(name):
+        try:
+            results.append((name, asyncio.run(pool.get_session("s", "t1", conn))))
+        except BaseException as e:  # noqa: BLE001 - capture for assertion
+            errors.append((name, e))
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        ta = threading.Thread(target=run_get, args=("A",))
+        ta.start()
+        assert entered.wait(2), "owner A must enter the CM and start initializing"
+
+        tb = threading.Thread(target=run_get, args=("B",))
+        tb.start()
+        tb.join(3)
+
+        # B must complete without depending on A's blocked initialize().
+        assert not tb.is_alive(), "foreign-loop request B must not hang"
+        # A must already be unwound (cancelled), not waiting on the dead gate.
+        ta.join(3)
+        assert not ta.is_alive(), "preempted owner A must not hang forever"
+
+    assert [n for n, _ in results] == ["B"], "only B produces a usable session"
+    assert any(isinstance(e, asyncio.CancelledError) for _, e in errors), "preempted A must unwind via CancelledError"
+    assert "blocking" in closed, "preempted owner's __aexit__ must run on teardown"
+
+
+@pytest.mark.asyncio
+async def test_close_all_sync_from_running_loop_does_not_wait_on_itself():
+    """close_all_sync must not block on the current running loop (#3379 CR P1).
+
+    When called from code already executing inside the owner loop's thread,
+    close_all_sync cannot synchronously wait for that loop to run the shutdown
+    coroutine. It must signal the owner task and return promptly, then the owner
+    task closes itself once the loop regains control.
+    """
+    pool = MCPSessionPool()
+    pool.SESSION_CLOSE_TIMEOUT = 0.2
+    conn = {"transport": "stdio", "command": "x", "args": []}
+
+    cm = _CloseTrackingCm()
+
+    def make_cm(*a, **kw):
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await pool.get_session("s", "t1", conn)
+        start = asyncio.get_running_loop().time()
+        pool.close_all_sync()
+        elapsed = asyncio.get_running_loop().time() - start
+
+        assert elapsed < 0.1, "close_all_sync must not stall until timeout on the current loop"
+        assert len(pool._entries) == 0
+        assert len(pool._inflight) == 0
+        assert cm.closed is False, "owner task has not run yet while close_all_sync is still executing"
+
+        for _ in range(10):
+            if cm.closed:
+                break
+            await asyncio.sleep(0.01)
+
+    assert cm.closed is True, "owner task must close itself after the loop regains control"
+
+
+# ---------------------------------------------------------------------------
+# reset_mcp_tools_cache deadlock regression
+# ---------------------------------------------------------------------------
+
+
+class _CloseTrackingCm:
+    """A create_session() context manager that records when __aexit__ runs."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aenter__(self):
+        session = MagicMock()
+
+        async def init():
+            return None
+
+        session.initialize = init
+        return session
+
+    async def __aexit__(self, *args):
+        self.closed = True
+        return False
+
+
+def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
+    """reset_mcp_tools_cache() must not deadlock when called from inside a
+    running loop that owns sessions (#3392 CR blocker).
+
+    The previous implementation spun up a worker thread running
+    ``asyncio.run(pool.close_all())`` and blocked the loop thread on
+    ``.result()``. close_all() then routed teardown of the current loop's
+    sessions back onto that blocked loop via run_coroutine_threadsafe(...),
+    so neither side could make progress. This test drives the exact scenario
+    on a daemon thread and asserts the call returns within a bounded time.
+    """
+    from deerflow.mcp.cache import reset_mcp_tools_cache
+    from deerflow.mcp.session_pool import get_session_pool
+
+    conn = {"transport": "stdio", "command": "x", "args": []}
+    cm = _CloseTrackingCm()
+    done = threading.Event()
+
+    async def scenario():
+        pool = get_session_pool()
+        # Entry owned by THIS loop — the deadlock-prone case.
+        await pool.get_session("s", "t1", conn)
+        # Synchronous call: asyncio.get_running_loop() succeeds inside it, so
+        # it takes the "running loop" branch in reset_mcp_tools_cache().
+        reset_mcp_tools_cache()
+        # Signal-only teardown completes once the loop regains control.
+        await asyncio.sleep(0.05)
+
+    def run():
+        asyncio.run(scenario())
+        done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        t.start()
+        t.join(timeout=5)
+
+    assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
+    assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
