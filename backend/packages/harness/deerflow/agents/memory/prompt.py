@@ -1,5 +1,7 @@
 """Prompt templates for memory update and injection."""
 
+from __future__ import annotations
+
 import logging
 import math
 import re
@@ -167,10 +169,10 @@ Return ONLY valid JSON."""
 # subsequent calls are a dict lookup (no network I/O).  Pre-warming at
 # startup via :func:`warm_tiktoken_cache` avoids blocking a request on the
 # (potentially slow) first ``get_encoding`` call.
-_tiktoken_encoding_cache: dict[str, "tiktoken.Encoding"] = {}
+_tiktoken_encoding_cache: dict[str, tiktoken.Encoding] = {}
 
 
-def _get_tiktoken_encoding(encoding_name: str = "cl100k_base") -> "tiktoken.Encoding | None":
+def _get_tiktoken_encoding(encoding_name: str = "cl100k_base") -> tiktoken.Encoding | None:
     """Return a cached tiktoken encoding, or ``None`` on failure / unavailability.
 
     On the very first call for a given *encoding_name*, tiktoken may need to
