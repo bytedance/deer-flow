@@ -1069,3 +1069,116 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
     # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
     assert captured.get("reasoning_effort") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout default injection (issue #3189)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkeypatch):
+    """OpenAI-compatible clients must receive a generous 240s chunk-gap budget by
+    default, so reasoning models with long thinking pauses don't trip
+    langchain-openai's aggressive 60s built-in default.
+    """
+    model = _make_model(use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
+    """If the user explicitly sets stream_chunk_timeout in config.yaml, the
+    factory must not overwrite it with the default — even if the value is
+    smaller (60s) or larger (600s) than the default.
+    """
+    model = ModelConfig(
+        name="custom-timeout-model",
+        display_name="Custom Timeout",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4o-mini",
+        stream_chunk_timeout=60.0,  # user-set explicit value
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="custom-timeout-model")
+
+    assert captured.get("stream_chunk_timeout") == 60.0
+
+
+def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
+    """Only langchain_openai:ChatOpenAI receives the default. Anthropic / Vertex /
+    other clients that don't understand this kwarg must not be polluted with it.
+    """
+    model = _make_model(use="langchain_anthropic:ChatAnthropic")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+def test_stream_chunk_timeout_default_constant_is_documented():
+    """Lock the default value at 240s. If we ever want to change this, the
+    deliberate update here (and the docstring on _apply_stream_chunk_timeout_default)
+    forces a paired review of the rationale comment block above the constant.
+    """
+    assert factory_module._DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS == 240.0
+
+
+def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
+    """Regression for CR feedback on issue #3189: if a user accidentally sets
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop
+    the kwarg before forwarding it to the model constructor. Otherwise the
+    third-party client raises ``TypeError: unexpected keyword argument
+    'stream_chunk_timeout'`` because the parameter is specific to
+    ``langchain_openai:ChatOpenAI``.
+    """
+    model = ModelConfig(
+        name="anthropic-with-stray-timeout",
+        display_name="Anthropic With Stray Timeout",
+        description=None,
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4",
+        stream_chunk_timeout=60.0,  # user-set on a non-OpenAI provider — must be dropped
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="anthropic-with-stray-timeout")
+
+    assert "stream_chunk_timeout" not in captured

@@ -373,7 +373,11 @@ def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) ->
     result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
+    # ReadError is a generic connection drop, not a chunk-gap timeout, so
+    # it must fall back to the legacy transient copy rather than the
+    # specialized "split the work into smaller steps" guidance (#3195 CR).
     assert "temporarily unavailable" in result.content
+    assert "streaming response was interrupted" not in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -397,7 +401,11 @@ async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPa
     result = await middleware.awrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
+    # ReadError is a generic connection drop, not a chunk-gap timeout, so
+    # it must fall back to the legacy transient copy rather than the
+    # specialized "split the work into smaller steps" guidance (#3195 CR).
     assert "temporarily unavailable" in result.content
+    assert "streaming response was interrupted" not in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -462,3 +470,211 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     assert result.content == "Success"
     assert middleware._circuit_failure_count == 0  # RESET
     assert middleware._check_circuit() is False
+
+
+class _StreamChunkTimeoutError(Exception):
+    """Local stand-in for langchain_openai's StreamChunkTimeoutError —
+    matched by class name, no langchain-openai import needed (mirrors
+    how this file already stubs httpx.ReadError / RemoteProtocolError).
+    """
+
+
+_StreamChunkTimeoutError.__name__ = "StreamChunkTimeoutError"
+
+
+def test_classify_error_stream_chunk_timeout_is_retriable() -> None:
+    """StreamChunkTimeoutError must be classified as transient/retriable."""
+    middleware = _build_middleware()
+    exc = _StreamChunkTimeoutError("No streaming chunk received for 120.0s (model=mimo-v2.5, chunks_received=58).")
+    exc.__class__.__name__ = "StreamChunkTimeoutError"
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_sync_stream_chunk_timeout_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync handler raising StreamChunkTimeoutError is retried exactly once —
+    the per-exception override caps it at 2 total attempts (1 first call + 1
+    retry) even when retry_max_attempts=3.
+    Same-payload retry on a chunk-gap timeout buffers the same way upstream;
+    a full 3-attempt loop would stack 6-12 minutes of dead air before
+    surfacing failure. We keep one cheap reconnect for genuine transient TCP
+    blips, then surface the failure so the model can re-plan on its next turn.
+    """
+    middleware = _build_middleware(
+        retry_max_attempts=3,
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=10,
+    )
+    attempts = 0
+    waits: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda d: waits.append(d))
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _StreamChunkTimeoutError("No streaming chunk received for 120.0s")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "streaming response was interrupted" in result.content
+    # Override caps StreamChunkTimeoutError at 2 attempts (1 first call + 1 retry).
+    assert attempts == 2
+    # Exactly one sleep between the first attempt and the single retry.
+    assert len(waits) == 1
+
+
+@pytest.mark.anyio
+async def test_async_stream_chunk_timeout_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async mirror of the sync test: StreamChunkTimeoutError is capped at
+    2 attempts (1 first call + 1 retry) so we don't stack 6-12 minutes of
+    dead air on a same-payload buffering failure.
+    """
+    middleware = _build_middleware(
+        retry_max_attempts=3,
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=10,
+    )
+    attempts = 0
+    waits: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        waits.append(d)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _StreamChunkTimeoutError("No streaming chunk received for 120.0s")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert "streaming response was interrupted" in result.content
+    assert attempts == 2
+    # Exactly one sleep between the first attempt and the single retry.
+    assert len(waits) == 1
+
+
+def test_max_attempts_for_returns_override_for_stream_chunk_timeout() -> None:
+    """StreamChunkTimeoutError must use the tightened budget (2 = "keep one retry"),
+    not the default of 3."""
+    middleware = _build_middleware(retry_max_attempts=3)
+    exc = _StreamChunkTimeoutError("upstream stalled")
+    exc.__class__.__name__ = "StreamChunkTimeoutError"
+
+    assert middleware._max_attempts_for(exc) == 2
+
+
+def test_max_attempts_for_falls_back_to_default_for_unlisted_exception() -> None:
+    """ReadError / RemoteProtocolError keep the full retry budget — only
+    StreamChunkTimeoutError pays for stalling upstream for `stream_chunk_timeout`
+    seconds per attempt, so only it gets the tighter cap.
+    """
+    middleware = _build_middleware(retry_max_attempts=3)
+
+    read_err = _ReadError("conn reset")
+    read_err.__class__.__name__ = "ReadError"
+    proto_err = _RemoteProtocolError("peer closed")
+    proto_err.__class__.__name__ = "RemoteProtocolError"
+
+    assert middleware._max_attempts_for(read_err) == 3
+    assert middleware._max_attempts_for(proto_err) == 3
+    assert middleware._max_attempts_for(FakeError("boom")) == 3
+
+
+def test_max_attempts_for_override_never_exceeds_user_cap() -> None:
+    """If the operator lowered retry_max_attempts below the override default,
+    the user-configured cap wins — overrides only ever *tighten*, never loosen.
+    """
+    middleware = _build_middleware(retry_max_attempts=1)
+    exc = _StreamChunkTimeoutError("upstream stalled")
+    exc.__class__.__name__ = "StreamChunkTimeoutError"
+
+    assert middleware._max_attempts_for(exc) == 1
+
+
+def test_user_message_for_stream_chunk_timeout_mentions_split_or_shorten() -> None:
+    """When the retry budget for StreamChunkTimeoutError is exhausted, the user
+    message must guide the user toward splitting / shortening the request
+    instead of suggesting a generic retry. This is the actionable advice
+    Reviewer B asked for in the follow-up CR (issue #3189).
+    """
+    middleware = _build_middleware()
+    exc = _StreamChunkTimeoutError("No streaming chunk received for 120.0s")
+    exc.__class__.__name__ = "StreamChunkTimeoutError"
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "streaming response was interrupted" in message
+    assert "split" in message or "shorten" in message
+    # The old generic "streaming response was interrupted" wording must NOT appear here,
+    # otherwise the actionable guidance is buried.
+    assert "temporarily unavailable" not in message
+
+
+def test_user_message_for_remote_protocol_error_uses_generic_transient_copy() -> None:
+    """RemoteProtocolError is a generic connection drop that can fire on
+    transient network blips with perfectly normal payloads. The
+    "split the work into smaller steps" guidance only applies when the
+    upstream chunk-gap watchdog fires (StreamChunkTimeoutError), so
+    RemoteProtocolError must fall back to the legacy transient copy.
+    Regression guard for the #3195 CR feedback.
+    """
+    middleware = _build_middleware()
+    exc = _RemoteProtocolError("Server closed connection unexpectedly")
+    exc.__class__.__name__ = "RemoteProtocolError"
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "temporarily unavailable" in message
+    assert "streaming response was interrupted" not in message
+
+
+def test_user_message_for_read_error_uses_generic_transient_copy() -> None:
+    """httpx.ReadError is symmetric to RemoteProtocolError: a generic
+    connection drop that must NOT receive the "split the work" guidance.
+    Regression guard for the #3195 CR feedback.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("connection dropped mid-stream")
+    exc.__class__.__name__ = "ReadError"
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "temporarily unavailable" in message
+    assert "streaming response was interrupted" not in message
+
+
+def test_user_message_for_generic_transient_keeps_legacy_copy() -> None:
+    """Generic transient errors (HTTP 503, 'cluster busy', etc.) must keep
+    the original 'streaming response was interrupted' message — only stream-drop
+    exceptions get the new specialized copy. This prevents regression on
+    callers who already rely on the legacy wording.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("server busy", status_code=503)
+
+    message = middleware._build_user_message(exc, reason="transient")
+
+    assert "temporarily unavailable" in message
+    assert "streaming response was interrupted" not in message
+
+
+def test_user_message_for_quota_unchanged() -> None:
+    """Sanity check: the quota / auth branches must remain untouched by the
+    stream-drop refactor.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+
+    message = middleware._build_user_message(exc, reason="quota")
+
+    assert "out of quota" in message
+    assert "streaming response was interrupted" not in message
