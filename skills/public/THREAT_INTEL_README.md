@@ -10,35 +10,44 @@
 
 每个 skill 是 deer-flow 标准结构：`SKILL.md`（frontmatter + Workflow）+ `scripts/`（argparse CLI）。
 
-## 依赖的底层项目（不在本仓库内）
+## 依赖的底层项目（已随本仓库一起分发）
 
-三个 skill 是底层 **`tg-intel-crawler`** 项目的薄封装，**底层项目不随 deer-flow 仓库一起分发**
-（它含 `*.session` 登录凭证、`config.yaml` 真实 api_key、153M 爬取数据，均不应入库）。
+三个 skill 是底层 **`tg-intel-crawler`** 项目的薄封装。**采集代码已集成进本仓库**
+（仓库根目录的 `tg-intel-crawler/`），所以 agent 部署到任何环境都自带 Telegram/Twitter
+采集能力，无需再单独获取代码。
 
-### 部署步骤
+**不进仓库的只有**（通过 `.gitignore` 排除，部署方各自提供/生成）：
+- `tg-intel-crawler/config/config.yaml` — 真实凭证（api_id/api_hash/phone/api_key）
+- `tg-intel-crawler/config/*.session` — Telegram 登录态
+- `tg-intel-crawler/output/` — 运行数据（intel.db 等，部署后自己采集生成）
+- `tg-intel-crawler/config/discovered_groups.yaml` — 候选池（采集时生成）
 
-1. 在部署机上准备底层项目并安装：
+### 部署步骤（在 agent 运行环境上执行一次）
 
-   ```bash
-   git clone <tg-intel-crawler-repo>          # 或拷贝你的本地副本
-   cd tg-intel-crawler
-   pip install -e .
-   pip install python-socks pysocks           # 代理依赖
-   cp config/config.example.yaml config/config.yaml   # 填好凭证、首次登录生成 session
-   ```
+```bash
+# 1. 安装采集项目（代码已在仓库内）
+cd <repo-root>/tg-intel-crawler
+pip install -e .
+pip install python-socks pysocks            # 代理依赖
 
-2. 让 skill 找到底层项目（**必需**）：
+# 2. 配置凭证（仓库不含，需自己填）
+cp config/config.example.yaml config/config.yaml
+#   编辑 config.yaml 填 api_id/api_hash/phone/llm.api_key/(可选)代理
 
-   ```bash
-   export TG_INTEL_CRAWLER_HOME=/abs/path/to/tg-intel-crawler
-   ```
+# 3. 让 skill 找到底层项目
+export TG_INTEL_CRAWLER_HOME=<repo-root>/tg-intel-crawler
 
-   - collector/curator 的脚本据此调用 `tg-crawler` CLI；
-   - analyst 据此定位 `output/intel.db`、`config/config.yaml`（LLM 配置）、`output/reports/`。
+# 4. 首次登录（生成 *.session，之后免登录）
+#    首次运行任一采集命令时按提示输入 Telegram 短信验证码
+tg-crawler crawl --mode history --days 1 --joined-only
+```
 
-3. analyst 多数据源：编辑 `threat-intel-analyst/scripts/federation.yaml`
-   （`path: AUTO` 即自动用 `$TG_INTEL_CRAWLER_HOME/output/intel.db`；队友的库按
-   `threat-intel-analyst/SCHEMA_CONTRACT.md` 建好后加一行注册）。
+完成后，agent 调用 collector/curator skill 即可在该环境**自主采集** Telegram/Twitter 情报，
+数据落到该环境的 `output/intel.db`，analyst skill 直接查询/分析。
+
+> 说明：凭证（api_key/session）本就**不能硬编码进任何仓库**——这是安全底线，与"功能集成"
+> 不冲突。功能（采集代码）已集成；凭证由每个部署环境各自提供一次，是所有涉及账号的系统的通用做法。
+
 
 ## 全链路示例
 
