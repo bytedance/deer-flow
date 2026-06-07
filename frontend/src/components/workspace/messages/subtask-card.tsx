@@ -20,7 +20,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
-import { useSubtask } from "@/core/tasks/context";
+import type { Subtask } from "@/core/tasks";
+import { useLatestSubtaskMessage } from "@/core/tasks/context";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -31,26 +32,30 @@ import { MarkdownContent } from "./markdown-content";
 
 export function SubtaskCard({
   className,
-  taskId,
+  task,
   isLoading,
 }: {
   className?: string;
-  taskId: string;
+  task: Subtask;
   isLoading: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
+  const latestMessage = useLatestSubtaskMessage(task.id);
+  const mergedTask = useMemo(
+    () => (latestMessage ? { ...task, latestMessage } : task),
+    [latestMessage, task],
+  );
   const icon = useMemo(() => {
-    if (task.status === "completed") {
+    if (mergedTask.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
-    } else if (task.status === "failed") {
+    } else if (mergedTask.status === "failed") {
       return <XCircleIcon className="size-3 text-red-500" />;
-    } else if (task.status === "in_progress") {
+    } else if (mergedTask.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
     }
-  }, [task.status]);
+  }, [mergedTask.status]);
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
@@ -59,10 +64,10 @@ export function SubtaskCard({
       <div
         className={cn(
           "ambilight z-[-1]",
-          task.status === "in_progress" ? "enabled" : "",
+          mergedTask.status === "in_progress" ? "enabled" : "",
         )}
       ></div>
-      {task.status === "in_progress" && (
+      {mergedTask.status === "in_progress" && (
         <>
           <ShineBorder
             borderWidth={1.5}
@@ -81,12 +86,12 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 className="font-normal"
                 label={
-                  task.status === "in_progress" ? (
+                  mergedTask.status === "in_progress" ? (
                     <Shimmer duration={3} spread={3}>
-                      {task.description}
+                      {mergedTask.description}
                     </Shimmer>
                   ) : (
-                    task.description
+                    mergedTask.description
                   )
                 }
                 icon={<ClipboardListIcon />}
@@ -96,19 +101,21 @@ export function SubtaskCard({
                   <div
                     className={cn(
                       "text-muted-foreground flex items-center gap-1 text-xs font-normal",
-                      task.status === "failed" ? "text-red-500 opacity-67" : "",
+                      mergedTask.status === "failed"
+                        ? "text-red-500 opacity-67"
+                        : "",
                     )}
                   >
                     {icon}
                     <FlipDisplay
                       className="max-w-[420px] truncate pb-1"
-                      uniqueKey={task.latestMessage?.id ?? ""}
+                      uniqueKey={mergedTask.latestMessage?.id ?? ""}
                     >
-                      {task.status === "in_progress" &&
-                      task.latestMessage &&
-                      hasToolCalls(task.latestMessage)
-                        ? explainLastToolCall(task.latestMessage, t)
-                        : t.subtasks[task.status]}
+                      {mergedTask.status === "in_progress" &&
+                      mergedTask.latestMessage &&
+                      hasToolCalls(mergedTask.latestMessage)
+                        ? explainLastToolCall(mergedTask.latestMessage, t)
+                        : t.subtasks[mergedTask.status]}
                     </FlipDisplay>
                   </div>
                 )}
@@ -123,29 +130,29 @@ export function SubtaskCard({
           </Button>
         </div>
         <ChainOfThoughtContent className="px-4 pb-4">
-          {task.prompt && (
+          {mergedTask.prompt && (
             <ChainOfThoughtStep
               label={
                 <Streamdown
                   {...streamdownPluginsWithWordAnimation}
                   components={{ a: CitationLink }}
                 >
-                  {task.prompt}
+                  {mergedTask.prompt}
                 </Streamdown>
               }
             ></ChainOfThoughtStep>
           )}
-          {task.status === "in_progress" &&
-            task.latestMessage &&
-            hasToolCalls(task.latestMessage) && (
+          {mergedTask.status === "in_progress" &&
+            mergedTask.latestMessage &&
+            hasToolCalls(mergedTask.latestMessage) && (
               <ChainOfThoughtStep
                 label={t.subtasks.in_progress}
                 icon={<Loader2Icon className="size-4 animate-spin" />}
               >
-                {explainLastToolCall(task.latestMessage, t)}
+                {explainLastToolCall(mergedTask.latestMessage, t)}
               </ChainOfThoughtStep>
             )}
-          {task.status === "completed" && (
+          {mergedTask.status === "completed" && (
             <>
               <ChainOfThoughtStep
                 label={t.subtasks.completed}
@@ -153,9 +160,9 @@ export function SubtaskCard({
               ></ChainOfThoughtStep>
               <ChainOfThoughtStep
                 label={
-                  task.result ? (
+                  mergedTask.result ? (
                     <MarkdownContent
-                      content={task.result}
+                      content={mergedTask.result}
                       isLoading={false}
                       rehypePlugins={rehypePlugins}
                     />
@@ -164,9 +171,9 @@ export function SubtaskCard({
               ></ChainOfThoughtStep>
             </>
           )}
-          {task.status === "failed" && (
+          {mergedTask.status === "failed" && (
             <ChainOfThoughtStep
-              label={<div className="text-red-500">{task.error}</div>}
+              label={<div className="text-red-500">{mergedTask.error}</div>}
               icon={<XCircleIcon className="size-4 text-red-500" />}
             ></ChainOfThoughtStep>
           )}

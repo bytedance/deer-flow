@@ -1,23 +1,26 @@
+import type { AIMessage } from "@langchain/langgraph-sdk";
 import { createContext, useCallback, useContext, useState } from "react";
 
-import type { Subtask } from "./types";
-
 export interface SubtaskContextValue {
-  tasks: Record<string, Subtask>;
-  setTasks: (tasks: Record<string, Subtask>) => void;
+  latestMessages: Record<string, AIMessage>;
+  setLatestMessages: React.Dispatch<
+    React.SetStateAction<Record<string, AIMessage>>
+  >;
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
-  tasks: {},
-  setTasks: () => {
+  latestMessages: {},
+  setLatestMessages: () => {
     /* noop */
   },
 });
 
 export function SubtasksProvider({ children }: { children: React.ReactNode }) {
-  const [tasks, setTasks] = useState<Record<string, Subtask>>({});
+  const [latestMessages, setLatestMessages] = useState<Record<string, AIMessage>>(
+    {},
+  );
   return (
-    <SubtaskContext.Provider value={{ tasks, setTasks }}>
+    <SubtaskContext.Provider value={{ latestMessages, setLatestMessages }}>
       {children}
     </SubtaskContext.Provider>
   );
@@ -33,21 +36,21 @@ export function useSubtaskContext() {
   return context;
 }
 
-export function useSubtask(id: string) {
-  const { tasks } = useSubtaskContext();
-  return tasks[id];
+export function useLatestSubtaskMessage(id: string) {
+  const { latestMessages } = useSubtaskContext();
+  return latestMessages[id];
 }
 
-export function useUpdateSubtask() {
-  const { tasks, setTasks } = useSubtaskContext();
-  const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
-      tasks[task.id] = { ...tasks[task.id], ...task } as Subtask;
-      if (task.latestMessage) {
-        setTasks({ ...tasks });
-      }
+export function useUpdateLatestMessage() {
+  const { setLatestMessages } = useSubtaskContext();
+  const updateLatestMessage = useCallback(
+    (taskId: string, message: AIMessage) => {
+      setLatestMessages((current) => ({
+        ...current,
+        [taskId]: message,
+      }));
     },
-    [tasks, setTasks],
+    [setLatestMessages],
   );
-  return updateSubtask;
+  return updateLatestMessage;
 }

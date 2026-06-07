@@ -19,7 +19,7 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
-import { useUpdateSubtask } from "../tasks/context";
+import { useUpdateLatestMessage } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -393,7 +393,7 @@ export function useThreadStream({
   }, []);
 
   const queryClient = useQueryClient();
-  const updateSubtask = useUpdateSubtask();
+  const updateLatestMessage = useUpdateLatestMessage();
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
@@ -503,7 +503,7 @@ export function useThreadStream({
           task_id: string;
           message: AIMessage;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        updateLatestMessage(e.task_id, e.message);
         return;
       }
 
