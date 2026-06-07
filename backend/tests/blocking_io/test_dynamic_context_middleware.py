@@ -98,3 +98,27 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     # IDs match
     assert sync_result["messages"][0].id == async_result["messages"][0].id
     assert sync_result["messages"][1].id == async_result["messages"][1].id
+
+
+async def test_abefore_agent_returns_none_on_timeout() -> None:
+    """If _inject() exceeds the timeout, abefore_agent returns None gracefully."""
+    import time
+
+    mw = DynamicContextMiddleware()
+
+    def blocking_inject(state):
+        time.sleep(10)  # Simulate a blocking call that far exceeds the timeout
+        return {"messages": [HumanMessage(content="should not reach")]}
+
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.1,
+        ),
+    ):
+        state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
+        runtime = SimpleNamespace(context={})
+        result = await mw.abefore_agent(state, runtime)
+
+    assert result is None
