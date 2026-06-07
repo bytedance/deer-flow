@@ -75,6 +75,32 @@ class _BlockingSingletonFactory:
             return self.stats["exits"]
 
 
+class _TrackingLock:
+    def __init__(self):
+        self._lock = Lock()
+        self.acquired = Event()
+
+    def acquire(self, *args, **kwargs):
+        acquired = self._lock.acquire(*args, **kwargs)
+        if acquired:
+            self.acquired.set()
+        return acquired
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
 def _call_getter_concurrently(getter, workers: int = 8) -> list[object]:
     ready = Barrier(workers + 1)
 
@@ -387,6 +413,38 @@ class TestSyncSingletonThreadSafety:
 
         assert all(result is factory.value for result in results)
         assert factory.enter_count() == 1
+
+    def test_checkpointer_loads_config_outside_singleton_lock(self):
+        tracking_lock = _TrackingLock()
+
+        def fake_get_app_config():
+            assert not tracking_lock.locked()
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider._checkpointer_lock", tracking_lock),
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=fake_get_app_config),
+        ):
+            checkpointer = get_checkpointer()
+
+        assert checkpointer is not None
+        assert tracking_lock.acquired.is_set()
+
+    def test_store_loads_config_outside_singleton_lock(self):
+        tracking_lock = _TrackingLock()
+
+        def fake_get_app_config():
+            assert not tracking_lock.locked()
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with (
+            patch("deerflow.runtime.store.provider._store_lock", tracking_lock),
+            patch("deerflow.runtime.store.provider.get_app_config", side_effect=fake_get_app_config),
+        ):
+            store = get_store()
+
+        assert store is not None
+        assert tracking_lock.acquired.is_set()
 
     def test_checkpointer_reset_waits_for_initialization(self):
         load_checkpointer_config_from_dict({"type": "memory"})

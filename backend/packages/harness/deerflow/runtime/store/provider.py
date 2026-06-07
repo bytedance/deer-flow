@@ -101,7 +101,22 @@ def _sync_store_cm(config) -> Iterator[BaseStore]:
 
 _store: BaseStore | None = None
 _store_ctx = None  # open context manager keeping the connection alive
-_store_lock = threading.RLock()
+_store_lock = threading.Lock()
+
+
+def _ensure_store_config_loaded() -> None:
+    """Load app config before entering the singleton lock if needed."""
+    from deerflow.config.app_config import _app_config
+    from deerflow.config.checkpointer_config import get_checkpointer_config
+
+    config = get_checkpointer_config()
+    if config is not None or _app_config is not None:
+        return
+
+    try:
+        get_app_config()
+    except FileNotFoundError:
+        pass
 
 
 def get_store() -> BaseStore:
@@ -119,29 +134,17 @@ def get_store() -> BaseStore:
     if _store is not None:
         return _store
 
+    # Config loading can reset both persistence singletons. Keep it outside
+    # this provider lock to avoid cross-provider lock-order inversion.
+    _ensure_store_config_loaded()
+
     with _store_lock:
         if _store is not None:
             return _store
 
-        # Lazily load app config, mirroring the checkpointer singleton pattern so
-        # that tests that set the global checkpointer config explicitly remain isolated.
-        from deerflow.config.app_config import _app_config
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         config = get_checkpointer_config()
-
-        if config is None and _app_config is None:
-            _store_lock.release()
-            try:
-                try:
-                    get_app_config()
-                except FileNotFoundError:
-                    pass
-            finally:
-                _store_lock.acquire()
-            if _store is not None:
-                return _store
-            config = get_checkpointer_config()
 
         if config is None:
             from langgraph.store.memory import InMemoryStore

@@ -101,7 +101,27 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 
 _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
-_checkpointer_lock = threading.RLock()
+_checkpointer_lock = threading.Lock()
+
+
+def _ensure_checkpointer_config_loaded() -> None:
+    """Load app config before entering the singleton lock if needed."""
+    from deerflow.config.app_config import _app_config
+    from deerflow.config.checkpointer_config import get_checkpointer_config
+
+    config = get_checkpointer_config()
+    if config is not None or _app_config is not None:
+        return
+
+    # Only load app config lazily when neither the app config nor an explicit
+    # checkpointer config has been initialized yet. This keeps tests that
+    # intentionally set the global checkpointer config isolated from any
+    # ambient config.yaml on disk.
+    try:
+        get_app_config()
+    except FileNotFoundError:
+        # In test environments without config.yaml, this is expected.
+        pass
 
 
 def get_checkpointer() -> Checkpointer:
@@ -118,35 +138,18 @@ def get_checkpointer() -> Checkpointer:
     if _checkpointer is not None:
         return _checkpointer
 
+    # Config loading can reset both persistence singletons. Keep it outside
+    # this provider lock to avoid cross-provider lock-order inversion.
+    _ensure_checkpointer_config_loaded()
+
     with _checkpointer_lock:
         if _checkpointer is not None:
             return _checkpointer
 
-        # Ensure app config is loaded before checking checkpointer config
-        # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
-        # but hasn't been loaded yet
-        from deerflow.config.app_config import _app_config
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         config = get_checkpointer_config()
 
-        if config is None and _app_config is None:
-            # Only load app config lazily when neither the app config nor an explicit
-            # checkpointer config has been initialized yet. This keeps tests that
-            # intentionally set the global checkpointer config isolated from any
-            # ambient config.yaml on disk.
-            _checkpointer_lock.release()
-            try:
-                try:
-                    get_app_config()
-                except FileNotFoundError:
-                    # In test environments without config.yaml, this is expected.
-                    pass
-            finally:
-                _checkpointer_lock.acquire()
-            if _checkpointer is not None:
-                return _checkpointer
-            config = get_checkpointer_config()
         if config is None:
             from langgraph.checkpoint.memory import InMemorySaver
 
