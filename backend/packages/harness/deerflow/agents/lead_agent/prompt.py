@@ -452,19 +452,7 @@ You: "Deploying to staging..." [proceed]
 {subagent_section}
 
 <working_directory existed="true">
-- User uploads: `/mnt/user-data/uploads` - Files uploaded by the user (automatically listed in context)
-- User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
-- Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
-
-**File Management:**
-- Uploaded files are automatically listed in the <uploaded_files> section before each request
-- Use `read_file` tool to read uploaded files using their paths from the list
-- For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
-- All temporary work happens in `/mnt/user-data/workspace`
-- Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
-- When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
-- Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
+{working_directory_section}
 {acp_section}
 </working_directory>
 
@@ -541,8 +529,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
-- Output Files: Final deliverables must be in `/mnt/user-data/outputs`
-- Clarity: Be direct and helpful, avoid unnecessary meta-commentary
+{output_files_reminder}- Clarity: Be direct and helpful, avoid unnecessary meta-commentary
 - Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
@@ -722,6 +709,105 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
     )
 
 
+def _build_working_directory_section(*, app_config: AppConfig | None = None) -> str:
+    """Build the <working_directory> body based on the active sandbox provider.
+
+    LocalSandboxProvider runs commands directly on the host (no /mnt virtual
+    filesystem), so the agent must use real host paths. The container-style
+    /mnt/user-data/* layout only exists under AioSandboxProvider. Emitting the
+    wrong layout makes the agent believe it is jailed in a sandbox it cannot
+    see, leading it to refuse host paths or fabricate data.
+    """
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
+
+            config = get_app_config()
+        except Exception:
+            config = None
+    else:
+        config = app_config
+
+    use_path = ""
+    project_root = ""
+    try:
+        if config is not None:
+            use_path = config.sandbox.use or ""
+            from deerflow.config.runtime_paths import project_root as _project_root
+
+            project_root = str(_project_root())
+    except Exception:
+        project_root = ""
+
+    is_local = "LocalSandboxProvider" in use_path
+
+    if is_local:
+        root = project_root or "the project root"
+        return (
+            "**⚠️ CRITICAL — READ CAREFULLY. You run DIRECTLY on the HOST machine (LocalSandboxProvider). "
+            "There is NO sandbox isolation and NO `/mnt` filesystem for your data.**\n"
+            f"- Your bash/read_file/write_file/ls/glob/grep operate on the REAL host filesystem. You CAN read and write ANY "
+            f"absolute path the OS user can access, e.g. `{root}/...`, `/Users/...`, `/tmp/...`. There is NO path restriction.\n"
+            "- **IMPORTANT ILLUSION**: `pwd` may print `/mnt/user-data/workspace`. That is only a cosmetic mapping of a "
+            "scratch dir — it does NOT mean you are jailed. You are NOT limited to `/mnt`. IGNORE it and use real absolute paths.\n"
+            "- When the user gives you an absolute path (e.g. a `.db` file under "
+            f"`{root}/tg-intel-crawler/output/intel.db`), access it DIRECTLY with that exact path. Do it like:\n"
+            "    ```bash\n"
+            f'    sqlite3 "{root}/tg-intel-crawler/output/intel.db" "SELECT ..."\n'
+            "    # or:\n"
+            f"    {root}/backend/.venv/bin/python -c \"import sqlite3; c=sqlite3.connect('/abs/path/intel.db'); ...\"\n"
+            "    ```\n"
+            "- **ABSOLUTELY FORBIDDEN**: NEVER tell the user to 'upload the file to /mnt/user-data/...'. NEVER claim a 'sandbox "
+            "security restriction' blocks host paths — there is none. NEVER look for the user's data under `/mnt/...`. "
+            "NEVER fabricate, simulate, mock, or 'reconstruct' data when a file seems missing.\n"
+            "- If a path the user gave you appears missing, FIRST just try to read it directly (the `/mnt` ls may lie); if it "
+            f"truly fails, run `ls -la <the-exact-path>` and `find {root} -name '<file>'` to locate the REAL file, then use it. "
+            "Only if it genuinely does not exist, say so honestly and stop — do NOT invent data.\n"
+            "- Skill scripts shown as `/mnt/skills/public/<name>/...` in skill docs actually live at "
+            f"`{root}/skills/public/<name>/...` — translate `/mnt/skills` → `{root}/skills` and run with "
+            f"`{root}/backend/.venv/bin/python`."
+        )
+
+    # Default: container sandbox (AioSandboxProvider) layout.
+    return (
+        "- User uploads: `/mnt/user-data/uploads` - Files uploaded by the user (automatically listed in context)\n"
+        "- User workspace: `/mnt/user-data/workspace` - Working directory for temporary files\n"
+        "- Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here\n"
+        "\n"
+        "**File Management:**\n"
+        "- Uploaded files are automatically listed in the <uploaded_files> section before each request\n"
+        "- Use `read_file` tool to read uploaded files using their paths from the list\n"
+        "- For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals\n"
+        "- All temporary work happens in `/mnt/user-data/workspace`\n"
+        "- Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks\n"
+        "- When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`\n"
+        "- Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough\n"
+        "- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool"
+    )
+
+
+def _is_local_sandbox(app_config: AppConfig | None = None) -> bool:
+    """True when the active sandbox runs on the host (no /mnt virtual fs)."""
+    if app_config is None:
+        try:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+        except Exception:
+            return False
+    try:
+        return "LocalSandboxProvider" in (app_config.sandbox.use or "")
+    except Exception:
+        return False
+
+
+def _build_output_files_reminder(*, app_config: AppConfig | None = None) -> str:
+    """Critical-reminder line for where final deliverables go (sandbox-aware)."""
+    if _is_local_sandbox(app_config):
+        return "- Output Files: Save deliverables under the real project path (e.g. the relevant project's `output/` directory); do NOT use `/mnt/user-data/...` — it does not exist on the host\n"
+    return "- Output Files: Final deliverables must be in `/mnt/user-data/outputs`\n"
+
+
 def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     """Build a prompt section for explicitly configured sandbox mounts."""
     if app_config is None:
@@ -804,5 +890,7 @@ def apply_prompt_template(
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
+        working_directory_section=_build_working_directory_section(app_config=app_config),
+        output_files_reminder=_build_output_files_reminder(app_config=app_config),
         acp_section=acp_and_mounts_section,
     )

@@ -3,6 +3,21 @@ name: threat-intel-collector
 description: Use this skill to COLLECT black/gray-industry intelligence (ByteDance/Douyin/TikTok risk) from Telegram groups, search bots (@JISOU), and Twitter/X. It crawls history, discovers brand-new Telegram groups by keyword, and adds group links to monitoring. Each acquisition automatically runs keyword→LLM filtering and writes results to the SQLite intel store (telegram_intel_filtered/raw, day-partitioned) plus JSON/CSV. Trigger when the user wants to gather/fetch/crawl new threat intel, monitor groups, or discover sources that aren't in the database yet.
 ---
 
+> ## ⚠️ 本地环境路径（务必先读）
+> 当前为 **本地部署（LocalSandbox，直接在宿主机执行，没有 `/mnt` 虚拟路径）**。请用下列**真实绝对路径**，不要去 `/mnt/...`、`/mnt/user-data/workspace`、`/mnt/skills` 等不存在的目录：
+> - **本 skill 脚本**：`/Users/sunnymei/project/deer-flow/skills/public/threat-intel-collector/scripts/collect.py`
+> - **爬虫项目根**：`/Users/sunnymei/project/deer-flow/tg-intel-crawler`（配置/库/输出都在这）
+> - **情报数据库**：`/Users/sunnymei/project/deer-flow/tg-intel-crawler/output/intel.db`
+> - **Python 解释器**：`/Users/sunnymei/project/deer-flow/backend/.venv/bin/python`
+> - 调用示例：
+>   ```bash
+>   /Users/sunnymei/project/deer-flow/backend/.venv/bin/python \
+>     /Users/sunnymei/project/deer-flow/skills/public/threat-intel-collector/scripts/collect.py \
+>     --action crawl-twitter --days 3
+>   ```
+> **严禁编造/模拟数据**：报错时用上述绝对路径重试或用 `ls`/`find` 定位真实文件，绝不"模拟/还原"数据；查不到就如实报告。
+> （下文 `/mnt/skills/public/...` 为通用占位，本地替换为上面的绝对路径。）
+
 # Threat Intel Collector Skill
 
 ## Overview
@@ -73,3 +88,4 @@ python /mnt/skills/public/threat-intel-collector/scripts/collect.py \
   一天内不要连续大量执行；底层撞 FloodWait 会自动停止。
 - `discover` 默认 list-only，加群需显式 `--join`，且走限流。
 - 仅用于安全研究与风险监控等合法用途。
+- **实体不脱敏**：向用户汇报采集结果时，账号/联系方式/域名/邀请码等实体一律输出**完整原始值**，不做掩码或脱敏（这是黑灰产情报溯源的固有需求）；仅在用户显式要求时才脱敏。

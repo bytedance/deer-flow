@@ -916,6 +916,7 @@ async def _crawl_twitter_async(
     exporter = Exporter(
         output_dir=config["output"]["dir"],
         formats=config["output"]["format"],
+        source="twitter",
     )
 
     all_tweets: list[TweetData] = []

@@ -3,6 +3,14 @@ name: threat-intel-curator
 description: Use this skill to GOVERN the discovered-groups candidate pool for black/gray-industry monitoring. It reports pool stats, verifies candidates' real Telegram entity type via get_entity (rejecting personal accounts, bots, and dead usernames so only real groups remain), and lets the LLM pick high-value candidate groups, join them (rate-limited), and crawl them. Trigger when the user wants to clean/verify the candidate pool, filter out non-group accounts, or have the model auto-select and crawl promising groups.
 ---
 
+> ## ⚠️ 本地环境路径（务必先读）
+> 当前为 **本地部署（LocalSandbox，无 `/mnt` 虚拟路径）**。用真实绝对路径，勿去 `/mnt/...`：
+> - **本 skill 脚本**：`/Users/sunnymei/project/deer-flow/skills/public/threat-intel-curator/scripts/curate.py`
+> - **爬虫项目根**：`/Users/sunnymei/project/deer-flow/tg-intel-crawler`
+> - **情报数据库**：`/Users/sunnymei/project/deer-flow/tg-intel-crawler/output/intel.db`
+> - **Python**：`/Users/sunnymei/project/deer-flow/backend/.venv/bin/python`
+> **严禁编造/模拟数据**：报错先用绝对路径重试或 `ls`/`find` 定位，查不到如实报告。
+
 # Threat Intel Curator Skill
 
 ## Overview

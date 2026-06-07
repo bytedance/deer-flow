@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "deerflow-harness",
+    "tg-intel-crawler",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.27",
@@ -50,3 +51,4 @@ members = ["packages/harness"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+tg-intel-crawler = { path = "../tg-intel-crawler", editable = true }

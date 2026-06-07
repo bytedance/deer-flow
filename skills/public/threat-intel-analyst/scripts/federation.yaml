@@ -10,10 +10,9 @@
 
 databases:
   # —— 你的库（Telegram/bot/twitter）——
-  # path: AUTO  → 自动解析为 $TG_INTEL_CRAWLER_HOME/output/intel.db
-  # 也可直接写真实绝对路径替代 AUTO。
+  # 已填真实绝对路径，不依赖 TG_INTEL_CRAWLER_HOME 环境变量，避免 agent 沙箱里定位失败。
   - alias: telegram
-    path: AUTO
+    path: /Users/sunnymei/project/deer-flow/tg-intel-crawler/output/intel.db
     owner: me
 
   # —— 队友 A 的数据源（填好真实路径后取消注释）——

@@ -130,16 +130,75 @@ def _extract_media_urls(legacy: dict) -> list[str]:
     return urls
 
 
+def _looks_like_tikhub_flat(d: dict) -> bool:
+    """TikHub fetch_search_timeline returns flat items under data.timeline[]:
+    each item has tweet_id + text (+ screen_name), NOT the GraphQL legacy shape.
+    """
+    return (
+        isinstance(d, dict)
+        and d.get("type") == "tweet"
+        and "tweet_id" in d
+        and "text" in d
+    )
+
+
+def _parse_tikhub_flat(node: dict, source_keyword: str) -> Optional[TweetData]:
+    """Map a flat TikHub timeline item to TweetData."""
+    tid = str(node.get("tweet_id") or "")
+    if not tid:
+        return None
+    screen_name = node.get("screen_name", "") or ""
+    try:
+        view_count = int(node.get("views") or 0)
+    except (TypeError, ValueError):
+        view_count = 0
+    td = TweetData(
+        tweet_id=tid,
+        user_id=str(node.get("user_id") or ""),
+        screen_name=screen_name,
+        user_name=node.get("user_name", "") or node.get("name", "") or "",
+        text=node.get("text") or "",
+        date=_parse_twitter_date(node.get("created_at")),
+        lang=node.get("lang", "") or "",
+        reply_count=int(node.get("replies") or 0),
+        retweet_count=int(node.get("retweets") or 0),
+        favorite_count=int(node.get("favorites") or 0),
+        quote_count=int(node.get("quotes") or 0),
+        view_count=view_count,
+        is_retweet=bool(node.get("retweeted")),
+        in_reply_to=str(node.get("in_reply_to_status_id") or ""),
+        source_keyword=source_keyword,
+        media_urls=_extract_media_urls(node),
+    )
+    if screen_name:
+        td.url = f"https://twitter.com/{screen_name}/status/{tid}"
+    return td
+
+
 def parse_tweet_results(payload: dict, source_keyword: str = "") -> list[TweetData]:
     """Turn a tikhub response payload into TweetData objects.
 
-    Walks the entire JSON tree and pulls out anything that quacks like a
-    tweet ``legacy`` object. Survives upstream schema drift better than a
-    rigid path-based parser.
+    Handles BOTH response shapes:
+    1. TikHub flat ``data.timeline[]`` (current fetch_search_timeline format),
+       where each item carries tweet_id/screen_name/text directly.
+    2. X/Twitter GraphQL nested ``legacy`` blobs (fallback for schema drift).
     """
     seen_ids: set[str] = set()
     out: list[TweetData] = []
 
+    # --- Pass 1: TikHub flat timeline items (the real current format) ---
+    for node in _walk(payload):
+        if not _looks_like_tikhub_flat(node):
+            continue
+        tid = str(node.get("tweet_id") or "")
+        if not tid or tid in seen_ids:
+            continue
+        td = _parse_tikhub_flat(node, source_keyword)
+        if td is not None:
+            seen_ids.add(tid)
+            out.append(td)
+
+    # --- Pass 2: GraphQL legacy fallback (only for ids not already captured) ---
     for node in _walk(payload):
         if not _looks_like_tweet_legacy(node):
             continue

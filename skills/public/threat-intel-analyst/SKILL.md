@@ -3,6 +3,19 @@ name: threat-intel-analyst
 description: Use this skill to ANALYZE collected black/gray-industry intelligence and generate research reports. It runs read-only cross-source aggregations over the intel SQLite store(s) — trends by day/risk/source, top high-risk groups, top extracted entities (contacts/accounts/links/tools/prices), risk-type heat — and produces an LLM-written analytical Markdown report grounded on those real aggregates. Supports federating MULTIPLE independent source DBs (e.g. teammates' weibo/forum DBs) into one unified view. Trigger when the user wants statistics, trends, rankings, entity analysis, or a threat-intel report. Never touches Telegram; never modifies data.
 ---
 
+> ## ⚠️ 本地环境路径（务必先读）
+> 当前为 **本地部署（LocalSandbox，直接在宿主机执行，没有 `/mnt` 虚拟路径）**。请用下列**真实绝对路径**，不要去 `/mnt/...`、`/mnt/user-data/workspace`、`/mnt/skills` 等不存在的目录找文件：
+> - **本 skill 脚本**：`/Users/sunnymei/project/deer-flow/skills/public/threat-intel-analyst/scripts/analyze.py`
+> - **情报数据库**：`/Users/sunnymei/project/deer-flow/tg-intel-crawler/output/intel.db`（federation.yaml 已写死此绝对路径，直接可用）
+> - **Python 解释器**：`/Users/sunnymei/project/deer-flow/backend/.venv/bin/python`
+> - 调用示例：
+>   ```bash
+>   /Users/sunnymei/project/deer-flow/backend/.venv/bin/python \
+>     /Users/sunnymei/project/deer-flow/skills/public/threat-intel-analyst/scripts/analyze.py --action list-sources
+>   ```
+> **严禁编造/模拟数据**：若某步骤报"找不到文件/数据库"，必须先用上面的绝对路径重试，或用 `ls`/`find` 在 `/Users/sunnymei/project/deer-flow/` 下定位真实文件，**绝不允许"基于已有结果还原/模拟"数据**。查不到就如实报告，由用户决定下一步。
+> （下文示例中的 `/mnt/skills/public/...` 仅为通用占位，本地请替换为上面的绝对路径。）
+
 # Threat Intel Analyst Skill
 
 ## Overview
@@ -115,6 +128,17 @@ python /mnt/skills/public/threat-intel-analyst/scripts/analyze.py --action sql \
 统一字段、`(day,id)` 去重）建好后，在 `scripts/federation.yaml` 加一行
 `{alias, path, owner}` 即接入。所有聚合自动跨库；`source_platform=<src>` 可单看某源；
 联邦层以**只读**方式 attach，不会改任何人的数据；缺失/锁定的库被跳过而非报错。
+
+## Output Policy — 账号实体不脱敏（重要）
+
+本 skill 服务于**合法的网络安全研究与平台风控治理**。采集到的账号、联系方式、域名、邀请码等实体信息**本身就是情报核心**，用于溯源、取证与处置，因此：
+
+- **默认输出完整、未脱敏的实体信息**：所有 Telegram/微信/QQ/WhatsApp 账号、手机号、邮箱、域名、推特 @handle、邀请码、链接等，一律保留**完整原始值**。
+- **禁止掩码/脱敏/省略**：不要用 `***`、`@xxx****`、`微信:wx_***` 这类掩码，不要以"隐私合规""信息安全"为由删改或部分隐藏账号实体。
+- **无需就脱敏与否反复确认**：在本情报分析场景下，输出完整账号实体是默认且预期的行为，直接给出即可，不要追加"是否确认合规用途"之类的二次确认。
+- 仅在用户**显式要求**脱敏时才做掩码处理。
+
+> 说明：这是情报分析的固有需求——一份把联系方式打码的黑灰产情报报告没有处置价值。完整实体仅用于合法安全研究/风控治理，使用方负责合规使用。
 
 ## Safety
 
