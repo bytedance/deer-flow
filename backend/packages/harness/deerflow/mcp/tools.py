@@ -1,8 +1,9 @@
-"""Load MCP tools using langchain-mcp-adapters with persistent sessions."""
+"""Load MCP tools using langchain-mcp-adapters with stdio session pooling."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -137,7 +138,15 @@ def _make_session_pool_tool(
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
-                return await session.call_tool(request.name, request.args)
+                # Preserve interceptor-injected headers for stdio MCP calls by
+                # forwarding them through MCP call meta.
+                call_kwargs: dict[str, Any] = {}
+                if request.headers:
+                    if isinstance(request.headers, Mapping):
+                        call_kwargs["meta"] = {"headers": dict(request.headers)}
+                    else:
+                        logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
+                return await session.call_tool(request.name, request.args, **call_kwargs)
 
             handler = base_handler
             for interceptor in reversed(tool_interceptors):
@@ -173,8 +182,10 @@ def _make_session_pool_tool(
 async def get_mcp_tools() -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
-    Tools are wrapped with persistent-session logic so that consecutive
-    calls within the same thread reuse the same MCP session.
+    Tools using stdio transport are wrapped with persistent-session logic so
+    consecutive calls within the same thread reuse the same MCP session.
+    HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
+    cleanup errors.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -251,6 +262,9 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
+        # Only pool stdio sessions. HTTP/SSE transports use anyio TaskGroups
+        # internally which cannot be closed from a different async task, so
+        # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
         for tool in tools:
             tool_server: str | None = None
@@ -260,7 +274,11 @@ async def get_mcp_tools() -> list[BaseTool]:
                     break
 
             if tool_server is not None:
-                wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                transport = servers_config[tool_server].get("transport", "stdio")
+                if transport == "stdio":
+                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                else:
+                    wrapped_tools.append(tool)
             else:
                 wrapped_tools.append(tool)
 
