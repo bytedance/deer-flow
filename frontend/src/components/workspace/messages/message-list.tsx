@@ -16,7 +16,6 @@ import {
 import {
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractTextFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -27,9 +26,7 @@ import {
   isAssistantMessageGroupStreaming,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
-import type { Subtask } from "@/core/tasks";
-import { useUpdateSubtask } from "@/core/tasks/context";
-import { parseSubtaskResult } from "@/core/tasks/subtask-result";
+import { buildSubtaskMapFromMessages } from "@/core/tasks/derive";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -177,8 +174,8 @@ export function MessageList({
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
-  const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
+  const tasks = useMemo(() => buildSubtaskMapFromMessages(messages), [messages]);
   const groupedMessages = getMessageGroups(messages);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
@@ -354,42 +351,29 @@ export function MessageList({
               </div>
             );
           } else if (group.type === "assistant:subagent") {
-            const tasks = new Set<Subtask>();
-            for (const message of group.messages) {
-              if (message.type === "ai") {
-                for (const toolCall of message.tool_calls ?? []) {
-                  if (toolCall.name === "task") {
-                    const task: Subtask = {
-                      id: toolCall.id!,
-                      subagent_type: toolCall.args.subagent_type,
-                      description: toolCall.args.description,
-                      prompt: toolCall.args.prompt,
-                      status: "in_progress",
-                    };
-                    updateSubtask(task);
-                    tasks.add(task);
-                  }
-                }
-              } else if (message.type === "tool") {
-                const taskId = message.tool_call_id;
-                if (taskId) {
-                  const parsed = parseSubtaskResult(
-                    extractTextFromMessage(message),
-                  );
-                  updateSubtask({ id: taskId, ...parsed });
-                }
-              }
-            }
-
             const results: React.ReactNode[] = [];
             const subagentDebugMessageIds: string[] = [];
-            if (tasks.size > 0) {
+            const groupTaskIds = Array.from(
+              new Set(
+                group.messages.flatMap((message) =>
+                  message.type === "ai"
+                    ? (message.tool_calls ?? [])
+                        .map((toolCall) =>
+                          toolCall.name === "task" ? toolCall.id : null,
+                        )
+                        .filter((taskId): taskId is string => Boolean(taskId))
+                    : [],
+                ),
+              ),
+            );
+
+            if (groupTaskIds.length > 0) {
               results.push(
                 <div
                   key="subtask-count"
                   className="text-muted-foreground pt-2 text-sm font-normal"
                 >
-                  {t.subtasks.executing(tasks.size)}
+                  {t.subtasks.executing(groupTaskIds.length)}
                 </div>,
               );
             }
@@ -417,10 +401,14 @@ export function MessageList({
                 ?.filter((toolCall) => toolCall.name === "task")
                 .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
+                const task = taskId ? tasks[taskId] : undefined;
+                if (!taskId || !task) {
+                  continue;
+                }
                 results.push(
                   <SubtaskCard
                     key={"task-group-" + taskId}
-                    taskId={taskId!}
+                    task={task}
                     isLoading={thread.isLoading}
                   />,
                 );
