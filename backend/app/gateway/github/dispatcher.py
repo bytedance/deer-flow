@@ -31,6 +31,7 @@ from typing import Any
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.gateway.github.identity import extract_target, resolve_thread_id
 from app.gateway.github.prompts import build_prompt
+from app.gateway.github.reactions import comment_reaction_fields, followup_ack_from_github
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
 from app.gateway.github.triggers import event_should_fire
 from deerflow.config.agents_config import GitHubAgentConfig, GitHubTriggerConfig
@@ -183,6 +184,58 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
     if not isinstance(comment, dict):
         return False
     return comment.get("pull_request_review_id") is not None and comment.get("in_reply_to_id") is None
+
+
+def _fanout_metadata(
+    *,
+    event: str,
+    payload: dict[str, Any],
+    dedupe_message_id: str | None,
+    agent_name: str,
+    repo: str,
+    number: int,
+    delivery_id: str,
+    installation_id: int | None,
+    recursion_limit: int | None,
+    thread_id: str,
+) -> dict[str, Any]:
+    """Build inbound metadata, including a reaction target when one exists.
+
+    ``followup_ack`` is present only for issue comments and pull-request
+    review comments that also carry a positive installation id. Review
+    summaries and issue/PR bodies stay unmarked: GitHub has no reaction
+    endpoint for them.
+    """
+    github_meta: dict[str, Any] = {
+        "repo": repo,
+        "number": number,
+        "event": event,
+        "delivery_id": delivery_id,
+        "installation_id": installation_id,
+        "recursion_limit": recursion_limit,
+        "thread_id": thread_id,
+    }
+    github_meta.update(comment_reaction_fields(event, payload))
+    metadata: dict[str, Any] = {
+        # Stable inbound-dedupe id keyed by the manager — see the
+        # ``dedupe_message_id`` construction in :func:`fanout_event`.
+        "message_id": dedupe_message_id,
+        # Routes to the right custom agent inside the manager:
+        # _resolve_run_params() pulls this and writes it into
+        # run_context["agent_name"].
+        "agent_name": agent_name,
+        # Carried through the manager into OutboundMessage.metadata so
+        # GitHubChannel.send() has the (repo, number, installation) context
+        # for its log line. The channel does not post — agents do that
+        # themselves via `gh` during the run.
+        "github": github_meta,
+        # Deterministic thread id for the manager's first-create path.
+        "preferred_thread_id": thread_id,
+    }
+    ack = followup_ack_from_github(github_meta)
+    if ack is not None:
+        metadata["followup_ack"] = ack
+    return metadata
 
 
 async def fanout_event(
@@ -442,34 +495,18 @@ async def fanout_event(
             # unique and always present — mirrors Telegram/WeChat keying the
             # workspace on the chat id.
             workspace_id=repo,
-            metadata={
-                # Stable inbound-dedupe id keyed by the manager — see
-                # ``dedupe_message_id`` above.
-                "message_id": dedupe_message_id,
-                # Routes to the right custom agent inside the manager:
-                # _resolve_run_params() pulls this and writes it into
-                # run_context["agent_name"].
-                "agent_name": agent.name,
-                # Carried through the manager into OutboundMessage.metadata
-                # so GitHubChannel.send() has the (repo, number, installation)
-                # context for its log line. The channel does not post — agents
-                # do that themselves via `gh` during the run.
-                "github": {
-                    "repo": repo,
-                    "number": number,
-                    "event": event,
-                    "delivery_id": delivery_id,
-                    "installation_id": github.installation_id,
-                    "recursion_limit": github.recursion_limit,
-                    "thread_id": thread_id,
-                },
-                # Deterministic thread id for the manager's first-create path:
-                # _create_thread passes this to client.threads.create(thread_id=...)
-                # so the same (repo, number) always maps to the same LangGraph
-                # thread even if the channel store JSON is wiped. Subsequent
-                # deliveries reuse it via the store mapping.
-                "preferred_thread_id": thread_id,
-            },
+            metadata=_fanout_metadata(
+                event=event,
+                payload=payload,
+                dedupe_message_id=dedupe_message_id,
+                agent_name=agent.name,
+                repo=repo,
+                number=number,
+                delivery_id=delivery_id,
+                installation_id=github.installation_id,
+                recursion_limit=github.recursion_limit,
+                thread_id=thread_id,
+            ),
         )
 
         logger.info(

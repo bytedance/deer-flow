@@ -1810,3 +1810,86 @@ async def test_review_comment_redundant_skip_prefers_own_trigger_reason_when_it_
     reason = result["skipped"][0]["reason"]
     assert reason != "redundant_review_comment", result
     assert "mention" in reason, result
+
+
+def _comment_agent(base_dir: Path, *, event: str) -> None:
+    trigger: dict = {}
+    if event in {"issue_comment", "pull_request_review_comment"}:
+        trigger["require_mention"] = False
+    _write_agent(
+        base_dir,
+        "default",
+        "assistant",
+        {
+            "name": "assistant",
+            "github": {
+                "installation_id": 77,
+                "bindings": [{"repo": "octo/hello", "triggers": {event: trigger}}],
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_carries_a_followup_reaction_target(base_dir: Path) -> None:
+    bus = MessageBus()
+    _comment_agent(base_dir, event="issue_comment")
+    payload = {
+        "action": "created",
+        "issue": {"number": 11},
+        "comment": {"id": 4242, "body": "please also cover the edge case", "user": {"login": "octocat"}},
+        "repository": {"full_name": "octo/hello"},
+        "sender": {"login": "octocat"},
+    }
+    await fanout_event(bus, "issue_comment", "del-react-1", payload)
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    github = messages[0].metadata["github"]
+    assert github["comment_id"] == 4242
+    assert github["reaction_subject"] == "issue_comment"
+    assert messages[0].metadata["followup_ack"] == {
+        "provider": "github",
+        "repo": "octo/hello",
+        "installation_id": 77,
+        "comment_id": 4242,
+        "subject": "issue_comment",
+    }
+
+
+@pytest.mark.asyncio
+async def test_review_comment_carries_a_followup_reaction_target(base_dir: Path) -> None:
+    bus = MessageBus()
+    _comment_agent(base_dir, event="pull_request_review_comment")
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 4},
+        "comment": {
+            "id": 99,
+            "body": "nit",
+            "user": {"login": "octocat"},
+            "in_reply_to_id": 12,
+        },
+        "repository": {"full_name": "octo/hello"},
+        "sender": {"login": "octocat"},
+    }
+    await fanout_event(bus, "pull_request_review_comment", "del-react-2", payload)
+    messages = await _drain(bus)
+    assert messages[0].metadata["followup_ack"]["subject"] == "pull_request_review_comment"
+    assert messages[0].metadata["followup_ack"]["comment_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_pull_request_body_has_no_followup_reaction_target(base_dir: Path) -> None:
+    bus = MessageBus()
+    _comment_agent(base_dir, event="pull_request")
+    payload = {
+        "action": "opened",
+        "pull_request": {"number": 4, "title": "Add feature", "user": {"login": "octocat"}, "body": "change"},
+        "repository": {"full_name": "octo/hello"},
+        "sender": {"login": "octocat"},
+    }
+    await fanout_event(bus, "pull_request", "del-react-3", payload)
+    messages = await _drain(bus)
+    assert "followup_ack" not in messages[0].metadata
+    assert "comment_id" not in messages[0].metadata["github"]
+    assert "reaction_subject" not in messages[0].metadata["github"]
