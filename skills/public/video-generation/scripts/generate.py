@@ -121,10 +121,10 @@ def _generate_video_minimax(
     return f"The video has been generated successfully to {output_file}"
 
 
-def download(url: str, output_file: str):
+def download(url: str, output_file: str) -> None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return "GEMINI_API_KEY is not set"
+        raise ValueError("GEMINI_API_KEY is not set")
     response = requests.get(url, headers={"x-goog-api-key": api_key})
     with open(output_file, "wb") as f:
         f.write(response.content)
