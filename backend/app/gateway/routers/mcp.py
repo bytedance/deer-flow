@@ -96,9 +96,11 @@ async def _require_admin_user(request: Request) -> None:
 def _allowed_stdio_commands() -> set[str]:
     """Return executable names allowed for API-managed stdio MCP servers."""
     raw = os.environ.get(_MCP_STDIO_COMMAND_ALLOWLIST_ENV)
+    base = set(_DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST)
     if raw is None:
-        return set(_DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST)
-    return {item.strip() for item in raw.split(",") if item.strip()}
+        return base
+    extra = {item.strip() for item in raw.split(",") if item.strip()}
+    return base | extra
 
 
 def _stdio_command_name(command: str | None, *, server_name: str) -> str:
