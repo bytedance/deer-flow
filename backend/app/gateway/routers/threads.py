@@ -536,9 +536,19 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         metadata["step"] = metadata.get("step", 0) + 1
         metadata["writes"] = {body.as_node: body.values}
 
+    # Assign a new checkpoint ID so aput performs an INSERT rather than an
+    # in-place REPLACE of the existing row.  Use uuid6 (time-ordered) rather
+    # than uuid4 (random) so the new ID is always lexicographically greater
+    # than the previous one — LangGraph's checkpointers determine the "latest"
+    # checkpoint by max(checkpoint_ids) string order, matching the uuid6 epoch.
+    from langgraph.checkpoint.base.id import uuid6
+
+    checkpoint["id"] = str(uuid6())
+
     # aput requires checkpoint_ns in the config — use the same config used for the
-    # read (which always includes checkpoint_ns="").  Do NOT include checkpoint_id
-    # so that aput generates a fresh checkpoint ID for the new snapshot.
+    # read (which always includes checkpoint_ns-"").The fresh checkpoint ID is
+    # assigned above via checkpoint["id"]; keep checkpoint_id out of the config so
+    # the write is keyed by the new checkpoint payload rather than the prior read.
     write_config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,
@@ -557,7 +567,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
 
     # Sync title changes through the ThreadMetaStore abstraction so /threads/search
     # reflects them immediately in both sqlite and memory backends.
-    if body.values and "title" in body.values:
+    if thread_store and body.values and "title" in body.values:
         new_title = body.values["title"]
         if new_title:  # Skip empty strings and None
             try:
