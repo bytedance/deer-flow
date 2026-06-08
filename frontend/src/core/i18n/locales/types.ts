@@ -67,6 +67,10 @@ export interface Translations {
     placeholder: string;
     createSkillPrompt: string;
     addAttachments: string;
+    skillScope: string;
+    allSkills: string;
+    noSkills: string;
+    selectedSkills: (count: number) => string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;

@@ -59,6 +59,7 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { useSkills } from "@/core/skills/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -75,6 +76,7 @@ import {
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
@@ -151,6 +153,7 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { skills } = useSkills();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -205,6 +208,62 @@ export function InputBox({
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
+  );
+
+  const enabledSkills = useMemo(
+    () => skills.filter((skill) => skill.enabled),
+    [skills],
+  );
+
+  const enabledSkillNames = useMemo(
+    () => enabledSkills.map((skill) => skill.name),
+    [enabledSkills],
+  );
+
+  const selectedSkillNames = Array.isArray(context.selected_skill_names)
+    ? context.selected_skill_names
+    : undefined;
+  const selectedSkillNameSet = useMemo(
+    () => new Set(selectedSkillNames ?? enabledSkillNames),
+    [enabledSkillNames, selectedSkillNames],
+  );
+
+  const skillScopeLabel = useMemo(() => {
+    if (!enabledSkills.length) {
+      return t.inputBox.noSkills;
+    }
+    if (!selectedSkillNames) {
+      return t.inputBox.allSkills;
+    }
+    return t.inputBox.selectedSkills(selectedSkillNameSet.size);
+  }, [
+    enabledSkills.length,
+    selectedSkillNameSet.size,
+    selectedSkillNames,
+    t.inputBox,
+  ]);
+
+  const handleAllSkillsSelect = useCallback(() => {
+    onContextChange?.({
+      ...context,
+      selected_skill_names: undefined,
+    });
+  }, [context, onContextChange]);
+
+  const handleSkillToggle = useCallback(
+    (skillName: string, checked: boolean) => {
+      const next = new Set(selectedSkillNames ?? enabledSkillNames);
+      if (checked) {
+        next.add(skillName);
+      } else {
+        next.delete(skillName);
+      }
+      onContextChange?.({
+        ...context,
+        selected_skill_names: Array.from(next),
+      });
+    },
+    [context, enabledSkillNames, onContextChange, selectedSkillNames],
   );
 
   const handleModelSelect = useCallback(
@@ -520,6 +579,58 @@ export function InputBox({
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
             <AddAttachmentsButton className="px-2!" />
+            <DropdownMenu>
+              <Tooltip content={t.inputBox.skillScope}>
+                <DropdownMenuTrigger asChild>
+                  <PromptInputButton
+                    className="gap-1! px-2!"
+                    disabled={enabledSkills.length === 0}
+                  >
+                    <SparklesIcon className="size-3" />
+                    <span className="text-xs font-normal">
+                      {skillScopeLabel}
+                    </span>
+                  </PromptInputButton>
+                </DropdownMenuTrigger>
+              </Tooltip>
+              <DropdownMenuContent className="w-64" align="start">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-muted-foreground text-xs">
+                    {t.inputBox.skillScope}
+                  </DropdownMenuLabel>
+                  <DropdownMenuCheckboxItem
+                    checked={!selectedSkillNames}
+                    onCheckedChange={(checked) => {
+                      if (checked === true) {
+                        handleAllSkillsSelect();
+                      }
+                    }}
+                  >
+                    {t.inputBox.allSkills}
+                  </DropdownMenuCheckboxItem>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  {enabledSkills.length === 0 ? (
+                    <DropdownMenuItem disabled>
+                      {t.inputBox.noSkills}
+                    </DropdownMenuItem>
+                  ) : (
+                    enabledSkills.map((skill) => (
+                      <DropdownMenuCheckboxItem
+                        key={skill.name}
+                        checked={selectedSkillNameSet.has(skill.name)}
+                        onCheckedChange={(checked) =>
+                          handleSkillToggle(skill.name, checked)
+                        }
+                      >
+                        {skill.name}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                  )}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
