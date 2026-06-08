@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
@@ -541,14 +541,16 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     # than uuid4 (random) so the new ID is always lexicographically greater
     # than the previous one — LangGraph's checkpointers determine the "latest"
     # checkpoint by max(checkpoint_ids) string order, matching the uuid6 epoch.
-    from langgraph.checkpoint.base.id import uuid6
-
     checkpoint["id"] = str(uuid6())
 
     # aput requires checkpoint_ns in the config — use the same config used for the
-    # read (which always includes checkpoint_ns-"").The fresh checkpoint ID is
+    # read (which always includes checkpoint_ns=""). The fresh checkpoint ID is
     # assigned above via checkpoint["id"]; keep checkpoint_id out of the config so
     # the write is keyed by the new checkpoint payload rather than the prior read.
+    # All supported savers (InMemorySaver, AsyncSqliteSaver, AsyncPostgresSaver)
+    # persist and echo back checkpoint["id"] verbatim — none mint their own — so
+    # the new_config below carries the uuid6 we assigned here. (Regression-locked
+    # by test_update_thread_state_inserts_new_checkpoint_each_call.)
     write_config: dict[str, Any] = {
         "configurable": {
             "thread_id": thread_id,

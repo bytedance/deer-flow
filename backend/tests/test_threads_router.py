@@ -524,3 +524,13 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     assert len(ids) == len(set(ids)), f"duplicate checkpoint ids: {ids}"
     # alist() returns newest-first; uuid6 is time-ordered so newest > oldest.
     assert ids[0] > ids[-1], f"checkpoint ids not time-ordered (uuid4 instead of uuid6?): {ids}"
+
+    # aput must PRESERVE the endpoint-assigned checkpoint["id"], not mint its own
+    # and discard the payload's. If it generated a fresh id internally the fix
+    # would be a no-op (the bug would never have existed). Assert the id returned
+    # in each response round-tripped into the persisted history, and that the two
+    # update writes kept the endpoint's uuid6 time-ordering through aput.
+    resp_ids = [r1.json()["checkpoint_id"], r2.json()["checkpoint_id"]]
+    assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
+    assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
+    assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"
