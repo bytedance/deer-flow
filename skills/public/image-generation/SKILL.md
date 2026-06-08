@@ -178,6 +178,19 @@ For scenarios where visual accuracy is critical, **use the `image_search` tool f
 
 This approach significantly improves generation quality by providing the model with concrete visual guidance rather than relying solely on text descriptions.
 
+## Providers (Gemini / MiniMax)
+
+This skill auto-selects the provider by environment variables (no CLI change):
+
+- `GEMINI_API_KEY` set → use Gemini (default, unchanged).
+- Only `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
+- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax`.
+
+MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
+`MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax
+`subject_reference` character image. The CLI and `--prompt-file` / `--reference-images`
+/ `--output-file` / `--aspect-ratio` arguments are identical for both providers.
+
 ## Notes
 
 - Always use English for prompts regardless of user's language
