@@ -59,6 +59,7 @@ def _poll_video_task(host: str, auth: str, task_id: str,
         )
         response.raise_for_status()
         payload = response.json()
+        _check_base_resp(payload)
         status = payload.get("status")
         if status == "Success":
             return payload["file_id"]

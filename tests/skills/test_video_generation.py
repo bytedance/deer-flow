@@ -114,3 +114,13 @@ def test_minimax_task_fail(monkeypatch, tmp_path):
     pf.write_text("x", encoding="utf-8")
     with pytest.raises(Exception):
         vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_minimax_poll_timeout(monkeypatch):
+    def fake_get(url, headers=None, params=None, **kw):
+        return FakeResp({"status": "Processing", "base_resp": {"status_code": 0}})
+
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    with pytest.raises(Exception) as e:
+        vid._poll_video_task("https://h", "Bearer m", "T1", max_attempts=3, interval=0)
+    assert "timed out" in str(e.value)
