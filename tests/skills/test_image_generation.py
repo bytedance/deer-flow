@@ -106,6 +106,63 @@ def test_minimax_raises_on_base_resp_error(monkeypatch, tmp_path):
     assert "1004" in str(e.value)
 
 
+def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["json"] = json
+        return FakeResp({"data": {"image_base64": [base64.b64encode(b"x").decode()]},
+                         "base_resp": {"status_code": 0}})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "p.json"
+    prompt_file.write_text(
+        '{"prompt": "a red barn at dawn", "style": "watercolor", '
+        '"composition": "rule of thirds", "negative_prompt": "blurry"}',
+        encoding="utf-8",
+    )
+    img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "16:9")
+
+    # Only the JSON `prompt` field reaches MiniMax — no other fields, no JSON syntax.
+    assert captured["json"]["prompt"] == "a red barn at dawn"
+    assert captured["json"]["prompt_optimizer"] is True
+
+
+def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["json"] = json
+        return FakeResp({"data": {"image_base64": [base64.b64encode(b"x").decode()]},
+                         "base_resp": {"status_code": 0}})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "p.txt"
+    prompt_file.write_text("a red apple on a table", encoding="utf-8")
+    img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "1:1")
+
+    assert captured["json"]["prompt"] == "a red apple on a table"
+
+
+def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+
+    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
+        raise AssertionError("must not call the API when the prompt is over the limit")
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "p.json"
+    prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
+    out = tmp_path / "o.jpg"
+    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
+
+    assert "1500" in msg
+    assert "character" in msg.lower()
+    assert not out.exists()
+
+
 def test_unknown_provider_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
     monkeypatch.setenv("GEMINI_API_KEY", "g")

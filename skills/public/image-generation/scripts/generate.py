@@ -1,9 +1,13 @@
 import base64
+import json
 import os
 
 import requests
 
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
+# MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
+# with a generic "invalid params" error, so validate before calling the API.
+MINIMAX_PROMPT_MAX_CHARS = 1500
 
 
 def validate_image(image_path: str) -> bool:
@@ -70,12 +74,41 @@ def _to_data_url(image_path: str) -> str:
     return f"data:{_guess_mime(image_path)};base64,{b64}"
 
 
+def _minimax_prompt(raw: str) -> str:
+    """Extract the single text prompt MiniMax image-01 expects.
+
+    The shared prompt file is structured JSON (a consolidated ``prompt`` plus
+    Gemini-oriented fields like ``style`` / ``composition`` / ``negative_prompt``),
+    but MiniMax consumes one string and expands it via ``prompt_optimizer``. The
+    provider adapts the input itself — the caller never needs to know MiniMax is
+    active. Use the JSON ``prompt`` field; fall back to the raw text for plain-text
+    prompt files or JSON without a ``prompt`` field.
+    """
+    text = raw.strip()
+    try:
+        data = json.loads(text)
+    except (ValueError, json.JSONDecodeError):
+        return text
+    if isinstance(data, dict):
+        core = data.get("prompt")
+        if isinstance(core, str) and core.strip():
+            return core.strip()
+    return text
+
+
 def _generate_image_minimax(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
     api_key = os.getenv("MINIMAX_API_KEY")
     if not api_key:
         return "MINIMAX_API_KEY is not set"
+    prompt = _minimax_prompt(prompt)
+    if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
+        return (
+            f"Prompt is {len(prompt)} characters but MiniMax image-01 accepts at most "
+            f"{MINIMAX_PROMPT_MAX_CHARS}. Shorten the prompt to stay within the limit; "
+            f"reference images plus a tighter description usually recover the detail."
+        )
     body = {
         "model": os.getenv("MINIMAX_IMAGE_MODEL", "image-01"),
         "prompt": prompt,

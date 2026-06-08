@@ -191,6 +191,14 @@ MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.co
 `subject_reference` character image. The CLI and `--prompt-file` / `--reference-images`
 / `--output-file` / `--aspect-ratio` arguments are identical for both providers.
 
+**MiniMax prompt handling (provider-internal).** Authoring is provider-agnostic — write
+the same structured JSON regardless of which provider is active. MiniMax `image-01`
+consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
+field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
+Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
+caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
+an error instead of calling the API. The Gemini path receives the full structured JSON.
+
 ## Notes
 
 - Always use English for prompts regardless of user's language
