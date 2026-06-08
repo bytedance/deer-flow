@@ -5,7 +5,8 @@ import json
 import logging
 import threading
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 _deleted_agent_memory_targets: dict[tuple[str | None, str], datetime] = {}
 _deleted_agent_memory_lock = threading.Lock()
 _DELETED_AGENT_MEMORY_MARKS_DIR = ".deleted-agent-memory"
+_DELETED_AGENT_MEMORY_MARK_TTL = timedelta(days=30)
 
 
 def utc_now_iso_z() -> str:
@@ -70,6 +72,17 @@ def _deleted_agent_mark_file(agent_name: str, *, user_id: str | None = None) -> 
     return paths.base_dir / _DELETED_AGENT_MEMORY_MARKS_DIR / f"{normalized_agent_name}.json"
 
 
+def _iter_deleted_agent_mark_roots() -> Iterator[tuple[Path, str | None]]:
+    paths = get_paths()
+    yield paths.base_dir / _DELETED_AGENT_MEMORY_MARKS_DIR, None
+
+    users_dir = paths.base_dir / "users"
+    if users_dir.exists():
+        for user_dir in users_dir.iterdir():
+            if user_dir.is_dir():
+                yield user_dir / _DELETED_AGENT_MEMORY_MARKS_DIR, user_dir.name
+
+
 def _write_deleted_agent_mark(agent_name: str, deleted_at: datetime, *, user_id: str | None = None) -> None:
     mark_file = _deleted_agent_mark_file(agent_name, user_id=user_id)
     mark_file.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +111,7 @@ def _read_deleted_agent_mark(agent_name: str, *, user_id: str | None = None) -> 
 
 def mark_agent_memory_deleted(agent_name: str, *, user_id: str | None = None) -> None:
     """Record that an agent memory target was deleted across workers."""
+    cleanup_stale_deleted_agent_memory_marks()
     deleted_at = datetime.now(UTC)
     _write_deleted_agent_mark(agent_name, deleted_at, user_id=user_id)
     with _deleted_agent_memory_lock:
@@ -116,12 +130,7 @@ def clear_deleted_agent_memory_mark(agent_name: str, *, user_id: str | None = No
 
 def clear_deleted_agent_memory_marks() -> None:
     """Clear deleted-agent memory markers. Intended for tests."""
-    paths = get_paths()
-    marker_roots = [paths.base_dir / _DELETED_AGENT_MEMORY_MARKS_DIR]
-    users_dir = paths.base_dir / "users"
-    if users_dir.exists():
-        marker_roots.extend(user_dir / _DELETED_AGENT_MEMORY_MARKS_DIR for user_dir in users_dir.iterdir() if user_dir.is_dir())
-    for marker_root in marker_roots:
+    for marker_root, _user_id in _iter_deleted_agent_mark_roots():
         if marker_root.exists():
             for marker_file in marker_root.glob("*.json"):
                 try:
@@ -130,6 +139,45 @@ def clear_deleted_agent_memory_marks() -> None:
                     logger.warning("Failed to remove deleted-agent memory marker %s: %s", marker_file, e)
     with _deleted_agent_memory_lock:
         _deleted_agent_memory_targets.clear()
+
+
+def cleanup_stale_deleted_agent_memory_marks(
+    *,
+    max_age: timedelta = _DELETED_AGENT_MEMORY_MARK_TTL,
+    now: datetime | None = None,
+) -> int:
+    """Remove old deleted-agent markers so small tombstone files do not accumulate."""
+    now = _normalize_datetime(now or datetime.now(UTC))
+    cutoff = now - max_age
+    removed_keys: list[tuple[str | None, str]] = []
+    removed_count = 0
+
+    for marker_root, user_id in _iter_deleted_agent_mark_roots():
+        if not marker_root.exists():
+            continue
+
+        for marker_file in marker_root.glob("*.json"):
+            deleted_at = _read_deleted_agent_mark(marker_file.stem, user_id=user_id)
+            if deleted_at is None or deleted_at > cutoff:
+                continue
+
+            try:
+                marker_file.unlink()
+            except OSError as e:
+                logger.warning("Failed to remove stale deleted-agent memory marker %s: %s", marker_file, e)
+                continue
+
+            removed_count += 1
+            removed_keys.append(_deleted_agent_key(marker_file.stem, user_id=user_id))
+
+    if removed_keys:
+        with _deleted_agent_memory_lock:
+            for key in removed_keys:
+                deleted_at = _deleted_agent_memory_targets.get(key)
+                if deleted_at is not None and deleted_at <= cutoff:
+                    _deleted_agent_memory_targets.pop(key, None)
+
+    return removed_count
 
 
 def is_agent_memory_obsolete(
@@ -143,14 +191,15 @@ def is_agent_memory_obsolete(
         return False
 
     context_timestamp = _normalize_datetime(context_timestamp)
+    key = _deleted_agent_key(agent_name, user_id=user_id)
 
     with _deleted_agent_memory_lock:
-        deleted_at = _deleted_agent_memory_targets.get(_deleted_agent_key(agent_name, user_id=user_id))
+        deleted_at = _deleted_agent_memory_targets.get(key)
     if deleted_at is None:
-        deleted_at = _read_deleted_agent_mark(agent_name, user_id=user_id)
-        if deleted_at is not None:
+        marker_deleted_at = _read_deleted_agent_mark(agent_name, user_id=user_id)
+        if marker_deleted_at is not None:
             with _deleted_agent_memory_lock:
-                _deleted_agent_memory_targets[_deleted_agent_key(agent_name, user_id=user_id)] = deleted_at
+                deleted_at = _deleted_agent_memory_targets.setdefault(key, marker_deleted_at)
 
     return deleted_at is not None and context_timestamp <= deleted_at
 

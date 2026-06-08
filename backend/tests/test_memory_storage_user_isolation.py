@@ -8,6 +8,7 @@ import pytest
 
 from deerflow.agents.memory.storage import (
     FileMemoryStorage,
+    cleanup_stale_deleted_agent_memory_marks,
     clear_deleted_agent_memory_marks,
     create_empty_memory,
     is_agent_memory_obsolete,
@@ -211,6 +212,59 @@ class TestUserIsolatedStorage:
 
             assert saved is False
             assert not (agent_dir / "memory.json").exists()
+
+    def test_deleted_agent_marker_cache_does_not_overwrite_newer_in_memory_mark(self, monkeypatch):
+        """A stale file marker must not clobber a newer in-memory deletion mark."""
+        from deerflow.agents.memory import storage as storage_module
+
+        old_deleted_at = datetime.now(UTC) - timedelta(seconds=10)
+        newer_deleted_at = datetime.now(UTC)
+        context_timestamp = newer_deleted_at - timedelta(seconds=1)
+        key = storage_module._deleted_agent_key("test-agent", user_id="alice")
+
+        def read_mark(agent_name: str, *, user_id: str | None = None) -> datetime:
+            assert agent_name == "test-agent"
+            assert user_id == "alice"
+            with storage_module._deleted_agent_memory_lock:
+                storage_module._deleted_agent_memory_targets[key] = newer_deleted_at
+            return old_deleted_at
+
+        monkeypatch.setattr(storage_module, "_read_deleted_agent_mark", read_mark)
+
+        assert is_agent_memory_obsolete(
+            "test-agent",
+            user_id="alice",
+            context_timestamp=context_timestamp,
+        )
+        assert storage_module._deleted_agent_memory_targets[key] == newer_deleted_at
+
+    def test_cleanup_stale_deleted_agent_memory_marks_keeps_recent_markers(self, base_dir: Path):
+        """Old marker files are removed without clearing recent same-target guards."""
+        from deerflow.agents.memory import storage as storage_module
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir)
+        now = datetime.now(UTC)
+        old_deleted_at = now - timedelta(days=31)
+        recent_deleted_at = now - timedelta(days=1)
+
+        with patch("deerflow.agents.memory.storage.get_paths", return_value=paths):
+            storage_module._write_deleted_agent_mark("old-agent", old_deleted_at, user_id="alice")
+            storage_module._write_deleted_agent_mark("recent-agent", recent_deleted_at, user_id="alice")
+
+            old_key = storage_module._deleted_agent_key("old-agent", user_id="alice")
+            recent_key = storage_module._deleted_agent_key("recent-agent", user_id="alice")
+            with storage_module._deleted_agent_memory_lock:
+                storage_module._deleted_agent_memory_targets[old_key] = old_deleted_at
+                storage_module._deleted_agent_memory_targets[recent_key] = recent_deleted_at
+
+            removed_count = cleanup_stale_deleted_agent_memory_marks(max_age=timedelta(days=30), now=now)
+
+            assert removed_count == 1
+            assert not (base_dir / "users" / "alice" / ".deleted-agent-memory" / "old-agent.json").exists()
+            assert (base_dir / "users" / "alice" / ".deleted-agent-memory" / "recent-agent.json").exists()
+            assert old_key not in storage_module._deleted_agent_memory_targets
+            assert storage_module._deleted_agent_memory_targets[recent_key] == recent_deleted_at
 
     def test_new_agent_memory_context_after_delete_is_not_obsolete(self):
         mark_agent_memory_deleted("new-agent", user_id="alice")
