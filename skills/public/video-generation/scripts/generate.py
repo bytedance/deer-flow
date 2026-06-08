@@ -26,6 +26,13 @@ def _minimax_host() -> str:
     return os.getenv("MINIMAX_API_HOST", MINIMAX_DEFAULT_HOST).rstrip("/")
 
 
+def _ensure_output_dir(output_file: str) -> None:
+    """Create the output file's parent directory so nested paths don't fail."""
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+
 def _check_base_resp(payload: dict) -> None:
     base = payload.get("base_resp") or {}
     if base.get("status_code", 0) != 0:
@@ -60,7 +67,6 @@ def _poll_video_task(host: str, auth: str, task_id: str,
         )
         response.raise_for_status()
         payload = response.json()
-        _check_base_resp(payload)
         status = payload.get("status")
         if status == "Success":
             return payload["file_id"]
@@ -70,6 +76,9 @@ def _poll_video_task(host: str, auth: str, task_id: str,
                 f"MiniMax video task {task_id} failed: "
                 f"{base.get('status_code')} {base.get('status_msg')}"
             )
+        # Surface query-level errors (bad task_id, auth) that arrive as a non-zero
+        # base_resp without a terminal status, then keep polling.
+        _check_base_resp(payload)
         time.sleep(interval)
     raise Exception(f"MiniMax video task {task_id} timed out after {max_attempts} polls")
 
@@ -90,6 +99,7 @@ def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
 def _download(url: str, output_file: str) -> None:
     response = requests.get(url, timeout=300)
     response.raise_for_status()
+    _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
         f.write(response.content)
 
@@ -125,7 +135,9 @@ def download(url: str, output_file: str) -> None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    response = requests.get(url, headers={"x-goog-api-key": api_key})
+    response = requests.get(url, headers={"x-goog-api-key": api_key}, timeout=300)
+    response.raise_for_status()
+    _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
         f.write(response.content)
 
@@ -151,14 +163,18 @@ def _generate_video_gemini(
         "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         json=request_json,
+        timeout=60,
     )
+    response.raise_for_status()
     data = response.json()
     operation_name = data["name"]
     while True:
         response = requests.get(
             f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
             headers={"x-goog-api-key": api_key},
+            timeout=30,
         )
+        response.raise_for_status()
         data = response.json()
         if data.get("done", False):
             sample = data["response"]["generateVideoResponse"]["generatedSamples"][0]

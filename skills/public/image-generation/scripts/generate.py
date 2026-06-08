@@ -74,6 +74,13 @@ def _to_data_url(image_path: str) -> str:
     return f"data:{_guess_mime(image_path)};base64,{b64}"
 
 
+def _ensure_output_dir(output_file: str) -> None:
+    """Create the output file's parent directory so nested paths don't fail."""
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+
 def _minimax_prompt(raw: str) -> str:
     """Extract the single text prompt MiniMax image-01 expects.
 
@@ -135,6 +142,7 @@ def _generate_image_minimax(
     images = (payload.get("data") or {}).get("image_base64") or []
     if not images:
         raise Exception("MiniMax returned no image data")
+    _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
         f.write(base64.b64decode(images[0]))
     return f"Successfully generated image to {output_file}"
@@ -176,6 +184,7 @@ def _generate_image_gemini(
     image_parts = [part for part in response_parts if part.get("inlineData", False)]
     if len(image_parts) == 1:
         base64_image = image_parts[0]["inlineData"]["data"]
+        _ensure_output_dir(output_file)
         with open(output_file, "wb") as f:
             f.write(base64.b64decode(base64_image))
         return f"Successfully generated image to {output_file}"

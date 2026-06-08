@@ -28,7 +28,9 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     if not api_key:
         return "MINIMAX_API_KEY is not set"
 
-    prompt = spec.get("prompt", "")
+    prompt = (spec.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("`prompt` is required in the music spec")
     lyrics = spec.get("lyrics") or None  # treat empty string the same as absent
     is_instrumental = bool(spec.get("is_instrumental", False))
 

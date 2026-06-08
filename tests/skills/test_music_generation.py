@@ -111,6 +111,19 @@ def test_raises_on_missing_audio_data(monkeypatch, tmp_path):
         mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
 
 
+def test_empty_prompt_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+
+    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
+        raise AssertionError("must not call the API when prompt is missing")
+
+    monkeypatch.setattr(mus.requests, "post", fake_post)
+    spec = tmp_path / "s.json"
+    spec.write_text('{"title":"X","lyrics":"[verse]\\nhi"}', encoding="utf-8")  # no prompt
+    with pytest.raises(ValueError, match="prompt"):
+        mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
+
+
 def test_empty_lyrics_falls_back_to_optimizer(monkeypatch, tmp_path):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}

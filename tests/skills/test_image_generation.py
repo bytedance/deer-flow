@@ -163,6 +163,22 @@ def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_pa
     assert not out.exists()
 
 
+def test_minimax_creates_nested_output_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+
+    def fake_post(url, headers=None, json=None, **kw):
+        return FakeResp({"data": {"image_base64": [base64.b64encode(b"img").decode()]},
+                         "base_resp": {"status_code": 0}})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "p.txt"
+    prompt_file.write_text("a cat", encoding="utf-8")
+    out = tmp_path / "nested" / "dir" / "o.jpg"
+    img.generate_image(str(prompt_file), [], str(out), "1:1")
+
+    assert out.read_bytes() == b"img"
+
+
 def test_unknown_provider_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
     monkeypatch.setenv("GEMINI_API_KEY", "g")
