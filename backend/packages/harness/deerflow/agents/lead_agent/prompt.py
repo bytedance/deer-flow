@@ -10,6 +10,7 @@ from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
+from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -691,19 +692,6 @@ Rules:
 - After `update_agent` returns successfully, tell the user the change is persisted and will take effect on the next turn.
 </self_update>
 """
-
-
-def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozenset()) -> str:
-    """Generate <available-deferred-tools> from an explicit deferred-name set.
-
-    Lists only names so the agent knows what exists and can use tool_search to
-    load them. Returns empty string when there are no deferred tools. The set is
-    computed at agent build time (after tool-policy filtering) and passed in.
-    """
-    if not deferred_names:
-        return ""
-    names = "\n".join(sorted(deferred_names))
-    return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
 def _build_acp_section(*, app_config: AppConfig | None = None) -> str:

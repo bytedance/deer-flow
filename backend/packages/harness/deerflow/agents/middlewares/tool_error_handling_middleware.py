@@ -199,6 +199,7 @@ def build_subagent_runtime_middlewares(
     app_config: AppConfig | None = None,
     model_name: str | None = None,
     lazy_init: bool = True,
+    deferred_setup=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -221,6 +222,16 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
         middlewares.append(ViewImageMiddleware())
+
+    # Hide deferred (MCP) tool schemas from the subagent's model binding until
+    # tool_search promotes them — same wiring the lead agent gets. The deferred
+    # set + catalog hash come from the build-time setup (assembled after
+    # tool-policy filtering); promotion is read from graph state. Empty/None
+    # setup (deferral disabled or no MCP tool survived) is a pure no-op.
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
