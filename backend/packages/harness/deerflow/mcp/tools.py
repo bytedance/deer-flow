@@ -33,6 +33,16 @@ def _strip_mcp_tool_prefix(tool_name: str, server_name: str) -> str:
     return tool_name[len(prefix) :] if tool_name.startswith(prefix) else tool_name
 
 
+def _rename_tool_for_exposure(tool: BaseTool, exposed_name: str) -> BaseTool:
+    if tool.name == exposed_name:
+        return tool
+    if hasattr(tool, "model_copy"):
+        return tool.model_copy(update={"name": exposed_name})
+    renamed = tool.copy()
+    renamed.name = exposed_name
+    return renamed
+
+
 def _extract_thread_id(runtime: Runtime | None) -> str:
     """Extract thread_id from the injected tool runtime or LangGraph config."""
     if runtime is not None:
@@ -287,10 +297,10 @@ async def get_mcp_tools() -> list[BaseTool]:
         exposed_name_counts = Counter(exposed_name_candidates)
 
         for tool, tool_server, exposed_name_candidate in zip(tools, tool_servers, exposed_name_candidates, strict=True):
+            exposed_name = exposed_name_candidate if exposed_name_counts[exposed_name_candidate] == 1 else tool.name
             if tool_server is not None:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
-                    exposed_name = exposed_name_candidate if exposed_name_counts[exposed_name_candidate] == 1 else tool.name
                     wrapped_tools.append(
                         _make_session_pool_tool(
                             tool,
@@ -301,9 +311,9 @@ async def get_mcp_tools() -> list[BaseTool]:
                         )
                     )
                 else:
-                    wrapped_tools.append(tool)
+                    wrapped_tools.append(_rename_tool_for_exposure(tool, exposed_name))
             else:
-                wrapped_tools.append(tool)
+                wrapped_tools.append(_rename_tool_for_exposure(tool, exposed_name))
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:
