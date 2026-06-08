@@ -1,10 +1,10 @@
 """End-to-end: the subagent deferral recipe hides then promotes an MCP tool (#3341).
 
 #3272 wired deferred MCP loading into the lead agent only. #3341 extends it to
-subagents. This locks the *subagent build recipe* — the shared helpers the
+subagents. This locks the *subagent build recipe* - the shared helpers the
 executor now calls (``assemble_deferred_tools`` + ``get_deferred_tools_prompt_section``)
 plus the ``DeferredToolFilterMiddleware`` that ``build_subagent_runtime_middlewares``
-attaches — composing into the same hide→promote loop the lead has, under the
+attaches - composing into the same hide/promote loop the lead has, under the
 subagent's build shape (``system_prompt=None`` + a single ``SystemMessage``).
 
 The hide/promote mechanics themselves are also covered for the lead path by
@@ -14,8 +14,8 @@ produces an equivalent loop without binding MCP schemas before promotion.
 A second test (``test_subagent_builder_emits_working_deferred_filter``) closes the
 remaining seam: it sources the filter from the *real* ``build_subagent_runtime_middlewares``
 (the exact call ``executor._create_agent`` makes) rather than hand-constructing it, so a
-regression in how the builder wires the setup into the filter — wrong catalog hash,
-dropped filter, wrong deferred set — is caught at runtime. (Running the full real stack
+regression in how the builder wires the setup into the filter - wrong catalog hash,
+dropped filter, wrong deferred set - is caught at runtime. (Running the full real stack
 is intentionally avoided: the other runtime middlewares need sandbox/thread infra to
 execute, which would make the test flaky; their attachment + ordering is locked in
 tests/test_tool_error_handling_middleware.py instead.)
@@ -101,8 +101,8 @@ def test_subagent_deferral_recipe_hides_then_promotes():
 
 
 def test_subagent_builder_emits_working_deferred_filter():
-    """The real build path the executor calls — ``build_subagent_runtime_middlewares`` —
-    must emit a ``DeferredToolFilterMiddleware`` that actually hides→promotes through a
+    """The real build path the executor calls - ``build_subagent_runtime_middlewares`` -
+    must emit a ``DeferredToolFilterMiddleware`` that actually hides/promotes through a
     graph. The recipe test above hand-builds the filter; this sources it from the real
     builder given a real setup, so a regression in the builder's wiring is caught: a
     wrong catalog hash silently stops promotion (turn 2 would keep mcp_calc hidden), a
@@ -141,7 +141,7 @@ def test_subagent_builder_emits_working_deferred_filter():
     )
 
     # The exact call executor._create_agent makes. Pull the filter the builder
-    # produced (not a hand-rolled one) so its wiring — deferred set + catalog hash —
+    # produced (not a hand-rolled one) so its wiring - deferred set + catalog hash -
     # is what's under test.
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", deferred_setup=setup)
     deferred_filters = [m for m in middlewares if isinstance(m, DeferredToolFilterMiddleware)]
@@ -165,9 +165,9 @@ def test_subagent_builder_emits_working_deferred_filter():
     result = asyncio.run(graph.ainvoke({"messages": [SystemMessage(content=section), HumanMessage(content="use the deferred calculator")]}))
 
     assert len(bound) >= 2, f"expected >=2 model binds, got {bound}"
-    # Turn 1: both deferred MCP tools hidden — the builder-produced filter is active.
+    # Turn 1: both deferred MCP tools hidden - the builder-produced filter is active.
     assert "mcp_calc" not in bound[0] and "mcp_other" not in bound[0]
-    # Turn 2: the searched tool is promoted — proves the builder wired the catalog
+    # Turn 2: the searched tool is promoted - proves the builder wired the catalog
     # hash correctly (a wrong hash would leave mcp_calc hidden here).
     assert "mcp_calc" in bound[1]
     assert "mcp_other" not in bound[1]

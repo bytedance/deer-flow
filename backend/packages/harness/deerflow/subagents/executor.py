@@ -428,7 +428,7 @@ class SubagentExecutor:
             so the agent build and the injected ``<available-deferred-tools>``
             section share one catalog/hash.
         """
-        # Lazy import: see the TYPE_CHECKING note at the top of this module —
+        # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
         from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
@@ -441,7 +441,7 @@ class SubagentExecutor:
         # The generated tool_search helper is intentionally not subject to the
         # subagent's name-level allow/deny (config.tools / disallowed_tools):
         # its catalog is built from the already-filtered list, so it can never
-        # surface a tool the policy denied — same decision as the lead agent.
+        # surface a tool the policy denied. This matches the lead agent.
         enabled = (self.app_config or get_app_config()).tool_search.enabled
         final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
         skill_messages = await self._load_skill_messages(skills)

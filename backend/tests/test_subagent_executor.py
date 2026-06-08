@@ -14,6 +14,7 @@ the real implementation in isolation.
 """
 
 import asyncio
+import importlib
 import sys
 import threading
 from datetime import datetime
@@ -39,6 +40,21 @@ _MOCKED_MODULE_NAMES = [
 ]
 
 
+def _default_app_config():
+    return SimpleNamespace(tool_search=SimpleNamespace(enabled=False))
+
+
+def _patch_default_get_app_config(executor_module):
+    executor_module.get_app_config = _default_app_config
+    return executor_module
+
+
+def _clear_stale_executor_package_attr() -> None:
+    subagents_pkg = sys.modules.get("deerflow.subagents")
+    if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
+        delattr(subagents_pkg, "executor")
+
+
 @pytest.fixture(autouse=True)
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
@@ -53,6 +69,7 @@ def _setup_executor_classes():
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
         del sys.modules["deerflow.subagents.executor"]
+    _clear_stale_executor_package_attr()
 
     # Set up mocks
     for name in _MOCKED_MODULE_NAMES:
@@ -70,6 +87,14 @@ def _setup_executor_classes():
         SubagentResult,
         SubagentStatus,
     )
+
+    executor_module = sys.modules["deerflow.subagents.executor"]
+
+    # Most tests in this module patch _create_agent and exercise executor
+    # control flow only. Keep those tests hermetic: CI checkouts do not include
+    # the gitignored config.yaml, and deferral-specific tests override this
+    # default explicitly.
+    _patch_default_get_app_config(executor_module)
 
     # Store classes in a dict to yield
     classes = {
@@ -499,7 +524,7 @@ class TestAgentConstruction:
         base_config,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        """tool_search disabled: no tool_search tool, no section — pure no-op even
+        """tool_search disabled: no tool_search tool, no section - pure no-op even
         with an MCP-tagged tool present."""
         from langchain_core.tools import tool as as_tool
 
@@ -879,7 +904,7 @@ class TestAsyncExecutionPath:
         if system_messages:
             assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
             # The consolidated SystemMessage must carry both the system_prompt
-            # and all skill content — nothing should be split across two messages.
+            # and all skill content; nothing should be split across two messages.
             assert base_config.system_prompt in system_messages[0].content
             assert "Skill instruction text" in system_messages[0].content
 
@@ -1315,11 +1340,9 @@ class TestThreadSafety:
     @pytest.fixture
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
@@ -1441,11 +1464,9 @@ class TestCleanupBackgroundTask:
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
         # Re-import to get the real module with cleanup_background_task
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""
@@ -1586,11 +1607,9 @@ class TestCooperativeCancellation:
     @pytest.fixture
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     @pytest.mark.anyio
     async def test_aexecute_cancelled_before_streaming(self, classes, base_config, mock_agent, msg):
