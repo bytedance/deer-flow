@@ -289,7 +289,23 @@ models:
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
+  #   # MiniMax inlines its chain-of-thought into `content` as <think>...</think>
+  #   # (reasoning_split defaults to false), not in a separate reasoning_content
+  #   # field. Declare the thinking toggle so non-thinking paths (flash mode,
+  #   # follow-up suggestions, title/memory generation) truly disable reasoning
+  #   # instead of wasting tokens on — and parsing around — inline <think> blocks.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
   #   use: langchain_openai:ChatOpenAI
@@ -331,7 +347,23 @@ models:
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
+  #   # MiniMax inlines its chain-of-thought into `content` as <think>...</think>
+  #   # (reasoning_split defaults to false), not in a separate reasoning_content
+  #   # field. Declare the thinking toggle so non-thinking paths (flash mode,
+  #   # follow-up suggestions, title/memory generation) truly disable reasoning
+  #   # instead of wasting tokens on — and parsing around — inline <think> blocks.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
   #   use: langchain_openai:ChatOpenAI
