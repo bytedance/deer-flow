@@ -16,31 +16,38 @@ SOUL_PATHS = [
 
 
 @pytest.mark.parametrize("soul_path", SOUL_PATHS, ids=[path.parent.name for path in SOUL_PATHS])
-def test_deeplink_kpis_must_submit_without_rendering(soul_path: Path):
+def test_deeplink_uses_direct_execute_tool(soul_path: Path):
+    """Test that SOUL.md instructs to use report_direct_execute tool."""
     soul_text = soul_path.read_text(encoding="utf-8")
 
-    assert 'step_id="kpis"' in soul_text
-    assert 'payload={"kpi_keys": [...]}' in soul_text
-    assert "report_template_submit_step" in soul_text
-    assert "report_template_render_step(..., step_id=\"kpis\")" in soul_text
-    assert "禁止" in soul_text
+    # Should reference the direct execute tool
+    assert "report_direct_execute" in soul_text
+    # Should have a "Deep-Link 直达" section
+    assert "Deep-Link 直达" in soul_text
+    # Should mention parameter齐全 and 缺失 scenarios
+    assert "参数齐全" in soul_text
+    assert "参数缺失" in soul_text
 
 
 @pytest.mark.parametrize("soul_path", SOUL_PATHS, ids=[path.parent.name for path in SOUL_PATHS])
-def test_deeplink_equipment_must_submit_without_rendering(soul_path: Path):
+def test_deeplink_lists_optional_parameters(soul_path: Path):
+    """Test that SOUL.md lists optional parameters for direct execution."""
     soul_text = soul_path.read_text(encoding="utf-8")
 
-    assert 'step_id="equipment"' in soul_text
-    assert 'payload={"equipment_ids": [...], "equipment_labels": [...]}' in soul_text
-    assert "report_template_submit_step" in soul_text
-    assert "report_template_render_step(..., step_id=\"equipment\")" in soul_text
-
-
-@pytest.mark.parametrize("soul_path", SOUL_PATHS, ids=[path.parent.name for path in SOUL_PATHS])
-def test_deeplink_kpis_forbids_list_equipment_lookup(soul_path: Path):
-    soul_text = soul_path.read_text(encoding="utf-8")
-
+    # Should list optional parameters
+    assert "equipment_type" in soul_text
+    assert "compare_with" in soul_text
+    assert "equipment_ids" in soul_text
     assert "kpi_keys" in soul_text
-    assert "list_equipment.py" in soul_text
-    assert "kpis.before_step" in soul_text
-    assert "Organize API" in soul_text
+
+
+@pytest.mark.parametrize("soul_path", SOUL_PATHS, ids=[path.parent.name for path in SOUL_PATHS])
+def test_deeplink_no_dsl_state_machine_constraints(soul_path: Path):
+    """Test that SOUL.md no longer contains DSL state machine constraints."""
+    soul_text = soul_path.read_text(encoding="utf-8")
+
+    # Should NOT contain DSL state machine step constraints
+    assert 'report_template_render_step(..., step_id="kpis")' not in soul_text
+    assert 'report_template_render_step(..., step_id="equipment")' not in soul_text
+    # Should NOT contain the 8-step DSL execution sequence
+    assert "report_template_submit_step(report_run_id=..., step_id=" not in soul_text

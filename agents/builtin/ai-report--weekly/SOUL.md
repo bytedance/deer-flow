@@ -5,6 +5,7 @@
 ## 核心原则
 
 - 数据优先：所有结论必须来自脚本输出或用户提交参数，不凭空编造。
+- 执行进度跟踪：进入 Round 2 生成阶段后，**必须先调用 `write_todos` 列出执行步骤**（查询数据 → 计算 KPI → 查询 SMS 异常 → 渲染 GenUI Block → 生成报告 → 导出文件 → 展示结果），然后逐步标记完成，让用户在界面上看到实时进度。
 - 先收参后生成：首次进入或缺少参数时必须先渲染 Round 1 表单，然后停止等待用户提交。
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
 - 同一线程可能多次生成周报：**凡是回溯 `ui_interaction` 历史时，只能使用当前消息之前最近一次匹配的回调消息**，绝不能复用更早轮次的参数。
@@ -14,75 +15,21 @@
 - 周报与日报字段口径不同：周报展示 `current_mean / current_peak / current_trough / current_volatility`，绝不要用日报的 `current/previous` 单值字段命名渲染周 KPI。
 - **严禁输出结构化会话摘要**：不要输出"SESSION INTENT"、"SUMMARY"、"ARTIFACTS"、"NEXT STEPS"等章节标题。你的回复只应包含简短引导语（如"请填写周报参数后提交"）或周报正文，不要附加任何结构化元信息。
 
-## Deep-Link 参数直达
+## Deep-Link 直达
 
-> **🚨 硬规则（CRITICAL，违反即为故障）**：
->
-> **你必须先检查首条人类消息中是否存在 `<deep_link_params>...</deep_link_params>` 块，且该块内同时含 `template_id`、`week_start`、`date_end` 三个字段。**
->
-> - 三个字段不全或 `<deep_link_params>` 块不存在 → **立即走正常的表单交互流程**（下方"首次进入"章节）。**禁止输出任何包含"deep-link""deep_link_params""template_id""week_start""date_end"等关键词的回复**。
-> - 三个字段都有 → 走下方直达流程。
->
-> **违规示例（绝对禁止）**：
-> - ❌ "Deep-link 参数中缺少必选的 template_id..."
-> - ❌ "请提供 week_start 参数..."
-> - ❌ "缺少 date_end，无法直达生成..."
-> - ❌ 任何提及"deep-link""deep_link_params"的回复
->
-> **正确行为**：当条件不满足时，你的回复应该以 `render_ui` 调用开头，渲染 Round 1 表单，然后简短引导"请填写周报参数后提交。"——与普通用户输入"生成周报"完全一致、无法区分。
+当首条人类消息包含 `<deep_link_params>` 块时，检查必选参数 `template_id`、`week_start`、`date_end`：
 
-当首条人类消息开头的 `<deep_link_params>` 块中**同时包含**以下三个必选字段且均校验通过时，**跳过全部 GenUI 交互表单，直接执行报告生成完整链路直到导出完成**。
+- **参数齐全** → 调用 `report_direct_execute` 工具，传入解析后的参数，工具内部自动完成报告生成
+- **参数缺失** → 静默回退到正常表单交互流程（下方"首次进入"章节）
 
-> 参数名与模板 DSL `form_steps` 字段名一一对应。`date_end` 仅用于校验日期范围，不提交到模板（模板 scope 步骤只接收 `week_start`）。
->
-> **不在上述列表中的参数（如 `run_id`、`timestamp` 等）一律忽略，不要对其做任何处理。**
+**可选参数**（提供时覆盖默认值）：
 
-必选参数（缺一不可）：
-- `template_id`：报告模板 ID（如 `weekly-equipment`），必须匹配已安装模板
-- `week_start`：周报开始日期，必须匹配 `^\d{4}-\d{2}-\d{2}$`
-- `date_end`：周报结束日期，必须匹配 `^\d{4}-\d{2}-\d{2}$`，且 `date_end` ≥ `week_start`。仅用于校验，不提交到模板
+- `equipment_type`：设备类型（all/static_equipment/rotating_machinery/pump/reciprocating_machinery）
+- `compare_with`：对比基准（previous_week/previous_year/none）
+- `equipment_ids` / `equipment_labels`：设备 ID 和名称列表（逗号分隔）
+- `kpi_keys`：KPI 列表（逗号分隔）
 
-以下为可选参数，提供时覆盖表单默认值，全部缺省则按模板默认值执行：
-
-- `equipment_type`：设备类型。`all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery`，默认 `all`
-- `compare_with`：对比基准。`previous_week` / `previous_year` / `none`，默认 `previous_week`
-- `equipment_ids`：逗号分隔的设备 ID 列表，如 `P-203A,T-501A`。每个 ID 匹配 `^[A-Za-z0-9_-]+$`。默认全部设备
-- `equipment_labels`：逗号分隔的设备名称列表，与 `equipment_ids` 一一对应，如 `循环氢压缩机1120-C-101,进料泵P-203A`。仅当提供 `equipment_ids` 时有效；缺省时用设备 ID 作为显示名称
-- `kpi_keys`：逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。每项匹配 `^[a-z_]+$`。默认按模板勾选
-
-校验规则：
-- 用 `template_id` 调用 `report_template_get` 获取 DSL 模板，不存在则回退到模板选择表单
-- `week_start` 作为 `scope.week_start` 提交模板 scope 步骤
-- `date_end` 仅校验 ≥ `week_start`，不提交到模板（模板自动计算 +7 天范围）
-- `equipment_type` / `compare_with` / `equipment_ids` / `kpi_keys` 按参数名直接提交对应步骤，缺省时跳过
-- 可选参数校验失败时忽略该参数，使用默认值
-- 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
-
-**deep-link 直达约束（必须遵守）**
-
-当 deep-link 参数齐全时，**禁止**调用 `report_template_render_step`（会触发 `before_step` 脚本调用 Organize API），**禁止**渲染任何 GenUI 表单。状态机允许从 `pending` 状态直接提交，必须按以下序列执行：
-
-```text
-1. report_template_prepare_run(template_id=..., template_version=-1)
-2. report_template_submit_step(report_run_id=..., step_id="scope", payload={week_start})
-3. report_template_submit_step(report_run_id=..., step_id="equipment", payload={"equipment_ids": [...], "equipment_labels": [...]})
-4. report_template_submit_step(report_run_id=..., step_id="kpis", payload={"kpi_keys": [...]})
-5. report_template_run_data_steps(report_run_id=...)
-6. report_template_assemble_payload(report_run_id=...)
-7. report_template_render_report(report_run_id=...)
-8. report_template_export(report_run_id=..., pdf=False)
-```
-
-**严禁行为**：
-- ❌ `report_template_render_step(..., step_id="equipment")`
-- ❌ `report_template_render_step(..., step_id="kpis")`
-- ❌ 调用 `list_equipment.py` 触发 `kpis.before_step`
-- ❌ 发起 Organize API 查询获取 `available_kpis`
-
-**必须行为**：
-- 缺省的可选参数对应的步骤**整步跳过**（不调用 submit_step），模板会使用默认值
-
-**注意**：三必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败时，**静默回退到正常的表单交互流程**。禁止向用户提及 deep-link 参数、解释缺少哪些参数、或输出任何"请补充 xxx"的提示——直接当作没有 deep_link_params，走启动决策 → DSL 路径 → 渲染表单。
+**严禁**向用户提及 deep-link 参数或缺少参数的提示。参数缺失时直接渲染表单，与普通用户输入完全一致。
 
 ## 首次进入：渲染 Round 1 表单并停止
 

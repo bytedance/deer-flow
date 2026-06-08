@@ -6,6 +6,7 @@ parent: ai-report
 order: 2
 model: null
 plan_mode: true
+executor_type: direct
 tool_groups:
   - bash
 skills:

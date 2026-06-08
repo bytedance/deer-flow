@@ -1,13 +1,21 @@
+# Equipment Report Data Provider
+
+## Purpose
+
+Specifies how equipment report data providers are registered and wired across the three per-report-type skills (`daily-report`, `weekly-report`, `monthly-report`), including direct InS fetch routing, `data_source` output field semantics, and the removal of the markdown data-source banner.
+
 ## Requirements
 
 ### Requirement: Provider registration for daily / weekly / monthly equipment reports
 
-The data-analyst skill SHALL register `daily`, `weekly`, and `monthly` as named provider sources in `_data_providers._PROVIDER_FACTORIES`, each exposing **only** an `ins` mode resolved through `get_provider(source, mode=...)`. The `DEER_FLOW_DATA_PROVIDER` environment variable SHALL no longer gate AI report generation; when set, it MUST be ignored by the daily / weekly / monthly sources (other unrelated sources MAY continue to honor it). The legacy `demo` mode entries for these three sources MUST NOT be registered, and `Demo{Daily,Weekly,Monthly}Provider` classes (and their backing `_demo_*` helpers in the query scripts) MUST be removed.
+The `daily-report`, `weekly-report`, and `monthly-report` skills SHALL each independently register their respective provider source (`daily`, `weekly`, `monthly`) in their own `_data_providers._PROVIDER_FACTORIES`, each exposing **only** an `ins` mode resolved through `get_provider(source, mode=...)`. The `DEER_FLOW_DATA_PROVIDER` environment variable SHALL no longer gate AI report generation; when set, it MUST be ignored by the daily / weekly / monthly sources (other unrelated sources MAY continue to honor it). The legacy `demo` mode entries for these three sources MUST NOT be registered, and `Demo{Daily,Weekly,Monthly}Provider` classes (and their backing `_demo_*` helpers in the query scripts) MUST be removed.
+
+Each skill's `_data_providers.py` is a fully independent copy; changes to one skill's provider registry SHALL NOT affect the other two skills.
 
 #### Scenario: InS provider is the only mode
 
-- **WHEN** `get_provider("daily")` (or `"weekly"` / `"monthly"`) is called with `DEER_FLOW_DATA_PROVIDER` unset
-- **THEN** the registry returns the `Ins{Daily,Weekly,Monthly}Provider` instance and `list_registered()["daily"]` equals `["ins"]`
+- **WHEN** `get_provider("daily")` (or `"weekly"` / `"monthly"`) is called within the respective skill with `DEER_FLOW_DATA_PROVIDER` unset
+- **THEN** the registry returns the `Platform{Daily,Weekly,Monthly}Provider` instance and `list_registered()["daily"]` equals `["ins"]`
 
 #### Scenario: Legacy demo mode raises
 
@@ -17,17 +25,22 @@ The data-analyst skill SHALL register `daily`, `weekly`, and `monthly` as named 
 #### Scenario: DEER_FLOW_DATA_PROVIDER is ignored
 
 - **WHEN** `DEER_FLOW_DATA_PROVIDER=demo` is set in the environment and `get_provider("daily")` runs
-- **THEN** the registry still returns `InsDailyProvider` — the env var has no effect for these three sources
+- **THEN** the registry still returns `PlatformDailyProvider` — the env var has no effect for these three sources
+
+#### Scenario: Each skill has independent provider registry
+
+- **WHEN** a bug fix is applied to `daily-report/scripts/_data_providers.py`
+- **THEN** `weekly-report` and `monthly-report` provider registries are unaffected and continue to function with their existing copies
 
 ### Requirement: Wire query scripts to direct InS fetch
 
-`query_daily.py:fetch_day`, `query_weekly.py:fetch_week`, and `query_monthly.py:fetch_month` (and their `_with_provenance` siblings) SHALL invoke the registered InS provider directly via `get_provider(source).fetch(...)` rather than `fetch_with_fallback`. Any `HttpProviderError` raised by the InS provider MUST propagate unchanged to the script's `main()`, where it is rendered as `{"error": "<ExceptionType>: <message>"}` on stdout (matching the existing `_error(...)` helper). Scripts MUST NOT silently substitute synthetic data.
+`query_daily.py:fetch_day`, `query_weekly.py:fetch_week`, and `query_monthly.py:fetch_month` (and their `_with_provenance` siblings) SHALL invoke the registered InS provider directly via `get_provider(source).fetch(...)` rather than `fetch_with_fallback`. Each skill's copy of these scripts is independent. Any `HttpProviderError` raised by the InS provider MUST propagate unchanged to the script's `main()`, where it is rendered as `{"error": "<ExceptionType>: <message>"}` on stdout (matching the existing `_error(...)` helper). Scripts MUST NOT silently substitute synthetic data.
 
 For `eq_type` values `rotating_machinery` and `reciprocating_machinery`, the InS provider SHALL fill the `alarms` field with real machine drop events fetched from the 8K or 9K `getMachineDrops` endpoint respectively. For all other `eq_type` values, `alarms` SHALL remain `[]`.
 
 #### Scenario: InS error propagates to script main
 
-- **WHEN** `InsDailyProvider.fetch(...)` raises `HttpProviderError("device <id> not found in InS")` and `query_daily.py` runs as a CLI
+- **WHEN** `PlatformDailyProvider.fetch(...)` raises `HttpProviderError("device <id> not found in InS")` and `query_daily.py` runs as a CLI
 - **THEN** the script writes `{"error": "HttpProviderError: device <id> not found in InS"}` to stdout, exits 0 (existing convention), and does NOT write `daily_data.json`
 
 #### Scenario: Compare period error fails the whole report
@@ -42,7 +55,7 @@ For `eq_type` values `rotating_machinery` and `reciprocating_machinery`, the InS
 
 #### Scenario: Rotating machinery reports include real alarms
 
-- **WHEN** `InsDailyProvider.fetch(...)` runs with `eq_type="rotating_machinery"` and InS returns machine drop events
+- **WHEN** `PlatformDailyProvider.fetch(...)` runs with `eq_type="rotating_machinery"` and InS returns machine drop events
 - **THEN** the `current.alarms` field in the output contains a list of non-empty alarm entries with `time`, `equipment`, `level`, `message` fields
 
 #### Scenario: Event fetch failure does not fail the report
@@ -72,6 +85,8 @@ For `eq_type` values `rotating_machinery` and `reciprocating_machinery`, the InS
 ### Requirement: Markdown banner removed from AI report rendering
 
 The `export_report.render_markdown` function SHALL NOT emit a data-source banner line for the AI report payloads (daily / weekly / monthly). The shared helper `_data_banner.format_banner` MUST be removed from the AI report rendering path; the file `_data_banner.py`, the `data_source_banner` field in KPI outputs, and the `data_source_banner` markdown sections in the builtin DSL templates (`agents/builtin/report-templates/{daily,weekly,monthly}-equipment/default.yaml`) MUST be removed. The three SOUL prompts (`agents/builtin/ai-report--{daily,weekly,monthly}/SOUL.md`) MUST drop any instructions about preserving a "first-line banner" or "demo fallback" copy.
+
+Each skill's independent `export_report.py` copy SHALL implement this requirement separately.
 
 #### Scenario: Rendered markdown has no banner line
 
