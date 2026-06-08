@@ -616,6 +616,21 @@ class DeerFlowClient:
         context = {"thread_id": thread_id}
         if self._agent_name:
             context["agent_name"] = self._agent_name
+        if self._app_config is not None:
+            try:
+                sandbox_config = getattr(self._app_config, "sandbox", None)
+                if sandbox_config is not None:
+                    max_chars = sandbox_config.read_file_output_max_chars
+                    if isinstance(max_chars, int) or max_chars is None:
+                        context["read_file_output_max_chars"] = max_chars
+            except Exception:
+                logger.debug("Failed to prepare runtime read-file limit.", exc_info=True)
+            try:
+                context["skill_storage"] = get_or_new_skill_storage(app_config=self._app_config)
+            except Exception:
+                logger.debug("Failed to prepare runtime skill storage.", exc_info=True)
+        if self._available_skills is not None:
+            context["available_skills"] = self._available_skills
 
         seen_ids: set[str] = set()
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``

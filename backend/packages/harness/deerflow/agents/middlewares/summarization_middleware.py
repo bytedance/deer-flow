@@ -17,6 +17,9 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.skills.path_utils import normalize_skill_file_path
+from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,45 @@ def _tool_call_path(tool_call: dict[str, Any]) -> str | None:
     return None
 
 
+def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | None:
+    name = tool_call.get("name") or ""
+    args = tool_call.get("args") or {}
+    if not isinstance(args, dict):
+        return None
+
+    if name == "skill_load":
+        skill_name = args.get("skill_name")
+        if not isinstance(skill_name, str) or not skill_name:
+            return None
+        try:
+            skill_name = SkillStorage.validate_skill_name(skill_name)
+        except ValueError:
+            return None
+        file_path = args.get("file_path")
+        if not isinstance(file_path, str) or not file_path:
+            file_path = SKILL_MD_FILE
+        try:
+            file_path = normalize_skill_file_path(file_path)
+        except ValueError:
+            return None
+        return f"skill_load:{skill_name}/{file_path}"
+
+    path = _tool_call_path(tool_call)
+    if not path:
+        return None
+    normalized_root = skills_root.rstrip("/")
+    path = path.strip().replace("\\", "/")
+    if path == normalized_root:
+        return normalized_root
+    if path.startswith(normalized_root + "/"):
+        try:
+            relative_path = normalize_skill_file_path(path[len(normalized_root) + 1 :])
+        except ValueError:
+            return None
+        return f"{normalized_root}/{relative_path}"
+    return None
+
+
 def _clone_ai_message(
     message: AIMessage,
     tool_calls: list[dict[str, Any]],
@@ -112,7 +154,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._skills_container_path = skills_container_path or "/mnt/skills"
-        self._skill_file_read_tool_names = frozenset(skill_file_read_tool_names or {"read_file", "read", "view", "cat"})
+        self._skill_file_read_tool_names = frozenset(skill_file_read_tool_names or {"skill_load", "read_file", "read", "view", "cat"})
         self._before_summarization_hooks = before_summarization or []
         self._preserve_recent_skill_count = max(0, preserve_recent_skill_count)
         self._preserve_recent_skill_tokens = max(0, preserve_recent_skill_tokens)
@@ -333,15 +375,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 continue
 
             tool_calls = list(msg.tool_calls)
-            skill_paths_by_id: dict[str, str] = {}
+            skill_keys_by_id: dict[str, str] = {}
             for tc in tool_calls:
-                if self._is_skill_tool_call(tc, skills_root):
-                    tc_id = tc.get("id")
-                    path = _tool_call_path(tc)
-                    if tc_id and path:
-                        skill_paths_by_id[tc_id] = path
+                name = tc.get("name") or ""
+                if name not in self._skill_file_read_tool_names:
+                    continue
+                skill_key = _tool_call_skill_key(tc, skills_root)
+                tc_id = tc.get("id")
+                if tc_id and skill_key:
+                    skill_keys_by_id[tc_id] = skill_key
 
-            if not skill_paths_by_id:
+            if not skill_keys_by_id:
                 i += 1
                 continue
 
@@ -356,9 +400,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
             for k in range(i + 1, j):
                 tool_msg = messages[k]
-                if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id in skill_paths_by_id:
+                if isinstance(tool_msg, ToolMessage) and tool_msg.tool_call_id in skill_keys_by_id:
                     skill_tool_tokens += self.token_counter([tool_msg])
-                    skill_key_parts.append(skill_paths_by_id[tool_msg.tool_call_id])
+                    skill_key_parts.append(skill_keys_by_id[tool_msg.tool_call_id])
                     skill_tool_indices.append(k)
                     matched_skill_call_ids.add(tool_msg.tool_call_id)
 
@@ -406,17 +450,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
         selected.reverse()
         return selected
-
-    def _is_skill_tool_call(self, tool_call: dict[str, Any], skills_root: str) -> bool:
-        """Return True when ``tool_call`` reads a file under the configured skills root."""
-        name = tool_call.get("name") or ""
-        if name not in self._skill_file_read_tool_names:
-            return False
-        path = _tool_call_path(tool_call)
-        if not path:
-            return False
-        normalized_root = skills_root.rstrip("/")
-        return path == normalized_root or path.startswith(normalized_root + "/")
 
     def _fire_hooks(
         self,
