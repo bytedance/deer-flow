@@ -9,6 +9,11 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import {
+  ContextActions,
+  ContextEventDivider,
+  ContextEventProvider,
+} from "@/components/workspace/context-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -128,6 +133,7 @@ export default function ChatPage() {
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
+      <ContextEventProvider>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
@@ -153,6 +159,7 @@ export default function ChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
+              {!isNewThread && <ContextActions threadId={threadId} />}
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
@@ -206,6 +213,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
+                <ContextEventDivider />
                 {mountedRef.current ? (
                   <InputBox
                     className={cn(
@@ -256,6 +264,7 @@ export default function ChatPage() {
           </main>
         </div>
       </ChatBox>
+      </ContextEventProvider>
     </ThreadContext.Provider>
   );
 }

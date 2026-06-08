@@ -247,6 +247,22 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    cancel: "Cancel",
+    clearContext: "Clear context",
+    clearContextTooltip:
+      "Drop history from the agent's view (your transcript stays)",
+    clearContextConfirmTitle: "Clear conversation context?",
+    clearContextConfirmDesc:
+      "The agent will no longer see prior messages on the next turn. Your transcript stays visible.",
+    clearContextConfirm: "Clear context",
+    clearContextSuccess: "Context cleared",
+    clearContextError: "Failed to clear context",
+    compactContext: "Compact context",
+    compactContextTooltip:
+      "Summarize history so the agent sees a shorter context",
+    compactContextSuccess: "Context compacted",
+    compactContextError: "Failed to compact context",
+    compactSummary: "Show summary",
   },
 
   // Chats

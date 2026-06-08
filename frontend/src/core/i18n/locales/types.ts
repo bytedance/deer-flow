@@ -178,6 +178,19 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    cancel: string;
+    clearContext: string;
+    clearContextTooltip: string;
+    clearContextConfirmTitle: string;
+    clearContextConfirmDesc: string;
+    clearContextConfirm: string;
+    clearContextSuccess: string;
+    clearContextError: string;
+    compactContext: string;
+    compactContextTooltip: string;
+    compactContextSuccess: string;
+    compactContextError: string;
+    compactSummary: string;
   };
 
   // Chats

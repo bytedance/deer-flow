@@ -235,6 +235,20 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    cancel: "取消",
+    clearContext: "清除上下文",
+    clearContextTooltip: "让 AI 忘记历史(对话记录仍保留)",
+    clearContextConfirmTitle: "清除对话上下文?",
+    clearContextConfirmDesc:
+      "AI 在下一轮不再看到之前的消息,对话记录仍会显示。",
+    clearContextConfirm: "确认清除",
+    clearContextSuccess: "已清除上下文",
+    clearContextError: "清除上下文失败",
+    compactContext: "压缩上下文",
+    compactContextTooltip: "用摘要替换历史以缩短上下文",
+    compactContextSuccess: "已压缩上下文",
+    compactContextError: "压缩上下文失败",
+    compactSummary: "查看摘要",
   },
 
   // Chats

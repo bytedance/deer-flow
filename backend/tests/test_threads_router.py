@@ -485,3 +485,297 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
         response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200
+
+
+# ── clear-context / compact endpoints ────────────────────────────────────────
+
+
+def _seed_thread_with_messages(store, checkpointer, thread_id: str, messages, *, extra_channels=None) -> None:
+    """Pre-seed a thread record plus a checkpoint whose channel_values carry messages.
+
+    The saver's blob store is keyed on ``(thread_id, ns, channel, version)``,
+    so each seeded channel must have a corresponding entry in
+    ``channel_versions`` (and in the ``new_versions`` arg of ``aput``);
+    otherwise the value is silently dropped on the next ``aget_tuple`` read.
+    """
+    import asyncio
+
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    async def _run() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": now_iso_str(),
+                "updated_at": now_iso_str(),
+                "metadata": {},
+            },
+        )
+        ckpt = empty_checkpoint()
+        channel_values = dict(ckpt.get("channel_values", {}))
+        channel_versions = dict(ckpt.get("channel_versions", {}))
+        new_versions: dict[str, object] = {}
+
+        def _bump(channel: str, value) -> None:
+            version = checkpointer.get_next_version(channel_versions.get(channel), None)
+            channel_values[channel] = value
+            channel_versions[channel] = version
+            new_versions[channel] = version
+
+        _bump("messages", list(messages))
+        if extra_channels:
+            for k, v in extra_channels.items():
+                _bump(k, v)
+
+        ckpt["channel_values"] = channel_values
+        ckpt["channel_versions"] = channel_versions
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            ckpt,
+            {"step": 0, "source": "input", "writes": None, "parents": {}},
+            new_versions,
+        )
+
+    asyncio.run(_run())
+
+
+def now_iso_str() -> str:
+    from deerflow.utils.time import now_iso
+
+    return now_iso()
+
+
+def test_clear_context_empties_messages_channel() -> None:
+    """POST /clear-context replaces channel_values["messages"] with an empty list and returns a fresh checkpoint_id."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "thread-clear-1"
+    _seed_thread_with_messages(
+        store,
+        checkpointer,
+        thread_id,
+        [HumanMessage(content="hi"), AIMessage(content="hello"), HumanMessage(content="how are you?")],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/clear-context")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["message"] == "Context cleared"
+    assert body["checkpoint_id"]  # non-empty new id
+
+    # Verify checkpoint state was actually mutated
+    import asyncio
+
+    async def _read() -> list:
+        tup = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        return tup.checkpoint["channel_values"].get("messages", [])
+
+    assert asyncio.run(_read()) == []
+
+
+def test_clear_context_preserves_other_channel_values() -> None:
+    """clear-context only empties ``messages``; other channels (todos, artifacts, title) stay intact."""
+    from langchain_core.messages import HumanMessage
+
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "thread-clear-keep"
+    _seed_thread_with_messages(
+        store,
+        checkpointer,
+        thread_id,
+        [HumanMessage(content="hi")],
+        extra_channels={"title": "Topic A", "todos": [{"id": "t1", "content": "do thing", "status": "pending"}]},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/clear-context")
+
+    assert response.status_code == 200, response.text
+
+    import asyncio
+
+    async def _read() -> dict:
+        tup = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        return tup.checkpoint["channel_values"]
+
+    channel_values = asyncio.run(_read())
+    assert channel_values.get("messages") == []
+    assert channel_values.get("title") == "Topic A"
+    assert channel_values.get("todos") == [{"id": "t1", "content": "do thing", "status": "pending"}]
+
+
+def test_clear_context_returns_404_for_missing_thread() -> None:
+    """POST /clear-context on a thread with no record returns 404 from the permission gate."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/missing-thread/clear-context")
+
+    assert response.status_code == 404
+
+
+def test_clear_context_response_shape() -> None:
+    """Response shape stays minimal: ``success``, ``message``, ``checkpoint_id`` only."""
+    from langchain_core.messages import HumanMessage
+
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "thread-clear-shape"
+    _seed_thread_with_messages(store, checkpointer, thread_id, [HumanMessage(content="hi")])
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/clear-context")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body.keys()) == {"success", "message", "checkpoint_id"}
+
+
+def _patch_compact_chat_model(monkeypatch, summary_text: str = "Summary of the conversation."):
+    """Stub deerflow.models.create_chat_model so compact tests never call a real LLM."""
+
+    class _StubModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            class _Resp:
+                text = summary_text
+
+            return _Resp()
+
+    def _factory(*_args, **_kwargs):
+        return _StubModel()
+
+    import deerflow.models
+
+    monkeypatch.setattr(deerflow.models, "create_chat_model", _factory)
+    return _factory
+
+
+def _attach_minimal_app_config(app, *, summarization=None) -> None:
+    """The compact endpoint reads ``app_config.summarization``; provide a
+    minimal stand-in so ``get_config(request)`` doesn't 503 in tests.
+    """
+    from unittest.mock import MagicMock
+
+    config = MagicMock()
+    config.summarization = summarization
+    app.state.config = config
+
+
+def test_compact_returns_summary_and_replaces_messages(monkeypatch) -> None:
+    """compact summarizes the conversation and replaces messages with [RemoveMessage(ALL), HumanMessage(name='summary')]."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    _patch_compact_chat_model(monkeypatch, summary_text="The user asked about X and got answer Y.")
+
+    app, store, checkpointer = _build_thread_app()
+    _attach_minimal_app_config(app)
+    thread_id = "thread-compact-1"
+    _seed_thread_with_messages(
+        store,
+        checkpointer,
+        thread_id,
+        [HumanMessage(content="ask X"), AIMessage(content="answer Y"), HumanMessage(content="follow up")],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/compact")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["message"] == "Context compacted"
+    assert body["summary"] == "The user asked about X and got answer Y."
+    assert body["checkpoint_id"]
+
+    import asyncio
+
+    async def _read():
+        tup = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        return tup.checkpoint["channel_values"].get("messages", [])
+
+    messages = asyncio.run(_read())
+    assert len(messages) == 2
+    remove_msg, summary_msg = messages
+    assert getattr(remove_msg, "id", None) == REMOVE_ALL_MESSAGES
+    assert getattr(summary_msg, "name", None) == "summary"
+    assert "The user asked about X and got answer Y." in summary_msg.content
+
+
+def test_compact_400_when_no_messages(monkeypatch) -> None:
+    """compact rejects empty conversations with 400."""
+    _patch_compact_chat_model(monkeypatch)
+
+    app, store, checkpointer = _build_thread_app()
+    _attach_minimal_app_config(app)
+    thread_id = "thread-compact-empty"
+    _seed_thread_with_messages(store, checkpointer, thread_id, [])
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/compact")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No messages to compact"
+
+
+def test_compact_400_when_only_summary_present(monkeypatch) -> None:
+    """compact treats an already-summarized state as empty (summary messages are filtered)."""
+    from langchain_core.messages import HumanMessage
+
+    _patch_compact_chat_model(monkeypatch)
+
+    app, store, checkpointer = _build_thread_app()
+    _attach_minimal_app_config(app)
+    thread_id = "thread-compact-only-summary"
+    _seed_thread_with_messages(
+        store,
+        checkpointer,
+        thread_id,
+        [HumanMessage(content="Here is a summary of the conversation to date:\n\nold summary", name="summary")],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/compact")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No messages to compact"
+
+
+def test_compact_returns_404_for_missing_thread() -> None:
+    """compact on a non-existent thread returns 404 via the permission gate."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/missing-compact/compact")
+
+    assert response.status_code == 404
+
+
+def test_compact_handles_model_failure(monkeypatch) -> None:
+    """If the LLM call raises, compact returns 500 with a generic detail (no leak)."""
+    from langchain_core.messages import HumanMessage
+
+    class _BoomModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise RuntimeError("llm went sideways")
+
+    import deerflow.models
+
+    monkeypatch.setattr(deerflow.models, "create_chat_model", lambda *a, **kw: _BoomModel())
+
+    app, store, checkpointer = _build_thread_app()
+    _attach_minimal_app_config(app)
+    thread_id = "thread-compact-boom"
+    _seed_thread_with_messages(store, checkpointer, thread_id, [HumanMessage(content="hi")])
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/compact")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to generate summary"
