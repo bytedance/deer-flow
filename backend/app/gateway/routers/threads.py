@@ -364,11 +364,16 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         )
 
     # Write thread_meta so the thread appears in /threads/search immediately
+    initial_display_name = None
+    agent_name = (body.metadata or {}).get("agent_name")
+    if isinstance(agent_name, str) and agent_name:
+        initial_display_name = _resolve_agent_display_name(agent_name)
     try:
         await thread_store.create(
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             metadata=body.metadata,
+            display_name=initial_display_name,
         )
     except Exception:
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
@@ -402,6 +407,23 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     )
 
 
+def _resolve_agent_display_name(agent_name: str) -> str | None:
+    """Resolve a human-readable display name for an agent.
+
+    Falls back to the raw agent_name when no display_name is configured.
+    Returns None only when the agent_name is empty or invalid.
+    """
+    try:
+        from deerflow.config.agents_config import load_agent_config
+
+        config = load_agent_config(agent_name)
+        if config and config.display_name:
+            return config.display_name
+    except Exception:
+        logger.debug("Failed to resolve display_name for agent %s (non-fatal)", sanitize_log_param(agent_name))
+    return agent_name
+
+
 @router.post("/search", response_model=list[ThreadResponse])
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads from the Store.
@@ -427,11 +449,20 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         return []
 
     results: list[ThreadResponse] = []
+    agent_display_name_cache: dict[str, str | None] = {}
     for val in items:
         values = dict(val.get("values") or {})
         display_name = val.get("display_name")
         if display_name and not values.get("title"):
             values["title"] = display_name
+        if not values.get("title"):
+            agent_name = (val.get("metadata") or {}).get("agent_name")
+            if isinstance(agent_name, str) and agent_name:
+                if agent_name not in agent_display_name_cache:
+                    agent_display_name_cache[agent_name] = _resolve_agent_display_name(agent_name)
+                fallback = agent_display_name_cache[agent_name]
+                if fallback:
+                    values["title"] = fallback
 
         results.append(ThreadResponse(
             thread_id=val["thread_id"],

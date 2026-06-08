@@ -277,6 +277,31 @@ def build_run_config(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_initial_display_name(body: Any) -> str | None:
+    """Derive a display_name for a new thread from its creation context.
+
+    Checks metadata.agent_name first, then falls back to assistant_id.
+    Resolves the agent's configured display_name when available.
+    """
+    agent_name = None
+    metadata = getattr(body, "metadata", None) or {}
+    if isinstance(metadata, dict):
+        agent_name = metadata.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name:
+        agent_name = getattr(body, "assistant_id", None)
+    if not isinstance(agent_name, str) or not agent_name:
+        return None
+    try:
+        from deerflow.config.agents_config import load_agent_config
+
+        config = load_agent_config(agent_name)
+        if config and config.display_name:
+            return config.display_name
+    except Exception:
+        logger.debug("Failed to resolve display_name for agent %s (non-fatal)", sanitize_log_param(agent_name))
+    return agent_name
+
+
 async def start_run(
     body: Any,
     thread_id: str,
@@ -375,10 +400,12 @@ async def start_run(
     try:
         existing = await run_ctx.thread_store.get(thread_id)
         if existing is None:
+            initial_display_name = _resolve_initial_display_name(body)
             await run_ctx.thread_store.create(
                 thread_id,
                 assistant_id=body.assistant_id,
                 metadata=body.metadata,
+                display_name=initial_display_name,
             )
         else:
             await run_ctx.thread_store.update_status(thread_id, "running")
