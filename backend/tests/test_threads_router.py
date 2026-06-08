@@ -485,3 +485,52 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
         response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200
+
+
+# ── update_thread_state: each call inserts a new checkpoint (regression) ───────
+
+
+def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
+    """Each ``POST /state`` must INSERT a distinct, time-ordered checkpoint.
+
+    Regression for the in-place REPLACE bug: before the fix the new
+    checkpoint reused the previous checkpoint["id"], so InMemorySaver/SQLite
+    overwrote the existing row and history never grew. The fix assigns a
+    fresh uuid6 to checkpoint["id"] before aput.
+    """
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        r1 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "First"}})
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "Second"}})
+        assert r2.status_code == 200, r2.text
+
+    import asyncio
+
+    async def _collect():
+        return [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
+
+    history = asyncio.run(_collect())
+
+    # 1 empty checkpoint from create_thread + 1 per update call.
+    assert len(history) >= 3, f"expected >=3 checkpoints, got {len(history)}"
+
+    ids = [cp.config["configurable"]["checkpoint_id"] for cp in history]
+    assert len(ids) == len(set(ids)), f"duplicate checkpoint ids: {ids}"
+    # alist() returns newest-first; uuid6 is time-ordered so newest > oldest.
+    assert ids[0] > ids[-1], f"checkpoint ids not time-ordered (uuid4 instead of uuid6?): {ids}"
+
+    # aput must PRESERVE the endpoint-assigned checkpoint["id"], not mint its own
+    # and discard the payload's. If it generated a fresh id internally the fix
+    # would be a no-op (the bug would never have existed). Assert the id returned
+    # in each response round-tripped into the persisted history, and that the two
+    # update writes kept the endpoint's uuid6 time-ordering through aput.
+    resp_ids = [r1.json()["checkpoint_id"], r2.json()["checkpoint_id"]]
+    assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
+    assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
+    assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"
