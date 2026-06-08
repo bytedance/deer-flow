@@ -114,6 +114,22 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return "\n".join(message_parts)
 
+    def _record_tool_result(self, request: ToolCallRequest, tool_message: ToolMessage) -> None:
+        """Persist clarification tool output even when execution short-circuits."""
+        runtime = getattr(request, "runtime", None)
+        if runtime is None:
+            return
+        context = getattr(runtime, "context", None) or {}
+        if not isinstance(context, dict):
+            return
+        journal = context.get("__run_journal")
+        if journal is None:
+            return
+        try:
+            journal.record_tool_result(tool_message)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to persist ask_clarification tool result", exc_info=True)
+
     def _handle_clarification(self, request: ToolCallRequest) -> Command:
         """Handle clarification request and return command to interrupt execution.
 
@@ -144,6 +160,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             tool_call_id=tool_call_id,
             name="ask_clarification",
         )
+        self._record_tool_result(request, tool_message)
 
         # Return a Command that:
         # 1. Adds the formatted tool message

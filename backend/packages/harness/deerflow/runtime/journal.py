@@ -82,6 +82,10 @@ class RunJournal(BaseCallbackHandler):
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
 
+        # Dedup: tool results persisted out-of-band (e.g. middleware returning
+        # Command(goto=END)) so a later on_tool_end cannot double-write them.
+        self._recorded_tool_result_ids: set[str] = set()
+
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
@@ -128,6 +132,28 @@ class RunJournal(BaseCallbackHandler):
         if isinstance(text, str):
             return text
         return ""
+
+    @staticmethod
+    def _is_real_human_input(message: BaseMessage) -> bool:
+        """Tell a genuine end-user message apart from middleware-injected stand-ins.
+
+        ``on_chat_model_start`` scans the LLM's message list from the tail to
+        find "the first human message" used for the ``llm.human.input`` event and
+        the ``first_human_message`` convenience field. Middleware such as
+        ``TodoMiddleware`` appends synthetic ``HumanMessage`` reminders to the
+        tail of that list (marked ``hide_from_ui`` with a sentinel ``name``), and
+        ``SummarizationMiddleware`` injects ``name="summary"`` messages. A naive
+        tail scan would pick those up and overwrite the real user input, so they
+        must be excluded here (issue #3337).
+        """
+        if not isinstance(message, HumanMessage):
+            return False
+        if message.name in {"summary", "todo_reminder", "todo_completion_reminder"}:
+            return False
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui"):
+            return False
+        return True
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
@@ -211,7 +237,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary":
+                    if self._is_real_human_input(m):
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(
@@ -334,14 +360,14 @@ class RunJournal(BaseCallbackHandler):
         """Handle tool end event, append message and clear node data"""
         try:
             if isinstance(output, ToolMessage):
-                msg = cast(ToolMessage, output)
-                self._put(event_type="llm.tool.result", category="message", content=msg.model_dump())
-                self._record_message_summary(msg)
+                self._persist_tool_result(cast(ToolMessage, output))
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
                 for message in messages:
-                    if isinstance(message, BaseMessage):
+                    if isinstance(message, ToolMessage):
+                        self._persist_tool_result(message)
+                    elif isinstance(message, BaseMessage):
                         self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
                         self._record_message_summary(message)
                     else:
@@ -474,6 +500,35 @@ class RunJournal(BaseCallbackHandler):
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
         self._first_human_msg = content[:2000] if content else None
+
+    def record_tool_result(self, message: ToolMessage) -> None:
+        """Persist a tool result that bypasses the normal ``on_tool_end`` path.
+
+        Some middleware short-circuit tool execution by returning a
+        ``Command(goto=END)`` directly from ``wrap_tool_call`` (e.g.
+        ``ClarificationMiddleware``). LangChain never fires ``on_tool_end`` for
+        those, so the resulting ``ToolMessage`` would never reach the event
+        store and would vanish from history once the context window is
+        compressed (issue #3337). Middleware calls this to persist the message
+        explicitly as a normal ``llm.tool.result`` event.
+        """
+        self._persist_tool_result(message)
+
+    def _persist_tool_result(self, message: ToolMessage) -> None:
+        """Write a single tool result event, deduped by message id.
+
+        Both ``on_tool_end`` and the out-of-band ``record_tool_result`` route
+        here so a tool result can never be written twice (e.g. when a middleware
+        persists it eagerly and LangChain later fires ``on_tool_end`` for the
+        same message).
+        """
+        message_id = getattr(message, "id", None)
+        if message_id is not None:
+            if message_id in self._recorded_tool_result_ids:
+                return
+            self._recorded_tool_result_ids.add(message_id)
+        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+        self._record_message_summary(message)
 
     def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:
         """Record a middleware state-change event.

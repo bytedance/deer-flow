@@ -154,6 +154,33 @@ class TestClarificationCommandIdempotency:
         assert merged[0].id == "clarification:call-clarify-1"
         assert merged[0].content == first_message.content
 
+    def test_persists_tool_message_to_run_journal(self, middleware):
+        recorded = []
+
+        class _FakeJournal:
+            def record_tool_result(self, message):
+                recorded.append(message)
+
+        request = SimpleNamespace(
+            runtime=SimpleNamespace(context={"__run_journal": _FakeJournal()}),
+            tool_call={
+                "name": "ask_clarification",
+                "id": "call-clarify-1",
+                "args": {
+                    "question": "Which environment should I use?",
+                    "clarification_type": "approach_choice",
+                    "options": ["dev", "prod"],
+                },
+            },
+        )
+
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert len(recorded) == 1
+        assert recorded[0].id == "clarification:call-clarify-1"
+        assert recorded[0].name == "ask_clarification"
+        assert recorded[0].content == result.update["messages"][0].content
+
     def test_missing_tool_call_id_still_gets_stable_message_id(self, middleware):
         request = SimpleNamespace(
             tool_call={

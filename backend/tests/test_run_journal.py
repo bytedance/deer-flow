@@ -222,6 +222,29 @@ class TestToolCallbacks:
         assert messages[0]["content"]["content"] == "file list"
 
     @pytest.mark.anyio
+    async def test_record_tool_result_persists_and_dedupes(self, journal_setup):
+        """Out-of-band tool results are persisted once even if on_tool_end also fires."""
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        tool_msg = ToolMessage(
+            id="clarification:call_3",
+            content="Which option?",
+            tool_call_id="call_3",
+            name="ask_clarification",
+        )
+
+        j.record_tool_result(tool_msg)
+        j.on_tool_end(tool_msg, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["event_type"] == "llm.tool.result"
+        assert messages[0]["content"]["id"] == "clarification:call_3"
+        assert messages[0]["content"]["name"] == "ask_clarification"
+
+    @pytest.mark.anyio
     async def test_on_tool_error_no_crash(self, journal_setup):
         """on_tool_error should not crash (no event emitted by default)."""
         j, store = journal_setup
@@ -852,6 +875,31 @@ class TestChatModelStartHumanMessage:
         await j.flush()
 
         assert j._first_human_msg == "Real question"
+
+    @pytest.mark.anyio
+    async def test_skips_hidden_todo_reminder_messages(self, journal_setup):
+        """Middleware-injected hidden reminders must not replace user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        messages_batch = [
+            [
+                HumanMessage(content="1 再来一局脑筋急转弯"),
+                HumanMessage(
+                    content="<system_reminder>todo state</system_reminder>",
+                    name="todo_reminder",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+            ],
+        ]
+        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "1 再来一局脑筋急转弯"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "1 再来一局脑筋急转弯"
 
     @pytest.mark.anyio
     async def test_only_first_human_message_captured(self, journal_setup):

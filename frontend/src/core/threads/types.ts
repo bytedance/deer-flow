@@ -33,12 +33,6 @@ export interface RunMessage {
   created_at: string;
 }
 
-export interface RunMessagesPage {
-  data: RunMessage[];
-  has_more?: boolean;
-  hasMore?: boolean;
-}
-
 export interface ThreadTokenUsageResponse {
   thread_id: string;
   total_tokens: number;
