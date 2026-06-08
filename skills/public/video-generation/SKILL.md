@@ -137,3 +137,15 @@ After generation:
 - JSON format ensures structured, parsable prompts
 - Reference image enhance generation quality significantly
 - Iterative refinement is normal for optimal results
+
+## Providers (Gemini / MiniMax)
+
+Auto-selected by environment variables (CLI unchanged):
+
+- `GEMINI_API_KEY` set → Gemini Veo (default, unchanged).
+- Only `MINIMAX_API_KEY` set → MiniMax video (`/v1/video_generation`, async 3-step poll/download).
+- Force with `VIDEO_GENERATION_PROVIDER=gemini|minimax`.
+
+MiniMax overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
+`MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). The first reference image is used
+as MiniMax `first_frame_image`. MiniMax ignores `--aspect-ratio` (it uses resolution/duration).
