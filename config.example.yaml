@@ -322,7 +322,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # - name: minimax-m2.7-highspeed
@@ -335,7 +335,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
@@ -386,7 +386,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # - name: minimax-m2.7-highspeed
@@ -399,7 +399,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: OpenRouter (OpenAI-compatible)

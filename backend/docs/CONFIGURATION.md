@@ -113,7 +113,7 @@ models:
     base_url: https://api.minimax.io/v1
     max_tokens: 4096
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-    supports_vision: true
+    supports_vision: false  # M2.7 is text-only; M3 supports vision
 
   - name: minimax-m2.7-highspeed
     display_name: MiniMax M2.7 Highspeed
@@ -123,7 +123,7 @@ models:
     base_url: https://api.minimax.io/v1
     max_tokens: 4096
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-    supports_vision: true
+    supports_vision: false  # M2.7 is text-only; M3 supports vision
   - name: openrouter-gemini-2.5-flash
     display_name: Gemini 2.5 Flash (OpenRouter)
     use: langchain_openai:ChatOpenAI
