@@ -104,8 +104,15 @@ def _tool_call_skill_key(tool_call: dict[str, Any], skills_root: str) -> str | N
     if not path:
         return None
     normalized_root = skills_root.rstrip("/")
-    if path == normalized_root or path.startswith(normalized_root + "/"):
-        return path
+    path = path.strip().replace("\\", "/")
+    if path == normalized_root:
+        return normalized_root
+    if path.startswith(normalized_root + "/"):
+        try:
+            relative_path = normalize_skill_file_path(path[len(normalized_root) + 1 :])
+        except ValueError:
+            return None
+        return f"{normalized_root}/{relative_path}"
     return None
 
 

@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,12 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+_LOG_CONTROL_CHARS = re.compile(r"[\r\n\t\x00-\x1f\x7f]+")
+
+
+def _sanitize_log_value(value: object) -> str:
+    text = _LOG_CONTROL_CHARS.sub(" ", str(value))
+    return text[:200]
 
 
 def _resolve_skill_file(skill: Skill, normalized_file_path: str) -> Path:
@@ -50,6 +57,24 @@ def _get_runtime_app_config(runtime: Runtime) -> "AppConfig | None":
             app_config = configurable.get("app_config")
             if app_config is not None:
                 return app_config
+    return None
+
+
+def _get_runtime_skill_storage(runtime: Runtime):
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        storage = context.get("skill_storage")
+        if storage is not None:
+            return storage
+    return None
+
+
+def _get_runtime_read_file_output_max_chars(runtime: Runtime) -> int | None:
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        max_chars = context.get("read_file_output_max_chars")
+        if isinstance(max_chars, int):
+            return max_chars
     return None
 
 
@@ -93,8 +118,15 @@ def _get_read_file_output_max_chars(app_config: "AppConfig | None") -> int | Non
         return 50000
 
 
-def _read_skill_file(target: Path, *, app_config: "AppConfig | None") -> str:
-    max_chars = _get_read_file_output_max_chars(app_config)
+def _read_skill_file(
+    target: Path,
+    *,
+    app_config: "AppConfig | None",
+    read_file_output_max_chars: int | None = None,
+) -> str:
+    max_chars = read_file_output_max_chars
+    if max_chars is None:
+        max_chars = _get_read_file_output_max_chars(app_config)
     if max_chars is None or max_chars <= 0:
         return target.read_text(encoding="utf-8")
 
@@ -127,8 +159,11 @@ def skill_load_tool(
         if available_skills is not None and normalized_name not in available_skills:
             return f"Error: Skill is not available to this agent: {normalized_name}"
 
-        app_config = _get_runtime_app_config(runtime)
-        storage = get_or_new_skill_storage(app_config=app_config) if app_config is not None else get_or_new_skill_storage()
+        storage = _get_runtime_skill_storage(runtime)
+        app_config = None
+        if storage is None:
+            app_config = _get_runtime_app_config(runtime)
+            storage = get_or_new_skill_storage(app_config=app_config) if app_config is not None else get_or_new_skill_storage()
         skill = storage.get_skill(normalized_name, enabled_only=True)
         if skill is None:
             return f"Error: Skill not found or disabled: {normalized_name}"
@@ -137,12 +172,16 @@ def skill_load_tool(
         target = _resolve_skill_file(skill, normalized_file_path)
         if not target.is_file():
             return f"Error: Skill file not found: {normalized_name}/{normalized_file_path}"
-        content = _read_skill_file(target, app_config=app_config)
+        content = _read_skill_file(
+            target,
+            app_config=app_config,
+            read_file_output_max_chars=_get_runtime_read_file_output_max_chars(runtime),
+        )
         return content if content else "(empty)"
     except ValueError as e:
         return f"Error: {e}"
     except UnicodeDecodeError:
         return f"Error: Skill file is not valid UTF-8: {skill_name}/{file_path}"
     except Exception:
-        logger.exception("Failed to load skill %s/%s", skill_name, file_path)
+        logger.exception("Failed to load skill %s/%s", _sanitize_log_value(skill_name), _sanitize_log_value(file_path))
         return "Error: Failed to load skill."

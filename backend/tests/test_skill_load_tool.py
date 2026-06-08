@@ -8,10 +8,20 @@ from deerflow.tools.builtins.skill_load_tool import skill_load_tool
 skill_load_module = importlib.import_module("deerflow.tools.builtins.skill_load_tool")
 
 
-def _runtime(*, app_config=None, available_skills=None) -> SimpleNamespace:
+def _runtime(
+    *,
+    app_config=None,
+    available_skills=None,
+    skill_storage=None,
+    read_file_output_max_chars=None,
+) -> SimpleNamespace:
     context = {}
     if app_config is not None:
         context["app_config"] = app_config
+    if skill_storage is not None:
+        context["skill_storage"] = skill_storage
+    if read_file_output_max_chars is not None:
+        context["read_file_output_max_chars"] = read_file_output_max_chars
     config = {"metadata": {}}
     if available_skills is not None:
         config["metadata"]["available_skills"] = available_skills
@@ -202,21 +212,34 @@ def test_skill_load_returns_generic_error_for_unexpected_failures(monkeypatch):
     assert result == "Error: Failed to load skill."
 
 
-def test_skill_load_threads_runtime_app_config_to_storage(monkeypatch, tmp_path):
+def test_skill_load_prefers_runtime_skill_storage(monkeypatch, tmp_path):
     skill = _skill(tmp_path)
-    app_config = object()
-    captured = {}
 
-    def fake_get_or_new_skill_storage(*, app_config=None):
-        captured["app_config"] = app_config
-        return _storage([skill])
+    def fail_get_or_new_skill_storage(*, app_config=None):
+        raise AssertionError("runtime skill storage should be used")
 
-    monkeypatch.setattr(skill_load_module, "get_or_new_skill_storage", fake_get_or_new_skill_storage)
+    monkeypatch.setattr(skill_load_module, "get_or_new_skill_storage", fail_get_or_new_skill_storage)
 
-    result = skill_load_tool.func(runtime=_runtime(app_config=app_config), skill_name="demo-skill")
+    result = skill_load_tool.func(runtime=_runtime(skill_storage=_storage([skill])), skill_name="demo-skill")
 
     assert "# Demo Skill" in result
-    assert captured["app_config"] is app_config
+
+
+def test_skill_load_uses_runtime_read_file_limit_with_runtime_storage(monkeypatch, tmp_path):
+    skill = _skill(tmp_path)
+    skill.skill_file.write_text("abcdef", encoding="utf-8")
+
+    def fail_get_or_new_skill_storage(*, app_config=None):
+        raise AssertionError("runtime skill storage should be used")
+
+    monkeypatch.setattr(skill_load_module, "get_or_new_skill_storage", fail_get_or_new_skill_storage)
+
+    result = skill_load_tool.func(
+        runtime=_runtime(skill_storage=_storage([skill]), read_file_output_max_chars=3),
+        skill_name="demo-skill",
+    )
+
+    assert result == "abc\n\n... [truncated: showing first 3 characters]"
 
 
 def test_skill_load_truncates_large_output(monkeypatch, tmp_path):

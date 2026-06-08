@@ -248,10 +248,28 @@ class SkillStorage(ABC):
     def get_skill(self, name: str, *, enabled_only: bool = False) -> Skill | None:
         """Return one skill by normalized name, or ``None`` when absent."""
         normalized_name = self.validate_skill_name(name)
-        return next(
-            (skill for skill in self.load_skills(enabled_only=enabled_only) if skill.name == normalized_name),
-            None,
-        )
+        from deerflow.skills.parser import parse_skill_file
+
+        for category, category_root, md_path in self._iter_skill_files():
+            if md_path.parent.name != normalized_name:
+                continue
+            skill = parse_skill_file(
+                md_path,
+                category=category,
+                relative_path=md_path.parent.relative_to(category_root),
+            )
+            if skill is None or skill.name != normalized_name:
+                continue
+            try:
+                from deerflow.config.extensions_config import ExtensionsConfig
+
+                skill.enabled = ExtensionsConfig.from_file().is_skill_enabled(skill.name, skill.category)
+            except Exception as e:
+                logger.warning("Failed to load extensions config: %s", e)
+            if enabled_only and not skill.enabled:
+                return None
+            return skill
+        return None
 
     def ensure_custom_skill_is_editable(self, name: str) -> None:
         """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
