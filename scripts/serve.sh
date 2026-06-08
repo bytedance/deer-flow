@@ -285,9 +285,26 @@ else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
+# Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
+# so pin DeerFlow-owned state to the expected backend runtime directory and
+# create it before uvicorn builds its reload exclude filter.
+if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
+    export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
+fi
+
+BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
+if [ -z "$DEER_FLOW_HOME" ]; then
+    export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
+fi
+
+mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME"
+DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
+BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
+export DEER_FLOW_HOME
+
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
     GATEWAY_EXTRA_FLAGS=""
 fi
