@@ -256,8 +256,7 @@ def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch
 
 
 def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_names(monkeypatch):
-    """A subagent build with deferred MCP tools gets DeferredToolFilterMiddleware,
-    positioned before SafetyFinishReasonMiddleware (mirrors the lead ordering)."""
+    """A subagent built with deferred MCP tools gets DeferredToolFilterMiddleware, positioned before SafetyFinishReasonMiddleware (mirrors the lead ordering)."""
     from langchain_core.tools import tool as as_tool
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
