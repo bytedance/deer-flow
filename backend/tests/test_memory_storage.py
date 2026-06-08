@@ -407,6 +407,13 @@ class TestMarkdownMemoryStorage:
         quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
         assert len(quarantined) == 1, "a non-UTF-8 summary must be quarantined, not silently rebuilt over"
         assert quarantined[0].read_bytes() == original
+        # The unreadable file was moved aside, so another load of the rebuilt
+        # manifest must not mint a second quarantine copy.
+        again = storage.load()
+        assert isinstance(again, dict)
+        still = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert still == quarantined
+        assert still[0].read_bytes() == original
 
     def test_fenced_block_containing_backticks_parses_losslessly(self):
         """Remembered code snippets must not terminate the JSON block."""
