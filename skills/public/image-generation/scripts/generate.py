@@ -94,6 +94,7 @@ def _generate_image_minimax(
         f"{_minimax_host()}/v1/image_generation",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=body,
+        timeout=60,
     )
     response.raise_for_status()
     payload = response.json()

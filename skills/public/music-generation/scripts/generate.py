@@ -50,6 +50,7 @@ def generate_music(prompt_file: str, output_file: str) -> str:
         f"{host}/v1/music_generation",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=body,
+        timeout=300,
     )
     response.raise_for_status()
     payload = response.json()

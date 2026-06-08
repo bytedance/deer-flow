@@ -113,3 +113,10 @@ def test_unknown_provider_raises(monkeypatch, tmp_path):
     pf.write_text("x", encoding="utf-8")
     with pytest.raises(ValueError):
         img.generate_image(str(pf), [], str(tmp_path / "o.jpg"), "1:1")
+
+
+def test_guess_mime_by_extension():
+    assert img._guess_mime("/a/b.png") == "image/png"
+    assert img._guess_mime("/a/b.webp") == "image/webp"
+    assert img._guess_mime("/a/b.jpg") == "image/jpeg"
+    assert img._guess_mime("/a/b.unknown") == "image/jpeg"

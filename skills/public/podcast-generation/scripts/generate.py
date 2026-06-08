@@ -111,6 +111,7 @@ def text_to_speech_minimax(text: str, voice_id: str) -> Optional[bytes]:
             f"{host}/v1/t2a_v2",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
+            timeout=60,
         )
         if response.status_code != 200:
             logger.error(f"MiniMax TTS error: {response.status_code} - {response.text}")

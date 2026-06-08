@@ -56,6 +56,7 @@ def _poll_video_task(host: str, auth: str, task_id: str,
             f"{host}/v1/query/video_generation",
             headers={"Authorization": auth},
             params={"task_id": task_id},
+            timeout=30,
         )
         response.raise_for_status()
         payload = response.json()
@@ -78,6 +79,7 @@ def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
         f"{host}/v1/files/retrieve",
         headers={"Authorization": auth},
         params={"file_id": file_id},
+        timeout=30,
     )
     response.raise_for_status()
     payload = response.json()
@@ -86,7 +88,7 @@ def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
 
 
 def _download(url: str, output_file: str) -> None:
-    response = requests.get(url)
+    response = requests.get(url, timeout=300)
     response.raise_for_status()
     with open(output_file, "wb") as f:
         f.write(response.content)
@@ -107,6 +109,7 @@ def _generate_video_minimax(
         f"{host}/v1/video_generation",
         headers={"Authorization": auth, "Content-Type": "application/json"},
         json=body,
+        timeout=60,
     )
     response.raise_for_status()
     payload = response.json()
