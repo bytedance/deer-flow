@@ -133,8 +133,8 @@ _background_tasks_lock = threading.Lock()
 MAX_CONCURRENT_SUBAGENTS = 3
 
 # Thread pool for background task scheduling and orchestration
-_scheduler_pool: ThreadPoolExecutor | None = None
-_scheduler_pool_max_workers: int | None = None
+_scheduler_pool: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SUBAGENTS, thread_name_prefix="subagent-scheduler-")
+_scheduler_pool_max_workers: int | None = MAX_CONCURRENT_SUBAGENTS
 _scheduler_pool_lock = threading.Lock()
 
 # Persistent event loop for isolated subagent executions triggered from an
