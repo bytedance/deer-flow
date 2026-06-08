@@ -346,7 +346,7 @@ def _build_middlewares(
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
-    # TokenBudgetMiddlware - enforce per-run token limits
+    # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware

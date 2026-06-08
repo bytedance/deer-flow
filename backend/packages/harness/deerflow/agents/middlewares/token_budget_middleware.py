@@ -55,9 +55,6 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         self._config = config
         self._lock = threading.Lock()
 
-        # (thread_id, run_id) -> TokenUsage
-        # self._usage: dict[tuple[str, str], TokenUsage] = {}
-
         # (thread_id, run_id) -> bool (whether warned)
         self._warned: dict[tuple[str, str], bool] = {}
 
@@ -143,7 +140,12 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         if "function_call" in kwargs:
             del kwargs["function_call"]
 
-        stopped_msg = msg.model_copy(update={"content": updated_content, "tool_calls": [], "additional_kwargs": kwargs})
+        response_metadata = dict(getattr(msg, "response_metadata", {}) or {})
+
+        if response_metadata.get("finish_reason") == "tool_calls":
+            response_metadata["finish_reason"] = "stop"
+
+        stopped_msg = msg.model_copy(update={"content": updated_content, "tool_calls": [], "additional_kwargs": kwargs, "response_metadata": response_metadata})
         return {"messages": [stopped_msg]}
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:

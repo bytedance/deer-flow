@@ -292,7 +292,7 @@ def _assemble_from_features(
 
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
 
-    # --- [13] Clarification (always last among built-ins) ---
+    # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 
