@@ -448,7 +448,7 @@ test("installed write fallback rejects when ClipboardItem lacks text/plain", asy
     "text/html": new Blob(["<table></table>"], { type: "text/html" }),
   });
   await expect(globalThis.navigator.clipboard.write([item])).rejects.toThrow(
-    "Clipboard item type not available",
+    "Clipboard item is missing text/plain data",
   );
   expect(execCommand).not.toHaveBeenCalled();
 });
@@ -510,8 +510,51 @@ test("installed write fallback rejects before getType when item types exclude te
         types: ["text/html"],
       } as unknown as ClipboardItem,
     ]),
-  ).rejects.toThrow("Clipboard item type not available");
+  ).rejects.toThrow("Clipboard item is missing text/plain data");
   expect(getType).not.toHaveBeenCalled();
+});
+
+test("installed write fallback rejects when getType is missing", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  await expect(
+    globalThis.navigator.clipboard.write([
+      {
+        types: ["text/plain"],
+      } as unknown as ClipboardItem,
+    ]),
+  ).rejects.toThrow("Clipboard item cannot read text/plain data");
+});
+
+test("installed write fallback rejects when getType returns a non-Blob", async () => {
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  await expect(
+    globalThis.navigator.clipboard.write([
+      {
+        getType: vi.fn().mockResolvedValue("plain text"),
+        types: ["text/plain"],
+      } as unknown as ClipboardItem,
+    ]),
+  ).rejects.toThrow("Clipboard item text/plain data is not a Blob");
 });
 
 test("installed write fallback preserves existing clipboard prototype methods", async () => {
@@ -648,6 +691,29 @@ test("installClipboardFallback skips missing clipboard on non-extensible navigat
 
   expect("clipboard" in globalThis.navigator).toBe(false);
   expect(typeof globalThis.ClipboardItem).toBe("function");
+});
+
+test("installClipboardFallback handles non-object navigator.clipboard values", async () => {
+  const navigator = {};
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: "locked",
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: navigator,
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: undefined,
+  });
+
+  installClipboardFallback();
+
+  expect(typeof globalThis.navigator.clipboard.writeText).toBe("function");
+  await expect(
+    globalThis.navigator.clipboard.writeText("hello"),
+  ).rejects.toThrow("Clipboard DOM fallback not available");
 });
 
 test("installClipboardFallback does not throw when ClipboardItem cannot be defined", async () => {

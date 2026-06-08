@@ -85,15 +85,29 @@ async function readPlainTextFromClipboardItem(
   }
 
   if (item.types && !item.types.includes("text/plain")) {
-    throw new Error("Clipboard item type not available");
+    throw new Error("Clipboard item is missing text/plain data");
   }
 
-  const blob = await item.getType?.("text/plain");
+  if (typeof item.getType !== "function") {
+    throw new Error("Clipboard item cannot read text/plain data");
+  }
+
+  const blob = await item.getType("text/plain");
   if (blob instanceof Blob) {
     return await blob.text();
   }
 
-  throw new Error("Clipboard item type not available");
+  throw new Error("Clipboard item text/plain data is not a Blob");
+}
+
+function canDefineNavigatorClipboard(
+  navigator: Navigator,
+  descriptor: PropertyDescriptor | undefined,
+): boolean {
+  if (descriptor) {
+    return descriptor.configurable === true;
+  }
+  return Object.isExtensible(navigator);
 }
 
 /**
@@ -106,7 +120,11 @@ export function installClipboardFallback(): void {
     return;
   }
 
-  const clipboard = navigator.clipboard as Partial<Clipboard> | undefined;
+  const rawClipboard = navigator.clipboard;
+  const clipboard =
+    typeof rawClipboard === "object" && rawClipboard !== null
+      ? (rawClipboard as Partial<Clipboard>)
+      : undefined;
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(
     navigator,
     "clipboard",
@@ -154,49 +172,53 @@ export function installClipboardFallback(): void {
 
     Object.defineProperties(fallbackClipboard, missingMethods);
 
-    if (!clipboard) {
-      const cannotDefineClipboard =
-        Object.isExtensible(navigator) === false &&
-        clipboardDescriptor?.configurable !== true;
-
-      if (!cannotDefineClipboard) {
-        Object.defineProperty(navigator, "clipboard", {
-          configurable: true,
-          value: fallbackClipboard,
-        });
-      }
-    }
-  } catch {
-    const replacement = Object.create(clipboard ?? null);
-    for (const methodName of ["read", "readText"] as const) {
-      const method = clipboard?.[methodName];
-      if (typeof method === "function") {
-        Object.defineProperty(replacement, methodName, {
-          configurable: true,
-          value: method.bind(clipboard),
-          writable: true,
-        });
-      }
-    }
-    Object.defineProperties(replacement, {
-      write: {
-        configurable: true,
-        value: write,
-        writable: true,
-      },
-      writeText: {
-        configurable: true,
-        value: writeText,
-        writable: true,
-      },
-    });
-    try {
+    if (
+      !clipboard &&
+      canDefineNavigatorClipboard(navigator, clipboardDescriptor)
+    ) {
       Object.defineProperty(navigator, "clipboard", {
         configurable: true,
-        value: replacement,
+        value: fallbackClipboard,
       });
-    } catch {
+    }
+  } catch {
+    if (!canDefineNavigatorClipboard(navigator, clipboardDescriptor)) {
       // The ClipboardItem fallback below is independent from navigator.clipboard.
+      if (hasClipboardItem) {
+        return;
+      }
+    } else {
+      const replacement = Object.create(clipboard ?? null);
+      for (const methodName of ["read", "readText"] as const) {
+        const method = clipboard?.[methodName];
+        if (typeof method === "function") {
+          Object.defineProperty(replacement, methodName, {
+            configurable: true,
+            value: method.bind(clipboard),
+            writable: true,
+          });
+        }
+      }
+      Object.defineProperties(replacement, {
+        write: {
+          configurable: true,
+          value: write,
+          writable: true,
+        },
+        writeText: {
+          configurable: true,
+          value: writeText,
+          writable: true,
+        },
+      });
+      try {
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: replacement,
+        });
+      } catch {
+        // The ClipboardItem fallback below is independent from navigator.clipboard.
+      }
     }
   }
 
@@ -218,7 +240,9 @@ export function installClipboardFallback(): void {
         if (typeof value === "string") {
           return Promise.resolve(new Blob([value], { type }));
         }
-        return Promise.reject(new Error("Clipboard item type not available"));
+        return Promise.reject(
+          new Error(`Clipboard item is missing ${type} data`),
+        );
       }
     }
 
