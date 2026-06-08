@@ -193,6 +193,26 @@ test("mergeMessages does not stitch same-id live AI text without stream metadata
   ).toEqual([liveReplacementAi]);
 });
 
+test("mergeMessages does not stitch unrelated replacement text when the stream predicate rejects it", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "old answer",
+  } as Message;
+  const liveReplacementAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "new answer",
+    response_metadata: { model: "test-model" },
+  } as Message;
+
+  expect(
+    mergeMessages([persistedAi], [liveReplacementAi], [], (message) =>
+      Boolean(message.response_metadata?.streamMetadata),
+    ),
+  ).toEqual([liveReplacementAi]);
+});
+
 test("mergeMessages keeps live AI metadata when reconnect stream repeats the persisted suffix", () => {
   const persistedAiPrefix = {
     id: "ai-1",

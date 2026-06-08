@@ -137,10 +137,16 @@ function withMessageTextContent(message: Message, text: string): Message {
   return { ...message, content };
 }
 
+const MAX_TEXT_OVERLAP_SCAN = 4096;
+
 function longestTextOverlap(left: string, right: string): number {
-  const maxLength = Math.min(left.length, right.length);
+  const maxLength = Math.min(left.length, right.length, MAX_TEXT_OVERLAP_SCAN);
+  const leftTail =
+    left.length > maxLength ? left.slice(left.length - maxLength) : left;
+  const rightHead =
+    right.length > maxLength ? right.slice(0, maxLength) : right;
   for (let length = maxLength; length > 0; length--) {
-    if (left.endsWith(right.slice(0, length))) {
+    if (leftTail.endsWith(rightHead.slice(0, length))) {
       return length;
     }
   }
