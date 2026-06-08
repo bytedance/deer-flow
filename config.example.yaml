@@ -537,6 +537,10 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Optional proxy for restricted networks / Docker / WSL.
+    # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
+    # proxy: $HTTPS_PROXY
+    # trust_env: true
 
   # Web fetch tool (uses InfoQuest)
   # - name: web_fetch
