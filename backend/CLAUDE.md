@@ -386,6 +386,19 @@ Each skill may ship a `report_scripts.yaml` at its root. The registry scans enab
 
 **ai-report--daily fallback**: the DSL path is preferred; the legacy hardcoded SOUL.md path remains as a fallback (triggered on `report_template_*` errors / missing builtin / disabled skill / validator regression). `ai-report--custom` and any from-scratch agent have **no fallback** — they fail loudly when the platform is down.
 
+**Direct Report Executor** (`packages/harness/deerflow/report_executor/`):
+
+Agents declare their execution strategy via `executor_type` field in `config.yaml`. This decouples routing logic from agent names, allowing any agent to use direct execution without code changes.
+
+- **Agent config**: Set `executor_type: direct` in agent's `config.yaml` to use direct execution path; omit or set to `dsl` for DSL template engine (default)
+- **Module**: `report_executor/executor.py` — `DirectReportExecutor` class orchestrates script execution (`query_*.py` → `*_kpi.py` → `export_report.py`) via subprocess
+- **Tool**: `report_direct_execute` (in `tools/builtins/report_direct_tools.py`) — LangChain tool wrapping the executor, returns structured JSON with `{report_run_id, artifacts, status}` or `{error: {code, message, step}, status: "failed"}`
+- **Routing**: `report_executor/router.py` — `get_report_tools_for_agent(agent_config)` reads `executor_type` from config, returns `[report_direct_execute]` for `direct` agents, `[report_template_*]` for `dsl` agents
+- **Error handling**: `DirectExecutionError` hierarchy with codes `SCRIPT_FAILED`, `NO_DATA`, `INTERNAL_ERROR`
+- **SOUL.md simplification**: Direct-execution agents' SOUL.md files no longer contain DSL state machine constraints; deep-link parameters trigger `report_direct_execute` directly
+
+**Tests**: 48 tests across `tests/test_report_direct_executor.py`, `tests/test_report_direct_execute_tool.py`, `tests/test_report_executor_router.py`, `tests/test_ai_report_deeplink_soul.py`, and `tests/test_blueprint_executor_type.py` cover the direct execution path, error handling, routing logic, and blueprint executor_type field.
+
 **Tests**: 347 tests across `tests/test_report_template_*.py`, `tests/test_builtin_report_templates.py`, and `tests/test_ai_report_weekly_*.py` cover schema, validator, source resolver, repository, permissions, runtime modules, registry, lifecycle tools, runtime tools, REST routes, generic renderer, push-block, and CI validation of all shipped builtin DSL files.
 
 **Telemetry (Phase 7)**: `report_templates/telemetry.py` provides a thread-safe in-memory collector mirroring the `RenderUIMetrics` pattern — no Prometheus / OTel dependency. Six event types are emitted from埋点 inside the platform: `report_run_outcome` (state.transition → terminal), `fallback_triggered` (via the `report_template_record_fallback` tool LLMs call in `ai-report--daily/SOUL.md`), `validator_outcome` (validator.validate_dsl), `storage_snapshot` + `version_count_snapshot` (storage_scanner, invoked by `POST /api/telemetry/report-templates/scan-storage|scan-versions`), and `skill_unavailable` (data_runner + script_registry). Events are simultaneously counted in memory and appended to `{DEER_FLOW_HOME}/report-templates/.telemetry.log` (JSONL) so the charter §4.2 30-day fallback-cohort report can be reconstructed offline. Disable the JSONL sink with `DEER_FLOW_REPORT_TELEMETRY_LOG=0`. HTTP surface: `GET /api/telemetry/report-templates/summary` returns the live counter snapshot. See [docs/plans/2026-05-18-phase7-charter.md](../docs/plans/2026-05-18-phase7-charter.md) for the alert thresholds and [docs/admin-guide/report-templates.md](../docs/admin-guide/report-templates.md) §5 for indicator semantics + alert wiring.

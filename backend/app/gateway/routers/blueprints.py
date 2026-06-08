@@ -41,6 +41,7 @@ class BlueprintSummaryResponse(BaseModel):
     category: str
     icon: Optional[str] = None
     tags: list[str] = []
+    executor_type: str = "direct"
 
 
 class BlueprintDetailResponse(BaseModel):
@@ -50,6 +51,7 @@ class BlueprintDetailResponse(BaseModel):
     category: str
     icon: Optional[str] = None
     tags: list[str] = []
+    executor_type: str = "direct"
     base_dsl: dict[str, Any]
     user_configurable: list[dict[str, Any]] = []
     recommended_scripts: list[str] = []
@@ -86,6 +88,7 @@ async def list_blueprints(
                 category=bp.category,
                 icon=bp.icon,
                 tags=bp.tags,
+                executor_type=bp.executor_type,
             )
             for bp in blueprints
         ]
@@ -110,6 +113,7 @@ async def get_blueprint(
             category=bp.category,
             icon=bp.icon,
             tags=bp.tags,
+            executor_type=bp.executor_type,
             base_dsl=bp.base_dsl.model_dump(mode="json"),
             user_configurable=[f.model_dump(mode="json") for f in bp.user_configurable],
             recommended_scripts=bp.recommended_scripts,

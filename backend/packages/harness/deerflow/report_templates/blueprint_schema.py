@@ -55,6 +55,10 @@ class BlueprintDefinition(BaseModel):
     category: BlueprintCategory
     icon: str | None = Field(default=None, description="Icon name for the catalog card")
     tags: list[str] = Field(default_factory=list)
+    executor_type: Literal["direct", "dsl"] = Field(
+        default="direct",
+        description="Execution strategy: 'direct' for builtin reports (uses report_direct_execute), 'dsl' for custom reports (uses report_template_* tools)",
+    )
 
     base_dsl: ReportTemplateDSL = Field(description="Pre-filled DSL that the editor starts with")
     user_configurable: list[ConfigurableField] = Field(

@@ -592,6 +592,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_co
         subagent_enabled=subagent_enabled,
         app_config=resolved_app_config,
         tenant_mcp_configs=tenant_mcp_configs,
+        agent_name=agent_name,
+        agent_config=agent_config,
     ) + extra_tools
 
     # Filter out excluded tools specified in agent config

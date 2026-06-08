@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from langchain.tools import BaseTool
 
@@ -61,6 +62,8 @@ def get_available_tools(
     *,
     app_config: AppConfig | None = None,
     tenant_mcp_configs: dict[str, dict] | None = None,
+    agent_name: str | None = None,
+    agent_config: Any | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -79,6 +82,10 @@ def get_available_tools(
             with global configs. Keys are server names, values are config dicts
             (same format as extensions_config mcpServers entries). Tenant configs
             override global configs with the same server name.
+        agent_name: Optional agent name for logging purposes.
+        agent_config: Optional AgentConfig instance to determine which report executor to use.
+            Agents with executor_type="direct" get direct execution tools,
+            others get DSL template tools.
 
     Returns:
         List of available tools.
@@ -109,6 +116,34 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+
+    # Route report tools based on agent_config.executor_type
+    # Agents with executor_type="direct" get direct execution, others get DSL template tools
+    if agent_config is not None or agent_name is not None:
+        from deerflow.report_executor.router import get_report_tools_for_agent, is_direct_executor_agent
+
+        # Remove all report template tools from builtin_tools
+        from deerflow.tools.builtins import (
+            REPORT_TEMPLATE_LIFECYCLE_TOOLS,
+            REPORT_TEMPLATE_RUNTIME_TOOLS,
+            report_template_record_fallback_tool,
+        )
+
+        # Collect tool names to remove (StructuredTool objects are unhashable)
+        report_tools_to_remove = {
+            *[t.name for t in REPORT_TEMPLATE_LIFECYCLE_TOOLS],
+            *[t.name for t in REPORT_TEMPLATE_RUNTIME_TOOLS],
+            report_template_record_fallback_tool.name,
+        }
+        builtin_tools = [t for t in builtin_tools if t.name not in report_tools_to_remove]
+
+        # Add appropriate report tools based on agent config
+        report_tools = get_report_tools_for_agent(agent_config)
+        builtin_tools.extend(report_tools)
+
+        executor_type = "direct" if is_direct_executor_agent(agent_config) else "dsl"
+        logger.debug(f"Agent '{agent_name or 'unknown'}' using {executor_type} report execution")
+
     skill_evolution_config = getattr(config, "skill_evolution", None)
     if getattr(skill_evolution_config, "enabled", False):
         from deerflow.tools.skill_manage_tool import skill_manage_tool

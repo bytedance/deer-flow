@@ -74,6 +74,7 @@ class AgentConfig(BaseModel):
     nav_items: list[NavItem] | None = None
     advanced: dict[str, Any] | None = None
     plan_mode: bool = False
+    executor_type: str | None = None  # "direct" | "dsl" | None (defaults to "dsl")
 
 
 class AgentInfo(BaseModel):

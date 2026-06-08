@@ -137,6 +137,7 @@ def generate_blueprint(template_name: str) -> BlueprintDefinition:
         category=category,
         icon=icon,
         tags=[template_name.split("-")[0], category.replace("_", "-")],
+        executor_type="direct",
         base_dsl=dsl,
         user_configurable=extract_configurable_fields(dsl_dict),
         recommended_scripts=extract_recommended_scripts(dsl_dict),
