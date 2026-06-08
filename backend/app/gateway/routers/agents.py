@@ -1,5 +1,6 @@
 """CRUD API for custom agents."""
 
+import asyncio
 import logging
 import re
 import shutil
@@ -428,19 +429,30 @@ async def delete_agent(name: str) -> None:
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
     paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, name)
 
-    if not agent_dir.exists():
-        if paths.agent_dir(name).exists():
-            raise HTTPException(
-                status_code=409,
-                detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
-            )
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    def _remove_agent_dir() -> tuple[str, str]:
+        # Runs in a worker thread: resolving the base dir, probing the directory
+        # (`exists`), and removing it (`rmtree`) are all blocking filesystem IO
+        # that must stay off the event loop.
+        agent_dir = paths.user_agent_dir(user_id, name)
+        if not agent_dir.exists():
+            outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
+            return outcome, str(agent_dir)
+        shutil.rmtree(agent_dir)
+        return "deleted", str(agent_dir)
 
     try:
-        shutil.rmtree(agent_dir)
-        logger.info(f"Deleted agent '{name}' from {agent_dir}")
+        outcome, agent_dir = await asyncio.to_thread(_remove_agent_dir)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
+
+    if outcome == "legacy":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
+        )
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    logger.info(f"Deleted agent '{name}' from {agent_dir}")
