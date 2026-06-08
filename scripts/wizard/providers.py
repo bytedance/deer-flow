@@ -19,9 +19,23 @@ class LLMProvider:
     api_key_field: str = "api_key"
     # Extra config fields beyond the common ones (merged into YAML)
     extra_config: dict = field(default_factory=dict)
+    # Per-model supports_vision overrides for providers whose models differ in
+    # capability (e.g. MiniMax M3 supports vision but M2.7 is text-only). The
+    # provider-level extra_config holds the default (default_model) capability.
+    model_vision_overrides: dict[str, bool] = field(default_factory=dict)
     auth_hint: str | None = None
     base_url_prompt: str | None = None
     model_prompt: str | None = None
+
+    def extra_config_for(self, model_name: str) -> dict:
+        """Return extra_config for a selected model, applying per-model overrides.
+
+        Does not mutate the shared provider-level ``extra_config``.
+        """
+        config = dict(self.extra_config)
+        if model_name in self.model_vision_overrides:
+            config["supports_vision"] = self.model_vision_overrides[model_name]
+        return config
 
 
 @dataclass
@@ -313,6 +327,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "supports_vision": True,
             "supports_thinking": True,
         },
+        model_vision_overrides={
+            "MiniMax-M2.7": False,
+            "MiniMax-M2.7-highspeed": False,
+        },
     ),
     LLMProvider(
         name="minimax_cn",
@@ -331,6 +349,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "temperature": 1.0,
             "supports_vision": True,
             "supports_thinking": True,
+        },
+        model_vision_overrides={
+            "MiniMax-M2.7": False,
+            "MiniMax-M2.7-highspeed": False,
         },
     ),
     LLMProvider(

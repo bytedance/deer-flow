@@ -715,7 +715,7 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
-        supports_vision=True,
+        supports_vision=False,  # M2.7 is text-only; M3 supports vision
         supports_thinking=False,
     )
     cfg = _make_app_config([m1, m2])
