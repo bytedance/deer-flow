@@ -37,10 +37,7 @@ def main() -> int:
         data = turn["output"].get("data", {})
         tool_calls = [tc.get("name") for tc in (data.get("tool_calls") or [])]
         caller = turn.get("caller", "legacy")
-        print(
-            f"  turn {index}: caller={caller} hash={turn['input_hash'][:12]} "
-            f"tool_calls={tool_calls} content={str(data.get('content'))[:50]!r}"
-        )
+        print(f"  turn {index}: caller={caller} hash={turn['input_hash'][:12]} tool_calls={tool_calls} content={str(data.get('content'))[:50]!r}")
     return 0
 
 
