@@ -20,8 +20,7 @@ def clean_env(monkeypatch):
 def test_resolve_prefers_gemini(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
-    assert img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini",
-                                 bool(__import__("os").getenv("GEMINI_API_KEY"))) == "gemini"
+    assert img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", True) == "gemini"
 
 
 def test_resolve_falls_back_to_minimax(monkeypatch):
@@ -64,6 +63,8 @@ def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
     assert captured["json"]["model"] == "image-01"
     assert captured["json"]["response_format"] == "base64"
     assert captured["json"]["aspect_ratio"] == "16:9"
+    assert captured["json"]["n"] == 1
+    assert captured["json"]["prompt_optimizer"] is True
     assert "Successfully generated image" in msg
 
 
@@ -86,6 +87,9 @@ def test_minimax_reference_image_as_data_url(monkeypatch, tmp_path):
     subj = captured["json"]["subject_reference"]
     assert subj[0]["type"] == "character"
     assert subj[0]["image_file"].startswith("data:image/jpeg;base64,")
+    import base64 as _b64
+    encoded = subj[0]["image_file"].split(",", 1)[1]
+    assert _b64.b64decode(encoded) == b"\xff\xd8refbytes"
 
 
 def test_minimax_raises_on_base_resp_error(monkeypatch, tmp_path):
@@ -100,3 +104,12 @@ def test_minimax_raises_on_base_resp_error(monkeypatch, tmp_path):
     with pytest.raises(Exception) as e:
         img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "1:1")
     assert "1004" in str(e.value)
+
+
+def test_unknown_provider_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    pf = tmp_path / "p.json"
+    pf.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError):
+        img.generate_image(str(pf), [], str(tmp_path / "o.jpg"), "1:1")

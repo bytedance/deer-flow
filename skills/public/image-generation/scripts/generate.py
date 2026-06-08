@@ -53,10 +53,21 @@ def _check_base_resp(payload: dict) -> None:
         )
 
 
+def _guess_mime(image_path: str) -> str:
+    ext = os.path.splitext(image_path)[1].lower()
+    return {
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+    }.get(ext, "image/jpeg")
+
+
 def _to_data_url(image_path: str) -> str:
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64}"
+    return f"data:{_guess_mime(image_path)};base64,{b64}"
 
 
 def _generate_image_minimax(
@@ -74,6 +85,8 @@ def _generate_image_minimax(
         "prompt_optimizer": True,
     }
     if reference_images:
+        # Reference images are passed as character subjects as-is; unlike the Gemini
+        # path we do not pre-validate them — invalid files surface as a MiniMax API error.
         body["subject_reference"] = [
             {"type": "character", "image_file": _to_data_url(p)} for p in reference_images
         ]
@@ -148,7 +161,9 @@ def generate_image(
     )
     if provider == "minimax":
         return _generate_image_minimax(prompt, reference_images, output_file, aspect_ratio)
-    return _generate_image_gemini(prompt, reference_images, output_file, aspect_ratio)
+    if provider in ("gemini", "google"):
+        return _generate_image_gemini(prompt, reference_images, output_file, aspect_ratio)
+    raise ValueError(f"Unknown image provider: {provider!r} (use 'gemini' or 'minimax')")
 
 
 if __name__ == "__main__":
