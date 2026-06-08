@@ -85,17 +85,21 @@ test.describe("real backend render (replay, no API key)", () => {
     await textarea.fill(PROMPT);
     await textarea.press("Enter");
 
-    // Replay-only DOM assertions (derived from the fixture): they render only if
+    // Replay-only DOM assertions (derived from the fixture): both are
+    // model-generated strings absent from the user prompt, so they render only if
     // the recorded turns replayed AND the real frontend rendered them — the
     // in-graph auto-title and the post-answer follow-up suggestion. Together they
-    // prove the whole pipeline (replay backend -> real frontend render).
+    // prove the whole pipeline (replay backend -> real frontend render). The
+    // record spec waits for the /suggestions response, so a re-recorded fixture
+    // always captures the suggestion turn — a missing one is a broken recording
+    // and must fail loud here, not pass silently.
     expect(
       EXPECTED_TITLE,
       "fixture should contain an auto-title turn",
     ).not.toBe("");
     expect(
       EXPECTED_SUGGESTION,
-      "fixture should contain a suggestions turn",
+      "fixture should contain a suggestions turn (re-record; the record spec waits for /suggestions)",
     ).not.toBe("");
     await expect(page.getByText(EXPECTED_TITLE)).toBeVisible({
       timeout: 60_000,

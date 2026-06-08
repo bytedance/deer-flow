@@ -50,12 +50,25 @@ gateway's own run/event stores using the request's auth context, so the real
 ## How replay works
 
 `tests/replay_provider.py::ReplayChatModel` returns recorded assistant turns keyed
-by a **normalized hash** of the model input (strips `<system-reminder>`, dates,
-UUIDs, tmp paths). A miss raises loudly rather than passing silently. The system
-prompt is made environment-independent by pinning skills + extensions empty and
-disabling memory/summarization (`tests/_replay_fixture.py::build_config_yaml`), so
-a fixture replays the same across machines, days, and CI. Replaying needs **no
-API key**.
+by a **normalized hash of the conversation** (human / ai / tool messages — role,
+text, tool-call name+args; with `<system-reminder>`, dates, UUIDs, tmp paths
+stripped). A miss raises loudly rather than passing silently.
+
+**The system prompt is excluded from the match key.** The lead-agent system
+prompt is a living, frequently-edited implementation detail — its wording changes
+across PRs (e.g. #3195 added a "File Editing Workflow" section). Hashing it would
+make every fixture go stale and red-fail unrelated PRs the moment anyone edits the
+prompt. The conversation flow (user input → tool calls → results → answer) is the
+stable contract that identifies a recorded turn. (This mirrors how open-design's
+mock picker keys on the user prompt, not the system internals.) Combined with
+pinning skills + extensions empty and disabling memory/summarization
+(`tests/_replay_fixture.py::build_config_yaml`), a fixture replays the same across
+machines, days, prompt edits, and CI. Replaying needs **no API key**.
+
+A swallowed hash-miss keeps the SSE *event shapes* identical (the gateway wraps it
+into a normal assistant error message), so the Layer-1 golden can't catch a miss
+by shape alone — it inspects `replay_provider.replay_misses()` and fails loud
+instead. Layer-2 already fails on a miss (the recorded turns never render).
 
 ## Record a new scenario (needs a real key — dev machine only)
 
