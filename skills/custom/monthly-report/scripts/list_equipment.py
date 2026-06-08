@@ -96,6 +96,36 @@ def _get_gateway_url() -> str:
     return os.environ.get("DEER_FLOW_GATEWAY_URL", "http://localhost:8001")
 
 
+_ORG_TREE_READ_CHUNK_BYTES = 64 * 1024
+_DEFAULT_ORG_TREE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _get_org_tree_max_bytes() -> int:
+    raw_value = os.environ.get("DEER_FLOW_ORG_TREE_MAX_BYTES", str(_DEFAULT_ORG_TREE_MAX_BYTES))
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return _DEFAULT_ORG_TREE_MAX_BYTES
+    return value if value > 0 else _DEFAULT_ORG_TREE_MAX_BYTES
+
+
+def _read_org_tree_response(resp) -> bytes:
+    max_bytes = _get_org_tree_max_bytes()
+    chunks: list[bytes] = []
+    total = 0
+
+    while True:
+        chunk = resp.read(_ORG_TREE_READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(
+                f"Organize API payload too large: {total} bytes exceeds {max_bytes} bytes"
+            )
+        chunks.append(chunk)
+
+
 def _collect_devices(node: dict, parent_area: str) -> list[dict]:
     """Recursively collect type<10 device nodes from an organize tree node."""
     devices: list[dict] = []
@@ -132,7 +162,7 @@ def _fetch_org_tree(user_id: str) -> list[dict] | None:
         if internal_token:
             req.add_header("X-DeerFlow-Internal-Token", internal_token)
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read(1_048_576)
+            raw = _read_org_tree_response(resp)
             data = json.loads(raw.decode("utf-8"))
             if isinstance(data, list):
                 return data

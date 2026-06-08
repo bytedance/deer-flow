@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 const RESERVED_PARAMS = new Set(["prompt", "auto_send", "source", "context"]);
 
@@ -57,17 +57,15 @@ export interface DeepLinkParams {
 /**
  * Parse deep-link URL parameters and return structured data.
  * Only activates for new threads (isNewThread === true).
- * Uses a useRef sentinel to fire exactly once per mount.
+ * Deduplication of auto-send is handled by the caller (autoStartFired ref).
  */
 export function useDeepLinkChat(isNewThread: boolean): DeepLinkParams {
   const searchParams = useSearchParams();
-  const firedRef = useRef(false);
 
   const result = useMemo<DeepLinkParams>(() => {
-    if (!isNewThread || firedRef.current) {
+    if (!isNewThread) {
       return { prompt: null, autoSend: false, source: null, context: null, passthroughParams: {} };
     }
-    firedRef.current = true;
 
     const prompt = validatePrompt(searchParams.get("prompt"));
     const autoSend = validateAutoSend(searchParams.get("auto_send"));

@@ -49,6 +49,30 @@
 - 可选参数校验失败时忽略该参数，使用默认值
 - 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
 
+**deep-link 直达约束（必须遵守）**
+
+当 deep-link 参数齐全时，**禁止**调用 `report_template_render_step`（会触发 `before_step` 脚本调用 Organize API），**禁止**渲染任何 GenUI 表单。状态机允许从 `pending` 状态直接提交，必须按以下序列执行：
+
+```text
+1. report_template_prepare_run(template_id=..., template_version=-1)
+2. report_template_submit_step(report_run_id=..., step_id="scope", payload={report_date, equipment_type, compare_with})
+3. report_template_submit_step(report_run_id=..., step_id="equipment", payload={"equipment_ids": [...], "equipment_labels": [...]})
+4. report_template_submit_step(report_run_id=..., step_id="kpis", payload={"kpi_keys": [...]})
+5. report_template_run_data_steps(report_run_id=...)
+6. report_template_assemble_payload(report_run_id=...)
+7. report_template_render_report(report_run_id=...)
+8. report_template_export(report_run_id=..., pdf=True)
+```
+
+**严禁行为**：
+- ❌ `report_template_render_step(..., step_id="equipment")`
+- ❌ `report_template_render_step(..., step_id="kpis")`
+- ❌ 调用 `list_equipment.py` 触发 `kpis.before_step`
+- ❌ 发起 Organize API 查询获取 `available_kpis`
+
+**必须行为**：
+- 缺省的可选参数对应的步骤**整步跳过**（不调用 submit_step），模板会使用默认值
+
 **注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成。任一必选参数缺失或校验失败时，**静默回退到正常的表单交互流程**。禁止向用户提及 deep-link 参数、解释缺少哪些参数、或输出任何"请补充 xxx"的提示——直接当作没有 deep_link_params，走启动决策 → DSL 路径 → 渲染表单。
 
 ### 启动决策（每次新会话开始时执行一次）
@@ -249,7 +273,7 @@ PDF 失败时 `pdf_skipped_reason` 会说明原因，降级仅 Markdown。
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。如果 `selected` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
 3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。**注意 `equipment_labels` 必须按 `selected` 原顺序，与 `equipment_ids` 一一对应**——后续调用 `query_daily.py` 时通过 `--equipment-names` 透传，使报告中所有"设备"列显示真实名称而非编号。
-4. **从对话历史中回溯找到“当前消息之前最近一次” `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
+4. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
 5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
 
 ```bash
@@ -293,8 +317,8 @@ python /mnt/skills/custom/daily-report/scripts/list_equipment.py \
 当收到 `ui_interaction` 且 `callback_id` 为 `daily-report-confirm` 时：
 
 1. 从 `payload` 中收集所有以 `kpi_` 开头且值为 `true` 的字段，去掉 `kpi_` 前缀组装 KPI 列表。
-2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示”请至少选择一个 KPI 指标”并停止，不调用任何脚本。
-3. **从对话历史中回溯找到”当前消息之前最近一次” `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
+2. **如果没有任何 KPI 被选中**，渲染 `markdown` 提示"请至少选择一个 KPI 指标"并停止，不调用任何脚本。
+3. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
    - Round 1 参数：`report_date`、`equipment_type`、`compare_with`（来自 `daily-report-scope` 的 `payload`）
    - Round 1.5 参数：`equipment_ids = selected.map(s => s.id)` 与 `equipment_labels = selected.map(s => s.label)`（来自 `daily-report-equipment` 的 `payload.selected` 数组，保持原顺序一一对应）
    如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。

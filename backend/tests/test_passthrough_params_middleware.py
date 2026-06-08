@@ -2,6 +2,7 @@
 
 Covers:
 - Passthrough params injected into content as <deep_link_params> block
+- SystemMessage injected at position 0 for stronger LLM compliance
 - Internal keys (files, hide_from_ui, element) excluded from block
 - No-op when no passthrough params present or params are all internal
 - Only first HumanMessage is processed (multi-turn safety)
@@ -9,7 +10,7 @@ Covers:
 - Empty messages and non-human first message edge cases
 """
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.passthrough_params_middleware import (
     PassthroughParamsMiddleware,
@@ -40,7 +41,10 @@ def test_injects_passthrough_params_into_string_content():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    # SystemMessage at position 0, updated HumanMessage at position 1
+    assert isinstance(result["messages"][0], SystemMessage)
+    updated_msg = result["messages"][1]
+    assert isinstance(updated_msg, HumanMessage)
     assert isinstance(updated_msg.content, str)
     assert "<deep_link_params>" in updated_msg.content
     assert "device_id: P-203A" in updated_msg.content
@@ -59,7 +63,9 @@ def test_injects_passthrough_params_into_list_content():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    assert isinstance(result["messages"][0], SystemMessage)
+    updated_msg = result["messages"][1]
+    assert isinstance(updated_msg, HumanMessage)
     assert isinstance(updated_msg.content, list)
     combined = "".join(
         block.get("text", "") if isinstance(block, dict) else str(block)
@@ -69,6 +75,19 @@ def test_injects_passthrough_params_into_list_content():
     assert "device_id: V-401" in combined
     assert "analysis_type: trend" in combined
     assert "analyse this" in combined
+
+
+def test_system_message_contains_deep_link_instruction():
+    mw = _middleware()
+    msg = _human("generate report", template_id="daily-equipment", report_date="2026-05-31")
+    state = _state(msg)
+    result = mw.before_agent(state, None)
+
+    assert result is not None
+    system_msg = result["messages"][0]
+    assert isinstance(system_msg, SystemMessage)
+    assert "deep_link_params" in system_msg.content
+    assert "跳过" in system_msg.content or "直达" in system_msg.content
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +102,7 @@ def test_excludes_files_key():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    updated_msg = result["messages"][1]
     assert "device_id: X-1" in updated_msg.content
     assert "files" not in str(updated_msg.content).split("<deep_link_params>")[1].split("</deep_link_params>")[0]
 
@@ -95,7 +114,7 @@ def test_excludes_hide_from_ui_key():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    updated_msg = result["messages"][1]
     params_block = updated_msg.content.split("<deep_link_params>")[1].split("</deep_link_params>")[0]
     assert "device_id" in params_block
     assert "hide_from_ui" not in params_block
@@ -108,7 +127,7 @@ def test_excludes_element_key():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    updated_msg = result["messages"][1]
     params_block = updated_msg.content.split("<deep_link_params>")[1].split("</deep_link_params>")[0]
     assert "device_id" in params_block
     assert "element" not in params_block
@@ -121,7 +140,7 @@ def test_excludes_none_values():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    updated_msg = result["messages"][1]
     params_block = updated_msg.content.split("<deep_link_params>")[1].split("</deep_link_params>")[0]
     assert "device_id" not in params_block
     assert "source: grafana" in params_block
@@ -186,10 +205,11 @@ def test_processes_first_message_with_params_and_ignores_later():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_msg = result["messages"][0]
+    # SystemMessage at 0, updated first HumanMessage at 1, original AIMessage at 2, second HumanMessage at 3
+    updated_msg = result["messages"][1]
     assert "device_id: Z-1" in updated_msg.content
     # Second human message should be unmodified
-    assert "<deep_link_params>" not in result["messages"][2].content
+    assert "<deep_link_params>" not in result["messages"][3].content
 
 
 # ---------------------------------------------------------------------------
@@ -205,5 +225,5 @@ def test_preserves_additional_kwargs_on_updated_message():
     result = mw.before_agent(state, None)
 
     assert result is not None
-    updated_kwargs = result["messages"][0].additional_kwargs
+    updated_kwargs = result["messages"][1].additional_kwargs
     assert updated_kwargs == kwargs

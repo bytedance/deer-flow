@@ -58,6 +58,32 @@
 - 可选参数校验失败时忽略该参数，使用默认值
 - 直接执行完整 DSL 链路：`prepare_run` → `form_steps` → `data_pipeline` → `render` → `export`
 
+**deep-link 直达约束（必须遵守）**
+
+当 deep-link 参数齐全时，**禁止**调用 `report_template_render_step`（会触发 `before_step` 脚本调用 Organize API），**禁止**渲染任何 GenUI 表单。状态机允许从 `pending` 状态直接提交，必须按以下序列执行：
+
+```text
+1. report_template_prepare_run(template_id=..., template_version=-1)
+2. report_template_submit_step(report_run_id=..., step_id="scope", payload={report_month})
+3. report_template_submit_step(report_run_id=..., step_id="equipment", payload={"equipment_ids": [...], "equipment_labels": [...]})
+4. report_template_submit_step(report_run_id=..., step_id="kpis", payload={"kpi_keys": [...]})
+5. report_template_run_data_steps(report_run_id=...)
+6. report_template_assemble_payload(report_run_id=...)
+7. report_template_render_report(report_run_id=...)
+8. report_template_export(report_run_id=..., pdf=False)
+```
+
+**严禁行为**：
+
+- ❌ `report_template_render_step(..., step_id="equipment")`
+- ❌ `report_template_render_step(..., step_id="kpis")`
+- ❌ 调用 `list_equipment.py` 触发 `kpis.before_step`
+- ❌ 发起 Organize API 查询获取 `available_kpis`
+
+**必须行为**：
+
+- 缺省的可选参数对应的步骤**整步跳过**（不调用 submit_step），模板会使用默认值
+
 **注意**：两必选参数齐全时，不再渲染任何表单——直接将参数填入 DSL 流程，一次性生成到报告完成并导出 Markdown。任一必选参数缺失或校验失败时，**静默回退到正常的表单交互流程**。禁止向用户提及 deep-link 参数、解释缺少哪些参数、或输出任何"请补充 xxx"的提示——直接当作没有 deep_link_params，走启动决策 → DSL 路径 → 渲染表单。
 
 ## 首次进入：渲染 Round 1 表单并停止

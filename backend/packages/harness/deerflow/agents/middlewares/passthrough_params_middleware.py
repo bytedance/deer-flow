@@ -5,7 +5,7 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,24 @@ logger = logging.getLogger(__name__)
 # Keys in additional_kwargs that are for internal infra use and should NOT be
 # exposed to the LLM as deep-link parameters.
 _INTERNAL_KWARGS_KEYS = frozenset({"files", "hide_from_ui", "element"})
+
+# Strong system instruction to enforce deep-link direct execution path.
+# Placed as SystemMessage for higher LLM priority than HumanMessage.
+_DEEP_LINK_SYSTEM_INSTRUCTION = """[系统指令] 首条用户消息中包含 <deep_link_params> 参数块。
+
+你必须立即执行以下检查：
+1. 解析 <deep_link_params> 中的所有参数
+2. 如果必选参数齐全 → 跳过所有表单交互，直接进入直达执行流程（DSL 管道 / 数据查询 / 报告生成）
+3. 如果必选参数缺失 → 静默回退到普通交互流程
+
+严禁行为：
+- 禁止向用户提及 "deep-link"、"deep_link_params" 或参数名称
+- 禁止在参数齐全时仍渲染表单（render_ui interactive=True）
+- 禁止要求用户重复提供已有的参数
+
+正确行为：
+- 参数齐全：直接执行，输出结果或进度提示
+- 参数缺失：当作没有 deep_link_params，走正常流程"""
 
 
 class PassthroughParamsMiddleware(AgentMiddleware):
@@ -68,5 +86,9 @@ class PassthroughParamsMiddleware(AgentMiddleware):
             additional_kwargs=first_message.additional_kwargs,
         )
 
+        # Insert SystemMessage at position 0 for stronger LLM compliance.
+        # The SystemMessage enforces deep-link direct execution path.
+        system_msg = SystemMessage(content=_DEEP_LINK_SYSTEM_INSTRUCTION)
         messages[0] = updated_message
+        messages.insert(0, system_msg)
         return {"messages": messages}
