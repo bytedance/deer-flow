@@ -34,6 +34,7 @@ load_proxy_env_from_dotenv() {
                 value="${value#\"}"
                 value="${value%\'}"
                 value="${value#\'}"
+                value="${value%$'\r'}"
                 export "${var}=${value}"
             fi
         fi
