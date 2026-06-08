@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator
 from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.persistence.postgres_schema import build_psycopg_options, create_schema_sql
 from deerflow.runtime.checkpointer.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_INSTALL,
@@ -47,24 +48,38 @@ def _prepare_database_sqlite_checkpointer_path(db_config) -> str:
     return conn_str
 
 
-def _build_postgres_pool(conn_string: str):
+def _build_postgres_pool(conn_string: str, schema: str = ""):
     """Build an AsyncConnectionPool with TCP keepalive and connection checking."""
     from psycopg.rows import dict_row
     from psycopg_pool import AsyncConnectionPool
 
+    kwargs = {
+        "autocommit": True,
+        "prepare_threshold": 0,
+        "row_factory": dict_row,
+        "keepalives": 1,
+        "keepalives_idle": 60,
+        "keepalives_interval": 10,
+        "keepalives_count": 6,
+    }
+    options = build_psycopg_options(schema)
+    if options is not None:
+        kwargs["options"] = options
+
     return AsyncConnectionPool(
         conn_string,
-        kwargs={
-            "autocommit": True,
-            "prepare_threshold": 0,
-            "row_factory": dict_row,
-            "keepalives": 1,
-            "keepalives_idle": 60,
-            "keepalives_interval": 10,
-            "keepalives_count": 6,
-        },
+        kwargs=kwargs,
         check=AsyncConnectionPool.check_connection,
     )
+
+
+async def _ensure_postgres_schema_with_pool(pool, schema: str) -> None:
+    """Create the configured schema before LangGraph creates its tables."""
+    statement = create_schema_sql(schema)
+    if statement is None:
+        return
+    async with pool.connection() as conn:
+        await conn.execute(statement)
 
 
 def _ensure_postgres_imports():
@@ -113,8 +128,9 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
         AsyncPostgresSaver, _ = _ensure_postgres_imports()
-        pool = _build_postgres_pool(config.connection_string)
+        pool = _build_postgres_pool(config.connection_string, config.postgres_schema)
         async with pool:
+            await _ensure_postgres_schema_with_pool(pool, config.postgres_schema)
             saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
@@ -154,8 +170,9 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
             raise ValueError("database.postgres_url is required for the postgres backend")
 
         AsyncPostgresSaver, _ = _ensure_postgres_imports()
-        pool = _build_postgres_pool(db_config.postgres_url)
+        pool = _build_postgres_pool(db_config.postgres_url, db_config.postgres_schema)
         async with pool:
+            await _ensure_postgres_schema_with_pool(pool, db_config.postgres_schema)
             saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver

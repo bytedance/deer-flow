@@ -62,6 +62,28 @@ class TestDatabaseConfig:
         with pytest.raises(ValueError, match="No SQLAlchemy URL"):
             _ = c.app_sqlalchemy_url
 
+    def test_postgres_schema_default_empty(self):
+        c = DatabaseConfig()
+        assert c.postgres_schema == ""
+
+    @pytest.mark.parametrize("schema", ["deerflow", "my_schema", "_private", "s", "a" * 63])
+    def test_postgres_schema_accepts_valid_identifier(self, schema):
+        c = DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema=schema)
+        assert c.postgres_schema == schema
+
+    @pytest.mark.parametrize("schema", ["1abc", "a b", "a;b", "a-b", "a" * 64, 'a"b'])
+    def test_postgres_schema_rejects_invalid_identifier(self, schema):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema=schema)
+
+    def test_postgres_schema_does_not_pollute_url(self):
+        c = DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema="deerflow")
+        url = c.app_sqlalchemy_url
+        assert "deerflow" not in url.replace("/db", "")
+        assert url.startswith("postgresql+asyncpg://")
+
 
 # -- MemoryRunStore --
 
@@ -228,3 +250,99 @@ class TestEngineLifecycle:
             pytest.raises(ImportError, match="uv sync --all-packages --extra postgres"),
         ):
             await init_engine("postgres", url="postgresql+asyncpg://x:x@localhost/x")
+
+
+def _make_fake_pg_engine():
+    """Build a fake async engine whose begin()/dispose() are awaitable mocks.
+
+    Tracks ordering of conn.execute (CREATE SCHEMA) vs conn.run_sync
+    (create_all) through a shared parent mock's ``mock_calls``.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    calls = MagicMock()
+    conn = MagicMock()
+    # Both are awaited by the engine code, so they must return awaitables.
+    calls.execute = AsyncMock()
+    calls.run_sync = AsyncMock()
+    conn.execute = calls.execute
+    conn.run_sync = calls.run_sync
+
+    begin_cm = AsyncMock()
+    begin_cm.__aenter__.return_value = conn
+    begin_cm.__aexit__.return_value = False
+
+    engine = MagicMock()
+    engine.begin = MagicMock(return_value=begin_cm)
+    engine.dispose = AsyncMock()
+    return engine, calls
+
+
+class TestPostgresSchemaInit:
+    @pytest.mark.anyio
+    async def test_passes_search_path_connect_args(self, monkeypatch):
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setitem(sys.modules, "asyncpg", object())
+        fake_engine, _calls = _make_fake_pg_engine()
+        captured = {}
+
+        def fake_create(_url, **kwargs):
+            captured.update(kwargs)
+            return fake_engine
+
+        monkeypatch.setattr(engine_module, "create_async_engine", fake_create)
+
+        await engine_module.init_engine(
+            "postgres",
+            url="postgresql+asyncpg://u:p@h:5432/db",
+            postgres_schema="deerflow",
+        )
+
+        assert captured["connect_args"] == {"server_settings": {"search_path": "deerflow"}}
+        await engine_module.close_engine()
+
+    @pytest.mark.anyio
+    async def test_creates_schema_before_create_all(self, monkeypatch):
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setitem(sys.modules, "asyncpg", object())
+        fake_engine, calls = _make_fake_pg_engine()
+        monkeypatch.setattr(engine_module, "create_async_engine", lambda url, **kw: fake_engine)
+
+        await engine_module.init_engine(
+            "postgres",
+            url="postgresql+asyncpg://u:p@h:5432/db",
+            postgres_schema="deerflow",
+        )
+
+        names = [c[0] for c in calls.mock_calls]
+        assert "execute" in names
+        assert "run_sync" in names
+        assert names.index("execute") < names.index("run_sync")
+        # The DDL passed to execute must be a CreateSchema for the target schema.
+        execute_arg = calls.execute.call_args[0][0]
+        assert "deerflow" in str(execute_arg)
+        await engine_module.close_engine()
+
+    @pytest.mark.anyio
+    async def test_empty_schema_skips_connect_args_and_ddl(self, monkeypatch):
+        import deerflow.persistence.engine as engine_module
+
+        monkeypatch.setitem(sys.modules, "asyncpg", object())
+        fake_engine, calls = _make_fake_pg_engine()
+        captured = {}
+
+        def fake_create(_url, **kwargs):
+            captured.update(kwargs)
+            return fake_engine
+
+        monkeypatch.setattr(engine_module, "create_async_engine", fake_create)
+
+        await engine_module.init_engine("postgres", url="postgresql+asyncpg://u:p@h:5432/db")
+
+        assert captured.get("connect_args", {}) == {}
+        names = [c[0] for c in calls.mock_calls]
+        assert "execute" not in names  # no CREATE SCHEMA
+        assert "run_sync" in names
+        await engine_module.close_engine()

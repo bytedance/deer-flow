@@ -1013,6 +1013,9 @@ skill_evolution:
 # checkpointer:
 #   type: postgres
 #   connection_string: postgresql://user:password@localhost:5432/deerflow
+#   # Optional: place LangGraph checkpointer/store tables in this schema.
+#   # Leave empty to use the server default search_path, usually public.
+#   postgres_schema: deerflow
 
 # ============================================================================
 # Database
@@ -1063,6 +1066,32 @@ skill_evolution:
 # database:
 #   backend: postgres
 #   postgres_url: $DATABASE_URL
+#   # Optional: place DeerFlow ORM tables and LangGraph checkpointer/store
+#   # tables in this schema. Leave empty to use the server default
+#   # search_path, usually public.
+#   postgres_schema: deerflow
+#
+# postgres_schema only takes effect for new tables. On startup DeerFlow runs
+# CREATE SCHEMA IF NOT EXISTS and pins the connection search_path; it never
+# moves existing tables, so third-party tables in `public` are left untouched.
+#
+# Migrating an EXISTING deployment from `public` to a dedicated schema:
+#   1. Stop the DeerFlow services.
+#   2. Move the DeerFlow tables into the new schema (run as the DB owner):
+#        CREATE SCHEMA IF NOT EXISTS deerflow;
+#        ALTER TABLE public.runs         SET SCHEMA deerflow;
+#        ALTER TABLE public.run_events   SET SCHEMA deerflow;
+#        ALTER TABLE public.threads_meta SET SCHEMA deerflow;
+#        ALTER TABLE public.feedback     SET SCHEMA deerflow;
+#        ALTER TABLE public.users        SET SCHEMA deerflow;
+#      LangGraph checkpointer/store table names vary by version. List them with
+#        SELECT table_name FROM information_schema.tables WHERE table_schema='public';
+#      then ALTER ... SET SCHEMA deerflow for each (e.g. checkpoints,
+#      checkpoint_blobs, checkpoint_writes, checkpoint_migrations, store,
+#      store_migrations).
+#   3. Set postgres_schema: deerflow here and restart.
+#   4. Verify with `SHOW search_path;` and a smoke test (create a run, read
+#      its history). The `public` schema should gain no new DeerFlow tables.
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data

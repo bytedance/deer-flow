@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
 
 CheckpointerType = Literal["memory", "sqlite", "postgres"]
 
@@ -24,6 +26,20 @@ class CheckpointerConfig(BaseModel):
         "For sqlite, use a file path like '.deer-flow/checkpoints.db' or ':memory:' for in-memory. "
         "For postgres, use a DSN like 'postgresql://user:pass@localhost:5432/db'.",
     )
+    postgres_schema: str = Field(
+        default="",
+        description=(
+            "PostgreSQL schema for legacy checkpointer/store tables (postgres only). "
+            "Empty string keeps the server default search_path (usually 'public'). "
+            "Only plain identifiers are allowed: "
+            f"{POSTGRES_SCHEMA_PATTERN}."
+        ),
+    )
+
+    @field_validator("postgres_schema")
+    @classmethod
+    def _validate_postgres_schema(cls, value: str) -> str:
+        return validate_postgres_schema(value)
 
 
 # Global configuration instance — None means no checkpointer is configured.
