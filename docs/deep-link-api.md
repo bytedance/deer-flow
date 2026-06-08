@@ -135,10 +135,13 @@ EHM Token：
 
 | 规则 | 违规时行为 |
 |------|-----------|
-| 长度超限 | 截断至最大长度 |
+| 长度超限（prompt ≤ 2000，source ≤ 100，context ≤ 500） | 截断至最大长度 |
+| 透传参数值超过 500 字符 | 丢弃该参数 |
 | 含控制字符 `\x00-\x08 \x0B \x0C \x0E-\x1F \x7F` | 自动过滤 |
 | 纯空白字符串 | 视为未提供 |
 | `auto_send` 值 ≠ `"1"` | 视为 `false`，仅预填 |
+
+> **校验归属说明**：上文"通用参数"和"参数校验规则（通用）"中的规则由前端执行。各接口表格中列出的业务校验规则（如 `device_id` 的正则格式、日期字段格式等）由 **Agent 侧**（SOUL.md）在收到消息后校验，前端只做透传——非法值不会被前端拦截，而是由 Agent 判定后静默回退到表单交互流程。
 
 ---
 
@@ -346,19 +349,27 @@ GET /workspace/agents/monitoring-analysis/chats/new
 
 | 参数 | 类型 | 必填 | 校验规则 | 说明 |
 |------|------|------|----------|------|
-| `device_id` | string | 是 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID |
-| `analysis_type` | string | 是 | `trend` / `anomaly` / `kpi_dashboard` / `correlation` / `spectrum` | 分析类型 |
-| `start_time` | string | 否 | `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$` | 开始时间 |
-| `end_time` | string | 否 | `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$` | 结束时间 |
+| `point_ids` | string | **是** | 逗号分隔的非空字符串 | 测点 ID 列表，如 `140529abc,140529def` |
+| `device_id` | string | 否 | — | 设备 ID，用于辅助定位 |
+| `device_type` | string | 否 | — | 设备类型编码 |
+| `date_start` | string | **是** | `^\d{4}-\d{2}-\d{2}$` | 开始日期，如 `2026-05-01` |
+| `date_end` | string | **是** | `^\d{4}-\d{2}-\d{2}$`，且 `date_end` > `date_start` | 结束日期，如 `2026-06-01` |
+| `include_waveform` | string | 否 | — | 是否包含波形数据 |
+| `analysis_focus` | string | 否 | — | 分析侧重点，如 `full` |
+
+> \* `point_ids` + `date_start` + `date_end` 三参数**全部填写且校验通过**时，Agent 跳过测点选择表单直接执行数据获取与分析。任一缺失或校验失败则回退到正常的表单交互流程（渲染测点多选器让用户手动选择）。
 
 **请求示例**
 
 ```
 GET /workspace/agents/monitoring-analysis/chats/new
-  ?device_id=V-401
-  &analysis_type=trend
-  &start_time=2026-05-25T00:00:00
-  &end_time=2026-06-01T23:59:59
+  ?point_ids=140529abc,140529def
+  &device_id=12345
+  &device_type=1
+  &date_start=2026-05-01
+  &date_end=2026-06-01
+  &include_waveform=true
+  &analysis_focus=full
   &auto_send=1
   &source=monitoring-dashboard
 ```
@@ -367,7 +378,7 @@ GET /workspace/agents/monitoring-analysis/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/monitoring-analysis/chats/new?device_id=V-401&analysis_type=trend&start_time=2026-05-25T00:00:00&end_time=2026-06-01T23:59:59&auto_send=1&source=monitoring-dashboard)>
+  ?next=<encodeURIComponent(/workspace/agents/monitoring-analysis/chats/new?point_ids=140529abc,140529def&device_id=12345&date_start=2026-05-01&date_end=2026-06-01&auto_send=1&source=monitoring-dashboard)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -376,9 +387,9 @@ GET /login
 
 ```
 1. 在已登录浏览器中打开上述 URL
-2. 页面应自动创建新对话，Agent 进入趋势分析流程
-3. 若 analysis_type 改为非法值（如 "unknown"），Agent 应回退到设备选择器交互
-4. 若只传 device_id 不传 analysis_type，Agent 应回退到设备选择器交互
+2. 页面应自动创建新对话，Agent 跳过测点选择器直接拉取数据并分析
+3. 若 point_ids 缺失，Agent 应回退到测点多选器交互
+4. 若 date_start / date_end 缺失或格式非法，Agent 应回退到测点多选器交互
 ```
 
 ---
@@ -635,27 +646,22 @@ GET /login
 
 ---
 
-### 10. 异常研判
+### 10. 旋转机组异常研判
 
 ```
-GET /workspace/agents/anomaly-judgment/chats/new
+GET /workspace/agents/abnormal-judgment--rotating/chats/new
 ```
 
 **参数**
 
-除通用参数外：
+除通用参数外，可传入任意业务参数（如 `device_id`、`anomaly_type`、`start_time`、`end_time` 等）。
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `device_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID |
-| `anomaly_type` | string | 否 | ≤ 100 字符 | 异常类型，如 `vibration_spike` |
-| `start_time` | string | 否 | `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$` | 开始时间 |
-| `end_time` | string | 否 | `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$` | 结束时间 |
+> **⚠️ 直达执行暂未实现**：该 Agent（[abnormal-judgment--rotating/SOUL.md](agents/builtin/abnormal-judgment--rotating/SOUL.md)）尚未在 SOUL.md 中解析 `<deep_link_params>` 块。所有参数会经前端透传至 Agent 的 `additional_kwargs`，但 **Agent 不会根据参数直达执行**，而是始终走正常交互流程（渲染异常列表选择器）。待 Agent 端实现 deep-link 直达逻辑后，本节内容将补充更新。
 
 **请求示例**
 
-```
-GET /workspace/agents/anomaly-judgment/chats/new
+```http
+GET /workspace/agents/abnormal-judgment--rotating/chats/new
   ?device_id=E-301
   &anomaly_type=vibration_spike
   &start_time=2026-06-01T06:00:00
@@ -666,19 +672,20 @@ GET /workspace/agents/anomaly-judgment/chats/new
 
 **EHM 免登示例**
 
-```
+```http
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/anomaly-judgment/chats/new?device_id=E-301&anomaly_type=vibration_spike&start_time=2026-06-01T06:00:00&end_time=2026-06-01T10:00:00&auto_send=1&source=prometheus-alertmanager)>
+  ?next=<encodeURIComponent(/workspace/agents/abnormal-judgment--rotating/chats/new?device_id=E-301&anomaly_type=vibration_spike&start_time=2026-06-01T06:00:00&end_time=2026-06-01T10:00:00&auto_send=1&source=prometheus-alertmanager)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
 
-```
+```text
 1. 在已登录浏览器中打开上述 URL
-2. Agent 应自动创建对话并开始异常分析
-3. 若参数不全，Agent 走正常交互流程
+2. Agent 应自动创建对话并渲染异常列表选择器（用户需手动选择事件）
+3. 传入的参数会出现在消息的 additional_kwargs 中，供后续研判参考
+4. 直达执行能力待 Agent 端补充 deep_link_params 解析后上线
 ```
 
 ---
@@ -691,7 +698,7 @@ GET /workspace/agents/crm-analyst/chats/new
 
 **参数**
 
-除通用参数外：
+除通用参数外，可传入以下业务参数：
 
 | 参数 | 类型 | 必填 | 校验规则 | 说明 |
 |------|------|------|----------|------|
@@ -700,9 +707,11 @@ GET /workspace/agents/crm-analyst/chats/new
 | `date_start` | string | 否 | `^\d{4}-\d{2}-\d{2}$` | 自定义开始日期（date_range=custom 时使用） |
 | `date_end` | string | 否 | `^\d{4}-\d{2}-\d{2}$` | 自定义结束日期（date_range=custom 时使用） |
 
+> **⚠️ 直达执行暂未实现**：该 Agent（[crm-analyst/SOUL.md](agents/builtin/crm-analyst/SOUL.md)）尚未在 SOUL.md 中解析 `<deep_link_params>` 块。所有参数会经前端透传至 Agent 的 `additional_kwargs`，但 **Agent 不会根据参数直达执行**，而是始终走正常交互流程（用户需手动输入查询意图）。待 Agent 端实现 deep-link 直达逻辑后，本节内容将补充更新。
+
 **请求示例**
 
-```
+```http
 GET /workspace/agents/crm-analyst/chats/new
   ?query_type=service_events
   &date_range=last_30d
@@ -715,7 +724,7 @@ GET /workspace/agents/crm-analyst/chats/new
 
 **EHM 免登示例**
 
-```
+```http
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/crm-analyst/chats/new?query_type=service_events&date_range=last_30d&auto_send=1&source=sap-erp)>
   &ehm_token=<EHM_JWT>
@@ -724,10 +733,11 @@ GET /login
 
 **调用方验证方式**
 
-```
+```text
 1. 在已登录浏览器中打开上述 URL
-2. Agent 应自动创建对话，按参数执行 CRM 数据查询
-3. 若不支持该 query_type，Agent 应提示可用的查询类型
+2. Agent 应自动创建对话并等待用户输入查询意图
+3. 传入的参数会出现在消息的 additional_kwargs 中，供后续查询参考
+4. 直达执行能力待 Agent 端补充 deep_link_params 解析后上线
 ```
 
 ---
@@ -799,13 +809,13 @@ function buildEhmDiagnosisUrl(alert, ehmToken, ehmUserBase64) {
 ```go
 func BuildMonitoringDeepLink(alert *Alert) string {
     params := url.Values{
-        "device_id":     {alert.Labels["device_id"]},
-        "analysis_type": {"trend"},
-        "start_time":    {alert.StartsAt.Format("2006-01-02T15:04:05")},
-        "end_time":      {time.Now().Format("2006-01-02T15:04:05")},
-        "auto_send":     {"1"},
-        "source":        {"prometheus-alertmanager"},
-        "context":       {fmt.Sprintf("%x", alert.Fingerprint)},
+        "point_ids":  {alert.Labels["point_ids"]},
+        "device_id":  {alert.Labels["device_id"]},
+        "date_start": {alert.StartsAt.Format("2006-01-02")},
+        "date_end":   {time.Now().Format("2006-01-02")},
+        "auto_send":  {"1"},
+        "source":     {"prometheus-alertmanager"},
+        "context":    {fmt.Sprintf("%x", alert.Fingerprint)},
     }
     return "https://deerflow.example.com/workspace/agents/monitoring-analysis/chats/new?" + params.Encode()
 }
@@ -813,12 +823,12 @@ func BuildMonitoringDeepLink(alert *Alert) string {
 // EHM 免登方式：构造 /login URL
 func BuildEhmMonitoringDeepLink(alert *Alert, ehmToken string, ehmUserBase64 string) string {
     deepLink := "/workspace/agents/monitoring-analysis/chats/new?" + url.Values{
-        "device_id":     {alert.Labels["device_id"]},
-        "analysis_type": {"trend"},
-        "start_time":    {alert.StartsAt.Format("2006-01-02T15:04:05")},
-        "end_time":      {time.Now().Format("2006-01-02T15:04:05")},
-        "auto_send":     {"1"},
-        "source":        {"prometheus-alertmanager"},
+        "point_ids":  {alert.Labels["point_ids"]},
+        "device_id":  {alert.Labels["device_id"]},
+        "date_start": {alert.StartsAt.Format("2006-01-02")},
+        "date_end":   {time.Now().Format("2006-01-02")},
+        "auto_send":  {"1"},
+        "source":     {"prometheus-alertmanager"},
     }.Encode()
     loginParams := url.Values{
         "next":      {deepLink},
@@ -953,8 +963,8 @@ xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null
 | 6 | `prompt=测试` 不带 `auto_send` | 输入框预填 "测试"，不自动发送 |
 | 7 | `auto_send=2` | 视为不自动发送 |
 | 8 | `prompt=<超2000字符>` | 截断至 2000 字符后发送 |
-| 9 | `device_id=P-203;rm+rf` (诊断接口) | 参数被丢弃，Agent 回退交互流程 |
-| 10 | `diagnosis_date=2026/06/01` (诊断接口) | 参数被丢弃，Agent 回退交互流程 |
+| 9 | `device_id=P-203;rm+rf` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
+| 10 | `diagnosis_date=2026/06/01` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
 | 11 | 已有对话 URL 后加 `?prompt=xxx` | 参数被忽略，对话正常加载 |
-| 12 | 监测分析只传 `device_id` 不传 `analysis_type` | Agent 回退到设备选择器交互 |
+| 12 | 监测分析只传 `device_id` 不传 `point_ids` | Agent 回退到测点多选器交互 |
 | 13 | 控制台检查 `[DeepLink] source=<value>` | source 参数正确输出到控制台 |
