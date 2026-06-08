@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import type { AIMessage } from "@langchain/langgraph-sdk";
 import { act, render, renderHook, screen } from "@testing-library/react";
 import * as React from "react";

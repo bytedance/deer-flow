@@ -18,13 +18,18 @@ function aiWithTaskCall(id: string, args: Record<string, unknown>): AIMessage {
   } as unknown as AIMessage;
 }
 
-function toolReturn(toolCallId: string, content: string): Message {
+function toolReturn(
+  toolCallId: string,
+  content: string,
+  additionalKwargs?: Record<string, unknown>,
+): Message {
   return {
     id: `t-${toolCallId}`,
     type: "tool",
     content,
     name: "task",
     tool_call_id: toolCallId,
+    ...(additionalKwargs ? { additional_kwargs: additionalKwargs } : {}),
   } as unknown as Message;
 }
 
@@ -147,9 +152,25 @@ describe("buildSubtaskMapFromMessages", () => {
     expect(map).toEqual({});
   });
 
-  // The structured `additional_kwargs.subagent_status` path is owned by
-  // #3146 / PR #3154. This derive function is forward-compatible: as soon
-  // as `parseSubtaskResult` grows the second parameter, the structured
-  // path will win here automatically. The end-to-end coverage of that
-  // wiring lives in `subtask-result.test.ts` once #3146 ships.
+  it("prefers the structured subagent_status stamp over the text prefix (#3146/#3154)", () => {
+    // The ToolMessage text claims success, but the backend stamped a
+    // `failed` structured status onto `additional_kwargs`. derive must
+    // forward `additional_kwargs` into `parseSubtaskResult` so the
+    // structured field wins. Without that second argument, merging #3154
+    // silently regresses this path back to text-only parsing and the card
+    // would show `completed`.
+    const map = buildSubtaskMapFromMessages([
+      aiWithTaskCall("task-struct", {
+        subagent_type: "general-purpose",
+        description: "x",
+        prompt: "y",
+      }),
+      toolReturn("task-struct", "Task Succeeded. Result: looks fine", {
+        subagent_status: "failed",
+        subagent_error: "boom",
+      }),
+    ]);
+    expect(map["task-struct"]!.status).toBe("failed");
+    expect(map["task-struct"]!.error).toBe("boom");
+  });
 });

@@ -43,12 +43,15 @@ export function buildSubtaskMapFromMessages(
     } else if (message.type === "tool") {
       const taskId = message.tool_call_id;
       if (!taskId || !(taskId in tasks)) continue;
-      // NOTE: `parseSubtaskResult` will gain a second argument for
-      // ``additional_kwargs.subagent_status`` once #3146 lands. This call
-      // site is forward-compatible: when the signature widens, we just
-      // pass `message.additional_kwargs` here and the structured field
-      // will take precedence over text parsing automatically.
-      const parsed = parseSubtaskResult(extractTextFromMessage(message));
+      // #3146/#3154 landed: `parseSubtaskResult` now takes the structured
+      // ``additional_kwargs.subagent_status`` stamp as its second argument
+      // and lets it win over text-prefix parsing. Passing it here keeps the
+      // derived base map consistent with the SSE `latestMessage` path, which
+      // already routes the same structured field through context.
+      const parsed = parseSubtaskResult(
+        extractTextFromMessage(message),
+        message.additional_kwargs,
+      );
       tasks[taskId] = { ...tasks[taskId], ...parsed } as Subtask;
     }
   }
