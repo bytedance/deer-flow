@@ -68,6 +68,11 @@ fi
 
 cd /app/backend
 
+RUNTIME_HOME="${DEER_FLOW_HOME:-/app/backend/.deer-flow}"
+# Uvicorn only treats reload exclusions as directories if they exist at startup.
+mkdir -p "$RUNTIME_HOME"
+RUNTIME_HOME="$(cd "$RUNTIME_HOME" && pwd -P)"
+
 # `--all-packages` propagates extras into workspace members (PR #2584).
 # `$EXTRAS_FLAGS` intentionally unquoted so each `--extra X` becomes its own arg.
 # shellcheck disable=SC2086 # word-splitting is intentional here
@@ -82,4 +87,5 @@ fi
 
 PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
-    --reload --reload-include='*.yaml .env'
+    --reload --reload-include='*.yaml .env' \
+    --reload-exclude="$RUNTIME_HOME"

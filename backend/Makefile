@@ -2,7 +2,10 @@ install:
 	uv sync
 
 dev:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	@runtime_home="$${DEER_FLOW_HOME:-.deer-flow}"; \
+	mkdir -p "$$runtime_home"; \
+	runtime_home="$$(cd "$$runtime_home" && pwd -P)"; \
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-exclude "$$runtime_home"
 
 gateway:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001

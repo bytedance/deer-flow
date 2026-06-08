@@ -287,7 +287,28 @@ fi
 
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
+    if [ -n "${DEER_FLOW_HOME:-}" ]; then
+        case "$DEER_FLOW_HOME" in
+            /*) GATEWAY_RUNTIME_HOME="$DEER_FLOW_HOME" ;;
+            *)  GATEWAY_RUNTIME_HOME="$REPO_ROOT/backend/$DEER_FLOW_HOME" ;;
+        esac
+    elif [ -n "${DEER_FLOW_PROJECT_ROOT:-}" ]; then
+        case "$DEER_FLOW_PROJECT_ROOT" in
+            /*) GATEWAY_PROJECT_ROOT="$DEER_FLOW_PROJECT_ROOT" ;;
+            *)  GATEWAY_PROJECT_ROOT="$REPO_ROOT/backend/$DEER_FLOW_PROJECT_ROOT" ;;
+        esac
+        if [ -d "$GATEWAY_PROJECT_ROOT" ]; then
+            GATEWAY_RUNTIME_HOME="$GATEWAY_PROJECT_ROOT/.deer-flow"
+        else
+            GATEWAY_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
+        fi
+    else
+        GATEWAY_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
+    fi
+    # Uvicorn only treats reload exclusions as directories if they exist at startup.
+    mkdir -p "$GATEWAY_RUNTIME_HOME"
+    GATEWAY_RUNTIME_HOME="$(builtin cd "$GATEWAY_RUNTIME_HOME" >/dev/null 2>&1 && pwd -P)"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='$GATEWAY_RUNTIME_HOME'"
 else
     GATEWAY_EXTRA_FLAGS=""
 fi
