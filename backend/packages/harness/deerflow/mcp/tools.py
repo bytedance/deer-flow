@@ -10,7 +10,12 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.client import build_servers_config_async
+from deerflow.mcp.credentials import (
+    credential_scope_key,
+    resolve_mcp_user_id,
+    resolve_server_credentials,
+)
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.reflection import resolve_variable
@@ -36,6 +41,60 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return str(tid) if tid is not None else "default"
     except RuntimeError:
         return "default"
+
+
+async def _resolve_connection_for_runtime(
+    server_name: str,
+    connection: dict[str, Any],
+    extensions_config: ExtensionsConfig,
+    runtime: Runtime | None,
+) -> tuple[dict[str, Any], str]:
+    server_config = extensions_config.get_enabled_mcp_servers().get(server_name)
+    user_id = resolve_mcp_user_id(runtime)
+    thread_id = _extract_thread_id(runtime)
+    if server_config is None:
+        return connection, f"{user_id}:{thread_id}:vglobal"
+
+    credentials = await resolve_server_credentials(
+        server_name,
+        server_config,
+        user_id=user_id,
+        include_global_secrets=True,
+    )
+    resolved = dict(connection)
+    if connection.get("transport", "stdio") == "stdio":
+        if credentials.env:
+            resolved["env"] = credentials.env
+        else:
+            resolved.pop("env", None)
+    return resolved, credential_scope_key(server_name, user_id, thread_id, credentials)
+
+
+def build_user_headers_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
+    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    if not enabled_servers:
+        return None
+
+    async def user_headers_interceptor(request: Any, handler: Any) -> Any:
+        server_config = enabled_servers.get(request.server_name)
+        if server_config is None:
+            return await handler(request)
+
+        user_id = resolve_mcp_user_id(getattr(request, "runtime", None))
+        credentials = await resolve_server_credentials(
+            request.server_name,
+            server_config,
+            user_id=user_id,
+            include_global_secrets=True,
+        )
+        if not credentials.headers:
+            return await handler(request)
+
+        updated_headers = dict(request.headers or {})
+        updated_headers.update(credentials.headers)
+        return await handler(request.override(headers=updated_headers))
+
+    return user_headers_interceptor
 
 
 def _convert_call_tool_result(call_tool_result: Any) -> Any:
@@ -108,6 +167,7 @@ def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
     connection: dict[str, Any],
+    extensions_config: ExtensionsConfig | None = None,
     tool_interceptors: list[Any] | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
@@ -126,13 +186,19 @@ def _make_session_pool_tool(
         original_name = original_name[len(prefix) :]
 
     pool = get_session_pool()
+    resolved_extensions_config = extensions_config or ExtensionsConfig()
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
-        thread_id = _extract_thread_id(runtime)
-        session = await pool.get_session(server_name, thread_id, connection)
+        resolved_connection, scope_key = await _resolve_connection_for_runtime(
+            server_name,
+            connection,
+            resolved_extensions_config,
+            runtime,
+        )
+        session = await pool.get_session(server_name, scope_key, resolved_connection)
 
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
@@ -179,7 +245,7 @@ def _make_session_pool_tool(
     )
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(user_id: str | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -201,7 +267,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
     extensions_config = ExtensionsConfig.from_file()
-    servers_config = build_servers_config(extensions_config)
+    servers_config = await build_servers_config_async(extensions_config, user_id=user_id)
 
     if not servers_config:
         logger.info("No enabled MCP servers configured")
@@ -212,7 +278,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, user_id=user_id)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -222,6 +288,10 @@ async def get_mcp_tools() -> list[BaseTool]:
                 servers_config[server_name]["headers"] = existing_headers
 
         tool_interceptors: list[Any] = []
+        user_headers_interceptor = build_user_headers_tool_interceptor(extensions_config)
+        if user_headers_interceptor is not None:
+            tool_interceptors.append(user_headers_interceptor)
+
         oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
@@ -276,7 +346,7 @@ async def get_mcp_tools() -> list[BaseTool]:
             if tool_server is not None:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
-                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], extensions_config, tool_interceptors))
                 else:
                     wrapped_tools.append(tool)
             else:
