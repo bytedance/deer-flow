@@ -109,8 +109,11 @@ class TestUserIsolatedStorage:
             s = FileMemoryStorage()
             memory = create_empty_memory()
             memory["user"]["workContext"]["summary"] = "agent scoped"
-            s.save(memory, "test-agent", user_id="alice")
             expected_path = base_dir / "users" / "alice" / "agents" / "test-agent" / "memory.json"
+            # The agent directory exists in real flow (created at agent creation);
+            # per-agent save() no longer recreates it (issue #3364).
+            expected_path.parent.mkdir(parents=True, exist_ok=True)
+            s.save(memory, "test-agent", user_id="alice")
             assert expected_path.exists()
 
     def test_cache_key_is_user_agent_tuple(self, base_dir: Path):
