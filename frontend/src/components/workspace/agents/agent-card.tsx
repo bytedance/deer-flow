@@ -28,8 +28,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useDeleteAgent } from "@/core/agents";
-import type { Agent } from "@/core/agents";
+import {
+  getAgentDisplayName,
+  hasAgentDisplayName,
+  type Agent,
+  useDeleteAgent,
+} from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -105,6 +109,8 @@ export function AgentCard({ agent }: AgentCardProps) {
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const displayName = getAgentDisplayName(agent);
+  const showAgentSlug = hasAgentDisplayName(agent);
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -130,11 +136,16 @@ export function AgentCard({ agent }: AgentCardProps) {
                 <BotIcon className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <TruncatedTooltip text={agent.name}>
+                <TruncatedTooltip text={displayName}>
                   <CardTitle className="truncate text-base">
-                    {agent.name}
+                    {displayName}
                   </CardTitle>
                 </TruncatedTooltip>
+                {showAgentSlug && (
+                  <div className="text-muted-foreground truncate text-xs">
+                    {t.agents.agentSlugLabel}: {agent.name}
+                  </div>
+                )}
                 {agent.model && (
                   <TruncatedBadge
                     label={agent.model}

@@ -20,7 +20,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
-import { useAgent } from "@/core/agents";
+import { getAgentDisplayName, useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
@@ -40,6 +40,7 @@ export default function AgentChatPage() {
   }>();
 
   const { agent } = useAgent(agent_name);
+  const displayName = getAgentDisplayName(agent, agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -140,9 +141,7 @@ export default function AgentChatPage() {
             {/* Agent badge */}
             <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
-              <span className="text-xs font-medium">
-                {agent?.name ?? agent_name}
-              </span>
+              <span className="text-xs font-medium">{displayName}</span>
             </div>
 
             <div className="flex w-full items-center text-sm font-medium">
