@@ -10,6 +10,7 @@ from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 INTERNAL_AUTH_HEADER_NAME = "X-DeerFlow-Internal-Token"
 INTERNAL_AUTH_ENV_VAR = "DEER_FLOW_INTERNAL_AUTH_TOKEN"
+INTERNAL_SYSTEM_ROLE = "internal"
 
 
 def _load_internal_auth_token() -> str:
@@ -34,4 +35,4 @@ def is_valid_internal_auth_token(token: str | None) -> bool:
 
 def get_internal_user():
     """Return the synthetic user used for trusted internal channel calls."""
-    return SimpleNamespace(id=DEFAULT_USER_ID, system_role="internal")
+    return SimpleNamespace(id=DEFAULT_USER_ID, system_role=INTERNAL_SYSTEM_ROLE)
