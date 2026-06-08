@@ -1,7 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
-import { ChevronUpIcon, Loader2Icon } from "lucide-react";
+import { ChevronUpIcon, Loader2Icon, Share2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 
 import {
   Conversation,
@@ -31,11 +32,13 @@ import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import { parseSubtaskResult } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import { createThreadShare } from "@/core/threads/api";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
+import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
@@ -165,6 +168,7 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  enableSharing = true,
 }: {
   className?: string;
   threadId: string;
@@ -174,14 +178,30 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  enableSharing?: boolean;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
-  const groupedMessages = getMessageGroups(messages);
+  const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
+  const previousHumanMessagesByGroupIndex = useMemo(() => {
+    const previousByIndex: Message[][] = [];
+    let previousHumanMessages: Message[] | null = null;
+
+    groupedMessages.forEach((group, index) => {
+      previousByIndex[index] = previousHumanMessages ?? [];
+      if (group.type === "human") {
+        previousHumanMessages = group.messages;
+      } else if (group.type === "assistant") {
+        previousHumanMessages = null;
+      }
+    });
+
+    return previousByIndex;
+  }, [groupedMessages]);
   const tokenDebugSteps = useMemo(
     () => buildTokenDebugSteps(messages, t),
     [messages, t],
@@ -196,21 +216,84 @@ export function MessageList({
     [messages, thread.getMessagesMetadata, thread.isLoading],
   );
 
-  const renderAssistantCopyButton = useCallback(
-    (messages: Message[], isStreaming: boolean) => {
+  const renderAssistantActions = useCallback(
+    (
+      messages: Message[],
+      isStreaming: boolean,
+      previousMessages: Message[],
+    ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
 
       if (!clipboardData) {
         return null;
       }
 
+      const shareMessageIds = [...previousMessages, ...messages]
+        .map((message) => message.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+
       return (
-        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div
+          className={cn(
+            "mt-2 flex justify-start gap-1 opacity-0 transition-opacity",
+            "delay-200 duration-300 group-hover/assistant-turn:opacity-100",
+          )}
+        >
           <CopyButton clipboardData={clipboardData} />
+          {enableSharing && (
+            <Tooltip content={t.common.share}>
+              <Button
+                aria-label={t.common.share}
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+                onClick={async () => {
+                  if (shareMessageIds.length === 0) {
+                    toast.error(t.conversation.noMessages);
+                    return;
+                  }
+                  try {
+                    const share = await createThreadShare({
+                      threadId,
+                      messageIds: shareMessageIds,
+                      title: thread.values.title,
+                    });
+                    const shareUrl = new URL(
+                      `/share/${share.share_id}`,
+                      window.location.origin,
+                    ).toString();
+                    try {
+                      await navigator.clipboard.writeText(shareUrl);
+                    } catch {
+                      toast.error(t.clipboard.failedToCopyToClipboard);
+                      return;
+                    }
+                    toast.success(t.clipboard.linkCopied);
+                  } catch (err) {
+                    toast.error(
+                      err instanceof Error
+                        ? err.message
+                        : "Failed to create share.",
+                    );
+                  }
+                }}
+              >
+                <Share2Icon size={12} />
+              </Button>
+            </Tooltip>
+          )}
         </div>
       );
     },
-    [],
+    [
+      t.clipboard.failedToCopyToClipboard,
+      t.clipboard.linkCopied,
+      t.common.share,
+      t.conversation.noMessages,
+      enableSharing,
+      thread.values.title,
+      threadId,
+    ],
   );
 
   const renderTokenUsage = useCallback(
@@ -275,6 +358,8 @@ export function MessageList({
         />
         {groupedMessages.map((group, groupIndex) => {
           const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
+          const previousMessages =
+            previousHumanMessagesByGroupIndex[groupIndex] ?? [];
 
           if (group.type === "human" || group.type === "assistant") {
             return (
@@ -301,12 +386,13 @@ export function MessageList({
                   turnUsageMessages,
                 })}
                 {group.type === "assistant" &&
-                  renderAssistantCopyButton(
+                  renderAssistantActions(
                     group.messages,
                     isAssistantMessageGroupStreaming(
                       group.messages,
                       streamingMessages,
                     ),
+                    previousMessages,
                   )}
               </div>
             );
@@ -375,7 +461,6 @@ export function MessageList({
                 if (taskId) {
                   const parsed = parseSubtaskResult(
                     extractTextFromMessage(message),
-                    message.additional_kwargs,
                   );
                   updateSubtask({ id: taskId, ...parsed });
                 }
