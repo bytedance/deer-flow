@@ -156,6 +156,15 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
         raise ValueError("Script contains no lines to process")
 
     provider = _resolve_tts_provider()
+    if provider == "volcengine" and not (
+        os.getenv("VOLCENGINE_TTS_APPID") and os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN")
+    ):
+        raise ValueError(
+            "Volcengine TTS selected but VOLCENGINE_TTS_APPID / "
+            "VOLCENGINE_TTS_ACCESS_TOKEN are not set"
+        )
+    if provider == "minimax" and not os.getenv("MINIMAX_API_KEY"):
+        raise ValueError("MiniMax TTS selected but MINIMAX_API_KEY is not set")
     logger.info(f"Converting script to audio using {max_workers} workers (provider={provider})...")
     tasks = [(i, line, total, provider) for i, line in enumerate(script.lines)]
 
