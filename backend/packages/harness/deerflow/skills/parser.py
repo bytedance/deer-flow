@@ -9,6 +9,37 @@ from .types import SKILL_MD_FILE, Skill, SkillCategory
 logger = logging.getLogger(__name__)
 
 
+def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> str:
+    """Render a developer-friendly explanation of a YAML front-matter error."""
+
+    lines = [f"Invalid YAML front-matter in {skill_file}: {exc}"]
+
+    mark = getattr(exc, "problem_mark", None)
+    source_lines = source.splitlines()
+    if mark is not None and 0 <= mark.line < len(source_lines):
+        offending = source_lines[mark.line]
+
+        # mark.line is 0-based within the front-matter body; +1 makes it
+        # 1-based, +1 more accounts for the leading `---` fence that the
+        # front-matter regex strips before yaml.safe_load sees it. The
+        # result matches the line number an author sees in their editor.
+        file_line_number = mark.line + 2
+        lines.append(f"  line {file_line_number}: {offending}")
+
+        # Targeted hint for the most common authoring mistake: an unquoted
+        # scalar value whose body contains ``: ``. We only surface the hint
+        # when we are confident it applies, to avoid misleading authors who
+        # hit unrelated YAML errors.
+        if getattr(exc, "problem", "") == "mapping values are not allowed here" and ":" in offending:
+            key, _, value = offending.partition(":")
+            value = value.strip()
+            if value and value[0] not in {'"', "'", "|", ">", "[", "{"}:
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'  hint: values containing ":" must be quoted, e.g. {key}: "{escaped}"')
+
+    return "\n".join(lines)
+
+
 def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
     """Parse the optional allowed-tools frontmatter field.
 
@@ -60,7 +91,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         try:
             metadata = yaml.safe_load(front_matter_text)
         except yaml.YAMLError as exc:
-            logger.error("Invalid YAML front-matter in %s: %s", skill_file, exc)
+            logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
             return None
 
         if not isinstance(metadata, dict):
