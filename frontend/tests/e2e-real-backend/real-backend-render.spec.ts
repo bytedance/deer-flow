@@ -66,7 +66,7 @@ test.describe("real backend render (replay, no API key)", () => {
     expect(resp.status(), await resp.text()).toBe(201);
   });
 
-  test("renders the replayed auto-title (and suggestions when present) from a real backend", async ({
+  test("renders the replayed auto-title + suggestions from a real backend", async ({
     page,
   }) => {
     // ultra mode so the context the frontend sends (is_plan_mode + subagent_enabled)
@@ -85,27 +85,28 @@ test.describe("real backend render (replay, no API key)", () => {
     await textarea.fill(PROMPT);
     await textarea.press("Enter");
 
-    // Replay-only DOM assertion (derived from the fixture): the in-graph
-    // auto-title is a model-generated string absent from the user prompt, so it
-    // renders only if the recorded turns replayed AND the real frontend rendered
-    // them — proving the whole pipeline (replay backend -> real frontend render).
+    // Replay-only DOM assertions (derived from the fixture): both are
+    // model-generated strings absent from the user prompt, so they render only if
+    // the recorded turns replayed AND the real frontend rendered them — the
+    // in-graph auto-title and the post-answer follow-up suggestion. Together they
+    // prove the whole pipeline (replay backend -> real frontend render). The
+    // record spec waits for the /suggestions response, so a re-recorded fixture
+    // always captures the suggestion turn — a missing one is a broken recording
+    // and must fail loud here, not pass silently.
     expect(
       EXPECTED_TITLE,
       "fixture should contain an auto-title turn",
     ).not.toBe("");
+    expect(
+      EXPECTED_SUGGESTION,
+      "fixture should contain a suggestions turn (re-record; the record spec waits for /suggestions)",
+    ).not.toBe("");
     await expect(page.getByText(EXPECTED_TITLE)).toBeVisible({
       timeout: 60_000,
     });
-    // The follow-up suggestion is a *second* replay-only proof point, but it is
-    // fired asynchronously by the frontend after the answer and depends on the
-    // model emitting a clean JSON array — so it is not always captured at record
-    // time. Assert it only when the fixture actually has a suggestions turn;
-    // never gate on its absence (that would make recording flakiness block CI).
-    if (EXPECTED_SUGGESTION) {
-      await expect(page.getByText(EXPECTED_SUGGESTION)).toBeVisible({
-        timeout: 30_000,
-      });
-    }
+    await expect(page.getByText(EXPECTED_SUGGESTION)).toBeVisible({
+      timeout: 30_000,
+    });
 
     // Visual regression is OS-sensitive (a macOS baseline won't match CI's
     // Linux render), so it's a local dev gate only; in CI we capture the render
