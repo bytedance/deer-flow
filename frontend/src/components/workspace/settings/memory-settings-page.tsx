@@ -555,13 +555,14 @@ export function MemorySettingsPage() {
               </div>
             ) : null}
 
-            <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-3">
+              {/* Row 1: search + filter tabs */}
+              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={searchPlaceholder}
-                  className="sm:max-w-xs"
+                  className="min-w-0 flex-1 sm:max-w-md"
                 />
                 <ToggleGroup
                   type="single"
@@ -570,16 +571,25 @@ export function MemorySettingsPage() {
                     if (value) setFilter(value as MemoryViewFilter);
                   }}
                   variant="outline"
+                  className="shrink-0 self-start sm:ml-auto sm:self-auto"
                 >
-                  <ToggleGroupItem value="all">{filterAll}</ToggleGroupItem>
-                  <ToggleGroupItem value="facts">{filterFacts}</ToggleGroupItem>
-                  <ToggleGroupItem value="summaries">
+                  <ToggleGroupItem value="all" className="whitespace-nowrap">
+                    {filterAll}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
+                    {filterFacts}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="summaries"
+                    className="whitespace-nowrap"
+                  >
                     {filterSummaries}
                   </ToggleGroupItem>
                 </ToggleGroup>
               </div>
 
-              <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
+              {/* Row 2: actions — constructive group on the left, destructive separated to the right */}
+              <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -609,6 +619,7 @@ export function MemorySettingsPage() {
                 </Button>
                 <Button
                   variant="destructive"
+                  className="ml-auto"
                   onClick={() => setClearDialogOpen(true)}
                   disabled={clearMemory.isPending}
                 >
