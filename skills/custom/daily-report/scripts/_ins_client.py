@@ -163,6 +163,63 @@ def _select_points_by_series(
 # ---------------------------------------------------------------------------
 
 
+async def fetch_trend_data_async(
+    client: Any,
+    equipment_ids: list[str],
+    start_time: str,
+    end_time: str,
+    eq_type: str = "rotating_machinery",
+) -> dict[str, list[dict[str, Any]]]:
+    """Async version of fetch_trend_data. Uses provided client.
+
+    Supports both real async client methods and mock methods that return plain values.
+    """
+    target_series = ENDPOINT_SERIES_BY_EQ_TYPE.get(eq_type, "8k")
+    features = FEATURES_BY_SERIES.get(target_series, ["speed", "pp_value", "value"])
+
+    start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
+    end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
+
+    results: dict[str, list[dict[str, Any]]] = {}
+
+    for eq_id in equipment_ids:
+        print(f"[数据查询] 趋势数据 -> {eq_id}...", file=sys.stderr)
+        try:
+            maybe_coro = client.get_slim_components(eq_id)
+            components = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+        except Exception as e:
+            logger.warning("Failed to get components for %s: %s", eq_id, e)
+            results[eq_id] = []
+            continue
+
+        points = _select_points_by_series(components or [], target_series)
+        if not points:
+            logger.warning("No %s points found for equipment %s", target_series, eq_id)
+            results[eq_id] = []
+            continue
+
+        point_ids = [str(p["id"]) for p in points if p.get("id")]
+        if not point_ids:
+            results[eq_id] = []
+            continue
+
+        try:
+            maybe_coro = client.get_trend_data(
+                ",".join(point_ids),
+                start_ms,
+                end_ms,
+                features,
+                endpoint_series=target_series,
+            )
+            rows = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+            results[eq_id] = rows or []
+        except Exception as e:
+            logger.warning("Failed to get trend data for %s: %s", eq_id, e)
+            results[eq_id] = []
+
+    return results
+
+
 def fetch_trend_data(
     equipment_ids: list[str],
     start_time: str,
@@ -182,48 +239,7 @@ def fetch_trend_data(
         ``time_ms``, ``time``, and ``values`` dict.
     """
     client = _get_client()
-    target_series = ENDPOINT_SERIES_BY_EQ_TYPE.get(eq_type, "8k")
-    features = FEATURES_BY_SERIES.get(target_series, ["speed", "pp_value", "value"])
-
-    start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
-    end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
-
-    results: dict[str, list[dict[str, Any]]] = {}
-
-    for eq_id in equipment_ids:
-        print(f"[数据查询] 趋势数据 → {eq_id}...", file=sys.stderr)
-        try:
-            components = _run_async(client.get_slim_components(eq_id))
-        except Exception as e:
-            logger.warning("Failed to get components for %s: %s", eq_id, e)
-            results[eq_id] = []
-            continue
-
-        points = _select_points_by_series(components or [], target_series)
-        if not points:
-            logger.warning("No %s points found for equipment %s", target_series, eq_id)
-            results[eq_id] = []
-            continue
-
-        point_ids = [str(p["id"]) for p in points if p.get("id")]
-        if not point_ids:
-            results[eq_id] = []
-            continue
-
-        try:
-            rows = _run_async(client.get_trend_data(
-                ",".join(point_ids),
-                start_ms,
-                end_ms,
-                features,
-                endpoint_series=target_series,
-            ))
-            results[eq_id] = rows or []
-        except Exception as e:
-            logger.warning("Failed to get trend data for %s: %s", eq_id, e)
-            results[eq_id] = []
-
-    return results
+    return _run_async(fetch_trend_data_async(client, equipment_ids, start_time, end_time, eq_type))
 
 
 def _format_machine_drop_entry(
@@ -259,6 +275,55 @@ def _format_machine_drop_entry(
     }
 
 
+async def fetch_alarm_events_async(
+    client: Any,
+    equipment_ids: list[str],
+    start_time: str,
+    end_time: str,
+    eq_type: str = "rotating_machinery",
+) -> list[dict[str, Any]]:
+    """Async version of fetch_alarm_events. Uses provided client.
+
+    Supports both real async client methods and mock methods that return plain values.
+    """
+    target_series = ENDPOINT_SERIES_BY_EQ_TYPE.get(eq_type, "8k")
+
+    # 6k (static equipment) does not support getMachineDrops endpoint
+    if target_series not in _MACHINE_DROPS_SUPPORTED_SERIES:
+        return []
+
+    event_types = EVENT_TYPES_BY_EQ_TYPE.get(eq_type, [1, 2, 3, 14, 15])
+
+    start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
+    end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
+
+    alarms: list[dict[str, Any]] = []
+    for eq_id in equipment_ids:
+        print(f"[数据查询] 告警事件 -> {eq_id}...", file=sys.stderr)
+        try:
+            maybe_coro = client.get_machine_drops(
+                eq_id,
+                start_ms,
+                end_ms,
+                event_types,
+                endpoint_series=target_series,
+            )
+            raw_events = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+        except Exception as e:
+            logger.warning("Failed to get machine drops for %s: %s", eq_id, e)
+            continue
+
+        for event in raw_events or []:
+            formatted = _format_machine_drop_entry(event, eq_id)
+            if formatted is not None:
+                alarms.append(formatted)
+
+    return alarms
+
+
+_MACHINE_DROPS_SUPPORTED_SERIES: frozenset[str] = frozenset({"8k", "9k"})
+
+
 def fetch_alarm_events(
     equipment_ids: list[str],
     start_time: str,
@@ -277,34 +342,49 @@ def fetch_alarm_events(
         List of alarm dicts with ``time``, ``equipment``, ``level``, ``message`` fields.
         Returns empty list on failure (alarm fetch is non-critical).
     """
-    client = _get_client()
     target_series = ENDPOINT_SERIES_BY_EQ_TYPE.get(eq_type, "8k")
-    event_types = EVENT_TYPES_BY_EQ_TYPE.get(eq_type, [1, 2, 3, 14, 15])
+    # 6k (static equipment) does not support getMachineDrops endpoint
+    if target_series not in _MACHINE_DROPS_SUPPORTED_SERIES:
+        return []
 
-    start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
-    end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
+    client = _get_client()
+    return _run_async(fetch_alarm_events_async(client, equipment_ids, start_time, end_time, eq_type))
 
-    alarms: list[dict[str, Any]] = []
-    for eq_id in equipment_ids:
-        print(f"[数据查询] 告警事件 → {eq_id}...", file=sys.stderr)
-        try:
-            raw_events = _run_async(client.get_machine_drops(
-                eq_id,
-                start_ms,
-                end_ms,
-                event_types,
-                endpoint_series=target_series,
-            ))
-        except Exception as e:
-            logger.warning("Failed to get machine drops for %s: %s", eq_id, e)
-            continue
 
-        for event in raw_events or []:
-            formatted = _format_machine_drop_entry(event, eq_id)
-            if formatted is not None:
-                alarms.append(formatted)
+async def _create_client_and_fetch(
+    equipment_ids: list[str],
+    start_time: str,
+    end_time: str,
+    eq_type: str = "rotating_machinery",
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Create a fresh client, fetch data, and close the client.
 
-    return alarms
+    This ensures each fetch operation has its own event loop context.
+    """
+    from ins import InsApiClient, load_ins_settings
+    settings = load_ins_settings()
+    client = InsApiClient(settings)
+    try:
+        trend_data = await fetch_trend_data_async(client, equipment_ids, start_time, end_time, eq_type)
+        alarms = await fetch_alarm_events_async(client, equipment_ids, start_time, end_time, eq_type)
+        return trend_data, alarms
+    finally:
+        maybe_coro = client.close()
+        if asyncio.iscoroutine(maybe_coro):
+            await maybe_coro
+
+
+def fetch_all(
+    equipment_ids: list[str],
+    start_time: str,
+    end_time: str,
+    eq_type: str = "rotating_machinery",
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Fetch both trend data and alarm events with a fresh client each time.
+
+    This avoids event loop issues when calling multiple async operations.
+    """
+    return _run_async(_create_client_and_fetch(equipment_ids, start_time, end_time, eq_type))
 
 
 # ---------------------------------------------------------------------------

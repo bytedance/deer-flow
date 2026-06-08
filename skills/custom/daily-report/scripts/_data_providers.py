@@ -151,7 +151,7 @@ class InsDailyProvider:
         Returns:
             包含 ``kpis``、``hourly_runtime_rate``、``alarms`` 的结果封装
         """
-        from _ins_client import fetch_alarm_events, fetch_trend_data, is_available
+        from _ins_client import fetch_all, is_available
         from _kpi_aggregator import (
             aggregate_equipment_kpis,
             compute_hourly_runtime_rate,
@@ -167,8 +167,8 @@ class InsDailyProvider:
             day_start = f"{date_str}T00:00:00"
             day_end = f"{date_str}T23:59:59"
 
-            print("[数据查询] 正在查询 InS 趋势数据 (get_trend)...", file=sys.stderr)
-            trend_data = fetch_trend_data(
+            print("[数据查询] 正在查询 InS 趋势数据和告警事件...", file=sys.stderr)
+            trend_data, alarms = fetch_all(
                 equipment_ids, day_start, day_end, eq_type,
             )
 
@@ -176,11 +176,6 @@ class InsDailyProvider:
                 trend_data, kpi_keys, {},
             )
             hourly = compute_hourly_runtime_rate(union_speed)
-
-            print("[数据查询] 正在查询 InS 告警事件 (getMachineDrops)...", file=sys.stderr)
-            alarms = fetch_alarm_events(
-                equipment_ids, day_start, day_end, eq_type,
-            )
 
         except Exception as exc:
             raise HttpProviderError(

@@ -896,6 +896,11 @@ def _extract_trend_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def parse_trend_response(rows: list[dict[str, Any]], series: str) -> list[dict[str, Any]]:
+    """Parse 2k/6k trend response into unified format.
+
+    Unified format: {component_id, time_ms, time, values: {feature: value}}.
+    This matches the format returned by parse_trend_response_multi() for 8k/9k.
+    """
     if not isinstance(rows, list):
         return []
     series = (series or "").lower()
@@ -905,7 +910,7 @@ def parse_trend_response(rows: list[dict[str, Any]], series: str) -> list[dict[s
     if series not in {"2k", "6k"}:
         return [row for row in rows if isinstance(row, dict)]
 
-    flat_rows: list[dict[str, Any]] = []
+    unified_rows: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -913,16 +918,20 @@ def parse_trend_response(rows: list[dict[str, Any]], series: str) -> list[dict[s
         if not isinstance(value_block, list):
             continue
 
-        flat: dict[str, Any] = {}
+        # Extract timestamp
+        time_ms_raw = None
         for k in ("datatime", "time", "ts", "timestamp", "collectTime"):
             if k in row:
-                flat[k] = row[k]
-        for k, v in row.items():
-            if k in {"value"}:
-                continue
-            if k not in flat:
-                flat[k] = v
+                time_ms_raw = row[k]
+                break
 
+        if time_ms_raw is None:
+            continue
+
+        time_ms_str = str(int(time_ms_raw)) if isinstance(time_ms_raw, (int, float)) else str(time_ms_raw)
+
+        # Build values dict from nested value[] array
+        values: dict[str, float | None] = {}
         for entry in value_block:
             if not isinstance(entry, dict):
                 continue
@@ -935,7 +944,23 @@ def parse_trend_response(rows: list[dict[str, Any]], series: str) -> list[dict[s
                 if not isinstance(name, str) or not name:
                     continue
                 key = _TWO_K_NAME_KEY_MAP.get(name, name)
-            flat[key] = _coerce_float(entry.get("value"))
+            values[key] = _coerce_float(entry.get("value"))
 
-        flat_rows.append(flat)
-    return flat_rows
+        # Extract component_id
+        component_id = ""
+        if "component_id" in row:
+            component_id = str(row["component_id"])
+        elif "gpid" in row:
+            component_id = str(row["gpid"])
+
+        # Build unified row structure
+        unified: dict[str, Any] = {
+            "component_id": component_id,
+            "time_ms": time_ms_str,
+            "time": format_ms_timestamp(time_ms_str),
+            "values": values,
+        }
+
+        unified_rows.append(unified)
+
+    return unified_rows
