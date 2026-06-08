@@ -336,8 +336,14 @@ test("buildRunMessagesUrl preserves configured backend base paths", () => {
   expect(buildRunMessagesUrl("/backend/", "thread-1", "run-1", 18)).toBe(
     "/backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
   );
+  expect(buildRunMessagesUrl("/backend", "thread-1", "run-1")).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages",
+  );
   expect(buildRunMessagesUrl("backend/", "thread-1", "run-1", 18)).toBe(
-    "backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+    "/backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(buildRunMessagesUrl("backend", "thread-1", "run-1")).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages",
   );
   expect(
     buildRunMessagesUrl(

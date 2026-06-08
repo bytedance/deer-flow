@@ -169,11 +169,15 @@ export function buildRunMessagesUrl(
   runId: string,
   beforeSeq?: number,
 ) {
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
   const isAbsoluteUrl = /^[a-z][a-z\d+\-.]*:\/\//i.test(normalizedBaseUrl);
   if (!isAbsoluteUrl) {
-    const url = `${normalizedBaseUrl}${path}`;
+    const rootRelativeBaseUrl =
+      normalizedBaseUrl && !normalizedBaseUrl.startsWith("/")
+        ? `/${normalizedBaseUrl}`
+        : normalizedBaseUrl;
+    const url = `${rootRelativeBaseUrl}${path}`;
     if (beforeSeq !== undefined) {
       return `${url}?${new URLSearchParams({ before_seq: String(beforeSeq) })}`;
     }
