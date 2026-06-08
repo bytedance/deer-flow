@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections.abc import Iterator
 
 from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import get_app_config
-from deerflow.config.checkpointer_config import CheckpointerConfig
+from deerflow.config.checkpointer_config import CheckpointerConfig, ensure_config_loaded
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 
 _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
+_checkpointer_lock = threading.Lock()
 
 
 def get_checkpointer() -> Checkpointer:
@@ -116,34 +118,29 @@ def get_checkpointer() -> Checkpointer:
     if _checkpointer is not None:
         return _checkpointer
 
-    # Ensure app config is loaded before checking checkpointer config
-    # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
-    # but hasn't been loaded yet
-    from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config
+    # Config loading can reset both persistence singletons. Keep it outside
+    # this provider lock to avoid cross-provider lock-order inversion.
+    ensure_config_loaded()
 
-    config = get_checkpointer_config()
+    with _checkpointer_lock:
+        if _checkpointer is not None:
+            return _checkpointer
 
-    if config is None and _app_config is None:
-        # Only load app config lazily when neither the app config nor an explicit
-        # checkpointer config has been initialized yet. This keeps tests that
-        # intentionally set the global checkpointer config isolated from any
-        # ambient config.yaml on disk.
-        try:
-            get_app_config()
-        except FileNotFoundError:
-            # In test environments without config.yaml, this is expected.
-            pass
+        from deerflow.config.checkpointer_config import get_checkpointer_config
+
         config = get_checkpointer_config()
-    if config is None:
-        from langgraph.checkpoint.memory import InMemorySaver
 
-        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
-        _checkpointer = InMemorySaver()
-        return _checkpointer
+        if config is None:
+            from langgraph.checkpoint.memory import InMemorySaver
 
-    _checkpointer_ctx = _sync_checkpointer_cm(config)
-    _checkpointer = _checkpointer_ctx.__enter__()
+            logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
+            _checkpointer = InMemorySaver()
+            return _checkpointer
+
+        checkpointer_ctx = _sync_checkpointer_cm(config)
+        checkpointer = checkpointer_ctx.__enter__()
+        _checkpointer_ctx = checkpointer_ctx
+        _checkpointer = checkpointer
 
     return _checkpointer
 
@@ -155,13 +152,14 @@ def reset_checkpointer() -> None:
     Useful in tests or after a configuration change.
     """
     global _checkpointer, _checkpointer_ctx
-    if _checkpointer_ctx is not None:
-        try:
-            _checkpointer_ctx.__exit__(None, None, None)
-        except Exception:
-            logger.warning("Error during checkpointer cleanup", exc_info=True)
-        _checkpointer_ctx = None
-    _checkpointer = None
+    with _checkpointer_lock:
+        if _checkpointer_ctx is not None:
+            try:
+                _checkpointer_ctx.__exit__(None, None, None)
+            except Exception:
+                logger.warning("Error during checkpointer cleanup", exc_info=True)
+            _checkpointer_ctx = None
+        _checkpointer = None
 
 
 # ---------------------------------------------------------------------------

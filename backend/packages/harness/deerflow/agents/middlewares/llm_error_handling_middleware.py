@@ -62,6 +62,41 @@ _AUTH_PATTERNS = (
     "未授权",
 )
 
+# Per-exception retry budget overrides.
+#
+# Some transient errors are retriable in principle but expensive to retry at
+# the default budget. StreamChunkTimeoutError in particular fires after the
+# upstream provider has already stalled for `stream_chunk_timeout` seconds
+# (typically 120-240s); a full 3-attempt loop can therefore stack 6-12 minutes
+# of dead air before surfacing the failure to the user. We keep exactly one
+# retry (cheap reconnect that catches genuine transient TCP blips) and then
+# fail fast — the same buffered payload is overwhelmingly likely to fail
+# again at the upstream provider for the same reason.
+#
+# Keys are exception class *names* (not classes) so we don't introduce
+# import-time coupling on optional dependencies like langchain-openai. The
+# value is the absolute max attempt count, NOT additional retries — so a
+# value of 2 means "1 first attempt + 1 retry" (the CR-requested
+# "keep one retry" behavior).
+_RETRY_BUDGET_OVERRIDES: dict[str, int] = {
+    "StreamChunkTimeoutError": 2,
+}
+
+# Exception class names that indicate the upstream stream-chunk watchdog
+# fired because the model stalled mid-flight. These deserve a more specific
+# user-facing message than the generic "temporarily unavailable" copy,
+# because the typical root cause is a long tool-call serialization stalling
+# the upstream stream — and the most actionable advice we can give the user
+# is "ask for a shorter / split output" rather than "wait and retry".
+# Generic connection drops (httpx RemoteProtocolError / ReadError) are
+# intentionally excluded: they routinely fire on transient network blips
+# with normal payloads, where the "split the work" guidance is misleading.
+_STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "StreamChunkTimeoutError",
+    }
+)
+
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Retry transient LLM errors and surface graceful assistant messages."""
@@ -82,6 +117,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_open_until = 0.0
         self._circuit_state = "closed"
         self._circuit_probe_in_flight = False
+
+    def _max_attempts_for(self, exc: BaseException) -> int:
+        """Return the effective max attempt count for this exception.
+
+        Falls back to `self.retry_max_attempts` unless the exception class name
+        appears in the per-exception override table.
+        """
+        override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
+        if override is None:
+            return self.retry_max_attempts
+
+        return min(override, self.retry_max_attempts)
 
     def _check_circuit(self) -> bool:
         """Returns True if circuit is OPEN (fast fail), False otherwise."""
@@ -153,6 +200,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "InternalServerError",
             "ReadError",  # httpx.ReadError: connection dropped mid-stream
             "RemoteProtocolError",  # httpx: server closed connection unexpectedly
+            "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
         }:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
@@ -202,6 +250,20 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if reason == "auth":
             return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
         if reason in {"busy", "transient"}:
+            # Stream-drop failures (chunk-gap timeout, peer-closed connection,
+            # raw read error) almost always point at a single oversized
+            # tool-call payload — the model spent so long serializing JSON
+            # arguments that the upstream provider buffered and the stream
+            # gap exceeded `stream_chunk_timeout`. Surfacing this distinct
+            # cause lets the user split or shorten their next request
+            # instead of helplessly retrying the same prompt.
+            if type(exc).__name__ in _STREAM_DROP_EXCEPTIONS:
+                return (
+                    "The model's streaming response was interrupted before it could "
+                    "finish. This usually happens when a single response or tool call "
+                    "is very large — please ask the assistant to split the work into "
+                    "smaller steps, or shorten the requested output, and try again."
+                )
             return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
         return f"LLM request failed: {detail}"
 
@@ -259,7 +321,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                if retriable and attempt < self.retry_max_attempts:
+                max_attempts = self._max_attempts_for(exc)
+                if retriable and attempt < max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
@@ -310,7 +373,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                if retriable and attempt < self.retry_max_attempts:
+                max_attempts = self._max_attempts_for(exc)
+                if retriable and attempt < max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",

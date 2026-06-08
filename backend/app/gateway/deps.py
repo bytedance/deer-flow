@@ -17,6 +17,7 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -32,6 +33,43 @@ from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
+
+# Upper bound (seconds) for draining in-flight runs during shutdown, before the
+# AsyncExitStack tears down the checkpointer (and its connection pool). Kept
+# local to avoid an app -> deps -> app import cycle. This is a *separate* budget
+# from ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS`` (currently also 5.0s,
+# which bounds channel-service stop): the two govern independent teardown steps
+# and may diverge, but both count toward the lifespan shutdown window — revisit
+# them together if their sum must stay within the server's graceful-shutdown
+# timeout.
+_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+async def _drain_inflight_runs(run_manager: RunManager) -> None:
+    """Drain in-flight runs before the checkpointer is torn down (issue #3373).
+
+    Shields the (internally-bounded) drain so that even if the lifespan
+    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
+    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
+    checkpointer pool is not closed while run tasks are still writing
+    checkpoints. On such a cancellation we let the already-running drain finish
+    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
+    the cancellation.
+    """
+    drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
+    try:
+        await asyncio.shield(drain)
+    except asyncio.CancelledError:
+        # Re-shield so this second wait does not abandon the in-flight drain;
+        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+        try:
+            await asyncio.shield(drain)
+        except Exception:
+            logger.exception("In-flight run drain failed after shutdown cancellation")
+        raise
+    except Exception:
+        logger.exception("Failed to drain in-flight runs during shutdown")
+
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -80,6 +118,16 @@ def get_config() -> AppConfig:
     :func:`get_app_config` closes the bytedance/deer-flow issue #3107 BUG-001
     split-brain where the worker / lead-agent thread saw a stale startup
     snapshot.
+
+    Hot-reload boundary: fields backed by startup-time singletons
+    (engines, sandbox provider, IM channels, logging handler) require a
+    process restart to change at runtime. The authoritative list lives in
+    :mod:`deerflow.config.reload_boundary` and is mirrored by the
+    standardised ``"startup-only:"`` prefix on the matching
+    ``Field(description=...)`` in :class:`AppConfig` — IDE hover on those
+    fields will surface the boundary inline. See
+    ``backend/CLAUDE.md`` "Config Hot-Reload Boundary" for the operator
+    summary.
 
     Any failure to materialise the config (missing file, permission denied,
     YAML parse error, validation error) is reported as 503 — semantically
@@ -177,6 +225,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
+            # checkpointer (and its connection pool). A run still mid-graph would
+            # otherwise leak into asyncio.run() shutdown, where langgraph's
+            # _checkpointer_put_after_previous aput races the closed pool and
+            # raises PoolClosed (issue #3373).
+            run_manager = getattr(app.state, "run_manager", None)
+            if run_manager is not None:
+                await _drain_inflight_runs(run_manager)
             await close_engine()
 
 
