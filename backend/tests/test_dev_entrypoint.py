@@ -40,6 +40,19 @@ def test_entrypoint_script_exists_and_is_posix_sh():
     assert proc.returncode == 0, proc.stderr
 
 
+def test_entrypoint_excludes_runtime_state_from_uvicorn_reload():
+    content = ENTRYPOINT.read_text(encoding="utf-8")
+
+    assert ': "${DEER_FLOW_HOME:=/app/backend/.deer-flow}"' in content
+    assert 'mkdir -p "$DEER_FLOW_HOME" /app/backend/.deer-flow' in content
+    assert "--reload-include='*.yaml .env'" not in content
+    assert "--reload-include='*.yaml'" in content
+    assert "--reload-include='.env'" in content
+    assert "--reload-exclude=/app/backend/sandbox" in content
+    assert '--reload-exclude="$DEER_FLOW_HOME"' in content
+    assert "--reload-exclude=/app/backend/.deer-flow" in content
+
+
 def test_no_uv_extras_yields_empty_flags():
     proc = _run(None)
     assert proc.returncode == 0
