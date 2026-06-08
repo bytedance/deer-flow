@@ -25,7 +25,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BeforeValidator
 
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import agent_config_exists, load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -151,7 +151,7 @@ def update_agent(
 
     paths = get_paths()
     agent_dir = paths.user_agent_dir(user_id, agent_name)
-    if not agent_dir.exists() and paths.agent_dir(agent_name).exists():
+    if not agent_config_exists(agent_dir) and agent_config_exists(paths.agent_dir(agent_name)):
         return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
 
     try:

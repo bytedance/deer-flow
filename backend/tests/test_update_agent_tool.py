@@ -155,6 +155,25 @@ def test_update_agent_accepts_known_model(tmp_path, patched_paths, stub_app_conf
     assert "model" in result.update["messages"][0].content
 
 
+def test_update_agent_rejects_legacy_agent_even_with_memory_only_user_dir(tmp_path, patched_paths):
+    legacy_dir = tmp_path / "agents" / "legacy-agent"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "config.yaml").write_text(yaml.safe_dump({"name": "legacy-agent", "description": "legacy"}), encoding="utf-8")
+    (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+    user_agent_dir = _user_agent_dir(tmp_path, "legacy-agent")
+    user_agent_dir.mkdir(parents=True)
+    (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+    result = update_agent.func(runtime=_runtime(agent_name="legacy-agent"), soul="should not write")
+
+    msg = result.update["messages"][0]
+    assert "only exists in the legacy shared layout" in msg.content
+    assert msg.status == "error"
+    assert not (user_agent_dir / "config.yaml").exists()
+    assert not (user_agent_dir / "SOUL.md").exists()
+
+
 def test_update_agent_treats_nullish_optional_text_as_omitted(tmp_path, patched_paths):
     """Models sometimes pass literal "null" strings while trying to omit fields.
 

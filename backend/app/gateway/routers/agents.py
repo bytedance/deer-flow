@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AgentConfig, agent_config_exists, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -151,7 +151,7 @@ async def check_agent_name(name: str) -> dict:
     # Treat the name as taken if either the per-user path or the legacy shared
     # path holds an agent — picking a name that collides with an unmigrated
     # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+    available = not agent_config_exists(paths.user_agent_dir(user_id, normalized)) and not agent_config_exists(paths.agent_dir(normalized))
     return {"available": available, "name": normalized}
 
 
@@ -215,8 +215,11 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
 
     agent_dir = paths.user_agent_dir(user_id, normalized_name)
     legacy_dir = paths.agent_dir(normalized_name)
+    config_file = agent_dir / "config.yaml"
+    soul_file = agent_dir / "SOUL.md"
+    agent_dir_preexisted = agent_dir.exists()
 
-    if agent_dir.exists() or legacy_dir.exists():
+    if agent_config_exists(agent_dir) or agent_config_exists(legacy_dir):
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
 
     try:
@@ -233,12 +236,10 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         if request.skills is not None:
             config_data["skills"] = request.skills
 
-        config_file = agent_dir / "config.yaml"
         with open(config_file, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
         # Write SOUL.md
-        soul_file = agent_dir / "SOUL.md"
         soul_file.write_text(request.soul, encoding="utf-8")
 
         logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
@@ -250,7 +251,10 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         raise
     except Exception as e:
         # Clean up on failure
-        if agent_dir.exists():
+        if agent_dir_preexisted:
+            config_file.unlink(missing_ok=True)
+            soul_file.unlink(missing_ok=True)
+        elif agent_dir.exists():
             shutil.rmtree(agent_dir)
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
@@ -287,7 +291,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     paths = get_paths()
     agent_dir = paths.user_agent_dir(user_id, name)
-    if not agent_dir.exists() and paths.agent_dir(name).exists():
+    if not agent_config_exists(agent_dir) and agent_config_exists(paths.agent_dir(name)):
         raise HTTPException(
             status_code=409,
             detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
@@ -430,8 +434,8 @@ async def delete_agent(name: str) -> None:
     paths = get_paths()
     agent_dir = paths.user_agent_dir(user_id, name)
 
-    if not agent_dir.exists():
-        if paths.agent_dir(name).exists():
+    if not agent_config_exists(agent_dir):
+        if agent_config_exists(paths.agent_dir(name)):
             raise HTTPException(
                 status_code=409,
                 detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),

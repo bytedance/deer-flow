@@ -202,6 +202,22 @@ class TestLoadAgentConfig:
 
         assert cfg.name == "legacy-agent"
 
+    def test_memory_only_user_agent_dir_does_not_shadow_legacy_config(self, tmp_path):
+        _write_agent(tmp_path, "legacy-agent", {"name": "legacy-agent", "description": "legacy"}, soul="legacy soul")
+        user_agent_dir = tmp_path / "users" / "alice" / "agents" / "legacy-agent"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config, load_agent_soul
+
+            cfg = load_agent_config("legacy-agent", user_id="alice")
+            soul = load_agent_soul("legacy-agent", user_id="alice")
+
+        assert cfg.name == "legacy-agent"
+        assert cfg.description == "legacy"
+        assert soul == "legacy soul"
+
 
 # ===========================================================================
 # 4. load_agent_soul
@@ -246,6 +262,18 @@ class TestLoadAgentSoul:
 
             cfg = AgentConfig(name="empty-soul")
             soul = load_agent_soul(cfg.name)
+
+        assert soul is None
+
+    def test_soul_without_config_is_not_loaded_as_agent(self, tmp_path):
+        agent_dir = tmp_path / "agents" / "soul-only"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "SOUL.md").write_text("orphan soul")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("soul-only")
 
         assert soul is None
 
@@ -318,6 +346,19 @@ class TestListCustomAgents:
 
         names = [a.name for a in agents]
         assert names == sorted(names)
+
+    def test_memory_only_user_agent_dir_does_not_hide_legacy_agent(self, tmp_path):
+        _write_agent(tmp_path, "legacy-agent", {"name": "legacy-agent", "description": "legacy"})
+        user_agent_dir = tmp_path / "users" / "alice" / "agents" / "legacy-agent"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import list_custom_agents
+
+            agents = list_custom_agents(user_id="alice")
+
+        assert [agent.name for agent in agents] == ["legacy-agent"]
 
 
 # ===========================================================================
@@ -502,6 +543,22 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
+    def test_update_memory_only_user_dir_with_legacy_agent_returns_409(self, agent_client, tmp_path):
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\ndescription: legacy\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        user_agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "legacy-agent"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        response = agent_client.put("/api/agents/legacy-agent", json={"soul": "should not write"})
+
+        assert response.status_code == 409
+        assert not (user_agent_dir / "config.yaml").exists()
+        assert not (user_agent_dir / "SOUL.md").exists()
+
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
         assert response.status_code == 404
@@ -564,6 +621,20 @@ class TestAgentsAPI:
 
         response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
         assert response.status_code == 409
+
+    def test_memory_only_user_agent_dir_does_not_make_name_unavailable(self, agent_client, tmp_path):
+        user_agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "memory-only"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        check = agent_client.get("/api/agents/check", params={"name": "memory-only"})
+        assert check.status_code == 200
+        assert check.json()["available"] is True
+
+        response = agent_client.post("/api/agents", json={"name": "memory-only", "soul": "new soul"})
+        assert response.status_code == 201
+        assert (user_agent_dir / "config.yaml").exists()
+        assert (user_agent_dir / "SOUL.md").read_text(encoding="utf-8") == "new soul"
 
 
 # ===========================================================================

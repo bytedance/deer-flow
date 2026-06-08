@@ -20,6 +20,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
+AGENT_CONFIG_FILENAME = "config.yaml"
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
@@ -49,6 +50,11 @@ class AgentConfig(BaseModel):
     skills: list[str] | None = None
 
 
+def agent_config_exists(agent_dir: Path) -> bool:
+    """Return true when a directory contains an agent config file."""
+    return (agent_dir / AGENT_CONFIG_FILENAME).is_file()
+
+
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     """Return the on-disk directory for an agent, preferring the per-user layout.
 
@@ -56,8 +62,8 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     1. ``{base_dir}/users/{user_id}/agents/{name}/`` (per-user, current layout).
     2. ``{base_dir}/agents/{name}/`` (legacy shared layout — read-only fallback).
 
-    If neither exists, the per-user path is returned so callers that intend to
-    create the agent write into the new layout.
+    If neither config exists, the per-user path is returned so callers that
+    intend to create the agent write into the new layout.
 
     Args:
         name: Validated agent name.
@@ -67,11 +73,11 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     paths = get_paths()
     effective_user = user_id or get_effective_user_id()
     user_path = paths.user_agent_dir(effective_user, name)
-    if user_path.exists():
+    if agent_config_exists(user_path):
         return user_path
 
     legacy_path = paths.agent_dir(name)
-    if legacy_path.exists():
+    if agent_config_exists(legacy_path):
         return legacy_path
 
     return user_path
@@ -92,7 +98,7 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         AgentConfig instance, or ``None`` if ``name`` is ``None``.
 
     Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
+        FileNotFoundError: If config.yaml does not exist.
         ValueError: If config.yaml cannot be parsed.
     """
 
@@ -101,12 +107,9 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
 
     name = validate_agent_name(name)
     agent_dir = resolve_agent_dir(name, user_id=user_id)
-    config_file = agent_dir / "config.yaml"
+    config_file = agent_dir / AGENT_CONFIG_FILENAME
 
-    if not agent_dir.exists():
-        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-
-    if not config_file.exists():
+    if not config_file.is_file():
         raise FileNotFoundError(f"Agent config not found: {config_file}")
 
     try:
@@ -142,6 +145,8 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
     """
     if agent_name:
         agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
+        if not agent_config_exists(agent_dir):
+            return None
     else:
         agent_dir = get_paths().base_dir
     soul_path = agent_dir / SOUL_FILENAME
@@ -175,15 +180,12 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
     legacy_root = paths.agents_dir
 
     for root in (user_root, legacy_root):
-        if not root.exists():
+        if not root.is_dir():
             continue
         for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
-                continue
             if entry.name in seen:
                 continue
-            config_file = entry / "config.yaml"
-            if not config_file.exists():
+            if not agent_config_exists(entry):
                 logger.debug(f"Skipping {entry.name}: no config.yaml")
                 continue
 
