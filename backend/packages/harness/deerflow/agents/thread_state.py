@@ -45,11 +45,51 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_todos(existing: list | None, new: list | None) -> list | None:
+    """Reducer for todos list - keeps the last non-None value.
+
+    Semantics:
+    - If `new` is None (node didn't touch todos), preserve `existing`.
+    - If `new` is provided (even empty list), it represents an explicit
+      update and wins over `existing`.
+    """
+    if new is None:
+        return existing
+    return new
+
+
+class PromotedTools(TypedDict):
+    catalog_hash: str
+    names: list[str]
+
+
+def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
+    """Reducer for deferred-tool promotions, scoped by catalog hash.
+
+    - new None/empty -> preserve existing (node didn't touch promotions).
+    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
+      persisted bare name from exposing a different tool after catalog drift).
+    - same catalog_hash -> union names, dedupe, preserve order.
+    """
+    if not new:
+        return existing
+    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
+        return {
+            "catalog_hash": new["catalog_hash"],
+            "names": list(dict.fromkeys(new["names"])),
+        }
+    return {
+        "catalog_hash": existing["catalog_hash"],
+        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    }
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
-    todos: NotRequired[list | None]
+    todos: Annotated[list | None, merge_todos]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    promoted: Annotated[PromotedTools | None, merge_promoted]

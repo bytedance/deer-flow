@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 9
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -118,19 +118,25 @@ models:
   # For Docker deployments, use host.docker.internal instead of localhost:
   #   base_url: http://host.docker.internal:11434
 
-  # Example: Anthropic Claude model
-  # - name: claude-3-5-sonnet
-  #   display_name: Claude 3.5 Sonnet
+  # Example: Anthropic Claude model (with extended thinking)
+  # supports_thinking: true is required — without it, DeerFlow silently falls
+  # back to non-thinking mode even when the UI thinking toggle is on.
+  # budget_tokens is required by the Anthropic API when thinking.type=enabled
+  # (no server default; min 1024; must be less than max_tokens).
+  # - name: claude-sonnet-4
+  #   display_name: Claude Sonnet 4
   #   use: langchain_anthropic:ChatAnthropic
-  #   model: claude-3-5-sonnet-20241022
+  #   model: claude-sonnet-4-20250514
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 8192
-  #   supports_vision: true  # Enable vision support for view_image tool
+  #   max_tokens: 16000
+  #   supports_vision: true
+  #   supports_thinking: true
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
+  #       budget_tokens: 4096   # required; min 1024; must be < max_tokens
   #   when_thinking_disabled:
   #     thinking:
   #       type: disabled
@@ -162,6 +168,38 @@ models:
   #   max_tokens: 16384
   #   supports_thinking: true
   #   supports_vision: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # Example: Xiaomi MiMo model (with thinking support)
+  # MiMo thinking mode returns reasoning_content and requires that field to be
+  # replayed on historical assistant messages in multi-turn agent/tool-call
+  # conversations. Use PatchedChatMiMo instead of plain ChatOpenAI.
+  # Use https://api.xiaomimimo.com/v1 with pay-as-you-go `sk-...` keys.
+  # Use your Token Plan regional URL (for example
+  # https://token-plan-cn.xiaomimimo.com/v1) with Token Plan `tp-...` keys.
+  # PatchedChatMiMo is model-id agnostic; use it for every MiMo thinking model
+  # entry you configure (for example mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro,
+  # mimo-v2-omni, or mimo-v2-flash), including models referenced by subagent
+  # model overrides.
+  # See: https://platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
+  # - name: mimo-v2.5-pro
+  #   display_name: MiMo V2.5 Pro
+  #   use: deerflow.models.patched_mimo:PatchedChatMiMo
+  #   model: mimo-v2.5-pro
+  #   api_key: $MIMO_API_KEY
+  #   base_url: https://api.xiaomimimo.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -237,12 +275,41 @@ models:
   #         type: disabled
 
   # Example: MiniMax (OpenAI-compatible) - International Edition
-  # MiniMax provides high-performance models with 204K context window
+  # MiniMax provides high-performance models with 512K context window and 128K max output
   # Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
-  # - name: minimax-m2.5
-  #   display_name: MiniMax M2.5
+  # - name: minimax-m3
+  #   display_name: MiniMax M3
   #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5
+  #   model: MiniMax-M3
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimax.io/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+  #   supports_thinking: true
+  #   # MiniMax inlines its chain-of-thought into `content` as <think>...</think>
+  #   # (reasoning_split defaults to false), not in a separate reasoning_content
+  #   # field. Declare the thinking toggle so non-thinking paths (flash mode,
+  #   # follow-up suggestions, title/memory generation) truly disable reasoning
+  #   # instead of wasting tokens on — and parsing around — inline <think> blocks.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
+  # - name: minimax-m2.7
+  #   display_name: MiniMax M2.7
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.7
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
   #   request_timeout: 600.0
@@ -252,10 +319,10 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
 
-  # - name: minimax-m2.5-highspeed
-  #   display_name: MiniMax M2.5 Highspeed
+  # - name: minimax-m2.7-highspeed
+  #   display_name: MiniMax M2.7 Highspeed
   #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5-highspeed
+  #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
   #   request_timeout: 600.0
@@ -266,8 +333,37 @@ models:
   #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
-  # MiniMax provides high-performance models with 204K context window
+  # MiniMax provides high-performance models with 512K context window and 128K max output
   # Docs: https://platform.minimaxi.com/docs/api-reference/text-openai-api
+  # - name: minimax-m3
+  #   display_name: MiniMax M3
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M3
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+  #   supports_thinking: true
+  #   # MiniMax inlines its chain-of-thought into `content` as <think>...</think>
+  #   # (reasoning_split defaults to false), not in a separate reasoning_content
+  #   # field. Declare the thinking toggle so non-thinking paths (flash mode,
+  #   # follow-up suggestions, title/memory generation) truly disable reasoning
+  #   # instead of wasting tokens on — and parsing around — inline <think> blocks.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
   #   use: langchain_openai:ChatOpenAI
@@ -372,6 +468,9 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
+    # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
+    # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
+    # safesearch: moderate   # on, moderate, off
 
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
   # Serper provides real-time Google Search results. Sign up at https://serper.dev
@@ -507,6 +606,34 @@ tool_search:
   enabled: false
 
 # ============================================================================
+# Tool Output Budget Protection
+# ============================================================================
+# Prevents oversized tool results from blowing the model context window.
+# Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
+# with a compact preview + file reference. The model can read the full output
+# via read_file.  When disk persistence is unavailable, outputs exceeding
+# `fallback_max_chars` are head+tail truncated instead.
+#
+# `exempt_tools` prevents persist→read→persist infinite loops for read tools.
+# `tool_overrides` allows per-tool threshold customization.
+
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: ".tool-results"
+  exempt_tools:
+    - read_file
+    - read_file_tool
+  # tool_overrides:
+  #   web_search: 8000
+  #   bash: 20000
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
@@ -528,6 +655,41 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Provider Safety Termination Configuration
+# ============================================================================
+# Intercept AIMessages where the provider stopped generation for safety reasons
+# (e.g. OpenAI finish_reason='content_filter', Anthropic stop_reason='refusal',
+# Gemini finish_reason='SAFETY') while still returning tool_calls. The
+# tool_calls in such responses are typically truncated/unreliable and must
+# not be executed. See issue #3028 for the full failure mode.
+#
+# Detectors are loaded by class path via reflection (same pattern as
+# guardrails / models / tools). The built-in set covers OpenAI-compatible
+# content_filter, Anthropic refusal, and Gemini SAFETY/BLOCKLIST/
+# PROHIBITED_CONTENT/SPII/RECITATION.
+
+safety_finish_reason:
+  enabled: true
+  # Leave `detectors` unset to use the built-in detector set. Set to a
+  # non-empty list to fully override (use `enabled: false` to disable instead
+  # of providing an empty list).
+  #
+  # Example — extend the OpenAI-compatible detector for a Chinese provider
+  # whose gateway uses a non-standard finish_reason token:
+  # detectors:
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
+  #     config:
+  #       finish_reasons: ["content_filter", "sensitive", "risk_control"]
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
+  #   - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
+  #
+  # Example — add a custom detector for an in-house provider:
+  # detectors:
+  #   - use: my_company.deerflow_ext:WenxinSafetyDetector
+  #     config:
+  #       error_codes: [336003, 17, 18]
 
 # ============================================================================
 # Sandbox Configuration
@@ -758,9 +920,9 @@ summarization:
   # Summarization runs when ANY threshold is met (OR logic)
   # You can specify a single trigger or a list of triggers
   trigger:
-    # Trigger when token count reaches 15564
+    # Trigger when token count reaches 32000
     - type: tokens
-      value: 15564
+      value: 32000
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50

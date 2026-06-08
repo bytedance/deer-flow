@@ -20,6 +20,8 @@ class LLMProvider:
     # Extra config fields beyond the common ones (merged into YAML)
     extra_config: dict = field(default_factory=dict)
     auth_hint: str | None = None
+    base_url_prompt: str | None = None
+    model_prompt: str | None = None
 
 
 @dataclass
@@ -44,48 +46,292 @@ class SearchProvider:
     extra_config: dict = field(default_factory=dict)
 
 
+OPENAI_COMPAT_THINKING_CONFIG = {
+    "supports_thinking": True,
+    "when_thinking_enabled": {
+        "extra_body": {
+            "thinking": {
+                "type": "enabled",
+            }
+        }
+    },
+    "when_thinking_disabled": {
+        "extra_body": {
+            "thinking": {
+                "type": "disabled",
+            }
+        }
+    },
+}
+
+ANTHROPIC_THINKING_CONFIG = {
+    "supports_thinking": True,
+    "when_thinking_enabled": {
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 4096,
+        }
+    },
+    "when_thinking_disabled": {
+        "thinking": {
+            "type": "disabled",
+        }
+    },
+}
+
+
 LLM_PROVIDERS: list[LLMProvider] = [
+    LLMProvider(
+        name="volcengine",
+        display_name="Volcengine Doubao",
+        description="Doubao Seed with thinking support",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=["doubao-seed-1-8-251228"],
+        default_model="doubao-seed-1-8-251228",
+        env_var="VOLCENGINE_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "supports_vision": True,
+            "supports_reasoning_effort": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+    ),
     LLMProvider(
         name="openai",
         display_name="OpenAI",
-        description="GPT-4o, GPT-4.1, o3",
+        description="GPT-5, GPT-4.1, GPT-4o",
         use="langchain_openai:ChatOpenAI",
-        models=["gpt-4o", "gpt-4.1", "o3"],
-        default_model="gpt-4o",
+        models=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"],
+        default_model="gpt-5",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
+        extra_config={
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "supports_vision": True,
+        },
+    ),
+    LLMProvider(
+        name="openai_responses",
+        display_name="OpenAI Responses API",
+        description="GPT-5 via /v1/responses",
+        use="langchain_openai:ChatOpenAI",
+        models=["gpt-5", "gpt-5-mini"],
+        default_model="gpt-5",
+        env_var="OPENAI_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "use_responses_api": True,
+            "output_version": "responses/v1",
+            "supports_vision": True,
+        },
     ),
     LLMProvider(
         name="anthropic",
         display_name="Anthropic",
-        description="Claude Opus 4, Sonnet 4",
+        description="Claude Sonnet 4 with extended thinking",
         use="langchain_anthropic:ChatAnthropic",
-        models=["claude-opus-4-5", "claude-sonnet-4-5"],
-        default_model="claude-sonnet-4-5",
+        models=["claude-sonnet-4-20250514", "claude-opus-4-5", "claude-sonnet-4-5"],
+        default_model="claude-sonnet-4-20250514",
         env_var="ANTHROPIC_API_KEY",
         package="langchain-anthropic",
-        extra_config={"max_tokens": 8192},
+        extra_config={
+            "default_request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 16000,
+            "supports_vision": True,
+            **ANTHROPIC_THINKING_CONFIG,
+        },
     ),
     LLMProvider(
         name="deepseek",
         display_name="DeepSeek",
-        description="V3, R1",
-        use="langchain_deepseek:ChatDeepSeek",
-        models=["deepseek-chat", "deepseek-reasoner"],
-        default_model="deepseek-chat",
+        description="DeepSeek Reasoner with thinking support",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=["deepseek-reasoner", "deepseek-chat"],
+        default_model="deepseek-reasoner",
         env_var="DEEPSEEK_API_KEY",
         package="langchain-deepseek",
+        extra_config={
+            "timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "supports_vision": False,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
     ),
     LLMProvider(
         name="google",
         display_name="Google Gemini",
-        description="2.0 Flash, 2.5 Pro",
+        description="Native Gemini SDK, no thinking support",
         use="langchain_google_genai:ChatGoogleGenerativeAI",
-        models=["gemini-2.0-flash", "gemini-2.5-pro"],
-        default_model="gemini-2.0-flash",
+        models=["gemini-2.5-pro", "gemini-2.0-flash"],
+        default_model="gemini-2.5-pro",
         env_var="GEMINI_API_KEY",
         package="langchain-google-genai",
         api_key_field="gemini_api_key",
+        extra_config={
+            "timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "supports_vision": True,
+        },
+    ),
+    LLMProvider(
+        name="gemini_openai_gateway",
+        display_name="Gemini OpenAI-compatible",
+        description="Gemini thinking via an OpenAI-compatible gateway",
+        use="deerflow.models.patched_openai:PatchedChatOpenAI",
+        models=["google/gemini-2.5-pro-preview"],
+        default_model="google/gemini-2.5-pro-preview",
+        env_var="GEMINI_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 16384,
+            "supports_vision": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+        base_url_prompt="Gateway base URL (e.g. https://your-gateway.example/v1)",
+    ),
+    LLMProvider(
+        name="ollama_qwen",
+        display_name="Ollama Qwen3",
+        description="Native local Ollama provider with thinking support",
+        use="langchain_ollama:ChatOllama",
+        models=["qwen3:32b"],
+        default_model="qwen3:32b",
+        env_var=None,
+        package="langchain-ollama",
+        extra_config={
+            "base_url": "http://localhost:11434",
+            "num_predict": 8192,
+            "temperature": 0.7,
+            "reasoning": True,
+            "supports_thinking": True,
+            "supports_vision": False,
+        },
+        auth_hint="No API key is required. Ensure Ollama is running and the model is pulled.",
+    ),
+    LLMProvider(
+        name="ollama_gemma",
+        display_name="Ollama Gemma",
+        description="Native local Ollama provider with vision support",
+        use="langchain_ollama:ChatOllama",
+        models=["gemma4:27b"],
+        default_model="gemma4:27b",
+        env_var=None,
+        package="langchain-ollama",
+        extra_config={
+            "base_url": "http://localhost:11434",
+            "num_predict": 8192,
+            "temperature": 0.7,
+            "reasoning": True,
+            "supports_thinking": True,
+            "supports_vision": True,
+        },
+        auth_hint="No API key is required. Ensure Ollama is running and the model is pulled.",
+    ),
+    LLMProvider(
+        name="mimo",
+        display_name="Xiaomi MiMo",
+        description="MiMo thinking models with reasoning replay",
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        models=["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2-flash"],
+        default_model="mimo-v2.5-pro",
+        env_var="MIMO_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.xiaomimimo.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "supports_vision": False,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+    ),
+    LLMProvider(
+        name="kimi",
+        display_name="Moonshot Kimi",
+        description="Kimi K2.5 with thinking support",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=["kimi-k2.5"],
+        default_model="kimi-k2.5",
+        env_var="MOONSHOT_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://api.moonshot.cn/v1",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 32768,
+            "supports_vision": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+    ),
+    LLMProvider(
+        name="novita",
+        display_name="Novita AI",
+        description="DeepSeek V3.2 via OpenAI-compatible API",
+        use="langchain_openai:ChatOpenAI",
+        models=["deepseek/deepseek-v3.2"],
+        default_model="deepseek/deepseek-v3.2",
+        env_var="NOVITA_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.novita.ai/openai",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "supports_vision": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+    ),
+    LLMProvider(
+        name="minimax",
+        display_name="MiniMax",
+        description="International OpenAI-compatible endpoint",
+        use="langchain_openai:ChatOpenAI",
+        models=["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        default_model="MiniMax-M3",
+        env_var="MINIMAX_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.minimax.io/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 4096,
+            "temperature": 1.0,
+            "supports_vision": True,
+            "supports_thinking": True,
+        },
+    ),
+    LLMProvider(
+        name="minimax_cn",
+        display_name="MiniMax CN",
+        description="China OpenAI-compatible endpoint",
+        use="langchain_openai:ChatOpenAI",
+        models=["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        default_model="MiniMax-M3",
+        env_var="MINIMAX_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.minimaxi.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 4096,
+            "temperature": 1.0,
+            "supports_vision": True,
+            "supports_thinking": True,
+        },
     ),
     LLMProvider(
         name="openrouter",
@@ -127,6 +373,35 @@ LLM_PROVIDERS: list[LLMProvider] = [
                     }
                 }
             },
+            "when_thinking_disabled": {
+                "extra_body": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    }
+                }
+            },
+        },
+    ),
+    LLMProvider(
+        name="mindie",
+        display_name="MindIE",
+        description="Qwen3-Coder on MindIE Engine",
+        use="deerflow.models.mindie_provider:MindIEChatModel",
+        models=["Qwen3-Coder-480B-A35B-Instruct-Client"],
+        default_model="Qwen3-Coder-480B-A35B-Instruct-Client",
+        env_var="OPENAI_API_KEY",
+        package=None,
+        extra_config={
+            "base_url": "http://localhost:8989/v1",
+            "temperature": 0,
+            "max_retries": 1,
+            "supports_thinking": False,
+            "supports_vision": False,
+            "supports_reasoning_effort": False,
+            "read_timeout": 900.0,
+            "connect_timeout": 30.0,
+            "write_timeout": 60.0,
+            "pool_timeout": 30.0,
         },
     ),
     LLMProvider(
@@ -163,6 +438,8 @@ LLM_PROVIDERS: list[LLMProvider] = [
         default_model="gpt-4o",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
+        base_url_prompt="Base URL (e.g. https://api.openai.com/v1)",
+        model_prompt="Model name",
     ),
 ]
 

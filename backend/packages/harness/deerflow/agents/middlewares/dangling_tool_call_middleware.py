@@ -15,6 +15,7 @@ to the end of the message list as before_model + add_messages reducer would do.
 
 import json
 import logging
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -24,6 +25,11 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
+
+# Workaround for issue #2894: malformed write_file calls can carry huge Markdown
+# payloads in invalid tool-call args. Keep recovery error details short so the
+# synthetic ToolMessage does not echo large or malformed content back to the model.
+_MAX_RECOVERY_ERROR_DETAIL_LEN = 500
 
 
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
@@ -97,9 +103,25 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     @staticmethod
     def _synthetic_tool_message_content(tool_call: dict) -> str:
         if tool_call.get("invalid"):
+            name = tool_call.get("name")
             error = tool_call.get("error")
-            if isinstance(error, str) and error:
-                return f"[Tool call could not be executed because its arguments were invalid: {error}]"
+            error_text = error[:_MAX_RECOVERY_ERROR_DETAIL_LEN] if isinstance(error, str) and error else ""
+            # Workaround for issue #2894: malformed write_file calls can carry huge Markdown
+            # payloads in invalid tool-call args. Keep recovery guidance actionable without
+            # echoing large or malformed content back to the model.
+            if name == "write_file":
+                details = f" Parser error: {error_text}" if error_text else ""
+                return (
+                    "[write_file failed before execution: the tool-call arguments were not valid JSON, "
+                    "so no file was written. This often happens when the model tries to write a very "
+                    "large Markdown file in a single tool call, especially when `content` contains "
+                    "unescaped quotes, inline JSON, backslashes, or code fences. Do not retry the same "
+                    "large `write_file` payload for this artifact; provide the report/content directly "
+                    "as normal assistant text in your next response. If a file write is still needed "
+                    f"later, split the file into smaller sections instead of one large payload.{details}]"
+                )
+            if error_text:
+                return f"[Tool call could not be executed because its arguments were invalid: {error_text}]"
             return "[Tool call could not be executed because its arguments were invalid.]"
         return "[Tool call was interrupted and did not return a result.]"
 
@@ -109,10 +131,10 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
         """
-        tool_messages_by_id: dict[str, ToolMessage] = {}
+        tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
         for msg in messages:
             if isinstance(msg, ToolMessage):
-                tool_messages_by_id.setdefault(msg.tool_call_id, msg)
+                tool_messages_by_id[msg.tool_call_id].append(msg)
 
         tool_call_ids: set[str] = set()
         for msg in messages:
@@ -124,7 +146,6 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     tool_call_ids.add(tc_id)
 
         patched: list = []
-        consumed_tool_msg_ids: set[str] = set()
         patch_count = 0
         for msg in messages:
             if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
@@ -136,13 +157,13 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
             for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")
-                if not tc_id or tc_id in consumed_tool_msg_ids:
+                if not tc_id:
                     continue
 
-                existing_tool_msg = tool_messages_by_id.get(tc_id)
+                tool_msg_queue = tool_messages_by_id.get(tc_id)
+                existing_tool_msg = tool_msg_queue.popleft() if tool_msg_queue else None
                 if existing_tool_msg is not None:
                     patched.append(existing_tool_msg)
-                    consumed_tool_msg_ids.add(tc_id)
                 else:
                     patched.append(
                         ToolMessage(
@@ -152,7 +173,6 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                             status="error",
                         )
                     )
-                    consumed_tool_msg_ids.add(tc_id)
                     patch_count += 1
 
         if patched == messages:

@@ -1,6 +1,9 @@
+import asyncio
+import os
 import posixpath
 import re
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
 from langchain.tools import tool
@@ -40,6 +43,17 @@ _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+_DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
+
+# Maximum bytes accepted in a single non-append write_file call (issue #3189).
+# Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
+# because the tool-call JSON payload (which the model must emit as one
+# continuous stream) grows past the safe window. 80 KB ≈ 20K tokens, a
+# comfortable headroom under the factory-default 240s stream_chunk_timeout.
+# Deployments can override via env var DEERFLOW_WRITE_FILE_MAX_BYTES; set to
+# 0 (or negative) to disable the guard entirely.
+_WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
+_WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
 _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
@@ -431,6 +445,42 @@ def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
         thread_data = get_thread_data(runtime)
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
+
+
+def _truncate_write_file_error_detail(detail: str, max_chars: int) -> str:
+    """Middle-truncate write_file error details, preserving the head and tail."""
+    if max_chars == 0:
+        return detail
+    if len(detail) <= max_chars:
+        return detail
+    total = len(detail)
+    marker_max_len = len(f"\n... [write_file error truncated: {total} chars skipped] ...\n")
+    kept = max(0, max_chars - marker_max_len)
+    if kept == 0:
+        return detail[:max_chars]
+    head_len = kept // 2
+    tail_len = kept - head_len
+    skipped = total - kept
+    marker = f"\n... [write_file error truncated: {skipped} chars skipped] ...\n"
+    return f"{detail[:head_len]}{marker}{detail[-tail_len:] if tail_len > 0 else ''}"
+
+
+def _format_write_file_error(
+    requested_path: str,
+    error: Exception,
+    runtime: Runtime | None = None,
+    *,
+    max_chars: int = _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+) -> str:
+    """Return a bounded, sanitized error string for write_file failures."""
+    header = f"Error: Failed to write file '{requested_path}'"
+    detail = _sanitize_error(error, runtime)
+    if max_chars == 0:
+        return f"{header}: {detail}"
+    detail_budget = max_chars - len(header) - 2
+    if detail_budget <= 0:
+        return _truncate_write_file_error_detail(f"{header}: {detail}", max_chars)
+    return f"{header}: {_truncate_write_file_error_detail(detail, detail_budget)}"
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -1006,8 +1056,9 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Path replacement is only needed for local sandbox since aio sandbox
-    already has /mnt/user-data mounted in the container.
+    Accepts both the legacy generic id ``"local"`` (acquire with no thread
+    context) and the per-thread id format ``"local:{thread_id}"`` produced by
+    :meth:`LocalSandboxProvider.acquire` once a thread is known.
     """
     if runtime is None:
         return False
@@ -1016,7 +1067,10 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
     sandbox_state = runtime.state.get("sandbox")
     if sandbox_state is None:
         return False
-    return sandbox_state.get("sandbox_id") == "local"
+    sandbox_id = sandbox_state.get("sandbox_id")
+    if not isinstance(sandbox_id, str):
+        return False
+    return sandbox_id == "local" or sandbox_id.startswith("local:")
 
 
 def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
@@ -1105,6 +1159,68 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
     return sandbox
+
+
+async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sandbox:
+    """Async counterpart to ``ensure_sandbox_initialized`` for tool runtimes.
+
+    This keeps lazy sandbox acquisition on the async provider hook, so AIO
+    sandbox startup and readiness polling do not fall back to synchronous
+    ``provider.acquire()`` during async tool execution.
+    """
+    if runtime is None:
+        raise SandboxRuntimeError("Tool runtime not available")
+
+    if runtime.state is None:
+        raise SandboxRuntimeError("Tool runtime state not available")
+
+    sandbox_state = runtime.state.get("sandbox")
+    if sandbox_state is not None:
+        sandbox_id = sandbox_state.get("sandbox_id")
+        if sandbox_id is not None:
+            sandbox = get_sandbox_provider().get(sandbox_id)
+            if sandbox is not None:
+                if runtime.context is not None:
+                    runtime.context["sandbox_id"] = sandbox_id
+                return sandbox
+
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    if thread_id is None:
+        raise SandboxRuntimeError("Thread ID not available in runtime context")
+
+    provider = get_sandbox_provider()
+    sandbox_id = await provider.acquire_async(thread_id)
+
+    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+
+    sandbox = provider.get(sandbox_id)
+    if sandbox is None:
+        raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+
+    if runtime.context is not None:
+        runtime.context["sandbox_id"] = sandbox_id
+    return sandbox
+
+
+async def _run_sync_tool_after_async_sandbox_init(
+    func: Callable[..., str] | None,
+    runtime: Runtime,
+    *args: object,
+) -> str:
+    """Initialize lazily via async provider, then run sync tool body off-thread."""
+    try:
+        await ensure_sandbox_initialized_async(runtime)
+    except SandboxError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+
+    if func is None:
+        return "Error: Tool implementation not available"
+
+    return await asyncio.to_thread(func, runtime, *args)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1269,6 +1385,13 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
+async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+
+
+bash_tool.coroutine = _bash_tool_async
+
+
 @tool("ls", parse_docstring=True)
 def ls_tool(runtime: Runtime, description: str, path: str) -> str:
     """List the contents of a directory up to 2 levels deep in tree format.
@@ -1314,6 +1437,13 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
+
+
+async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
+
+
+ls_tool.coroutine = _ls_tool_async
 
 
 @tool("glob", parse_docstring=True)
@@ -1364,6 +1494,28 @@ def glob_tool(
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
+
+
+async def _glob_tool_async(
+    runtime: Runtime,
+    description: str,
+    pattern: str,
+    path: str,
+    include_dirs: bool = False,
+    max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        glob_tool.func,
+        runtime,
+        description,
+        pattern,
+        path,
+        include_dirs,
+        max_results,
+    )
+
+
+glob_tool.coroutine = _glob_tool_async
 
 
 @tool("grep", parse_docstring=True)
@@ -1436,6 +1588,32 @@ def grep_tool(
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
 
+async def _grep_tool_async(
+    runtime: Runtime,
+    description: str,
+    pattern: str,
+    path: str,
+    glob: str | None = None,
+    literal: bool = False,
+    case_sensitive: bool = False,
+    max_results: int = _DEFAULT_GREP_MAX_RESULTS,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        grep_tool.func,
+        runtime,
+        description,
+        pattern,
+        path,
+        glob,
+        literal,
+        case_sensitive,
+        max_results,
+    )
+
+
+grep_tool.coroutine = _grep_tool_async
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -1491,6 +1669,36 @@ def read_file_tool(
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
+async def _read_file_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
+
+
+read_file_tool.coroutine = _read_file_tool_async
+
+
+def _effective_write_file_max_bytes() -> int:
+    """Return the active size cap for non-append write_file calls.
+
+    Reads ``DEERFLOW_WRITE_FILE_MAX_BYTES`` at call time (not import time)
+    so tests and runtime tweaks take effect without restart. Falls back to
+    the default on missing/malformed values. A non-positive value disables
+    the guard.
+    """
+    raw = os.environ.get(_WRITE_FILE_MAX_BYTES_ENV)
+    if raw is None:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+
+
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: Runtime,
@@ -1499,18 +1707,51 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file. By default this overwrites the target file; set append to true to add content to the end without replacing existing content.
+    """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    SIZE POLICY (issue #3189):
+    A single non-append write_file call must not exceed 80 KB of UTF-8 content.
+    Oversized single-shot writes correlate with LLM streaming chunk-gap
+    timeouts because the tool-call JSON payload — which the model must emit as
+    one continuous stream — grows past the safe window. For larger documents,
+    use ONE of these strategies (write_file rejects oversized payloads with an
+    actionable error):
+
+      1. INCREMENTAL EDIT (preferred for revisions): after the initial write,
+         use `str_replace` to surgically update sections. This is the same
+         pattern Claude Code's Write+Edit and OpenAI Codex's apply_patch use,
+         and keeps each tool call's payload small.
+      2. APPEND-IN-CHUNKS (for new long-form content): split the document into
+         sections, each well under 80 KB. First call uses append=False to
+         create the file; subsequent calls use append=True. The 80 KB cap does
+         NOT apply to append=True calls.
+
+    Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
+    (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
+        append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    if not append:
+        max_bytes = _effective_write_file_max_bytes()
+        if max_bytes > 0:
+            content_bytes = len(content.encode("utf-8"))
+            if content_bytes > max_bytes:
+                return (
+                    f"Error: write_file content ({content_bytes} bytes) exceeds the "
+                    f"{max_bytes}-byte single-call limit. Split the content into smaller "
+                    "pieces: either (a) write the first section now, then use `str_replace` "
+                    "for further edits, or (b) call write_file again with append=True "
+                    "carrying the next section. See SIZE POLICY in the tool docstring "
+                    "or issue #3189 for the rationale."
+                )
     try:
+        requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
@@ -1521,15 +1762,34 @@ def write_file_tool(
             sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
-        return f"Error: {e}"
+        return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
-        return f"Error: Permission denied writing to file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Permission denied writing to file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Path is a directory, not a file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except OSError as e:
-        return f"Error: Failed to write file '{requested_path}': {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
     except Exception as e:
-        return f"Error: Unexpected error writing file: {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
+
+
+async def _write_file_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    content: str,
+    append: bool = False,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+
+
+write_file_tool.coroutine = _write_file_tool_async
 
 
 @tool("str_replace", parse_docstring=True)
@@ -1581,3 +1841,25 @@ def str_replace_tool(
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:
         return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
+
+
+async def _str_replace_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    old_str: str,
+    new_str: str,
+    replace_all: bool = False,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        str_replace_tool.func,
+        runtime,
+        description,
+        path,
+        old_str,
+        new_str,
+        replace_all,
+    )
+
+
+str_replace_tool.coroutine = _str_replace_tool_async
