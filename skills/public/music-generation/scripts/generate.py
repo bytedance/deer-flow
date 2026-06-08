@@ -29,7 +29,7 @@ def generate_music(prompt_file: str, output_file: str) -> str:
         return "MINIMAX_API_KEY is not set"
 
     prompt = spec.get("prompt", "")
-    lyrics = spec.get("lyrics")
+    lyrics = spec.get("lyrics") or None  # treat empty string the same as absent
     is_instrumental = bool(spec.get("is_instrumental", False))
 
     body = {

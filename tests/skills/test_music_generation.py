@@ -96,3 +96,27 @@ def test_missing_api_key_returns_message(monkeypatch, tmp_path):
     spec.write_text('{"prompt":"x"}', encoding="utf-8")
     msg = mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
     assert "MINIMAX_API_KEY" in msg
+
+
+def test_raises_on_missing_audio_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+
+    def fake_post(url, headers=None, json=None, **kw):
+        return FakeResp({"base_resp": {"status_code": 0}})  # no "data" key
+
+    monkeypatch.setattr(mus.requests, "post", fake_post)
+    spec = tmp_path / "s.json"
+    spec.write_text('{"prompt":"x"}', encoding="utf-8")
+    with pytest.raises(Exception, match="no audio data"):
+        mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
+
+
+def test_empty_lyrics_falls_back_to_optimizer(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    captured = {}
+    monkeypatch.setattr(mus.requests, "post", _post_ok(captured))
+    spec = tmp_path / "s.json"
+    spec.write_text('{"prompt":"x","lyrics":""}', encoding="utf-8")
+    mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
+    assert captured["json"]["lyrics_optimizer"] is True
+    assert "lyrics" not in captured["json"]
