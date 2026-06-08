@@ -66,13 +66,23 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     cfg = app_config_module.get_app_config()
     cfg.database.sqlite_dir = str(home / "db")
 
+    # Fail loud on a replay miss. The gateway swallows a hash-miss into a normal
+    # assistant error message, so the SSE *shapes* below stay green on a stale
+    # fixture — the miss list is the only reliable signal at this layer.
+    import replay_provider
+
     from app.gateway.app import create_app
+
+    replay_provider.reset_replay_misses()
 
     events = drive_gateway(create_app(), prompt=fixture["prompt"], context=fixture["context"])
 
     assert events, "replay produced no SSE events"
     assert events[0]["event"] == "metadata", f"first event should be metadata, got {events[0]!r}"
     assert events[-1]["event"] == "end", f"last event should be end (run completed), got {events[-1]!r}"
+
+    misses = replay_provider.replay_misses()
+    assert not misses, f"replay miss ({len(misses)}): the fixture is stale vs the current system prompt or agent graph. Re-record it (see backend/docs/REPLAY_E2E.md). Missed hashes: {misses}"
 
     # Regenerate the committed golden after re-recording the fixture:
     #   DEERFLOW_WRITE_GOLDEN=1 uv run pytest tests/test_replay_golden.py
@@ -81,7 +91,7 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
         return
 
     golden = json.loads(events_path.read_text(encoding="utf-8"))["events"]
-    # A replay hash-miss surfaces as the run erroring mid-stream -> the event
-    # shape sequence diverges from the golden, so this assertion is the catch-all
-    # for both backend SSE drift and replay divergence.
+    # Guards backend SSE protocol drift: the event name + payload-key sequence
+    # must match the committed golden. (Replay divergence is caught by the miss
+    # assertion above, not here — a swallowed miss keeps the shapes identical.)
     assert events == golden, f"SSE event-shape sequence drifted from the golden.\ngot  ({len(events)}): {[e['event'] for e in events]}\nwant ({len(golden)}): {[e['event'] for e in golden]}"

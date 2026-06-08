@@ -65,6 +65,66 @@
       ]
     },
     {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
       "event": "end",
       "keys": null
     }

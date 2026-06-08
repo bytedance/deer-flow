@@ -104,6 +104,16 @@ test("record write/read-file run through the real frontend", async ({
   await textarea.fill(PROMPT);
   await textarea.press("Enter");
 
+  // Suggestions fire only AFTER the run completes (input-box.tsx POSTs
+  // /suggestions). Wait for that response so its model call lands in the capture
+  // before we check for stability — otherwise the stability window can return
+  // first and the recorded fixture would be missing the suggestions turn.
+  await page
+    .waitForResponse((r) => r.url().includes("/suggestions"), {
+      timeout: 90_000,
+    })
+    .catch(() => undefined);
+
   const captured = await waitForCaptureStable(out!);
   console.log(
     `[record] captures stabilized at ${captured} model call(s) -> ${out}`,

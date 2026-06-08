@@ -76,6 +76,24 @@ from pydantic import PrivateAttr
 
 _FIXTURE_ENV = "DEERFLOW_REPLAY_FIXTURE"
 
+# Process-wide record of replay misses. A miss raises inside the model, but the
+# gateway's LLMErrorHandlingMiddleware swallows it into a normal assistant error
+# message — so the SSE *event shapes* are unchanged and a shape-only golden stays
+# green on a stale fixture. The in-process Layer-1 test inspects this list to fail
+# loud on a miss instead. (Layer-2 already fails on a miss: the recorded turns
+# never render.)
+_replay_misses: list[str] = []
+
+
+def replay_misses() -> list[str]:
+    """Hashes that missed the fixture since the last reset (see ``_replay_misses``)."""
+    return list(_replay_misses)
+
+
+def reset_replay_misses() -> None:
+    _replay_misses.clear()
+
+
 # Volatile substrings that differ between a recording run and a replay run but
 # carry no semantic weight for matching. Normalized to stable placeholders
 # before hashing so the same logical input hashes identically across processes.
@@ -117,13 +135,24 @@ def _content_to_text(content: Any) -> str:
 def _canonical_messages(messages: list[BaseMessage]) -> str:
     """Project messages to a stable shape that excludes volatile metadata/ids.
 
-    Keeps only what determines the model's next output: role, text content, and
-    tool-call name+args. Drops ``id``, ``response_metadata``, ``usage_metadata``,
-    and ``tool_call_id`` (all volatile), then normalizes embedded volatile
-    substrings.
+    Keeps only what determines which recorded turn to replay: the conversation
+    (human / ai / tool messages — role, text content, tool-call name+args). Drops
+    ``id``, ``response_metadata``, ``usage_metadata``, ``tool_call_id`` (all
+    volatile), then normalizes embedded volatile substrings.
+
+    **The system message is excluded entirely.** The lead-agent system prompt is
+    a living, frequently-edited implementation detail (its wording changes across
+    PRs), not part of the front-back contract this harness verifies. Hashing it
+    would make every fixture go stale — and red-fail on unrelated PRs — the moment
+    anyone edits the prompt. The conversation flow (user input -> tool calls ->
+    results -> answer) is the stable key that identifies a recorded turn.
     """
     projected: list[dict[str, Any]] = []
     for message in messages:
+        # Exclude the system prompt from the match key — see docstring. It is the
+        # most-edited part of the prompt and not part of the contract under test.
+        if message.type == "system":
+            continue
         content = _normalize_text(_content_to_text(message.content))
         tool_calls = getattr(message, "tool_calls", None)
         # Drop messages that are empty after normalization — e.g. a turn that was
@@ -189,6 +218,7 @@ class ReplayChatModel(BaseChatModel):
         key = hash_messages(messages)
         bucket = self._table.get(key)
         if not bucket:
+            _replay_misses.append(key)
             preview = _canonical_messages(messages)
             raise KeyError(
                 f"replay miss: no recorded output for input hash {key} in {self._fixture_path!r}. "
@@ -227,4 +257,4 @@ class ReplayChatModel(BaseChatModel):
 
 
 # Re-export so the recorder shares the exact hashing logic.
-__all__ = ["ReplayChatModel", "hash_messages"]
+__all__ = ["ReplayChatModel", "hash_messages", "replay_misses", "reset_replay_misses"]
