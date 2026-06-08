@@ -4,7 +4,10 @@ Skills live in skills/public/<name>/scripts/generate.py and are NOT a package,
 so tests load them via importlib. Tests then mock the module's `requests`.
 """
 import importlib.util
+import sys
 from pathlib import Path
+
+import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -15,6 +18,7 @@ def load(skill_name: str):
     mod_name = skill_name.replace("-", "_") + "_generate"
     spec = importlib.util.spec_from_file_location(mod_name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module  # standard pattern; lets the module resolve itself
     spec.loader.exec_module(module)
     return module
 
@@ -29,7 +33,7 @@ class FakeResp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise Exception(f"HTTP {self.status_code}")
+            raise requests.HTTPError(f"HTTP {self.status_code}")
 
     def json(self):
         return self._json
