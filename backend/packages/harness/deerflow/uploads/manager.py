@@ -226,8 +226,7 @@ def list_files_in_dir(directory: Path) -> dict:
     Returns:
         Dict with "files" list (sorted by name) and "count".
         Each file entry has ``size`` as *int* (bytes).  Call
-        :func:`enrich_file_listing` to stringify sizes and add
-        virtual / artifact URLs.
+        :func:`enrich_file_listing` to add virtual / artifact URLs.
     """
     if not directory.is_dir():
         return {"files": [], "count": 0}
@@ -298,13 +297,12 @@ def upload_virtual_path(filename: str) -> str:
 
 
 def enrich_file_listing(result: dict, thread_id: str) -> dict:
-    """Add virtual paths, artifact URLs, and stringify sizes on a listing result.
+    """Add virtual paths and artifact URLs on a listing result.
 
     Mutates *result* in place and returns it for convenience.
     """
     for f in result["files"]:
         filename = f["filename"]
-        f["size"] = str(f["size"])
         f["virtual_path"] = upload_virtual_path(filename)
         f["artifact_url"] = upload_artifact_url(thread_id, filename)
     return result
