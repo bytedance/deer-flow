@@ -183,3 +183,15 @@ The following environment variables must be set:
 - Technical content should be simplified for audio accessibility in the script
 - Complex notations (formulas, code) should be translated to plain language in the script
 - Long content may result in longer podcasts
+
+## Providers (Volcengine / MiniMax)
+
+Auto-selected by environment variables (CLI unchanged):
+
+- `VOLCENGINE_TTS_APPID` + `VOLCENGINE_TTS_ACCESS_TOKEN` set → Volcengine TTS (default).
+- Only `MINIMAX_API_KEY` set → MiniMax TTS (`/v1/t2a_v2`).
+- Force with `PODCAST_GENERATION_PROVIDER=volcengine|minimax`.
+
+MiniMax overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
+`MINIMAX_TTS_MODEL` (default `speech-2.6-hd`), `MINIMAX_TTS_VOICE_MALE`
+(default `male-qn-qingse`), `MINIMAX_TTS_VOICE_FEMALE` (default `female-tianmei`).
