@@ -340,32 +340,47 @@ def _budget_content(
 
     if threshold > 0 and len(content) > threshold:
         virtual_path: str | None = None
-        provider = None
-        if outputs_path or sandbox is not None:
+        # Decide persistence target based on what's available, without touching
+        # the sandbox provider unless a sandbox was actually resolved for this
+        # call. This keeps the legacy host-disk path provider-free, so callers
+        # without a configured sandbox (and CI environments without a
+        # config.yaml) continue to externalize to the host as before.
+        if sandbox is not None:
+            provider = None
             try:
                 provider = get_sandbox_provider()
             except Exception:
                 logger.exception("Failed to get sandbox provider for tool-output externalization; falling back to inline truncation")
-        if provider is not None and getattr(provider, "uses_thread_data_mounts", False):
-            # Host-mounted sandbox: the host outputs path is bind-mounted into
-            # the sandbox at the same virtual path, so writing host-side is
-            # equivalent to writing sandbox-side. Preserve the original
-            # behavior to avoid extra sandbox round-trips.
-            if outputs_path:
-                virtual_path = _externalize(
+            if provider is not None and getattr(provider, "uses_thread_data_mounts", False):
+                # Host-mounted sandbox: host outputs path is bind-mounted into
+                # the sandbox at the same virtual path, so writing host-side is
+                # equivalent. Preserve the original behavior to avoid extra
+                # sandbox round-trips.
+                if outputs_path:
+                    virtual_path = _externalize(
+                        content,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        outputs_path=outputs_path,
+                        storage_subdir=config.storage_subdir,
+                    )
+            else:
+                virtual_path = _externalize_to_sandbox(
                     content,
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
-                    outputs_path=outputs_path,
                     storage_subdir=config.storage_subdir,
+                    sandbox=sandbox,
                 )
-        elif sandbox is not None:
-            virtual_path = _externalize_to_sandbox(
+        elif outputs_path:
+            # No sandbox in this call (legacy / non-sandbox tools): write to
+            # host outputs path directly, no provider needed.
+            virtual_path = _externalize(
                 content,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
+                outputs_path=outputs_path,
                 storage_subdir=config.storage_subdir,
-                sandbox=sandbox,
             )
         if virtual_path is not None:
             logger.info(
