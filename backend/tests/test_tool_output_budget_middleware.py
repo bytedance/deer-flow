@@ -1189,3 +1189,36 @@ class TestWrapToolCallSandboxIntegration:
         assert sb.writes and sb.writes[0][1] == content
         # Host disk must not have been written.
         assert not (tmp_path / ".tool-results").exists()
+
+
+class TestBudgetContentNoSandboxNoProviderCall:
+    """Without a sandbox, _budget_content must NOT call get_sandbox_provider.
+
+    This is the legacy host-disk path (and the CI-without-config.yaml path):
+    touching the provider would raise and force inline fallback, regressing
+    issue #3416's fix and breaking environments that never opt into sandbox.
+    """
+
+    def test_no_provider_call_when_sandbox_absent(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        called = {"n": 0}
+
+        def boom():
+            called["n"] += 1
+            raise RuntimeError("provider must not be called on the legacy path")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", boom)
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-legacy",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert called["n"] == 0
+        assert (tmp_path / ".tool-results").is_dir()
