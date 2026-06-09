@@ -62,13 +62,24 @@ def _shlex(fragment: str) -> list[str]:
 
 
 def _reload_exclude_values(script: str) -> list[str]:
-    """Every ``--reload-exclude=<value>`` value, exact, with quoting removed."""
-    values = []
+    """Every ``--reload-exclude`` value, with quoting removed.
+
+    Supports both click/uvicorn forms:
+    - ``--reload-exclude=<value>``
+    - ``--reload-exclude <value>``
+    """
+    values: list[str] = []
     for line in _logical_lines(script):
-        for raw in re.findall(r"--reload-exclude=(\S+)", line):
-            tokens = _shlex(raw)
-            if tokens:
-                values.append(tokens[0])
+        tokens = _shlex(line)
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok.startswith("--reload-exclude="):
+                values.append(tok.split("=", 1)[1])
+            elif tok == "--reload-exclude" and i + 1 < len(tokens):
+                values.append(tokens[i + 1])
+                i += 1
+            i += 1
     return values
 
 
