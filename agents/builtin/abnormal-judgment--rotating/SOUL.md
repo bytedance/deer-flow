@@ -310,13 +310,12 @@ present_files(["/mnt/user-data/outputs/judgment_report.md"])
 
 **触发条件**：`real_fault` && confidence ≥ 0.7 && `suspected_fault_type` 非空。
 
-**首先生成 handoff 数据文件**（脚本自动从 detail 提取 factory_id + events，ID 从步骤1 的实际值传入）：
+**首先生成 handoff 数据文件**。脚本自动从 `abnormal_detail.json` 读取 `mac_id` / `component_id` 和 `factory_id`，**你只需传入 `--abnormal-id` 和可读的名称/路径**：
 
 ```bash
 python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
   --detail /mnt/user-data/outputs/abnormal_detail.json \
-  --mac-id "{mac_id}" \
-  --component-id "{component_id}" \
+  --abnormal-id "{abnormal_id}" \
   --mac-name "{mac_name}" \
   --component-name "{component_name}" \
   --mac-path "{mac_path}" \
@@ -329,6 +328,10 @@ python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
   --evidence "证据1" --evidence "证据2" \
   --output /mnt/user-data/outputs/handoff_payload.json
 ```
+
+**关键约束**：
+- `--abnormal-id` / `--mac-name` / `--component-name` / `--mac-path` 必须使用步骤1从 `payload.selected` 提取的实际值，**严禁编造**。
+- `mac_id` 和 `component_id` 由脚本从 `abnormal_detail.json` 自动读取（`query_abnormal_detail.py` 已将它们合并到 JSON 顶层），**无需也不能通过 CLI 传入**。
 
 **然后用 `read_file` 读取 `/mnt/user-data/outputs/handoff_payload.json`**，将其内容直接作为 `handoff_data` 传给 `render_ui`：
 

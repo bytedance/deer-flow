@@ -159,8 +159,7 @@ python /mnt/skills/custom/abnormal-judgment-rotating/scripts/export_abnormal_rep
 ```bash
 python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
   --detail /mnt/user-data/outputs/abnormal_detail.json \
-  --mac-id {mac_id} \
-  --component-id {component_id} \
+  --abnormal-id {abnormal_id} \
   --mac-name "{mac_name}" \
   --component-name "{component_name}" \
   --mac-path "{mac_path}" \
@@ -177,9 +176,8 @@ python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
 **参数**：
 | 参数 | 必填 | 说明 |
 |------|:----:|------|
-| `--detail` | ✅ | `abnormal_detail.json` 路径 |
-| `--mac-id` | ✅ | 设备 ID |
-| `--component-id` | ✅ | 子设备 ID |
+| `--detail` | ✅ | `abnormal_detail.json` 路径（从中自动读取 mac_id / component_id / factory_id） |
+| `--abnormal-id` | ✅ | 异常事件 ID（来自用户选择） |
 | `--mac-name` | ✅ | 设备名称 |
 | `--component-name` | ✅ | 子设备名称 |
 | `--mac-path` | ✅ | 设备路径 |
@@ -193,6 +191,8 @@ python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
 | `--output` | ✅ | 输出文件路径 |
 
 **输出**：`handoff_payload.json`，用于 `render_ui(agent_handoff)` 的 `handoff_data`。
+
+> ⚠ **mac_id / component_id 由脚本从 detail JSON 自动读取**，无需通过 CLI 传入，避免 LLM 编造错误的 ID 值。
 
 ---
 

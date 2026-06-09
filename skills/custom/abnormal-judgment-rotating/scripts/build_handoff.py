@@ -4,14 +4,16 @@
 Usage:
     python build_handoff.py \
       --detail /mnt/user-data/outputs/abnormal_detail.json \
-      --mac-id <id> --component-id <id> \
+      --abnormal-id <id> \
       --mac-name <name> --component-name <name> --mac-path <path> \
       --verdict real_fault --confidence 0.85 --fault-type unbalance_1x \
       --severity medium --health 84.0 --run-status normal \
       --evidence "证据1" --evidence "证据2" \
       --output /mnt/user-data/outputs/handoff_payload.json
 
-Outputs a JSON file ready to be passed as handoff_data to render_ui(agent_handoff).
+All equipment IDs (mac_id, component_id, abnormal_id) are read from the detail
+JSON file, NOT from CLI arguments, so the LLM cannot hallucinate wrong values.
+Only human-readable names/paths are passed via CLI.
 """
 
 from __future__ import annotations
@@ -25,8 +27,7 @@ import sys
 def main():
     p = argparse.ArgumentParser(description="Build handoff payload for fault-diagnosis")
     p.add_argument("--detail", required=True, help="Path to abnormal_detail.json")
-    p.add_argument("--mac-id", required=True)
-    p.add_argument("--component-id", required=True)
+    p.add_argument("--abnormal-id", required=True, help="Abnormal event ID (from user selection)")
     p.add_argument("--mac-name", required=True)
     p.add_argument("--component-name", required=True)
     p.add_argument("--mac-path", required=True)
@@ -40,11 +41,23 @@ def main():
     p.add_argument("--output", required=True)
     args = p.parse_args()
 
-    # Read detail and extract events + factory_id
+    # Read detail and extract events + factory_id + equipment IDs
     with open(args.detail, encoding="utf-8") as f:
         raw = json.load(f)
     detail = raw.get("data", raw) if isinstance(raw, dict) else raw
     events = detail.get("events", [])
+
+    # Read mac_id / component_id from the TOP LEVEL of detail JSON
+    # (merged by query_abnormal_detail.py — they sit alongside "data", not inside it).
+    # These come from the actual API data — never from LLM CLI args — so they can't
+    # be hallucinated.
+    mac_id = str(raw.get("mac_id", "")) if isinstance(raw, dict) else ""
+    component_id = str(raw.get("component_id", "")) if isinstance(raw, dict) else ""
+
+    if not mac_id:
+        print("[build_handoff] WARNING: mac_id is empty in detail JSON", file=sys.stderr)
+    if not component_id:
+        print("[build_handoff] WARNING: component_id is empty in detail JSON", file=sys.stderr)
 
     # Get factory_id from first event's jumpParams
     factory_id = ""
@@ -57,10 +70,10 @@ def main():
 
     handoff = {
         "source_agent": "abnormal-judgment--rotating",
-        "abnormal_id": "",
+        "abnormal_id": args.abnormal_id,
         "equipment": {
-            "mac_id": args.mac_id,
-            "component_id": args.component_id,
+            "mac_id": mac_id,
+            "component_id": component_id,
             "factory_id": factory_id,
             "mac_name": args.mac_name,
             "mac_path": args.mac_path,
@@ -83,7 +96,7 @@ def main():
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(handoff, f, ensure_ascii=False, indent=2)
 
-    print(f"[build_handoff] written to {args.output} ({len(events)} events, factory_id={factory_id})", file=sys.stderr)
+    print(f"[build_handoff] written to {args.output} (abnormal_id={args.abnormal_id}, mac_id={mac_id}, component_id={component_id}, {len(events)} events, factory_id={factory_id})", file=sys.stderr)
     print(json.dumps(handoff, ensure_ascii=False, indent=2))
 
 
