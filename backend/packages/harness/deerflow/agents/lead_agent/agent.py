@@ -18,6 +18,8 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 ``create_chat_model`` call must add to this list and pass the flag.
 """
 
+from __future__ import annotations
+
 import logging
 
 from langchain.agents import create_agent
@@ -356,23 +358,6 @@ def _build_middlewares(
     return middlewares
 
 
-def _assemble_deferred(filtered_tools, *, enabled: bool):
-    """Build the final tool list + deferred setup from a policy-filtered list.
-
-    Call AFTER tool-policy filtering so the deferred catalog never exposes a
-    tool the agent is not allowed to use. Fail-closed: if tool_search is enabled
-    and MCP tools survived filtering but no deferred set was recovered, raise
-    rather than silently binding their full schemas to the model.
-    """
-    from deerflow.tools.builtins.tool_search import _is_mcp_tool, build_deferred_tool_setup
-
-    setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
-    if enabled and not setup.deferred_names and any(_is_mcp_tool(t) for t in filtered_tools):
-        raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered — refusing to bind MCP schemas (fail-closed).")
-    final_tools = list(filtered_tools) + ([setup.tool_search_tool] if setup.tool_search_tool else [])
-    return final_tools, setup
-
-
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if is_bootstrap:
         return {"bootstrap"}
@@ -406,6 +391,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
+    from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -482,7 +468,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
-        final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
+        final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -503,7 +489,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
-    final_tools, setup = _assemble_deferred(filtered, enabled=resolved_app_config.tool_search.enabled)
+    final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,

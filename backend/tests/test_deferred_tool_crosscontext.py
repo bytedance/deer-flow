@@ -22,7 +22,8 @@ from langchain_core.tools import tool as as_tool
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
-from deerflow.tools.builtins.tool_search import DeferredToolSetup, build_deferred_tool_setup
+from deerflow.tools.builtins.tool_search import DeferredToolSetup, assemble_deferred_tools, build_deferred_tool_setup
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 
 @as_tool
@@ -37,11 +38,6 @@ def mcp_secret(x: str) -> str:
     return x
 
 
-def _tag(t):
-    t.metadata = {**(t.metadata or {}), "deerflow_mcp": True}
-    return t
-
-
 _BOUND: list[list[str]] = []
 
 
@@ -52,7 +48,7 @@ class _RecordingModel(GenericFakeChatModel):
 
 
 def _build_graph():
-    filtered = [active_tool, _tag(mcp_secret)]
+    filtered = [active_tool, tag_mcp_tool(mcp_secret)]
     setup = build_deferred_tool_setup(filtered, enabled=True)
     final = [*filtered, setup.tool_search_tool]
     model = _RecordingModel(messages=iter([AIMessage(content="done")] * 4))
@@ -97,28 +93,26 @@ def test_policy_excluded_mcp_tool_not_in_catalog():
 def test_fail_closed_when_mcp_survives_without_setup(monkeypatch):
     """Finding 2: simulate a wiring regression and assert it fails loudly.
 
-    ``_assemble_deferred`` lazy-imports ``build_deferred_tool_setup`` from the
-    source module, so patch it there (not on the agent module).
+    ``assemble_deferred_tools`` references ``build_deferred_tool_setup`` as a
+    module global, so patch it in ``tool_search`` (its home module).
     """
-    from deerflow.agents.lead_agent import agent as agentmod
-
     monkeypatch.setattr(
         "deerflow.tools.builtins.tool_search.build_deferred_tool_setup",
         lambda tools, *, enabled: DeferredToolSetup(None, frozenset(), None),
     )
     with pytest.raises(RuntimeError, match="fail-closed"):
-        agentmod._assemble_deferred([_tag(mcp_secret)], enabled=True)
+        assemble_deferred_tools([tag_mcp_tool(mcp_secret)], enabled=True)
 
 
 def test_subagent_reentry_does_not_touch_lead_state():
     """#2884: building a second (subagent) setup must not affect the lead's
     middleware. With no shared registry/ContextVar, the lead middleware depends
     only on its own deferred_names + the passed state."""
-    lead_setup = build_deferred_tool_setup([active_tool, _tag(mcp_secret)], enabled=True)
+    lead_setup = build_deferred_tool_setup([active_tool, tag_mcp_tool(mcp_secret)], enabled=True)
     mw = DeferredToolFilterMiddleware(lead_setup.deferred_names, lead_setup.catalog_hash)
 
     # Simulate a subagent build re-entering tool assembly with its own setup.
-    _ = build_deferred_tool_setup([_tag(mcp_secret)], enabled=True)
+    _ = build_deferred_tool_setup([tag_mcp_tool(mcp_secret)], enabled=True)
 
     class _Req:
         def __init__(self):
@@ -150,12 +144,10 @@ def _make_skill(allowed_tools):
 
 def test_policy_denied_mcp_yields_no_tool_search_end_to_end():
     """An allowlist that denies the MCP tool gates it end-to-end: after the real
-    policy filter no MCP tool survives, so ``_assemble_deferred`` adds no
+    policy filter no MCP tool survives, so ``assemble_deferred_tools`` adds no
     tool_search (and does not fail-closed, because no MCP tool leaked through)."""
-    from deerflow.agents.lead_agent import agent as agentmod
-
-    filtered = filter_tools_by_skill_allowed_tools([active_tool, _tag(mcp_secret)], [_make_skill(["active_tool"])])
-    final_tools, setup = agentmod._assemble_deferred(filtered, enabled=True)
+    filtered = filter_tools_by_skill_allowed_tools([active_tool, tag_mcp_tool(mcp_secret)], [_make_skill(["active_tool"])])
+    final_tools, setup = assemble_deferred_tools(filtered, enabled=True)
 
     assert [t.name for t in final_tools] == ["active_tool"]
     assert "tool_search" not in {t.name for t in final_tools}
@@ -171,11 +163,9 @@ def test_tool_search_appended_after_policy_but_never_exposes_denied_tool():
     is derived from the already policy-filtered list — so it can never expose a
     tool the allowlist denied. Locks that contract so the ordering cannot regress.
     """
-    from deerflow.agents.lead_agent import agent as agentmod
-
     allowed = ["active_tool", "mcp_secret"]  # permits the MCP tool, does NOT list tool_search
-    filtered = filter_tools_by_skill_allowed_tools([active_tool, _tag(mcp_secret)], [_make_skill(allowed)])
-    final_tools, setup = agentmod._assemble_deferred(filtered, enabled=True)
+    filtered = filter_tools_by_skill_allowed_tools([active_tool, tag_mcp_tool(mcp_secret)], [_make_skill(allowed)])
+    final_tools, setup = assemble_deferred_tools(filtered, enabled=True)
 
     names = {t.name for t in final_tools}
     assert "tool_search" in names  # appended despite not being in the allowlist

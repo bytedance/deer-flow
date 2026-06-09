@@ -85,7 +85,7 @@ def main() -> int:
             display_name=f"{llm.provider.display_name} / {llm.model_name}",
             api_key_field=llm.provider.api_key_field,
             env_var=llm.provider.env_var,
-            extra_model_config=llm.provider.extra_config or None,
+            extra_model_config=llm.provider.extra_config_for(llm.model_name) or None,
             base_url=llm.base_url,
             search_use=search_provider.use if search_provider else None,
             search_tool_name=search_provider.tool_name if search_provider else "web_search",

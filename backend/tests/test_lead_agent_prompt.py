@@ -373,3 +373,44 @@ def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog):
 
     assert warmed is False
     assert "Timed out waiting" in caplog.text
+
+
+def test_system_prompt_template_contains_file_editing_workflow_rule():
+    """The File Editing Workflow rule must remain in the system prompt
+    template so the planner picks the right tool (str_replace for edits,
+    write_file + append=True for long new content) and avoids mid-stream
+    chunk-gap timeouts on oversized single-shot writes. See issue #3189
+    / PR #3195.
+
+    We deliberately do NOT assert on any specific byte / word threshold
+    here — that would re-introduce the docstring-lock-in pattern the
+    reviewers flagged. The numeric cap lives in the server-side guard
+    (see test_write_file_tool_size_guard.py), which is where it belongs.
+    """
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    # Section anchor — keeps the rule discoverable in the assembled prompt.
+    assert "File Editing Workflow" in template
+    # Behavioural anchors — if either of these disappears, the model will
+    # silently regress to single-shot write_file calls for long content.
+    assert "str_replace" in template
+    assert "append=True" in template
+
+
+def test_system_prompt_template_preserves_placeholders():
+    """Ensure the chunking-rule edit didn't drop any f-string placeholder
+    consumed by apply_prompt_template(). A missing placeholder would
+    crash prompt rendering at runtime.
+    """
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    for ph in (
+        "{agent_name}",
+        "{soul}",
+        "{self_update_section}",
+        "{subagent_thinking}",
+        "{skills_section}",
+        "{deferred_tools_section}",
+        "{subagent_section}",
+        "{acp_section}",
+        "{subagent_reminder}",
+    ):
+        assert ph in template, f"placeholder {ph} accidentally removed"

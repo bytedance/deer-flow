@@ -20,6 +20,7 @@ from langchain_core.tools import tool as as_tool
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 
 @as_tool
@@ -40,11 +41,6 @@ def mcp_other(x: str) -> str:
     return x
 
 
-def _tag(t):
-    t.metadata = {**(t.metadata or {}), "deerflow_mcp": True}
-    return t
-
-
 def test_tool_search_promotes_into_next_turn():
     bound: list[list[str]] = []
 
@@ -53,7 +49,7 @@ def test_tool_search_promotes_into_next_turn():
             bound.append([getattr(t, "name", None) for t in tools])
             return self
 
-    setup = build_deferred_tool_setup([active_tool, _tag(mcp_calc), _tag(mcp_other)], enabled=True)
+    setup = build_deferred_tool_setup([active_tool, tag_mcp_tool(mcp_calc), tag_mcp_tool(mcp_other)], enabled=True)
     turn1 = AIMessage(content="", tool_calls=[{"name": "tool_search", "args": {"query": "select:mcp_calc"}, "id": "c1", "type": "tool_call"}])
     turn2 = AIMessage(content="done")
     model = RecordingModel(messages=iter([turn1, turn2]))

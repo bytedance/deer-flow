@@ -121,11 +121,17 @@ class TestExternalize:
                 assert f.read() == "full content here"
 
     def test_returns_none_on_invalid_path(self):
+        # ``/dev/null`` is a character device on both Linux and macOS, so
+        # ``os.makedirs`` cannot create any subdirectory under it for any
+        # user (including root). The previously-used ``/nonexistent/...``
+        # path was silently created by ``mkdir -p`` when the test process
+        # ran as root inside the CI container, which made this test fail
+        # in CI independently of the externalization logic under test.
         path = _externalize(
             "data",
             tool_name="test",
             tool_call_id="tc-1",
-            outputs_path="/nonexistent/path/that/should/not/exist",
+            outputs_path="/dev/null/cannot-mkdir-here",
             storage_subdir=".tool-results",
         )
         assert path is None
@@ -370,7 +376,7 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/nonexistent/impossible/path")
+        req = _make_request(outputs_path="/dev/null/cannot-mkdir-here")
 
         result = mw.wrap_tool_call(req, lambda _: msg)
 
@@ -888,3 +894,331 @@ class TestConfigVersion:
             assert tool_output["enabled"] is True
             assert tool_output["externalize_min_chars"] == 12000
             assert "read_file" in tool_output["exempt_tools"]
+
+
+# ===========================================================================
+# externalize into sandbox for non-mounted (remote) sandboxes
+# ===========================================================================
+
+
+class _FakeSandbox:
+    """In-memory stand-in for a Sandbox. Records calls and supports failure injection."""
+
+    def __init__(self, *, write_ok: bool = True, check_result: str = "OK") -> None:
+        self.commands: list[str] = []
+        self.writes: list[tuple[str, str]] = []
+        self._write_ok = write_ok
+        self._check_result = check_result
+
+    def execute_command(self, command: str) -> str:
+        self.commands.append(command)
+        if command.startswith("test -s"):
+            return self._check_result
+        return ""
+
+    def write_file(self, path: str, content: str, append: bool = False) -> None:
+        if not self._write_ok:
+            raise RuntimeError("simulated write failure")
+        self.writes.append((path, content))
+
+
+class _FakeProvider:
+    """Minimal SandboxProvider stand-in for monkeypatching get_sandbox_provider."""
+
+    def __init__(self, *, uses_thread_data_mounts: bool, sandbox: _FakeSandbox | None = None) -> None:
+        self.uses_thread_data_mounts = uses_thread_data_mounts
+        self._sandbox = sandbox
+
+    def get(self, sandbox_id: str):
+        return self._sandbox
+
+
+class TestExternalizeToSandbox:
+    def test_writes_and_returns_virtual_path(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-1",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is not None
+        assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
+        assert result.endswith(".log")
+        assert any(c.startswith("mkdir -p ") for c in sb.commands)
+        assert any(c.startswith("test -s ") for c in sb.commands)
+        assert sb.writes and sb.writes[0][0] == result
+        assert sb.writes[0][1] == "x" * 100
+
+    def test_returns_none_when_write_raises(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="web_fetch",
+            tool_call_id="tc-2",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(write_ok=False),
+        )
+        assert result is None
+
+    def test_returns_none_when_validation_fails(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(check_result="MISSING"),
+        )
+        assert result is None
+
+    def test_rejects_unsafe_storage_subdir(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-4",
+                storage_subdir="../escape",
+                sandbox=sb,
+            )
+            is None
+        )
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-5",
+                storage_subdir="/abs/path",
+                sandbox=sb,
+            )
+            is None
+        )
+        # Sandbox must not be touched when the subdir is rejected up-front.
+        assert sb.commands == []
+        assert sb.writes == []
+
+    def test_default_extension_for_unknown_tool(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "data",
+            tool_name="unknown_tool",
+            tool_call_id="tc-6",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(),
+        )
+        assert result is not None and result.endswith(".txt")
+
+
+class TestBudgetContentSandboxDispatch:
+    """_budget_content must branch on uses_thread_data_mounts (issue #3416)."""
+
+    def test_mounted_sandbox_uses_host_disk(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=True, sandbox=sb),
+        )
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-m",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        # Mounted path must NOT touch the sandbox.
+        assert sb.commands == []
+        assert sb.writes == []
+        # And the host file must exist.
+        storage_dir = tmp_path / ".tool-results"
+        assert storage_dir.is_dir()
+        assert len(list(storage_dir.iterdir())) == 1
+
+    def test_non_mounted_sandbox_writes_to_sandbox(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-n",
+            outputs_path=str(tmp_path),  # present, but ignored on non-mounted path
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        # Non-mounted path MUST write into the sandbox.
+        assert sb.writes and sb.writes[0][1] == "x" * 500
+        # And MUST NOT touch the host.
+        assert not (tmp_path / ".tool-results").exists()
+
+    def test_non_mounted_without_sandbox_falls_back(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=None),
+        )
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=500,
+            fallback_head_chars=100,
+            fallback_tail_chars=50,
+        )
+        result = mod._budget_content(
+            "x" * 5000,
+            tool_name="web_search",
+            tool_call_id="tc-fb",
+            outputs_path=None,
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Persistent storage unavailable" in result
+
+
+class TestResolveSandbox:
+    def test_returns_none_when_no_state(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=None)
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_state_has_no_sandbox(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_sandbox_id_missing(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {}}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_sandbox_from_provider(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_none_on_provider_exception(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class _Boom:
+            def get(self, sandbox_id):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", lambda: _Boom())
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-x"}}))
+        assert mod._resolve_sandbox(req) is None
+
+
+class TestWrapToolCallSandboxIntegration:
+    """End-to-end via wrap_tool_call for the non-mounted path (issue #3416)."""
+
+    def test_oversized_output_lands_in_sandbox_not_host(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="remote_executor")
+        # Request carries BOTH outputs_path (host) AND a sandbox_id; the
+        # non-mounted branch must ignore outputs_path and write into sandbox.
+        req = SimpleNamespace(
+            tool_call={"name": "remote_executor", "id": "tc-1"},
+            runtime=SimpleNamespace(
+                state={
+                    "thread_data": {"outputs_path": str(tmp_path)},
+                    "sandbox": {"sandbox_id": "sb-1"},
+                }
+            ),
+        )
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result.content
+        assert sb.writes and sb.writes[0][1] == content
+        # Host disk must not have been written.
+        assert not (tmp_path / ".tool-results").exists()
+
+
+class TestBudgetContentNoSandboxNoProviderCall:
+    """Without a sandbox, _budget_content must NOT call get_sandbox_provider.
+
+    This is the legacy host-disk path (and the CI-without-config.yaml path):
+    touching the provider would raise and force inline fallback, regressing
+    issue #3416's fix and breaking environments that never opt into sandbox.
+    """
+
+    def test_no_provider_call_when_sandbox_absent(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        called = {"n": 0}
+
+        def boom():
+            called["n"] += 1
+            raise RuntimeError("provider must not be called on the legacy path")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", boom)
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-legacy",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert called["n"] == 0
+        assert (tmp_path / ".tool-results").is_dir()
