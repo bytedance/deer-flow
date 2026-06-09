@@ -1,5 +1,15 @@
 # 陕西农信 AI 办公助手 SOUL 落地实施计划
 
+> ⚠️ **状态：DESIGN ONLY — v2 未来工作，不在 v1 实施范围**
+>
+> 2026-06-09 决策：v1 仅交付 SOUL.md + config.yaml 部署产物（见 `docs/superpowers/deployment/`），**不实施本计划中的 middleware 改造**。
+>
+> 原因：行方 v1 部署可能不采用 DeerFlow 运行时；middleware 改造属于平台深度集成，待行方确认后再激活本计划。
+>
+> 本文件保留作为 v2 设计参考。任何 v2 实施必须重新走 brainstorming → writing-plans 流程。
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 DeerFlow 上落地陕西农信 AI 办公助手的 SOUL.md 配置 + 3 个配套 guard middleware（HardLimitGuard / ConfirmBeforeWrite / AuditLogger），TDD 推进，每个 task 结束都提交。
