@@ -3,24 +3,11 @@ name: markitdown
 license: MIT
 source: https://github.com/microsoft/markitdown
 description: |
-  Convert a single uploaded document to clean Markdown for LLM consumption.
-  Primary formats with non-obvious gotchas: PDF, PPTX, DOCX, JPG, PNG.
-  Also supports XLSX, HTML, CSV, EPUB, JSON, XML.
-  OCR for images and scanned PDFs is routed to the internal MinerU service
-  (env: MINERU_API_URL, MINERU_API_KEY).
-  markitdown is pre-installed in the sandbox — call directly.
-  Output: writes to /mnt/user-data/outputs/<stem>.md AND prints the body
-  to stdout so the agent (and user) can see the full MD inline.
-  For ≥ 500-line results the agent switches to `present_files` to share.
+  Convert an uploaded document to clean Markdown. Supports PDF, PPTX, DOCX, JPG, PNG (these have non-obvious gotchas); XLSX/HTML/CSV/EPUB/JSON/XML are also fine. Images and scanned PDFs are OCR'd via the internal MinerU service.
 
-  Triggers: "把这份 PDF 转成 markdown", "convert this to md",
-  "extract text from this PPT/DOCX", "OCR this screenshot",
-  "总结这个文档", "识别这个文件", "把这个截图读一下",
-  "读这个扫描件".
+  Triggers: "把这份 PDF 转成 markdown", "convert this to md", "OCR this screenshot", "把这个截图读一下", "识别这个文件", "读这个扫描件", "总结这个文档", "extract text from this PDF/PPTX/DOCX".
 
-  Do NOT use for: audio files, video files, YouTube URLs,
-  batch-convert a folder, or anything already in text form
-  (use Read tool directly).
+  Do NOT use for: audio/video files, YouTube URLs, batch-converting a folder, or files already in text form (use Read tool).
 ---
 
 # MarkItDown Skill
