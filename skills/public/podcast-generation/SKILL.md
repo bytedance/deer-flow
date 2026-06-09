@@ -64,6 +64,7 @@ Parameters:
 > - The script handles all TTS API calls and audio generation internally.
 > - Do NOT read the Python file, just call it with the parameters.
 > - Always include `--transcript-file` to generate a readable transcript for the user.
+> - The TTS provider and its concurrency are selected automatically from environment variables — you do not choose or tune them.
 
 ## Script JSON Format
 
@@ -172,8 +173,8 @@ After generation:
 ## Requirements
 
 The following environment variables must be set:
-- `VOLCENGINE_TTS_APPID`: Volcengine TTS application ID
-- `VOLCENGINE_TTS_ACCESS_TOKEN`: Volcengine TTS access token
+- For Volcengine: `VOLCENGINE_TTS_APPID` and `VOLCENGINE_TTS_ACCESS_TOKEN`
+- For MiniMax: `MINIMAX_API_KEY`
 - `VOLCENGINE_TTS_CLUSTER`: Volcengine TTS cluster (optional, defaults to "volcano_tts")
 
 ## Notes
@@ -183,3 +184,20 @@ The following environment variables must be set:
 - Technical content should be simplified for audio accessibility in the script
 - Complex notations (formulas, code) should be translated to plain language in the script
 - Long content may result in longer podcasts
+
+## Providers (Volcengine / MiniMax)
+
+Auto-selected by environment variables:
+
+- `VOLCENGINE_TTS_APPID` + `VOLCENGINE_TTS_ACCESS_TOKEN` set → Volcengine TTS (default).
+- Only `MINIMAX_API_KEY` set → MiniMax TTS (`/v1/t2a_v2`).
+- Force with `PODCAST_GENERATION_PROVIDER=volcengine|minimax`.
+
+MiniMax overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
+`MINIMAX_TTS_MODEL` (default `speech-2.6-hd`), `MINIMAX_TTS_VOICE_MALE`
+(default `male-qn-qingse`), `MINIMAX_TTS_VOICE_FEMALE` (default `female-tianmei`).
+
+Concurrency is owned by each provider internally — MiniMax runs single-threaded
+to reduce rate-limit failures, Volcengine uses 4 workers. There is no
+caller-facing concurrency knob; transient rate limits are handled by automatic
+retry with backoff.

@@ -32,6 +32,7 @@ class _FakeRunManager:
         self.store = store
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
+        self.shutdown_calls: int = 0
         _FakeRunManager.instances.append(self)
 
     async def reconcile_orphaned_inflight_runs(self, *, error: str, before: str | None = None):
@@ -41,6 +42,11 @@ class _FakeRunManager:
     async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 100):
         self.list_by_thread_calls.append({"thread_id": thread_id, "user_id": user_id, "limit": limit})
         return self.latest_by_thread.get(thread_id, self.recovered_runs[:limit])
+
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        # No in-flight tasks in these startup-recovery tests; langgraph_runtime
+        # drains the manager on teardown, so the double must accept the call.
+        self.shutdown_calls += 1
 
 
 class _FakeThreadStore:
