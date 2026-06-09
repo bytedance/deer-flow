@@ -586,7 +586,11 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+        memory_content = format_memory_for_injection(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            use_tiktoken=(config.token_counting == "tiktoken"),
+        )
 
         if not memory_content.strip():
             return ""
