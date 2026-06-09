@@ -297,7 +297,12 @@ if [ -z "$DEER_FLOW_HOME" ]; then
     export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
 fi
 
-mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME"
+# `backend/sandbox` is excluded from uvicorn's reload watcher below. uvicorn only
+# excludes an absolute path directly when it already exists as a directory;
+# otherwise it globs the pattern, and Python 3.12's pathlib rejects absolute glob
+# patterns with NotImplementedError, crashing `make dev` on a fresh checkout
+# (#3459 / #3454). Creating it here keeps every absolute exclude on the is_dir path.
+mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"
 DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
 BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
 export DEER_FLOW_HOME
