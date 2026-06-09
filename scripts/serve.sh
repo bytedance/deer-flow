@@ -62,27 +62,185 @@ done
 
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
-_kill_port() {
+# Every deer-flow worktree (the main checkout + each linked worktree) hardcodes
+# the same dev ports (8001/3000/2026), so a service started from ANY of them
+# must be reclaimable from here — otherwise `make stop`/`make dev` in this
+# worktree can neither kill nor take over a port held by a sibling worktree.
+# DEERFLOW_ROOTS is that set of roots; processes living outside all of them
+# (e.g. an unrelated project on port 3000) are still never touched.
+# Sorted most-specific-first (longest path first): a linked worktree lives
+# under the main checkout, so both roots are substrings of its files — checking
+# the deeper root first attributes a reclaimed port to the right worktree.
+DEERFLOW_ROOTS="$(
+    {
+        printf '%s\n' "$REPO_ROOT"
+        git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null |
+            awk '/^worktree /{print $2}'
+    } | awk 'NF && !seen[$0]++ {print length($0)"\t"$0}' | sort -rn | sed 's/^[0-9]*\t//'
+)"
+
+# True if PID has an open file/cwd under any deer-flow worktree root. The
+# trailing slash keeps a sibling dir like ".../deer-flow-notes" from matching
+# the ".../deer-flow" root.
+_is_deerflow_pid() {
+    local pid=$1 files root
+    files=$(lsof -p "$pid" 2>/dev/null) || return 1
+    while IFS= read -r root; do
+        [ -n "$root" ] || continue
+        case "$files" in
+            *"$root"/*) return 0 ;;
+        esac
+    done <<< "$DEERFLOW_ROOTS"
+    return 1
+}
+
+# Report ports about to be reclaimed from a *different* worktree, so stopping
+# (or starting, which stops first) isn't silently killing someone else's run.
+_report_reclaimed_ports() {
+    local port pid files root owner
+    for port in 8001 3000 2026; do
+        for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
+            _is_deerflow_pid "$pid" || continue
+            files=$(lsof -p "$pid" 2>/dev/null)
+            case "$files" in *"$REPO_ROOT"/*) continue ;; esac  # this worktree — normal
+            owner=""
+            while IFS= read -r root; do
+                [ -n "$root" ] || continue
+                case "$files" in *"$root"/*) owner="$root"; break ;; esac
+            done <<< "$DEERFLOW_ROOTS"
+            echo "  ↻ Reclaiming port $port from another worktree: ${owner:-?}"
+            break
+        done
+    done
+}
+
+_kill_repo_processes() {
+    local pattern=$1
+    local pid
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_deerflow_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f "$pattern" 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+    fi
+}
+
+_kill_repo_port() {
     local port=$1
     local pid
-    pid=$(lsof -ti :"$port" 2>/dev/null) || true
-    if [ -n "$pid" ]; then
-        kill -9 $pid 2>/dev/null || true
+    local pids=""
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_deerflow_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
+    fi
+}
+
+_is_port_listening() {
+    local port=$1
+
+    if command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+_is_repo_nginx_pid() {
+    local pid=$1
+    local command
+    local args
+
+    command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    case "$command" in
+        nginx|*/nginx) ;;
+        *) return 1 ;;
+    esac
+
+    args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
+    local root
+    while IFS= read -r root; do
+        [ -n "$root" ] || continue
+        case "$args" in
+            *"$root"/docker/nginx/nginx.local.conf*|*"$root"/*) return 0 ;;
+        esac
+    done <<< "$DEERFLOW_ROOTS"
+
+    _is_deerflow_pid "$pid"
+}
+
+_kill_repo_nginx() {
+    local pid
+    local pids=""
+
+    if [ -f "$REPO_ROOT/logs/nginx.pid" ]; then
+        read -r pid < "$REPO_ROOT/logs/nginx.pid" || true
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            pids="$pids $pid"
+        fi
+    fi
+
+    while IFS= read -r pid; do
+        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
+            case " $pids " in
+                *" $pid "*) ;;
+                *) pids="$pids $pid" ;;
+            esac
+        fi
+    done < <(pgrep -f nginx 2>/dev/null || true)
+
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
     fi
 }
 
 stop_all() {
     echo "Stopping all services..."
-    pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
-    pkill -f "next dev" 2>/dev/null || true
-    pkill -f "next start" 2>/dev/null || true
-    pkill -f "next-server" 2>/dev/null || true
+    _report_reclaimed_ports
+    _kill_repo_processes "uvicorn app.gateway.app:app"
+    _kill_repo_processes "next dev"
+    _kill_repo_processes "next start"
+    _kill_repo_processes "next-server"
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
-    pkill -9 nginx 2>/dev/null || true
-    # Force-kill any survivors still holding the service ports
-    _kill_port 8001
-    _kill_port 3000
+    _kill_repo_nginx
+    # Force-kill any survivors still holding the service ports. 2026 is included
+    # so a lingering nginx (or any deer-flow process) that _kill_repo_nginx did
+    # not match by name still gets reclaimed — otherwise `make dev` fails its
+    # nginx port preflight.
+    _kill_repo_port 8001
+    _kill_repo_port 3000
+    _kill_repo_port 2026
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -127,9 +285,26 @@ else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
 fi
 
+# Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
+# so pin DeerFlow-owned state to the expected backend runtime directory and
+# create it before uvicorn builds its reload exclude filter.
+if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
+    export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
+fi
+
+BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
+if [ -z "$DEER_FLOW_HOME" ]; then
+    export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
+fi
+
+mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME"
+DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
+BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
+export DEER_FLOW_HOME
+
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
     GATEWAY_EXTRA_FLAGS=""
 fi
@@ -216,13 +391,15 @@ echo ""
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
 cleanup() {
+    local status="${1:-0}"
     trap - INT TERM
     echo ""
     stop_all
-    exit 0
+    exit "$status"
 }
 
-trap cleanup INT TERM
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 # ── Helper: start a service ──────────────────────────────────────────────────
 
@@ -230,6 +407,12 @@ trap cleanup INT TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+
+    if _is_port_listening "$port"; then
+        echo "✗ $name cannot start because port $port is already in use."
+        echo "  If it belongs to this worktree, run 'make stop'; otherwise free the port manually."
+        cleanup 1
+    fi
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
@@ -242,7 +425,7 @@ run_service() {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup
+        cleanup 1
     }
     echo "✓ $name started on localhost:$port"
 }

@@ -15,11 +15,19 @@ import httpx
 from langgraph_sdk.errors import ConflictError
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    PENDING_CLARIFICATION_METADATA_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
+from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -154,13 +162,6 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     return normalized
 
 
-def _strip_loop_warning_text(text: str) -> str:
-    """Remove middleware-authored loop warning lines from display text."""
-    if "[LOOP DETECTED]" not in text:
-        return text
-    return "\n".join(line for line in text.splitlines() if "[LOOP DETECTED]" not in line).strip()
-
-
 def _extract_response_text(result: dict | list) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
@@ -170,7 +171,6 @@ def _extract_response_text(result: dict | list) -> str:
     Handles special cases:
     - Regular AI text responses
     - Clarification interrupts (``ask_clarification`` tool messages)
-    - Strips loop-detection warnings attached to tool-call AI messages
     """
     if isinstance(result, list):
         messages = result
@@ -189,6 +189,8 @@ def _extract_response_text(result: dict | list) -> str:
 
         # Stop at the last human message — anything before it is a previous turn
         if msg_type == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
 
         # Check for tool messages from ask_clarification (interrupt case)
@@ -200,12 +202,7 @@ def _extract_response_text(result: dict | list) -> str:
         # Regular AI message with text content
         if msg_type == "ai":
             content = msg.get("content", "")
-            has_tool_calls = bool(msg.get("tool_calls"))
             if isinstance(content, str) and content:
-                if has_tool_calls:
-                    content = _strip_loop_warning_text(content)
-                    if not content:
-                        continue
                 return content
             # content can be a list of content blocks
             if isinstance(content, list):
@@ -216,11 +213,57 @@ def _extract_response_text(result: dict | list) -> str:
                     elif isinstance(block, str):
                         parts.append(block)
                 text = "".join(parts)
-                if has_tool_calls:
-                    text = _strip_loop_warning_text(text)
                 if text:
                     return text
     return ""
+
+
+def _messages_from_result(result: dict | list) -> list[Any]:
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        messages = result.get("messages", [])
+        if isinstance(messages, list):
+            return messages
+    return []
+
+
+def _current_turn_messages(result: dict | list) -> list[dict[str, Any]]:
+    messages = _messages_from_result(result)
+    current_turn: list[dict[str, Any]] = []
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "human":
+            break
+        current_turn.append(msg)
+    current_turn.reverse()
+    return current_turn
+
+
+def _has_current_turn_clarification(result: dict | list) -> bool:
+    """Return True only when the current turn's final result is clarification."""
+    for msg in reversed(_current_turn_messages(result)):
+        msg_type = msg.get("type")
+        if msg_type == "tool":
+            return msg.get("name") == "ask_clarification"
+        if msg_type == "ai":
+            content = msg.get("content")
+            if isinstance(content, str):
+                if content:
+                    return False
+            elif content:
+                return False
+            if msg.get("tool_calls"):
+                return False
+    return False
+
+
+def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
+    metadata = _slim_metadata(base_metadata)
+    if pending_clarification:
+        metadata[PENDING_CLARIFICATION_METADATA_KEY] = True
+    return metadata
 
 
 def _extract_text_content(content: Any) -> str:
@@ -336,6 +379,8 @@ def _extract_artifacts(result: dict | list) -> list[str]:
             continue
         # Stop at the last human message — anything before it is a previous turn
         if msg.get("type") == "human":
+            if _is_hidden_human_control_message(msg):
+                continue
             break
         # Look for AI messages with present_files tool calls
         if msg.get("type") == "ai":
@@ -346,6 +391,18 @@ def _extract_artifacts(result: dict | list) -> list[str]:
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
     return artifacts
+
+
+def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
+    """Return whether a human message is an internal control message hidden from UI."""
+    if msg.get("type") != "human":
+        return False
+
+    additional_kwargs = msg.get("additional_kwargs")
+    if not isinstance(additional_kwargs, Mapping):
+        return False
+
+    return additional_kwargs.get("hide_from_ui") is True
 
 
 def _format_artifact_text(artifacts: list[str]) -> str:
@@ -646,12 +703,20 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
+        # ``user_id`` drives user-scoped filesystem buckets that only accept
+        # ``[A-Za-z0-9_-]``, so normalize the channel id and keep the raw value
+        # under ``channel_user_id`` for platform-facing lookups.
+        run_context_identity: dict[str, Any] = {"thread_id": thread_id}
+        if msg.user_id:
+            run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
+            run_context_identity["channel_user_id"] = msg.user_id
+
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
             self._default_session.get("context"),
             channel_layer.get("context"),
             user_layer.get("context"),
-            {"thread_id": thread_id},
+            run_context_identity,
         )
 
         # Custom agents are implemented as lead_agent + agent_name context.
@@ -865,6 +930,7 @@ class ChannelManager:
                 raise
 
         response_text = _extract_response_text(result)
+        pending_clarification = _has_current_turn_clarification(result)
         artifacts = _extract_artifacts(result)
 
         logger.info(
@@ -890,7 +956,7 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
-            metadata=_slim_metadata(msg.metadata),
+            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -952,7 +1018,7 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
-                        metadata=_slim_metadata(msg.metadata),
+                        metadata=_response_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
@@ -966,6 +1032,7 @@ class ChannelManager:
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
+            pending_clarification = _has_current_turn_clarification(result)
             artifacts = _extract_artifacts(result)
             response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
@@ -997,7 +1064,7 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
-                    metadata=_slim_metadata(msg.metadata),
+                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
 

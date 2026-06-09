@@ -18,8 +18,10 @@ from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
+from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -29,6 +31,7 @@ from deerflow.config.summarization_config import SummarizationConfig, load_summa
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 
 load_dotenv()
@@ -83,15 +86,27 @@ def apply_logging_level(name: str | None) -> None:
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
-    log_level: str = Field(default="info", description="Logging level for deerflow and app modules (debug/info/warning/error); third-party libraries are not affected")
+    log_level: str = Field(
+        default="info",
+        description=format_field_description(
+            "log_level",
+            field_doc="Logging level for deerflow and app modules (debug/info/warning/error); third-party libraries are not affected.",
+        ),
+    )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
-    sandbox: SandboxConfig = Field(description="Sandbox configuration")
+    sandbox: SandboxConfig = Field(
+        description=format_field_description(
+            "sandbox",
+            field_doc="Sandbox provider configuration (local filesystem or Docker-based aio sandbox).",
+        ),
+    )
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
+    tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
@@ -102,11 +117,36 @@ class AppConfig(BaseModel):
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
+    safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     model_config = ConfigDict(extra="allow")
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Unified database backend configuration")
-    run_events: RunEventsConfig = Field(default_factory=RunEventsConfig, description="Run event storage configuration")
-    checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
-    stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
+    database: DatabaseConfig = Field(
+        default_factory=DatabaseConfig,
+        description=format_field_description(
+            "database",
+            field_doc="Unified database backend for run/feedback metadata (memory, sqlite, or postgres).",
+        ),
+    )
+    run_events: RunEventsConfig = Field(
+        default_factory=RunEventsConfig,
+        description=format_field_description(
+            "run_events",
+            field_doc="Run-event store backend (memory for dev, db for production queries, jsonl for lightweight single-node persistence).",
+        ),
+    )
+    checkpointer: CheckpointerConfig | None = Field(
+        default=None,
+        description=format_field_description(
+            "checkpointer",
+            field_doc="LangGraph state-persistence checkpointer configuration.",
+        ),
+    )
+    stream_bridge: StreamBridgeConfig | None = Field(
+        default=None,
+        description=format_field_description(
+            "stream_bridge",
+            field_doc="Stream bridge connecting agent workers to SSE endpoints.",
+        ),
+    )
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:

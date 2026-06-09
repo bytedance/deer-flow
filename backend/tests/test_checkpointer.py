@@ -2,7 +2,9 @@
 
 import sys
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,12 +12,14 @@ import pytest
 import deerflow.config.app_config as app_config_module
 from deerflow.config.checkpointer_config import (
     CheckpointerConfig,
+    ensure_config_loaded,
     get_checkpointer_config,
     load_checkpointer_config_from_dict,
     set_checkpointer_config,
 )
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
+from deerflow.runtime.store import get_store, reset_store
 from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
 
 
@@ -25,10 +29,90 @@ def reset_state():
     app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
+    reset_store()
     yield
     app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
+    reset_store()
+
+
+class _BlockingSingletonContext:
+    def __init__(self, value: object, entered: Event, release: Event, stats: dict[str, object]):
+        self._value = value
+        self._entered = entered
+        self._release = release
+        self._stats = stats
+
+    def __enter__(self):
+        with self._stats["lock"]:
+            self._stats["enters"] += 1
+            self._entered.set()
+        assert self._release.wait(timeout=3), "timed out waiting to release singleton initialization"
+        return self._value
+
+    def __exit__(self, exc_type, exc, tb):
+        with self._stats["lock"]:
+            self._stats["exits"] += 1
+        return False
+
+
+class _BlockingSingletonFactory:
+    def __init__(self):
+        self.value = object()
+        self.entered = Event()
+        self.release = Event()
+        self.stats = {"enters": 0, "exits": 0, "lock": Lock()}
+
+    def context_manager(self, _config):
+        return _BlockingSingletonContext(self.value, self.entered, self.release, self.stats)
+
+    def enter_count(self) -> int:
+        with self.stats["lock"]:
+            return self.stats["enters"]
+
+    def exit_count(self) -> int:
+        with self.stats["lock"]:
+            return self.stats["exits"]
+
+
+class _TrackingLock:
+    def __init__(self):
+        self._lock = Lock()
+        self.acquired = Event()
+
+    def acquire(self, *args, **kwargs):
+        acquired = self._lock.acquire(*args, **kwargs)
+        if acquired:
+            self.acquired.set()
+        return acquired
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
+def _call_getter_concurrently(getter, workers: int = 8) -> list[object]:
+    ready = Barrier(workers + 1)
+
+    def worker():
+        ready.wait(timeout=3)
+        return getter()
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(worker) for _ in range(workers)]
+        ready.wait(timeout=3)
+        return [future.result(timeout=3) for future in futures]
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +150,26 @@ class TestCheckpointerConfig:
         load_checkpointer_config_from_dict({"type": "memory"})
         set_checkpointer_config(None)
         assert get_checkpointer_config() is None
+
+    def test_ensure_config_loaded_loads_app_config_when_uninitialized(self):
+        def fake_get_app_config():
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with patch("deerflow.config.app_config.get_app_config", side_effect=fake_get_app_config) as mock_get_app_config:
+            ensure_config_loaded()
+
+        mock_get_app_config.assert_called_once()
+        config = get_checkpointer_config()
+        assert config is not None
+        assert config.type == "memory"
+
+    def test_ensure_config_loaded_skips_explicit_config(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+
+        with patch("deerflow.config.app_config.get_app_config") as mock_get_app_config:
+            ensure_config_loaded()
+
+        mock_get_app_config.assert_not_called()
 
     def test_invalid_type_raises(self):
         with pytest.raises(Exception):
@@ -118,7 +222,7 @@ class TestGetCheckpointer:
         """get_checkpointer should return InMemorySaver when not configured."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        with patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
+        with patch("deerflow.config.app_config.get_app_config", side_effect=FileNotFoundError):
             cp = get_checkpointer()
         assert cp is not None
         assert isinstance(cp, InMemorySaver)
@@ -287,11 +391,148 @@ class TestGetCheckpointer:
         mock_saver_instance.setup.assert_called_once()
 
 
+class TestSyncSingletonThreadSafety:
+    def test_store_reset_clears_singleton(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        store1 = get_store()
+        reset_store()
+        store2 = get_store()
+        assert store1 is not store2
+
+    def test_concurrent_checkpointer_getter_creates_one_instance(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", side_effect=factory.context_manager):
+            futures_started = ThreadPoolExecutor(max_workers=1)
+            try:
+                result_future = futures_started.submit(_call_getter_concurrently, get_checkpointer)
+                assert factory.entered.wait(timeout=3)
+                factory.release.wait(timeout=0.05)
+                factory.release.set()
+                results = result_future.result(timeout=3)
+            finally:
+                futures_started.shutdown(wait=True)
+
+        assert all(result is factory.value for result in results)
+        assert factory.enter_count() == 1
+
+    def test_concurrent_store_getter_creates_one_instance(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with patch("deerflow.runtime.store.provider._sync_store_cm", side_effect=factory.context_manager):
+            futures_started = ThreadPoolExecutor(max_workers=1)
+            try:
+                result_future = futures_started.submit(_call_getter_concurrently, get_store)
+                assert factory.entered.wait(timeout=3)
+                factory.release.wait(timeout=0.05)
+                factory.release.set()
+                results = result_future.result(timeout=3)
+            finally:
+                futures_started.shutdown(wait=True)
+
+        assert all(result is factory.value for result in results)
+        assert factory.enter_count() == 1
+
+    def test_checkpointer_loads_config_outside_singleton_lock(self):
+        tracking_lock = _TrackingLock()
+
+        def fake_ensure_config_loaded():
+            assert not tracking_lock.locked()
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider._checkpointer_lock", tracking_lock),
+            patch("deerflow.runtime.checkpointer.provider.ensure_config_loaded", side_effect=fake_ensure_config_loaded),
+        ):
+            checkpointer = get_checkpointer()
+
+        assert checkpointer is not None
+        assert tracking_lock.acquired.is_set()
+
+    def test_store_loads_config_outside_singleton_lock(self):
+        tracking_lock = _TrackingLock()
+
+        def fake_ensure_config_loaded():
+            assert not tracking_lock.locked()
+            load_checkpointer_config_from_dict({"type": "memory"})
+
+        with (
+            patch("deerflow.runtime.store.provider._store_lock", tracking_lock),
+            patch("deerflow.runtime.store.provider.ensure_config_loaded", side_effect=fake_ensure_config_loaded),
+        ):
+            store = get_store()
+
+        assert store is not None
+        assert tracking_lock.acquired.is_set()
+
+    def test_checkpointer_reset_waits_for_initialization(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", side_effect=factory.context_manager),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            get_future = executor.submit(get_checkpointer)
+            assert factory.entered.wait(timeout=3)
+
+            reset_started = Event()
+
+            def reset_worker():
+                reset_started.set()
+                reset_checkpointer()
+
+            reset_future = executor.submit(reset_worker)
+            assert reset_started.wait(timeout=3)
+            factory.release.wait(timeout=0.05)
+
+            assert not reset_future.done()
+            assert factory.exit_count() == 0
+
+            factory.release.set()
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
+
+        assert factory.exit_count() == 1
+
+    def test_store_reset_waits_for_initialization(self):
+        load_checkpointer_config_from_dict({"type": "memory"})
+        factory = _BlockingSingletonFactory()
+
+        with (
+            patch("deerflow.runtime.store.provider._sync_store_cm", side_effect=factory.context_manager),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            get_future = executor.submit(get_store)
+            assert factory.entered.wait(timeout=3)
+
+            reset_started = Event()
+
+            def reset_worker():
+                reset_started.set()
+                reset_store()
+
+            reset_future = executor.submit(reset_worker)
+            assert reset_started.wait(timeout=3)
+            factory.release.wait(timeout=0.05)
+
+            assert not reset_future.done()
+            assert factory.exit_count() == 0
+
+            factory.release.set()
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
+
+        assert factory.exit_count() == 1
+
+
 class TestAsyncCheckpointer:
     @pytest.mark.anyio
     async def test_sqlite_creates_parent_dir_via_to_thread(self):
         """Async SQLite setup should move mkdir off the event loop."""
-        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+        from deerflow.runtime.checkpointer.async_provider import _prepare_sqlite_checkpointer_path, make_checkpointer
 
         mock_config = MagicMock()
         mock_config.checkpointer = CheckpointerConfig(type="sqlite", connection_string="relative/test.db")
@@ -310,20 +551,154 @@ class TestAsyncCheckpointer:
         with (
             patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
             patch.dict(sys.modules, {"langgraph.checkpoint.sqlite.aio": mock_module}),
-            patch("deerflow.runtime.checkpointer.async_provider.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
             patch(
-                "deerflow.runtime.checkpointer.async_provider.resolve_sqlite_conn_str",
+                "deerflow.runtime.checkpointer.async_provider.asyncio.to_thread",
+                new_callable=AsyncMock,
                 return_value="/tmp/resolved/test.db",
-            ),
+            ) as mock_to_thread,
         ):
             async with make_checkpointer() as saver:
                 assert saver is mock_saver
 
         mock_to_thread.assert_awaited_once()
         called_fn, called_path = mock_to_thread.await_args.args
-        assert called_fn.__name__ == "ensure_sqlite_parent_dir"
-        assert called_path == "/tmp/resolved/test.db"
+        assert called_fn is _prepare_sqlite_checkpointer_path
+        assert called_path == "relative/test.db"
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/resolved/test.db")
+        mock_saver.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_postgres_uses_connection_pool(self):
+        """Async postgres checkpointer should use AsyncConnectionPool, not a single connection."""
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        mock_config = MagicMock()
+        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db")
+
+        mock_saver = AsyncMock()
+
+        mock_saver_cls = MagicMock(return_value=mock_saver)
+
+        mock_pool_instance = AsyncMock()
+        mock_pool_instance.__aenter__.return_value = mock_pool_instance
+        mock_pool_instance.__aexit__.return_value = False
+
+        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
+        mock_pool_cls.check_connection = AsyncMock()
+        mock_dict_row = MagicMock()
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresSaver = mock_saver_cls
+
+        mock_psycopg_rows = MagicMock()
+        mock_psycopg_rows.dict_row = mock_dict_row
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg.rows": mock_psycopg_rows}),
+            patch.dict(sys.modules, {"psycopg_pool": MagicMock(AsyncConnectionPool=mock_pool_cls)}),
+        ):
+            # AsyncConnectionPool() is a callable that returns mock_pool_instance
+            # We need the constructor to be an async context manager
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        # Verify the pool was constructed with check Connection
+        mock_pool_cls.assert_called_once()
+        call_kwargs = mock_pool_cls.call_args
+        assert call_kwargs[0][0] == "postgresql://localhost/db"
+        assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+
+        # Verify saver was constructed with the pool (not via from_conn_string)
+        mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
+        mock_saver.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_database_postgres_uses_connection_pool(self):
+        """Unified database postgres path should use AsyncConnectionPool with keepalive."""
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        db_config = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db")
+        mock_config = MagicMock()
+        mock_config.checkpointer = None
+        mock_config.database = db_config
+
+        mock_saver = AsyncMock()
+
+        mock_saver_cls = MagicMock(return_value=mock_saver)
+
+        mock_pool_instance = AsyncMock()
+        mock_pool_instance.__aenter__.return_value = mock_pool_instance
+        mock_pool_instance.__aexit__.return_value = False
+
+        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
+        mock_pool_cls.check_connection = AsyncMock()
+        mock_dict_row = MagicMock()
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresSaver = mock_saver_cls
+
+        mock_psycopg_rows = MagicMock()
+        mock_psycopg_rows.dict_row = mock_dict_row
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg.rows": mock_psycopg_rows}),
+            patch.dict(sys.modules, {"psycopg_pool": MagicMock(AsyncConnectionPool=mock_pool_cls)}),
+        ):
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        mock_pool_cls.assert_called_once()
+        call_kwargs = mock_pool_cls.call_args
+        assert call_kwargs[0][0] == "postgresql://localhost/db"
+        assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+
+        mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
+        mock_saver.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_database_sqlite_creates_parent_dir_via_to_thread(self):
+        """Unified database SQLite setup should also move path IO off the event loop."""
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.runtime.checkpointer.async_provider import _prepare_database_sqlite_checkpointer_path, make_checkpointer
+
+        db_config = DatabaseConfig(backend="sqlite", sqlite_dir="relative-data")
+        mock_config = MagicMock()
+        mock_config.checkpointer = None
+        mock_config.database = db_config
+
+        mock_saver = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_saver
+        mock_cm.__aexit__.return_value = False
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string.return_value = mock_cm
+
+        mock_module = MagicMock()
+        mock_module.AsyncSqliteSaver = mock_saver_cls
+
+        with (
+            patch("deerflow.runtime.checkpointer.async_provider.get_app_config", return_value=mock_config),
+            patch.dict(sys.modules, {"langgraph.checkpoint.sqlite.aio": mock_module}),
+            patch(
+                "deerflow.runtime.checkpointer.async_provider.asyncio.to_thread",
+                new_callable=AsyncMock,
+                return_value="/tmp/data/deerflow.db",
+            ) as mock_to_thread,
+        ):
+            async with make_checkpointer() as saver:
+                assert saver is mock_saver
+
+        mock_to_thread.assert_awaited_once()
+        called_fn, called_db_config = mock_to_thread.await_args.args
+        assert called_fn is _prepare_database_sqlite_checkpointer_path
+        assert called_db_config is db_config
+        mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/data/deerflow.db")
         mock_saver.setup.assert_awaited_once()
 
 
@@ -372,7 +747,7 @@ class TestClientCheckpointerFallback:
             patch("deerflow.client.get_app_config", return_value=config_mock),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.create_chat_model", return_value=MagicMock()),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value=""),
             patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):
@@ -406,7 +781,7 @@ class TestClientCheckpointerFallback:
             patch("deerflow.client.get_app_config", return_value=config_mock),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.create_chat_model", return_value=MagicMock()),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value=""),
             patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):

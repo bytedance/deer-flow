@@ -13,6 +13,7 @@ from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
-                d[key] = val.isoformat()
+                # SQLite drops tzinfo despite ``DateTime(timezone=True)``;
+                # ``coerce_iso`` normalizes naive values as UTC so the wire format always carries tz.
+                d[key] = coerce_iso(val)
         return d
 
     async def create(

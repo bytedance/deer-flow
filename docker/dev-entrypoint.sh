@@ -64,6 +64,13 @@ if [ -n "$EXTRAS_FLAGS" ]; then
     echo "[startup] uv extras:$EXTRAS_FLAGS"
 fi
 
+# Keep runtime-owned files out of uvicorn's reload watcher. The directory must
+# exist before uvicorn starts so watchfiles treats it as an excluded directory,
+# not as a plain glob pattern.
+: "${DEER_FLOW_HOME:=/app/backend/.deer-flow}"
+export DEER_FLOW_HOME
+mkdir -p "$DEER_FLOW_HOME" /app/backend/.deer-flow
+
 # ── Sync dependencies (with self-heal) ──────────────────────────────────────
 
 cd /app/backend
@@ -82,4 +89,9 @@ fi
 
 PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
-    --reload --reload-include='*.yaml .env'
+    --reload \
+    --reload-include='*.yaml' \
+    --reload-include='.env' \
+    --reload-exclude=/app/backend/sandbox \
+    --reload-exclude="$DEER_FLOW_HOME" \
+    --reload-exclude=/app/backend/.deer-flow
