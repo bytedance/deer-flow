@@ -43,6 +43,27 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("keeps Shift+Enter as newline while skill suggestions are visible", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/dat");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeVisible();
+
+    await textarea.press("Shift+Enter");
+
+    await expect(textarea).toHaveValue("/dat\n");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeHidden();
+  });
+
   test("does not suggest skills for slash text away from the prompt start", async ({
     page,
   }) => {

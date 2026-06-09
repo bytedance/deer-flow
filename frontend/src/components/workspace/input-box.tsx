@@ -461,6 +461,9 @@ export function InputBox({
       }
 
       if (event.key === "Enter" || event.key === "Tab") {
+        if (event.shiftKey) {
+          return;
+        }
         event.preventDefault();
         const selectedSkill = skillSuggestions[skillSuggestionIndex];
         if (selectedSkill) {

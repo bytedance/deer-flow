@@ -30,7 +30,7 @@ from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 
@@ -425,19 +425,24 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
+def _unknown_command_reply(command: str | None = None) -> str:
+    available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
+    if command:
+        return f"Unknown command: /{command}. Available commands: {available}"
+    return f"Unknown command. Available commands: {available}"
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
     storage: SkillStorage | Callable[[], SkillStorage] | None = None,
 ) -> _SlashSkillCommandResolution | None:
-    if parse_slash_skill_reference(text) is None:
+    reference = parse_slash_skill_reference(text)
+    if reference is None:
         return None
     try:
         resolved_storage = storage() if callable(storage) else storage or get_or_new_skill_storage()
         skills = resolved_storage.load_skills(enabled_only=False)
-        reference = parse_slash_skill_reference(text)
-        if reference is None:
-            return None
 
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
@@ -447,13 +452,7 @@ def _resolve_slash_skill_command(
         if available_skills is not None and reference.name not in available_skills:
             return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
 
-        resolved = resolve_slash_skill(
-            text,
-            skills,
-            available_skills=available_skills,
-            container_base_path=resolved_storage.get_container_root(),
-        )
-        return _SlashSkillCommandResolution(route_to_chat=True) if resolved is not None else None
+        return _SlashSkillCommandResolution(route_to_chat=True)
     except Exception as exc:
         logger.exception("[Manager] failed to resolve slash skill command")
         raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
@@ -1092,34 +1091,17 @@ class ChannelManager:
         raw_text = msg.text
         text = raw_text.strip()
         parts = text.split(maxsplit=1)
+        reply: str | None = None
         if not parts:
-            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
-            outbound = OutboundMessage(
-                channel_name=msg.channel_name,
-                chat_id=msg.chat_id,
-                thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or "",
-                text=f"Unknown command. Available commands: {available}",
-                thread_ts=msg.thread_ts,
-                metadata=_slim_metadata(msg.metadata),
-            )
-            await self.bus.publish_outbound(outbound)
-            return
-        command = parts[0].lower().removeprefix("/")
+            command = None
+            reply = _unknown_command_reply()
+        else:
+            command = parts[0].lower().removeprefix("/")
 
-        if not raw_text.startswith("/"):
-            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
-            outbound = OutboundMessage(
-                channel_name=msg.channel_name,
-                chat_id=msg.chat_id,
-                thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or "",
-                text=f"Unknown command: /{command}. Available commands: {available}",
-                thread_ts=msg.thread_ts,
-                metadata=_slim_metadata(msg.metadata),
-            )
-            await self.bus.publish_outbound(outbound)
-            return
+        if reply is None and not raw_text.startswith("/"):
+            reply = _unknown_command_reply(command)
 
-        if command == "bootstrap":
+        if reply is None and command == "bootstrap":
             from dataclasses import replace as _dc_replace
 
             chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
@@ -1127,7 +1109,7 @@ class ChannelManager:
             await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
             return
 
-        if command == "new":
+        if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
             thread = await client.threads.create()
@@ -1140,14 +1122,14 @@ class ChannelManager:
                 user_id=msg.user_id,
             )
             reply = "New conversation started."
-        elif command == "status":
+        elif reply is None and command == "status":
             thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
-        elif command == "models":
+        elif reply is None and command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
-        elif command == "memory":
+        elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory")
-        elif command == "help":
+        elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
@@ -1158,7 +1140,7 @@ class ChannelManager:
                 "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
-        else:
+        elif reply is None:
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
@@ -1175,8 +1157,7 @@ class ChannelManager:
                 await self._handle_chat(chat_msg)
                 return
             else:
-                available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
-                reply = f"Unknown command: /{command}. Available commands: {available}"
+                reply = _unknown_command_reply(command)
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,

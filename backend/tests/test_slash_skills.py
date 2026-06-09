@@ -187,6 +187,29 @@ def test_skill_activation_middleware_does_not_duplicate_activation_separated_by_
     assert sum(is_slash_skill_activation_reminder(message) for message in second_capture["messages"]) == 1
 
 
+def test_skill_activation_middleware_dedupes_immediately_previous_activation_without_target_id(monkeypatch, tmp_path):
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    legacy_activation_msg = SkillActivationMiddleware._make_activation_message(
+        HumanMessage(content="/data-analysis analyze uploads/foo.csv"),
+        "existing activation context",
+    )
+    target = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(_make_model_request([legacy_activation_msg, target]), handler)
+
+    assert isinstance(result, AIMessage)
+    assert captured["messages"] == [legacy_activation_msg, target]
+    assert sum(is_slash_skill_activation_reminder(message) for message in captured["messages"]) == 1
+
+
 def test_skill_activation_middleware_async_injects_hidden_human_context_for_model_call(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))

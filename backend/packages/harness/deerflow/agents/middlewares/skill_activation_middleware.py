@@ -174,7 +174,6 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 target_id = previous.additional_kwargs.get(_SLASH_SKILL_ACTIVATION_TARGET_ID_KEY)
                 if target_id == target.id or previous.id == f"{target.id}__slash_activation":
                     return True
-            return False
 
         previous = messages[target_index - 1]
         return is_slash_skill_activation_reminder(previous)
