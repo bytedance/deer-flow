@@ -92,3 +92,25 @@ def test_title_run_name_uses_middleware_caller_namespace(tmp_path: Path):
 
     assert caller_identity(name="title_agent") == "middleware:title"
     assert model.invoke(messages, config={"run_name": "title_agent"}).content == "generated title"
+
+
+def test_replay_uses_single_pending_capture_when_run_manager_is_missing(tmp_path: Path):
+    messages = [HumanMessage(content="title prompt")]
+    fixture_path = tmp_path / "fixture.json"
+
+    _write_fixture(
+        fixture_path,
+        [
+            {
+                "caller": "middleware:title",
+                "conversation_hash": hash_messages(messages),
+                "input_hash": hash_replay_input(messages, caller="middleware:title"),
+                "output": messages_to_dict([AIMessage(content="generated title")])[0],
+            }
+        ],
+    )
+
+    model = ReplayChatModel(fixture=str(fixture_path))
+    model._run_callers["captured-run"] = caller_identity(name="title_agent", tags=["middleware:title"])
+
+    assert model._match(messages, run_manager=None).content == "generated title"

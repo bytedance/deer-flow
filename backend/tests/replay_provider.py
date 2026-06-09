@@ -279,6 +279,13 @@ class ReplayChatModel(BaseChatModel):
 
     def _caller_from_run_manager(self, run_manager: CallbackManagerForLLMRun | None) -> str:
         if run_manager is None:
+            if len(self._run_callers) == 1:
+                # Some async LangGraph paths fire on_chat_model_start with the
+                # caller metadata but invoke the model implementation without a
+                # run_manager. When there is only one pending start event, it is
+                # the current call; use it so record/replay share the same
+                # caller key.
+                return self._run_callers.pop(next(iter(self._run_callers)))
             return _DEFAULT_CALLER
         run_id = str(getattr(run_manager, "run_id", ""))
         caller = self._run_callers.pop(run_id, None)
