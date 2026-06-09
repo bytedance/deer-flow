@@ -23,3 +23,5 @@
 24、skill的设计方案（拆分方法）
 25、模板功能的串联
 26、机泵诊断准确率
+
+docker exec -it postgres bash -c "apt-get update && apt-get install -y postgresql-13-pgvector"

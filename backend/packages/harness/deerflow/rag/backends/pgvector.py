@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
+
+from sqlalchemy import text
 
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.rag.vector_store import SearchResult, VectorStore
@@ -38,25 +41,32 @@ class PgvectorVectorStore(VectorStore):
     def _ensure_table(self) -> None:
         if self._table_initialized:
             return
+        from deerflow.config.rag_config import get_rag_config
+        dim = get_rag_config().embedding_dimension
         engine = self._get_engine()
         with engine.begin() as conn:
-            conn.execute(  # type: ignore[attr-defined]
-                """
-                CREATE EXTENSION IF NOT EXISTS vector;
-                CREATE TABLE IF NOT EXISTS deerflow_rag_chunks (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tenant_id TEXT NOT NULL,
-                    collection TEXT NOT NULL,
-                    chunk_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata JSONB DEFAULT '{}',
-                    embedding vector,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-                CREATE INDEX IF NOT EXISTS idx_rag_tenant_collection
-                    ON deerflow_rag_chunks (tenant_id, collection);
-                """
-            )
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS knowledge_rag_chunks ("
+                "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+                "  tenant_id TEXT NOT NULL,"
+                "  collection TEXT NOT NULL,"
+                "  chunk_id TEXT NOT NULL,"
+                "  content TEXT NOT NULL,"
+                "  metadata JSONB DEFAULT '{}',"
+                f"  embedding vector({dim}),"
+                "  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+                ")"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_rag_tenant_collection"
+                "  ON knowledge_rag_chunks (tenant_id, collection)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_rag_embedding_hnsw"
+                "  ON knowledge_rag_chunks USING hnsw (embedding vector_cosine_ops)"
+                "  WITH (m = 16, ef_construction = 64)"
+            ))
         self._table_initialized = True
 
     def add(
@@ -68,16 +78,16 @@ class PgvectorVectorStore(VectorStore):
         self._ensure_table()
         engine = self._get_engine()
         tid = get_current_tenant_id()
-        import json
 
         ids = [uuid.uuid4().hex for _ in chunks]
         with engine.begin() as conn:
             for i, chunk in enumerate(chunks):
-                conn.execute(  # type: ignore[attr-defined]
-                    """
-                    INSERT INTO deerflow_rag_chunks (tenant_id, collection, chunk_id, content, metadata, embedding)
-                    VALUES (:tid, :col, :cid, :content, :meta, :emb)
-                    """,
+                conn.execute(
+                    text(
+                        "INSERT INTO knowledge_rag_chunks"
+                        " (tenant_id, collection, chunk_id, content, metadata, embedding)"
+                        " VALUES (:tid, :col, :cid, :content, :meta, :emb)"
+                    ),
                     {
                         "tid": tid,
                         "col": collection,
@@ -100,19 +110,18 @@ class PgvectorVectorStore(VectorStore):
         self._ensure_table()
         engine = self._get_engine()
         tid = get_current_tenant_id()
-        import json
 
         with engine.begin() as conn:
-            rows = conn.execute(  # type: ignore[attr-defined]
-                """
-                SELECT chunk_id, content, metadata,
-                       1.0 - (embedding <=> :emb::vector) AS similarity
-                FROM deerflow_rag_chunks
-                WHERE tenant_id = :tid AND collection = :col
-                  AND 1.0 - (embedding <=> :emb::vector) >= :threshold
-                ORDER BY embedding <=> :emb::vector
-                LIMIT :limit
-                """,
+            rows = conn.execute(
+                text(
+                    "SELECT chunk_id, content, metadata,"
+                    " 1.0 - (embedding <=> CAST(:emb AS vector)) AS similarity"
+                    " FROM knowledge_rag_chunks"
+                    " WHERE tenant_id = :tid AND collection = :col"
+                    "   AND 1.0 - (embedding <=> CAST(:emb AS vector)) >= :threshold"
+                    " ORDER BY embedding <=> CAST(:emb AS vector)"
+                    " LIMIT :limit"
+                ),
                 {
                     "tid": tid,
                     "col": collection,
@@ -142,8 +151,12 @@ class PgvectorVectorStore(VectorStore):
         engine = self._get_engine()
         tid = get_current_tenant_id()
         with engine.begin() as conn:
-            result = conn.execute(  # type: ignore[attr-defined]
-                "DELETE FROM deerflow_rag_chunks WHERE tenant_id = :tid AND collection = :col AND chunk_id = ANY(:ids)",
+            result = conn.execute(
+                text(
+                    "DELETE FROM knowledge_rag_chunks"
+                    " WHERE tenant_id = :tid AND collection = :col"
+                    "   AND chunk_id = ANY(:ids)"
+                ),
                 {"tid": tid, "col": collection, "ids": chunk_ids},
             )
             return result.rowcount
@@ -153,8 +166,11 @@ class PgvectorVectorStore(VectorStore):
         engine = self._get_engine()
         tid = get_current_tenant_id()
         with engine.begin() as conn:
-            rows = conn.execute(  # type: ignore[attr-defined]
-                "SELECT DISTINCT collection FROM deerflow_rag_chunks WHERE tenant_id = :tid ORDER BY collection",
+            rows = conn.execute(
+                text(
+                    "SELECT DISTINCT collection FROM knowledge_rag_chunks"
+                    " WHERE tenant_id = :tid ORDER BY collection"
+                ),
                 {"tid": tid},
             ).fetchall()
         return [r[0] for r in rows]
@@ -164,8 +180,11 @@ class PgvectorVectorStore(VectorStore):
         engine = self._get_engine()
         tid = get_current_tenant_id()
         with engine.begin() as conn:
-            conn.execute(  # type: ignore[attr-defined]
-                "DELETE FROM deerflow_rag_chunks WHERE tenant_id = :tid AND collection = :col",
+            conn.execute(
+                text(
+                    "DELETE FROM knowledge_rag_chunks"
+                    " WHERE tenant_id = :tid AND collection = :col"
+                ),
                 {"tid": tid, "col": collection},
             )
         return True
@@ -175,8 +194,11 @@ class PgvectorVectorStore(VectorStore):
         engine = self._get_engine()
         tid = get_current_tenant_id()
         with engine.begin() as conn:
-            row = conn.execute(  # type: ignore[attr-defined]
-                "SELECT COUNT(*) FROM deerflow_rag_chunks WHERE tenant_id = :tid AND collection = :col",
+            row = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM knowledge_rag_chunks"
+                    " WHERE tenant_id = :tid AND collection = :col"
+                ),
                 {"tid": tid, "col": collection},
             ).fetchone()
         return row[0] if row else 0

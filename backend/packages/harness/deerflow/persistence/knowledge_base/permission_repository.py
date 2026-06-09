@@ -82,6 +82,16 @@ class KbPermissionRepository:
             await session.commit()
             return result.rowcount > 0
 
+    async def delete_by_kb(self, knowledge_base_id: str) -> int:
+        """Remove all explicit permission grants for a knowledge base."""
+        async with self._sf() as session:
+            stmt = delete(KbPermissionRow).where(
+                KbPermissionRow.knowledge_base_id == knowledge_base_id
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
+
     async def list_by_kb(self, knowledge_base_id: str) -> list[dict[str, Any]]:
         """List all permission grants for a knowledge base."""
         async with self._sf() as session:

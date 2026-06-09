@@ -48,6 +48,13 @@ class RagConfig(BaseModel):
         default="",
         description="PostgreSQL connection string for pgvector backend",
     )
+    embedding_dimension: int = Field(
+        default=1024,
+        ge=1,
+        le=8192,
+        description="Vector dimension for pgvector column. Must match the embedding model output. "
+        "text-embedding-3-small / text-embedding-v4 → 1536, text-embedding-3-large → 3072.",
+    )
     chunk_size: int = Field(
         default=1000,
         ge=100,

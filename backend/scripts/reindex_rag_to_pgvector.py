@@ -200,21 +200,28 @@ def migrate_knowledge_base(
 
         # Ensure table exists
         with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE EXTENSION IF NOT EXISTS vector;
-                CREATE TABLE IF NOT EXISTS deerflow_rag_chunks (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    tenant_id TEXT NOT NULL,
-                    collection TEXT NOT NULL,
-                    chunk_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata JSONB DEFAULT '{}',
-                    embedding vector,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-                CREATE INDEX IF NOT EXISTS idx_rag_tenant_collection
-                    ON deerflow_rag_chunks (tenant_id, collection);
-            """))
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS knowledge_rag_chunks ("
+                "  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
+                "  tenant_id TEXT NOT NULL,"
+                "  collection TEXT NOT NULL,"
+                "  chunk_id TEXT NOT NULL,"
+                "  content TEXT NOT NULL,"
+                "  metadata JSONB DEFAULT '{}',"
+                f"  embedding vector({report.embedding_dim}),"
+                "  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+                ")"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_rag_tenant_collection"
+                "  ON knowledge_rag_chunks (tenant_id, collection)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_knowledge_rag_embedding_hnsw"
+                "  ON knowledge_rag_chunks USING hnsw (embedding vector_cosine_ops)"
+                "  WITH (m = 16, ef_construction = 64)"
+            ))
 
         # Process in batches
         for i in range(0, len(doc_ids), batch_size):
@@ -243,7 +250,7 @@ def migrate_knowledge_base(
             with engine.begin() as conn:
                 for j, doc_id in enumerate(batch_ids):
                     conn.execute(text("""
-                        INSERT INTO deerflow_rag_chunks (tenant_id, collection, chunk_id, content, metadata, embedding)
+                        INSERT INTO knowledge_rag_chunks (tenant_id, collection, chunk_id, content, metadata, embedding)
                         VALUES (:tid, :col, :cid, :content, :meta, :emb::vector)
                     """), {
                         "tid": tenant_id,

@@ -72,6 +72,18 @@ def get_vector_store() -> VectorStore:
     if backend == "pgvector":
         from deerflow.rag.backends.pgvector import PgvectorVectorStore
 
-        return PgvectorVectorStore(connection_string=config.pgvector_connection_string)
+        conn_str = config.pgvector_connection_string
+        if not conn_str:
+            from deerflow.config import get_app_config
+
+            conn_str = get_app_config().database.postgres_url
+        if not conn_str:
+            raise ValueError(
+                "pgvector backend requires either rag.pgvector_connection_string "
+                "or database.postgres_url to be configured"
+            )
+        if conn_str.startswith("postgresql://") and "+" not in conn_str.split("://", 1)[0]:
+            conn_str = conn_str.replace("postgresql://", "postgresql+psycopg://", 1)
+        return PgvectorVectorStore(connection_string=conn_str)
 
     raise ValueError(f"Unknown vector store backend: {backend!r}. Supported: 'chroma', 'pgvector'.")

@@ -235,7 +235,8 @@ rag:
   embedding_api_key: $OPENAI_API_KEY
   embedding_base_url: https://aiapi.shenguyun.com/v1
   embedding_batch_size: 10
-  vector_store_backend: chroma
+   # vector_store_backend: chroma   # 本地 SQLite（开发/单机）
+  vector_store_backend: pgvector
   chunk_size: 1000
   chunk_overlap: 200
   chunk_strategy: recursive

@@ -10,6 +10,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
 from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
 from deerflow.persistence.knowledge_base.model import IndexJobRow, KnowledgeBaseDocumentRow, KnowledgeBaseRow
+from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
 from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
 
 
@@ -36,6 +37,11 @@ async def doc_repo(session_factory):
 @pytest_asyncio.fixture
 async def job_repo(session_factory):
     return IndexJobRepository(session_factory)
+
+
+@pytest_asyncio.fixture
+async def perm_repo(session_factory):
+    return KbPermissionRepository(session_factory)
 
 
 TENANT = "tenant-1"
@@ -82,6 +88,13 @@ class TestKnowledgeBaseRepository:
         kb = await kb_repo.create(tenant_id=TENANT, owner_user_id=USER, name="ToDelete")
         assert await kb_repo.soft_delete(kb["id"], tenant_id=TENANT, owner_user_id=USER)
         assert await kb_repo.get(kb["id"], tenant_id=TENANT, owner_user_id=USER) is None
+
+    @pytest.mark.asyncio
+    async def test_hard_delete(self, kb_repo: KnowledgeBaseRepository):
+        kb = await kb_repo.create(tenant_id=TENANT, owner_user_id=USER, name="ToDelete")
+        assert await kb_repo.hard_delete(kb["id"], tenant_id=TENANT)
+        assert await kb_repo.get_by_id_internal(kb["id"]) is None
+
     @pytest.mark.asyncio
     async def test_resolve_accessible_by_ids(self):
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -179,6 +192,15 @@ class TestDocumentRepository:
         assert await doc_repo.get(doc["id"], tenant_id=TENANT, owner_user_id=USER) is None
 
     @pytest.mark.asyncio
+    async def test_hard_delete_by_kb(self, kb_repo: KnowledgeBaseRepository, doc_repo: DocumentRepository):
+        kb = await kb_repo.create(tenant_id=TENANT, owner_user_id=USER, name="KB")
+        await doc_repo.create(knowledge_base_id=kb["id"], tenant_id=TENANT, owner_user_id=USER, title="D1", content="x", content_hash="h1")
+        await doc_repo.create(knowledge_base_id=kb["id"], tenant_id=TENANT, owner_user_id="other-user", title="D2", content="y", content_hash="h2")
+
+        assert await doc_repo.hard_delete_by_kb(kb["id"]) == 2
+        assert await doc_repo.list_by_kb_accessible(kb["id"]) == []
+
+    @pytest.mark.asyncio
     async def test_update_index_status(self, kb_repo: KnowledgeBaseRepository, doc_repo: DocumentRepository):
         kb = await kb_repo.create(tenant_id=TENANT, owner_user_id=USER, name="KB")
         doc = await doc_repo.create(knowledge_base_id=kb["id"], tenant_id=TENANT, owner_user_id=USER, title="D", content="x", content_hash="h")
@@ -222,3 +244,88 @@ class TestIndexJobRepository:
 
         jobs = await job_repo.list_by_document("doc-1")
         assert len(jobs) == 2
+
+    @pytest.mark.asyncio
+    async def test_delete_by_kb(self, job_repo: IndexJobRepository):
+        await job_repo.create(document_id="doc-1", knowledge_base_id="kb-1", tenant_id=TENANT, owner_user_id=USER, version=1)
+        await job_repo.create(document_id="doc-2", knowledge_base_id="kb-1", tenant_id=TENANT, owner_user_id=USER, version=1)
+        await job_repo.create(document_id="doc-3", knowledge_base_id="kb-2", tenant_id=TENANT, owner_user_id=USER, version=1)
+
+        assert await job_repo.delete_by_kb("kb-1") == 2
+        assert await job_repo.list_by_document("doc-1") == []
+        assert await job_repo.list_by_document("doc-2") == []
+        assert len(await job_repo.list_by_document("doc-3")) == 1
+
+
+class TestPermissionRepository:
+    @pytest.mark.asyncio
+    async def test_delete_by_kb(self, perm_repo: KbPermissionRepository):
+        await perm_repo.grant(
+            knowledge_base_id="kb-1",
+            tenant_id=TENANT,
+            user_id="user-2",
+            role="viewer",
+            granted_by=USER,
+        )
+        await perm_repo.grant(
+            knowledge_base_id="kb-1",
+            tenant_id=TENANT,
+            user_id="user-3",
+            role="editor",
+            granted_by=USER,
+        )
+        await perm_repo.grant(
+            knowledge_base_id="kb-2",
+            tenant_id=TENANT,
+            user_id="user-4",
+            role="viewer",
+            granted_by=USER,
+        )
+
+        assert await perm_repo.delete_by_kb("kb-1") == 2
+        assert await perm_repo.list_by_kb("kb-1") == []
+        assert len(await perm_repo.list_by_kb("kb-2")) == 1
+
+
+class TestDeleteCascade:
+    @pytest.mark.asyncio
+    async def test_hard_delete_removes_all_kb_related_rows(
+        self,
+        kb_repo: KnowledgeBaseRepository,
+        doc_repo: DocumentRepository,
+        job_repo: IndexJobRepository,
+        perm_repo: KbPermissionRepository,
+    ):
+        kb = await kb_repo.create(tenant_id=TENANT, owner_user_id=USER, name="KB")
+        doc = await doc_repo.create(
+            knowledge_base_id=kb["id"],
+            tenant_id=TENANT,
+            owner_user_id=USER,
+            title="Doc 1",
+            content="Hello world",
+            content_hash="abc123",
+        )
+        await job_repo.create(
+            document_id=doc["id"],
+            knowledge_base_id=kb["id"],
+            tenant_id=TENANT,
+            owner_user_id=USER,
+            version=1,
+        )
+        await perm_repo.grant(
+            knowledge_base_id=kb["id"],
+            tenant_id=TENANT,
+            user_id="user-2",
+            role="viewer",
+            granted_by=USER,
+        )
+
+        await perm_repo.delete_by_kb(kb["id"])
+        await job_repo.delete_by_kb(kb["id"])
+        await doc_repo.hard_delete_by_kb(kb["id"])
+        assert await kb_repo.hard_delete(kb["id"], tenant_id=TENANT)
+
+        assert await kb_repo.get_by_id_internal(kb["id"]) is None
+        assert await doc_repo.list_by_kb_accessible(kb["id"]) == []
+        assert await job_repo.list_by_document(doc["id"]) == []
+        assert await perm_repo.list_by_kb(kb["id"]) == []
