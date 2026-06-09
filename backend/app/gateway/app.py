@@ -30,6 +30,7 @@ from app.gateway.routers import (
     capabilities,
     channels,
     closure_tickets,
+    config,
     cost,
     feedback,
     genui,
@@ -534,8 +535,8 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance.
     """
-    config = get_gateway_config()
-    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    gateway_config = get_gateway_config()
+    docs_kwargs = {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"} if gateway_config.enable_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
     app = FastAPI(
         title="DeerFlow API Gateway",
@@ -671,6 +672,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+
+    # Config API is mounted at /api/config
+    app.include_router(config.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)

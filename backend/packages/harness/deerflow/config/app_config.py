@@ -66,6 +66,12 @@ class CircuitBreakerConfig(BaseModel):
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
+class UIConfig(BaseModel):
+    """Configuration for frontend UI behavior."""
+
+    show_bash_script: bool = Field(default=True, description="Whether to show bash command scripts in frontend chat UI. When false, only the description is shown.")
+
+
 def _legacy_config_candidates() -> tuple[Path, ...]:
     """Return source-tree config.yaml locations for monorepo compatibility."""
     backend_dir = Path(__file__).resolve().parents[4]
@@ -134,6 +140,7 @@ class AppConfig(BaseModel):
     http_connectors: dict[str, list[HttpConnectorConfig]] = Field(default_factory=dict, description="HTTP connectors keyed by tenant_id for external API integration")
     nacos: NacosConfig | None = Field(default=None, description="Nacos service discovery configuration (null = disabled)")
     rpc: RpcConfig | None = Field(default=None, description="Java RPC client configuration (null = disabled)")
+    ui: UIConfig = Field(default_factory=UIConfig, description="Frontend UI behavior configuration")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:

@@ -2,6 +2,8 @@ config_version: 11
 log_level: info
 token_usage:
   enabled: true
+ui:
+  show_bash_script: false
 database:
   # 切换后端：只需改 backend 字段，db_name 保持不变
   # - sqlite: 本地开发，数据存在 {sqlite_dir}/{db_name}.db
