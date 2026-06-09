@@ -76,6 +76,7 @@ def render_charts_file(charts_json_path: str) -> str:
             "waveform": "echart",
             "spectrum": "echart",
             "table": "table",
+            "markdown": "markdown",
         }
 
         component = component_map.get(chart_type)

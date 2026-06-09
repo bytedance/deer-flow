@@ -13,6 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "@/components/ui/icons";
+import { useAppConfig } from "@/core/config/hooks";
 import { useMemo, useState } from "react";
 
 import {
@@ -435,6 +436,7 @@ function ToolCall({
   tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
+  const appConfig = useAppConfig();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const tokenLabel = tokenDebugStep
@@ -651,7 +653,7 @@ function ToolCall({
         label={resolveLabel(description)}
         icon={SquareTerminalIcon}
       >
-        {command && (
+        {command && appConfig.ui.show_bash_script && (
           <CodeBlock
             className="mx-0 cursor-pointer border-none px-0"
             showLineNumbers={false}
