@@ -192,7 +192,7 @@ from deerflow.config import get_app_config
 
 ### Middleware Chain
 
-Lead-agent middlewares are assembled in strict append order across `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`build_lead_runtime_middlewares`) and `packages/harness/deerflow/agents/lead_agent/agent.py` (`_build_middlewares`):
+Lead-agent middlewares are assembled in strict append order across `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`build_lead_runtime_middlewares`) and `packages/harness/deerflow/agents/lead_agent/agent.py` (`build_middlewares`):
 
 1. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode); Web UI thread deletion now follows LangGraph thread removal with Gateway cleanup of the local thread directory
 2. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation
@@ -493,7 +493,7 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
   - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each
   - `"custom"` — forwarded from `StreamWriter`
   - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
-- Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
+- Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
 - See [docs/STREAMING.md](docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
