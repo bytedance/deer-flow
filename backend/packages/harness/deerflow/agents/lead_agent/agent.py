@@ -265,7 +265,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(
+def build_middlewares(
     config: RunnableConfig,
     model_name: str | None,
     agent_name: str | None = None,
@@ -274,12 +274,21 @@ def _build_middlewares(
     app_config: AppConfig | None = None,
     deferred_setup=None,
 ):
-    """Build middleware chain based on runtime configuration.
+    """Build the lead-agent middleware chain based on runtime configuration.
+
+    Public entry point for the lead agent's full middleware composition. Used by
+    ``make_lead_agent`` and by the embedded ``DeerFlowClient`` (a lead-agent variant
+    that needs the identical chain). Keep this name stable: it is imported across a
+    module boundary, so renames/signature changes ripple into ``client.py``.
 
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
+        model_name: Resolved runtime model name; gates vision-only middleware.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
+        app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
+        deferred_setup: Optional deferred-MCP-tool setup that attaches
+            ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
 
     Returns:
         List of middleware instances.
@@ -472,7 +481,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config, deferred_setup=setup),
+            middleware=build_middlewares(config, model_name=model_name, app_config=resolved_app_config, deferred_setup=setup),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
@@ -493,7 +502,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config, deferred_setup=setup),
+        middleware=build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config, deferred_setup=setup),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
