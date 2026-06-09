@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.base import Channel
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -620,7 +621,7 @@ class WechatChannel(Channel):
             chat_id=chat_id,
             user_id=chat_id,
             text=text,
-            msg_type=InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT,
+            msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
             thread_ts=thread_ts,
             files=files,
             metadata={

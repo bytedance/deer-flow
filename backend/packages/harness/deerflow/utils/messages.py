@@ -7,6 +7,7 @@ ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 
 
 def message_content_to_text(content: Any) -> str:
+    """Extract text from LangChain message content shapes."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -23,6 +24,7 @@ def message_content_to_text(content: Any) -> str:
 
 
 def get_original_user_content_text(content: Any, additional_kwargs: Mapping[str, Any] | None) -> str:
+    """Return pre-middleware user text when available, otherwise content text."""
     original_content = (additional_kwargs or {}).get(ORIGINAL_USER_CONTENT_KEY)
     if isinstance(original_content, str):
         return original_content

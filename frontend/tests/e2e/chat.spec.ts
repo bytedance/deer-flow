@@ -49,6 +49,150 @@ test.describe("Chat workspace", () => {
     });
   });
 
+  test("slash skill command is submitted as normal chat text", async ({
+    page,
+  }) => {
+    const slashCommand = "/data-analysis analyze uploads/foo.csv";
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill(slashCommand);
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe(slashCommand);
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("slash skill command with attachment preserves command text and file metadata", async ({
+    page,
+  }) => {
+    const slashCommand = "/data-analysis analyze report.docx";
+    let uploadCalled = false;
+    let submittedText: string | undefined;
+    let submittedFiles:
+      | Array<{ filename?: string; path?: string; status?: string }>
+      | undefined;
+
+    await page.route("**/api/threads/*/uploads", async (route) => {
+      uploadCalled = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Uploaded",
+          files: [
+            {
+              filename: "report.docx",
+              size: 12,
+              path: "report.docx",
+              virtual_path: "/mnt/user-data/uploads/report.docx",
+              artifact_url: "/api/threads/test/uploads/report.docx",
+              extension: ".docx",
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: {
+          messages?: Array<{
+            content?: unknown;
+            additional_kwargs?: {
+              files?: Array<{
+                filename?: string;
+                path?: string;
+                status?: string;
+              }>;
+            };
+          }>;
+        };
+      };
+      const message = body.input?.messages?.at(-1);
+      const content = message?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      submittedFiles = message?.additional_kwargs?.files;
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "report.docx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from("fake docx"),
+    });
+
+    await textarea.fill(slashCommand);
+    await textarea.press("Enter");
+
+    await expect.poll(() => uploadCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe(slashCommand);
+    await expect
+      .poll(() => submittedFiles, { timeout: 10_000 })
+      .toEqual([
+        {
+          filename: "report.docx",
+          size: 12,
+          path: "/mnt/user-data/uploads/report.docx",
+          status: "uploaded",
+        },
+      ]);
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
   test("keeps attachments visible while upload submit is pending", async ({
     page,
   }) => {

@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.utils.messages import get_original_user_content_text
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
+_SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 _SUMMARY_MESSAGE_NAME = "summary"
 
 
@@ -47,6 +49,7 @@ class _ActivationResolution:
 
 
 def is_slash_skill_activation_reminder(message: object) -> bool:
+    """Return whether a message is hidden slash-skill activation context."""
     return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_SLASH_SKILL_ACTIVATION_KEY))
 
 
@@ -73,7 +76,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
 
-    def _storage(self):
+    def _storage(self) -> SkillStorage:
         if self._app_config is not None:
             return get_or_new_skill_storage(app_config=self._app_config)
         return get_or_new_skill_storage()
@@ -159,26 +162,72 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 </skill>
 </slash_skill_activation>"""
 
-    def _find_activation_target(self, messages: list) -> tuple[HumanMessage, _ActivationResolution] | None:
+    @staticmethod
+    def _has_existing_activation_for_target(messages: list, target_index: int, target: HumanMessage) -> bool:
+        if target_index <= 0:
+            return False
+
+        if target.id:
+            for previous in messages[:target_index]:
+                if not is_slash_skill_activation_reminder(previous):
+                    continue
+                target_id = previous.additional_kwargs.get(_SLASH_SKILL_ACTIVATION_TARGET_ID_KEY)
+                if target_id == target.id or previous.id == f"{target.id}__slash_activation":
+                    return True
+            return False
+
+        previous = messages[target_index - 1]
+        return is_slash_skill_activation_reminder(previous)
+
+    def _find_activation_target(self, messages: list) -> tuple[int, HumanMessage, _ActivationResolution] | None:
         if not messages:
             return None
 
-        target = next((msg for msg in reversed(messages) if _is_user_activation_target(msg)), None)
+        target_index = next((idx for idx in range(len(messages) - 1, -1, -1) if _is_user_activation_target(messages[idx])), None)
+        if target_index is None:
+            return None
+
+        target = messages[target_index]
         if target is None:
+            return None
+        if self._has_existing_activation_for_target(messages, target_index, target):
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
         resolution = self._resolve_activation(content)
         if resolution is None:
             return None
-        return target, resolution
+        return target_index, target, resolution
 
-    def _prepare_model_request(self, request: ModelRequest) -> ModelRequest | AIMessage | None:
+    @staticmethod
+    def _record_activation(request: ModelRequest, activation: _Activation, *, hook: str) -> None:
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        journal = context.get("__run_journal") if isinstance(context, dict) else None
+        if journal is None:
+            return
+        try:
+            journal.record_middleware(
+                "skill_activation",
+                name="SkillActivationMiddleware",
+                hook=hook,
+                action="activate",
+                changes={
+                    "skill_name": activation.skill_name,
+                    "category": activation.category,
+                    "path": activation.container_file_path,
+                    "content_hash": activation.content_hash,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to record slash skill activation audit event", exc_info=True)
+
+    def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> ModelRequest | AIMessage | None:
         target_and_resolution = self._find_activation_target(list(request.messages))
         if target_and_resolution is None:
             return None
 
-        target, resolution = target_and_resolution
+        target_index, target, resolution = target_and_resolution
         if resolution.failure_message:
             return AIMessage(content=resolution.failure_message)
 
@@ -187,36 +236,32 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         logger.info(
-            "SkillActivationMiddleware: activating slash skill %s category=%s hash=%s",
+            "SkillActivationMiddleware: activating slash skill %s category=%s path=%s hash=%s",
             activation.skill_name,
             activation.category,
-            activation.content_hash[:12],
+            activation.container_file_path,
+            activation.content_hash,
         )
+        self._record_activation(request, activation, hook=hook)
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
-        target_index = self._find_target_index(messages, target)
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages)
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:
         stable_id = target.id or str(uuid.uuid4())
+        additional_kwargs = {
+            "hide_from_ui": True,
+            _SLASH_SKILL_ACTIVATION_KEY: True,
+        }
+        if target.id:
+            additional_kwargs[_SLASH_SKILL_ACTIVATION_TARGET_ID_KEY] = target.id
         return HumanMessage(
             content=activation_content,
             id=f"{stable_id}__slash_activation",
-            additional_kwargs={
-                "hide_from_ui": True,
-                _SLASH_SKILL_ACTIVATION_KEY: True,
-            },
+            additional_kwargs=additional_kwargs,
         )
-
-    @staticmethod
-    def _find_target_index(messages: list, target: HumanMessage) -> int:
-        for idx, message in enumerate(messages):
-            if message is target:
-                return idx
-        logger.warning("SkillActivationMiddleware target message was not found in request messages; appending activation at the end")
-        return len(messages)
 
     @override
     def wrap_model_call(
@@ -224,7 +269,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse | AIMessage:
-        prepared = self._prepare_model_request(request)
+        prepared = self._prepare_model_request(request, hook="wrap_model_call")
         if prepared is None:
             return handler(request)
         if isinstance(prepared, AIMessage):
@@ -237,7 +282,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | AIMessage:
-        prepared = await asyncio.to_thread(self._prepare_model_request, request)
+        prepared = await asyncio.to_thread(self._prepare_model_request, request, hook="awrap_model_call")
         if prepared is None:
             return await handler(request)
         if isinstance(prepared, AIMessage):

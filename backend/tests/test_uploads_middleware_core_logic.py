@@ -264,6 +264,22 @@ class TestBeforeAgent:
         assert "<uploaded_files>" in combined_text
         assert "analyse this" in combined_text
 
+    def test_list_content_preserves_original_slash_skill_text(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b")
+
+        msg = _human(
+            [{"type": "text", "text": "/data-analysis analyze data.csv"}],
+            files=[{"filename": "data.csv", "size": 3, "path": "/mnt/user-data/uploads/data.csv"}],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert isinstance(updated_msg.content, list)
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis analyze data.csv"
+
     def test_preserves_additional_kwargs_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
@@ -285,7 +301,7 @@ class TestBeforeAgent:
         (uploads_dir / "report.pdf").write_bytes(b"pdf")
 
         msg = _human(
-            "/data-analysis分析这个文档",
+            "/data-analysis 分析这个文档",
             files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
         )
         result = mw.before_agent(self._state(msg), _runtime())
@@ -293,7 +309,7 @@ class TestBeforeAgent:
         assert result is not None
         updated_msg = result["messages"][-1]
         assert updated_msg.content.startswith("<uploaded_files>")
-        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis分析这个文档"
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis 分析这个文档"
 
     def test_preserves_existing_original_user_content_marker(self, tmp_path):
         mw = _middleware(tmp_path)
