@@ -37,6 +37,17 @@ if [ -f "$REPO_ROOT/.env" ]; then
     set +a
 fi
 
+_pick_python() {
+    local candidate
+    for candidate in python3 python py; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 DEV_MODE=true
@@ -274,11 +285,7 @@ fi
 if $DEV_MODE; then
     FRONTEND_CMD="pnpm run dev"
 else
-    if command -v python3 >/dev/null 2>&1; then
-        PYTHON_BIN="python3"
-    elif command -v python >/dev/null 2>&1; then
-        PYTHON_BIN="python"
-    else
+    if ! PYTHON_BIN="$(_pick_python)"; then
         echo "Python is required to generate BETTER_AUTH_SECRET."
         exit 1
     fi
@@ -337,15 +344,10 @@ fi
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
-# Pick a Python for the extras detector. Falls back to plain `python` for
-# Windows/Git Bash where only `python` is on PATH.
-if command -v python3 >/dev/null 2>&1; then
-    DETECT_PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-    DETECT_PYTHON="python"
-else
-    DETECT_PYTHON=""
-fi
+# Pick a runnable Python for the extras detector. On Windows/Git Bash,
+# `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
+# present on PATH but not executable from Bash.
+DETECT_PYTHON="$(_pick_python || true)"
 
 # Resolve uv extras (postgres, etc.) from UV_EXTRAS or config.yaml so that
 # `uv sync` does not wipe out optional dependencies on every restart. See
