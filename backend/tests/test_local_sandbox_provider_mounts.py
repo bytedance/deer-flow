@@ -612,6 +612,54 @@ class TestLocalSandboxProviderMounts:
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
 
+    def test_setup_path_mappings_logs_actionable_error_for_missing_host_path(self, tmp_path, caplog):
+        """Regression for #3244.
+
+        When ``sandbox.mounts[].host_path`` is absent from the gateway process's
+        filesystem (the typical symptom in Docker production mode: host_path is a
+        host machine path that is not bind-mounted into the gateway container),
+        the mount is still skipped — but the failure must be a hard-to-miss ERROR
+        log with explicit, actionable guidance about Docker bind mounts, not the
+        old DEBUG/WARNING that buried the silent failure.
+        """
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        missing_host_path = tmp_path / "does-not-exist"
+
+        from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+        sandbox_config = SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                VolumeMountConfig(host_path=str(missing_host_path), container_path="/mnt/knowledge", read_only=True),
+            ],
+        )
+        config = SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+            sandbox=sandbox_config,
+        )
+
+        with caplog.at_level("ERROR", logger="deerflow.sandbox.local.local_sandbox_provider"):
+            with patch("deerflow.config.get_app_config", return_value=config):
+                provider = LocalSandboxProvider()
+
+        # Silent-skip behaviour is preserved (no breaking change for existing deployments).
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+
+        # The failure must be observable at ERROR level and reference the offending paths.
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert error_records, "expected an ERROR log when host_path is missing"
+        message = "\n".join(r.getMessage() for r in error_records)
+        assert str(missing_host_path) in message
+        assert "/mnt/knowledge" in message
+
+        # And it must include actionable Docker guidance so users don't lose hours
+        # to a silent empty-mount failure in production.
+        lowered = message.lower()
+        assert "docker" in lowered
+        assert "gateway" in lowered
+        assert "docker-compose" in lowered
+
     def test_write_file_resolves_container_paths_in_content(self, tmp_path):
         """write_file should replace container paths in file content with local paths."""
         data_dir = tmp_path / "data"

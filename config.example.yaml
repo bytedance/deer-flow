@@ -768,8 +768,12 @@ sandbox:
   allow_host_bash: false
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
+  # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
+  # checked from inside the deer-flow-gateway container — you must also bind-mount
+  # the same directory into services.gateway.volumes in docker/docker-compose.yaml
+  # for this mount to take effect (see issue #3244).
   # mounts:
-  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
   #     read_only: true                     # Whether the mount is read-only (default: false)
 
