@@ -50,18 +50,22 @@ gateway's own run/event stores using the request's auth context, so the real
 ## How replay works
 
 `tests/replay_provider.py::ReplayChatModel` returns recorded assistant turns keyed
-by a **normalized hash of the conversation** (human / ai / tool messages — role,
-text, tool-call name+args; with `<system-reminder>`, dates, UUIDs, tmp paths
-stripped). A miss raises loudly rather than passing silently.
+by a **normalized hash of the model caller + conversation**. The conversation is
+human / ai / tool messages — role, text, tool-call name+args; with
+`<system-reminder>`, dates, UUIDs, tmp paths stripped. The caller is the stable
+source of the model call (`lead_agent`, `middleware:title`, `suggest_agent`,
+`subagent:*`, etc.). A miss raises loudly rather than passing silently.
 
 **The system prompt is excluded from the match key.** The lead-agent system
 prompt is a living, frequently-edited implementation detail — its wording changes
 across PRs (e.g. #3195 added a "File Editing Workflow" section). Hashing it would
 make every fixture go stale and red-fail unrelated PRs the moment anyone edits the
 prompt. The conversation flow (user input → tool calls → results → answer) is the
-stable contract that identifies a recorded turn. (This mirrors how open-design's
-mock picker keys on the user prompt, not the system internals.) Combined with
-pinning skills + extensions empty and disabling memory/summarization
+stable contract that identifies a recorded turn. The caller still stays in the
+key so two different model users with identical conversation text do not compete
+for the same replay bucket. (This mirrors how open-design's mock picker keys on
+the user prompt, not the system internals.) Combined with pinning skills +
+extensions empty and disabling memory/summarization
 (`tests/_replay_fixture.py::build_config_yaml`), a fixture replays the same across
 machines, days, prompt edits, and CI. Replaying needs **no API key**.
 

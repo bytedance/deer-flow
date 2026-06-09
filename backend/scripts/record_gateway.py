@@ -28,27 +28,45 @@ sys.path.insert(0, str(_BACKEND / "tests"))
 def _install_capture(out_path: Path) -> None:
     from langchain_core.callbacks import BaseCallbackHandler
     from langchain_core.messages import messages_to_dict
-    from replay_provider import hash_messages
+    from replay_provider import caller_identity, hash_messages, hash_replay_input
 
     import deerflow.models.factory as factory_mod
 
     class Capture(BaseCallbackHandler):
         def __init__(self) -> None:
-            self.inputs: dict[str, list] = {}
+            self.inputs: dict[str, tuple[list, str]] = {}
 
-        def on_chat_model_start(self, serialized, messages, *, run_id=None, **kwargs):  # noqa: ANN001
-            self.inputs[str(run_id)] = messages[0] if messages else []
+        def on_chat_model_start(  # noqa: ANN001
+            self,
+            serialized,
+            messages,
+            *,
+            run_id=None,
+            tags=None,
+            name=None,
+            **kwargs,
+        ):
+            self.inputs[str(run_id)] = (
+                messages[0] if messages else [],
+                caller_identity(name=name, tags=tags),
+            )
 
         def on_llm_end(self, response, *, run_id=None, **kwargs):  # noqa: ANN001
-            inp = self.inputs.pop(str(run_id), None)
-            if inp is None:
+            captured = self.inputs.pop(str(run_id), None)
+            if captured is None:
                 return
+            inp, caller = captured
             for batch in response.generations:
                 for gen in batch:
                     message = getattr(gen, "message", None)
                     if message is None:
                         continue
-                    record = {"input_hash": hash_messages(inp), "output": messages_to_dict([message])[0]}
+                    record = {
+                        "caller": caller,
+                        "conversation_hash": hash_messages(inp),
+                        "input_hash": hash_replay_input(inp, caller=caller),
+                        "output": messages_to_dict([message])[0],
+                    }
                     with open(out_path, "a", encoding="utf-8") as handle:
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                         handle.flush()
