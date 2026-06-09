@@ -40,7 +40,7 @@ async def test_create_agent_does_not_block_event_loop(tmp_path: Path, monkeypatc
         user_id = get_effective_user_id()
         # test-side check (resolution offloaded; not exercised on the loop)
         agent_dir = await asyncio.to_thread(get_paths().user_agent_dir, user_id, "loop-make-agent")
-        assert (agent_dir / "config.yaml").exists()
+        assert await asyncio.to_thread((agent_dir / "config.yaml").exists)
     finally:
         load_agents_api_config_from_dict({})
 
@@ -51,13 +51,14 @@ async def test_delete_agent_does_not_block_event_loop(tmp_path: Path, monkeypatc
     load_agents_api_config_from_dict({"enabled": True})
     try:
         user_id = get_effective_user_id()
+        user_id = get_effective_user_id()
         # test-side seeding (resolution offloaded; not exercised on the loop)
         agent_dir = await asyncio.to_thread(get_paths().user_agent_dir, user_id, "loop-test-agent")
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        (agent_dir / "config.yaml").write_text("name: loop-test-agent\n", encoding="utf-8")
+        await asyncio.to_thread(agent_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread((agent_dir / "config.yaml").write_text, "name: loop-test-agent\n", encoding="utf-8")
 
         await delete_agent("loop-test-agent")
 
-        assert not agent_dir.exists()
+        assert not await asyncio.to_thread(agent_dir.exists)
     finally:
         load_agents_api_config_from_dict({})

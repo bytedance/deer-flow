@@ -221,12 +221,14 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         agent_dir = paths.user_agent_dir(user_id, normalized_name)
         legacy_dir = paths.agent_dir(normalized_name)
 
-        if agent_dir.exists() or legacy_dir.exists():
+        if legacy_dir.exists():
             return None  # signals 409 to the caller
 
         try:
-            agent_dir.mkdir(parents=True, exist_ok=True)
-
+            try:
+                agent_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                return None  # signals 409 to the caller
             # Write config.yaml
             config_data: dict = {"name": normalized_name}
             if request.description:
