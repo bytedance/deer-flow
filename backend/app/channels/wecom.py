@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from app.channels.base import Channel
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import (
     InboundMessageType,
     MessageBus,
@@ -270,7 +271,7 @@ class WeComChannel(Channel):
 
         user_id = (body.get("from") or {}).get("userid")
 
-        inbound_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
         inbound = self._make_inbound(
             chat_id=user_id,  # keep user's conversation in memory
             user_id=user_id,

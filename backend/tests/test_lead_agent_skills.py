@@ -60,6 +60,17 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
     assert "skill2" in result
 
 
+def test_get_skills_prompt_section_includes_slash_activation_guidance(monkeypatch):
+    skills = [_make_skill("data-analysis")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+
+    result = get_skills_prompt_section(available_skills={"data-analysis"})
+
+    assert "Explicit Slash Skill Activation" in result
+    assert "The runtime injects the activated skill content" in result
+    assert "do not call `read_file` for that SKILL.md again" in result
+
+
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)

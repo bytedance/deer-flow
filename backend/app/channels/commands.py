@@ -18,3 +18,10 @@ KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
         "/help",
     }
 )
+
+
+def is_known_channel_command(text: str) -> bool:
+    """Return whether text starts with a registered channel control command."""
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
