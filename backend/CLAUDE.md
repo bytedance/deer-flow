@@ -448,6 +448,11 @@ Agents declare their execution strategy via `executor_type` field in `config.yam
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
 - **Data-analyst InS reports**: `skills/custom/daily-report/scripts/query_daily.py`, `query_weekly.py`, and `query_monthly.py` always run through the InS provider — there is no demo-fallback path. Output carries top-level `data_source="ins"` and `data_notes=[]` so downstream KPI/export steps can preserve provenance. Any InS-side failure (network/auth/missing point/features-tool unavailable) emits `{"error": "HttpProviderError: ..."}` to stdout; the SOUL must surface that error to the user instead of generating a fake report. The InS adapter handles four endpoint series — `2k` (legacy vibration, nested name-based payload), `6k` (corrosion monitoring, nested key-based payload), `8k` (default rotating machinery, flat payload), and `9k` (high-end rotating / reciprocating, flat payload). See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for failure handling and 2k threshold semantics.
+- **Skill Source Protection** (3-layer defense): Skill script source code (`.py` files) and `SKILL.md` files under `/mnt/skills/` are protected from being read or displayed to users:
+  - **Layer 1 — Prompt**: `_build_skill_protection_section()` in `agents/lead_agent/prompt.py` injects a `<skill_source_protection>` directive into every agent's system prompt, instructing the agent to refuse source code display
+  - **Layer 2 — Tool**: `_is_protected_skill_source_path()` and `_is_skill_source_read_command()` in `sandbox/tools.py` block `read_file` access to `.py`/`SKILL.md` under `/mnt/skills/` and intercept bash commands (cat/head/tail/vim/python open) targeting skill source
+  - **Layer 3 — Audit**: `_HIGH_RISK_PATTERNS` in `agents/middlewares/sandbox_audit_middleware.py` classifies skill source read commands as `block`
+  - Non-sensitive files (README.md, .yaml, .json) and normal script execution (`python /mnt/skills/.../script.py`) are allowed
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 

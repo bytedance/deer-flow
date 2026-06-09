@@ -48,6 +48,11 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- fork bomb ---
     re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
+    # --- skill source code read attempts (shell commands) ---
+    re.compile(r"\b(cat|head|tail|less|more|vim|nano|pygmentize)\s+.*(/mnt/skills/)\S*\.py\b"),
+    re.compile(r"\b(cat|head|tail|less|more|vim|nano|pygmentize)\s+.*(/mnt/skills/)\S*SKILL\.md\b"),
+    # --- skill source code read attempts (Python open) ---
+    re.compile(r"""python[23]?\s+-[cC]\s+["'].*open\s*\(.*(/mnt/skills/)"""),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [

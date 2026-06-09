@@ -463,6 +463,16 @@ SKILL.md Format:
 - Environment variables resolved at runtime
 - Servers can be enabled/disabled independently
 
+### Skill Source Protection
+
+Skill script source code (`.py` files) and `SKILL.md` instruction files under `/mnt/skills/` are protected via a 3-layer defense-in-depth strategy:
+
+1. **Prompt layer** (`agents/lead_agent/prompt.py`): `_build_skill_protection_section()` injects a `<skill_source_protection>` directive into every agent's system prompt, instructing the agent to refuse source code display requests
+2. **Tool layer** (`sandbox/tools.py`): `_is_protected_skill_source_path()` blocks `read_file` on `.py`/`SKILL.md` under `/mnt/skills/`; `_is_skill_source_read_command()` intercepts bash commands (cat/head/tail/vim/python open) targeting skill source
+3. **Audit layer** (`agents/middlewares/sandbox_audit_middleware.py`): `_HIGH_RISK_PATTERNS` classifies skill source read commands as `block`, preventing execution even if the tool layer is bypassed
+
+Non-sensitive files (README.md, .yaml, .json) and normal script execution (`python /mnt/skills/.../script.py`) are not affected.
+
 ## Performance Considerations
 
 ### Caching

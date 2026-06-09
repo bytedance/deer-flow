@@ -153,6 +153,52 @@ def _resolve_skills_path(path: str) -> str:
     return _join_path_preserving_style(skills_host, relative)
 
 
+_SKILL_PROTECTED_FILENAMES = frozenset({"SKILL.md"})
+
+
+def _is_protected_skill_source_path(path: str) -> bool:
+    """Return True if *path* is a skill source file that must not be read.
+
+    Protected files:
+    - Any ``.py`` file under the skills container path
+    - Any file named ``SKILL.md`` under the skills container path
+
+    Non-sensitive files (README.md, .yaml, .json, etc.) are allowed.
+    """
+    if not _is_skills_path(path):
+        return False
+    if path.endswith(".py"):
+        return True
+    basename = path.rsplit("/", 1)[-1] if "/" in path else path
+    return basename in _SKILL_PROTECTED_FILENAMES
+
+
+_SKILL_SOURCE_READ_CMDS = re.compile(
+    r"\b(cat|head|tail|less|more|vim|nano|pygmentize|sed|awk)\b"
+)
+
+_SKILL_SOURCE_PYTHON_OPEN = re.compile(
+    r"""python[23]?\s+(?:-[cC]\s+|-\w*c\w*\s+)["'].*?open\s*\(\s*["']"""
+)
+
+
+def _is_skill_source_read_command(command: str) -> bool:
+    """Return True if *command* attempts to read skill source code.
+
+    Detects:
+    - Shell read commands (cat, head, etc.) targeting .py or SKILL.md under skills path
+    - Python ``open()`` calls targeting the skills path
+    """
+    skills_prefix = _get_skills_container_path()
+    if skills_prefix not in command:
+        return False
+    if _SKILL_SOURCE_READ_CMDS.search(command) and (".py" in command or "SKILL.md" in command):
+        return True
+    if _SKILL_SOURCE_PYTHON_OPEN.search(command):
+        return True
+    return False
+
+
 def _is_acp_workspace_path(path: str) -> bool:
     """Check if a path is under the ACP workspace virtual path."""
     return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(f"{_ACP_WORKSPACE_VIRTUAL_PATH}/")
@@ -1289,6 +1335,8 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
+            if _is_skill_source_read_command(command):
+                return "Command blocked: skill source code access is not permitted"
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
@@ -1504,6 +1552,8 @@ def read_file_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        if _is_protected_skill_source_path(path):
+            return "Error: Access to skill source code is not permitted"
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
