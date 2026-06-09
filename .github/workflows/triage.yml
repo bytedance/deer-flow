@@ -166,9 +166,9 @@ jobs:
               return;
             }
 
-            const labels = (await github.rest.issues.listLabelsOnIssue({
-              owner, repo, issue_number: num,
-            })).data.map(l => l.name);
+            const labels = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number: num, per_page: 100,
+            })).map(l => l.name);
             if (labels.includes('reviewing')) {
               core.info('Already labeled reviewing; skipping.');
               return;
@@ -198,7 +198,12 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = context.payload.issue.number;
 
-            const current = (context.payload.issue.labels || []).map(l => l.name);
+            // Read live labels (not the event payload) so labels added at creation
+            // time via the API or by another automation are seen — consistent with
+            // the live-state reads in the PR jobs above.
+            const current = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number, per_page: 100,
+            })).map(l => l.name);
             if (current.includes('needs-triage')) {
               core.info('Issue already has needs-triage; nothing to do.');
               return;
