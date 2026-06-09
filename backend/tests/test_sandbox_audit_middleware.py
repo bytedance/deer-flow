@@ -469,6 +469,31 @@ class TestHomeDirectoryDeletionSpellings:
         assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
 
 
+class TestHomeDirectoryStartupFileSpellings:
+    """Redirects into shell startup files match ``$HOME`` the way they match ``~`` (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "> $HOME/.bashrc",
+            ">> $HOME/.profile",
+            "> ${HOME}/.zshrc",
+            "> ${HOME}/.bash_profile",
+            ">> ${HOME}/.bashrc",
+            '> "$HOME/.bashrc"',
+            '>> "$HOME/.profile"',
+            '> "${HOME}/.zshrc"',
+            '> "${HOME}/.bash_profile"',
+            "echo hi > $HOME/.bashrc",
+            "printf x >> ${HOME}/.profile",
+            ">> $HOME/.bashrc && echo done",
+            "echo kept > ${HOME}/.bash_profile; true",
+        ],
+    )
+    def test_home_variable_startup_overwrite_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 

@@ -77,7 +77,7 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- overwrite system binaries ---
     re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
     # --- overwrite shell startup files ---
-    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    re.compile(rf">+\s*{_HOME_TARGET}/?\.(bashrc|profile|zshrc|bash_profile)"),
     # --- process environment leakage ---
     re.compile(r"/proc/[^/]+/environ"),
     # --- dynamic linker hijack (one-step escalation) ---
