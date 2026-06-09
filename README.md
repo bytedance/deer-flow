@@ -2913,8 +2913,9 @@ and agents. Failed extraction attempts are retryable execution errors, not safet
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
 `memory.json` can contain its JSON object inside a fenced `memory-json` block;
-embedded backticks and later fenced notes are supported. Unparseable summary
-text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+embedded backticks and later fenced notes are supported. Summary text that
+cannot be parsed or decoded is moved to `memory.json.corrupt-<timestamp>` for
+recovery before rebuilding.
 `storage_path` must point to the data root directory, not an existing JSON file.
 Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
 BOM; reads accept it, while writes remain BOM-free UTF-8.
