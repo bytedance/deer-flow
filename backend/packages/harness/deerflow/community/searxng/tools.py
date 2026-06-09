@@ -1,12 +1,18 @@
+import asyncio
 import json
 import logging
+
 from langchain.tools import tool
+
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
+
 from .searxng_client import SearxngClient
 
 logger = logging.getLogger(__name__)
-readability_extractor = ReadabilityExtractor()
+
+# readability_extractor runs CPU-bound parsing; always call via asyncio.to_thread
+_readability_extractor = ReadabilityExtractor()
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -27,7 +33,7 @@ def _get_searxng_client() -> SearxngClient:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+async def web_search_tool(query: str) -> str:
     """Search the web using SearXNG.
 
     Args:
@@ -41,24 +47,24 @@ def web_search_tool(query: str) -> str:
             max_results = int(raw) if not isinstance(raw, int) else raw
 
         client = _get_searxng_client()
-        results = client.search(query, max_results=max_results)
+        results = await client.search(query, max_results=max_results)
 
-        normalized_results = [
+        normalized = [
             {
-                "title": result.get("title", ""),
-                "url": result.get("url", ""),
-                "snippet": result.get("content", ""),
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("content", ""),
             }
-            for result in results
+            for r in results
         ]
-        return json.dumps(normalized_results, indent=2, ensure_ascii=False)
+        return json.dumps(normalized, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error in web_search_tool: {e}")
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -69,7 +75,6 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        # Use a direct HTTP fetch (not through SearXNG proxy)
         cfg = _get_tool_config("web_fetch")
         timeout_s = 30
         if cfg is not None:
@@ -77,8 +82,8 @@ def web_fetch_tool(url: str) -> str:
             timeout_s = float(raw) if not isinstance(raw, float) else raw
 
         import httpx
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
-            resp = client.get(
+        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+            resp = await client.get(
                 url,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)"},
             )
@@ -88,7 +93,7 @@ def web_fetch_tool(url: str) -> str:
         if not html_content.strip():
             return "Error: Empty response"
 
-        article = readability_extractor.extract_article(html_content)
+        article = await asyncio.to_thread(_readability_extractor.extract_article, html_content)
         return article.to_markdown()[:4096]
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")

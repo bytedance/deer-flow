@@ -12,7 +12,7 @@ class SearxngClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
 
-    def search(
+    async def search(
         self,
         query: str,
         max_results: int = 5,
@@ -41,8 +41,8 @@ class SearxngClient:
 
         logger.debug(f"Searching SearXNG at {self.base_url} with query: {query}")
         try:
-            with httpx.Client(timeout=30) as client:
-                resp = client.get(
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
                     f"{self.base_url}/search",
                     params=params,
                     headers={
@@ -64,7 +64,7 @@ class SearxngClient:
             logger.error(f"An unexpected error occurred during SearXNG search: {e}")
             raise
 
-    def fetch(self, url: str) -> str:
+    async def fetch(self, url: str) -> str:
         """Fetch the HTML content of a URL directly via HTTP GET.
 
         Args:
@@ -74,8 +74,8 @@ class SearxngClient:
             HTML content as string, or an error string prefixed with "Error:".
         """
         try:
-            with httpx.Client(timeout=30, follow_redirects=True) as client:
-                resp = client.get(
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(
                     url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)",

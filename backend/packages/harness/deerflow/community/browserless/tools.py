@@ -1,11 +1,17 @@
+import asyncio
 import logging
+
 from langchain.tools import tool
+
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
+
 from .browserless_client import BrowserlessClient
 
 logger = logging.getLogger(__name__)
-readability_extractor = ReadabilityExtractor()
+
+# readability_extractor runs CPU-bound parsing; always call via asyncio.to_thread
+_readability_extractor = ReadabilityExtractor()
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -46,7 +52,7 @@ def _get_browserless_client() -> BrowserlessClient:
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL using Browserless (headless Chrome).
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -78,7 +84,7 @@ def web_fetch_tool(url: str) -> str:
             best_attempt = _normalize_bool(cfg.get("best_attempt"), best_attempt)
 
         client = _get_browserless_client()
-        html = client.fetch_html(
+        html = await client.fetch_html(
             url=url,
             wait_until=wait_until,
             goto_timeout_ms=goto_timeout_ms,
@@ -93,7 +99,7 @@ def web_fetch_tool(url: str) -> str:
         if html.startswith("Error:"):
             return html
 
-        article = readability_extractor.extract_article(html)
+        article = await asyncio.to_thread(_readability_extractor.extract_article, html)
         return article.to_markdown()[:4096]
 
     except Exception as e:

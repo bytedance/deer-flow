@@ -14,7 +14,7 @@ class BrowserlessClient:
         self.token = token
         self.timeout_s = timeout_s
 
-    def fetch_html(
+    async def fetch_html(
         self,
         url: str,
         wait_until: str = "networkidle2",
@@ -65,8 +65,8 @@ class BrowserlessClient:
 
         logger.debug(f"Fetching URL via Browserless: {url}")
         try:
-            with httpx.Client(timeout=self.timeout_s) as client:
-                resp = client.post(
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                resp = await client.post(
                     f"{self.base_url}/content",
                     json=payload,
                     headers={
