@@ -13,9 +13,5 @@ def validate_postgres_schema(value: str) -> str:
     if value == "":
         return value
     if not _POSTGRES_SCHEMA_RE.match(value):
-        raise ValueError(
-            "postgres_schema must be a plain PostgreSQL identifier "
-            f"matching {POSTGRES_SCHEMA_PATTERN}; got {value!r}. "
-            "Quoted identifiers are not supported."
-        )
+        raise ValueError(f"postgres_schema must be a plain PostgreSQL identifier matching {POSTGRES_SCHEMA_PATTERN}; got {value!r}. Quoted identifiers are not supported.")
     return value

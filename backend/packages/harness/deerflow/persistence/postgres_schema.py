@@ -114,7 +114,12 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
         params["options"] = _merge_search_path_option(params.get("options", ""), schema)
         return make_conninfo(**params)
 
-    if parts.scheme not in {"postgres", "postgresql"}:
+    # DatabaseConfig.postgres_url may carry a SQLAlchemy driver suffix such as
+    # ``postgresql+asyncpg://``. psycopg's libpq only understands the bare
+    # ``postgres``/``postgresql`` scheme, so accept the compound form but emit
+    # a psycopg-consumable DSN by dropping the ``+driver`` part.
+    scheme_base = parts.scheme.split("+", 1)[0]
+    if scheme_base not in {"postgres", "postgresql"}:
         raise ValueError(f"Unsupported PostgreSQL DSN scheme for schema injection: {parts.scheme!r}")
 
     options_values: list[str] = []
@@ -129,4 +134,4 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
     query_pairs.append(("options", options))
     # quote_via=quote encodes space as %20 (libpq-safe), not + (form-style).
     query = urlencode(query_pairs, quote_via=quote)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    return urlunsplit((scheme_base, parts.netloc, parts.path, query, parts.fragment))

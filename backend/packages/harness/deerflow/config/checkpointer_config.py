@@ -28,12 +28,7 @@ class CheckpointerConfig(BaseModel):
     )
     postgres_schema: str = Field(
         default="",
-        description=(
-            "PostgreSQL schema for legacy checkpointer/store tables (postgres only). "
-            "Empty string keeps the server default search_path (usually 'public'). "
-            "Only plain identifiers are allowed: "
-            f"{POSTGRES_SCHEMA_PATTERN}."
-        ),
+        description=(f"PostgreSQL schema for legacy checkpointer/store tables (postgres only). Empty string keeps the server default search_path (usually 'public'). Only plain identifiers are allowed: {POSTGRES_SCHEMA_PATTERN}."),
     )
 
     @field_validator("postgres_schema")

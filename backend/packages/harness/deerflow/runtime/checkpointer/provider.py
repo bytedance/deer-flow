@@ -49,10 +49,14 @@ def _ensure_postgres_schema(conn_string: str, schema: str) -> None:
     statement = create_schema_sql(schema)
     if statement is None:
         return
-    import psycopg
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise ImportError(POSTGRES_INSTALL) from exc
 
     with psycopg.connect(conn_string, autocommit=True) as conn:
         conn.execute(statement)
+
 
 # ---------------------------------------------------------------------------
 # Sync factory

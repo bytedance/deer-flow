@@ -1,7 +1,8 @@
-
 """Tests for the PostgreSQL schema helpers (Issue #3380)."""
 
 from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 from deerflow.persistence.postgres_schema import (
     build_asyncpg_connect_args,
@@ -77,6 +78,7 @@ class TestDsnWithSearchPath:
         assert query["options"] == ["-c statement_timeout=5000 -c search_path=deerflow"]
 
     def test_supports_keyword_dsn(self):
+        pytest.importorskip("psycopg")
         from psycopg.conninfo import conninfo_to_dict
 
         dsn = "host=localhost dbname=deerflow user=postgres"
@@ -89,11 +91,22 @@ class TestDsnWithSearchPath:
         }
 
     def test_preserves_keyword_dsn_options(self):
+        pytest.importorskip("psycopg")
         from psycopg.conninfo import conninfo_to_dict
 
         dsn = "host=localhost dbname=deerflow options='-c statement_timeout=5000'"
         out = dsn_with_search_path(dsn, "deerflow")
         assert conninfo_to_dict(out)["options"] == "-c statement_timeout=5000 -c search_path=deerflow"
+
+    def test_normalizes_sqlalchemy_driver_scheme(self):
+        # DatabaseConfig.postgres_url may carry a +asyncpg suffix; the libpq DSN
+        # produced for psycopg must drop the driver and still inject search_path.
+        dsn = "postgresql+asyncpg://u:p@h:5432/db"
+        out = dsn_with_search_path(dsn, "deerflow")
+        parts = urlsplit(out)
+        assert parts.scheme == "postgresql"
+        query = parse_qs(parts.query)
+        assert query["options"] == ["-c search_path=deerflow"]
 
     def test_rejects_non_postgres_url_scheme(self):
         try:
