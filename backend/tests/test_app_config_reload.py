@@ -140,6 +140,57 @@ def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
     assert config.database.sqlite_dir == ".deer-flow/data"
 
 
+def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
+    """Commenting out every entry under a list key makes PyYAML parse it as None.
+
+    Regression for the documented ``cp config.example.yaml config.yaml`` flow
+    (issue #1444): such a config must load with empty lists instead of raising
+    ``Input should be a valid list``.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "models": None,
+                "tools": None,
+                "tool_groups": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.models == []
+    assert config.tools == []
+    assert config.tool_groups == []
+
+
+def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "models": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    with caplog.at_level("WARNING", logger="deerflow.config.app_config"):
+        AppConfig.from_file(str(config_path))
+
+    assert "No models are configured" in caplog.text
+
+
 def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
