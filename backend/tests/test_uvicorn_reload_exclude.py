@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -130,3 +131,38 @@ def test_launcher_precreates_every_absolute_reload_exclude(name):
 
     for value in absolute_excludes:
         assert value in created, f"{name}: absolute reload-exclude {value!r} is never created via mkdir (created dirs: {sorted(created)})"
+
+
+@pytest.mark.parametrize("name", list(LAUNCHERS))
+def test_sandbox_mkdir_precedes_uvicorn_launch(name):
+    """The sandbox mkdir must come before the uvicorn launch, not just exist.
+
+    ``_mkdir_dirs`` only proves the mkdir is present somewhere; this pins script
+    order so a future edit can't move (or guard) the mkdir below the launch and
+    silently reintroduce the #3454 crash on a fresh checkout. ``uv run uvicorn``
+    matches the launch but not serve.sh's ``stop_all`` kill line.
+    """
+    lines = LAUNCHERS[name].read_text(encoding="utf-8").splitlines()
+    launch_idx = next((i for i, ln in enumerate(lines) if "uv run uvicorn" in ln), None)
+    mkdir_idx = next((i for i, ln in enumerate(lines) if re.search(r"\bmkdir\b", ln) and "sandbox" in ln), None)
+
+    assert launch_idx is not None, f"{name}: could not locate the 'uv run uvicorn' launch line"
+    assert mkdir_idx is not None, f"{name}: could not locate the sandbox mkdir line"
+    assert mkdir_idx < launch_idx, f"{name}: sandbox mkdir (line {mkdir_idx + 1}) must precede uvicorn launch (line {launch_idx + 1})"
+
+
+def test_precreated_sandbox_artifacts_are_gitignored():
+    """backend/sandbox is runtime state — its contents must stay out of git so
+    sandbox artifacts can't be accidentally committed (matches the reload-exclude
+    intent). A content path is existence-independent, unlike the bare dir path.
+
+    Guards against the inaccurate "gitignored" claim by making it verifiable.
+    """
+    probe = "backend/sandbox/__artifact_probe__"
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", probe],
+        capture_output=True,
+    )
+    if result.returncode == 128:  # not a git checkout (e.g. packaged install)
+        pytest.skip("not inside a git working tree")
+    assert result.returncode == 0, "backend/sandbox/* should be gitignored (see backend/.gitignore '/sandbox/')"
