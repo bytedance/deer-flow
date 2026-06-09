@@ -279,7 +279,7 @@ models:
   # Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
   # - name: minimax-m3
   #   display_name: MiniMax M3
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M3
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
@@ -289,10 +289,32 @@ models:
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
+  #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
+  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
+  #   # names differ with "user name must be consistent (2013)". Declare the
+  #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
+  #   # title/memory generation) truly disable reasoning instead of spending
+  #   # tokens on it.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
+  # Still use the PatchedChatMiniMax adapter: it strips the per-message `name`
+  # field DeerFlow middlewares attach, which MiniMax otherwise rejects with
+  # "user name must be consistent (2013)".
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
@@ -300,12 +322,12 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # - name: minimax-m2.7-highspeed
   #   display_name: MiniMax M2.7 Highspeed
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
@@ -313,7 +335,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
@@ -321,7 +343,7 @@ models:
   # Docs: https://platform.minimaxi.com/docs/api-reference/text-openai-api
   # - name: minimax-m3
   #   display_name: MiniMax M3
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M3
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
@@ -331,10 +353,32 @@ models:
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
+  #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
+  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
+  #   # names differ with "user name must be consistent (2013)". Declare the
+  #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
+  #   # title/memory generation) truly disable reasoning instead of spending
+  #   # tokens on it.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
+  # Still use the PatchedChatMiniMax adapter: it strips the per-message `name`
+  # field DeerFlow middlewares attach, which MiniMax otherwise rejects with
+  # "user name must be consistent (2013)".
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
@@ -342,12 +386,12 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # - name: minimax-m2.7-highspeed
   #   display_name: MiniMax M2.7 Highspeed
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
@@ -355,7 +399,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: OpenRouter (OpenAI-compatible)
@@ -493,6 +537,10 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Optional proxy for restricted networks / Docker / WSL.
+    # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
+    # proxy: $HTTPS_PROXY
+    # trust_env: true
 
   # Web fetch tool (uses InfoQuest)
   # - name: web_fetch

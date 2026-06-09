@@ -15,6 +15,32 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
 
+load_proxy_env_from_dotenv() {
+    local env_file="$PROJECT_ROOT/.env"
+    local var
+    local line
+    local value
+
+    if [ ! -f "$env_file" ]; then
+        return
+    fi
+
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+        if [ -z "${!var+x}" ]; then
+            line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
+            if [ -n "$line" ]; then
+                value="${line#*=}"
+                value="${value%\"}"
+                value="${value#\"}"
+                value="${value%\'}"
+                value="${value#\'}"
+                value="${value%$'\r'}"
+                export "${var}=${value}"
+            fi
+        fi
+    done
+}
+
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
     local sandbox_use=""
@@ -219,6 +245,8 @@ start() {
             echo -e "${BLUE}Created empty extensions_config.json${NC}"
         fi
     fi
+
+    load_proxy_env_from_dotenv
 
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services

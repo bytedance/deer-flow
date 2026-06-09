@@ -54,6 +54,29 @@ class TestProviders:
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
 
+    def test_minimax_vision_is_per_model(self):
+        """M3 supports vision; M2.7 variants are text-only.
+
+        The provider-level extra_config carries the default (M3) capability, but
+        extra_config_for() must drop vision when an M2.7 model is selected.
+        """
+        providers = {provider.name: provider for provider in LLM_PROVIDERS}
+
+        for name in ("minimax", "minimax_cn"):
+            provider = providers[name]
+            assert provider.extra_config["supports_vision"] is True
+            assert provider.extra_config_for("MiniMax-M3")["supports_vision"] is True
+            assert provider.extra_config_for("MiniMax-M2.7")["supports_vision"] is False
+            assert provider.extra_config_for("MiniMax-M2.7-highspeed")["supports_vision"] is False
+            # Override must not mutate the shared provider-level config.
+            assert provider.extra_config["supports_vision"] is True
+
+    def test_extra_config_for_returns_provider_config_without_override(self):
+        """Providers without per-model overrides return their config unchanged."""
+        providers = {provider.name: provider for provider in LLM_PROVIDERS}
+        openai = providers["openai"]
+        assert openai.extra_config_for("gpt-5") == openai.extra_config
+
     def test_llm_providers_have_required_fields(self):
         for p in LLM_PROVIDERS:
             assert p.name
