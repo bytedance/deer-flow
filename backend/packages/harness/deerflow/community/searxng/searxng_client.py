@@ -65,13 +65,13 @@ class SearxngClient:
             raise
 
     def fetch(self, url: str) -> str:
-        """Fetch the HTML content of a URL via SearXNG's fetch proxy if available.
+        """Fetch the HTML content of a URL directly via HTTP GET.
 
         Args:
             url: The URL to fetch.
 
         Returns:
-            HTML content as string.
+            HTML content as string, or an error string prefixed with "Error:".
         """
         try:
             with httpx.Client(timeout=30, follow_redirects=True) as client:

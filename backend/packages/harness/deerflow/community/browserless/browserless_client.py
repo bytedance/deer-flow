@@ -78,7 +78,6 @@ class BrowserlessClient:
                 code = resp.status_code
                 target_code = resp.headers.get("X-Response-Code", "")
                 target_status = resp.headers.get("X-Response-Status", "")
-                target_url = resp.headers.get("X-Response-URL", "")
 
                 logger.debug(
                     f"Browserless response: code={code}, "

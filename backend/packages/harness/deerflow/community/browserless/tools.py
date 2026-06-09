@@ -8,15 +8,40 @@ logger = logging.getLogger(__name__)
 readability_extractor = ReadabilityExtractor()
 
 
+def _get_tool_config(tool_name: str) -> dict | None:
+    """Get tool config extras safely, returning None if not configured."""
+    config = get_app_config().get_tool_config(tool_name)
+    if config is None:
+        return None
+    extras = config.model_extra
+    return extras if extras is not None else {}
+
+
+def _normalize_bool(value: bool | str | int | None, default: bool) -> bool:
+    """Normalize a config value to a boolean.
+    Handles env-resolved strings like "false" or "true".
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    if isinstance(value, int):
+        return bool(value)
+    return default
+
+
 def _get_browserless_client() -> BrowserlessClient:
-    config = get_app_config().get_tool_config("web_fetch")
+    cfg = _get_tool_config("web_fetch")
     base_url = "http://localhost:3032"
     token = ""
     timeout_s = 30.0
-    if config is not None and config.model_extra:
-        base_url = config.model_extra.get("base_url", base_url)
-        token = config.model_extra.get("token", token)
-        timeout_s = float(config.model_extra.get("timeout_s", timeout_s))
+    if cfg is not None:
+        base_url = cfg.get("base_url", base_url)
+        token = cfg.get("token", token)
+        raw = cfg.get("timeout_s", timeout_s)
+        timeout_s = float(raw) if not isinstance(raw, float) else raw
     return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
@@ -32,7 +57,7 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        config = get_app_config().get_tool_config("web_fetch")
+        cfg = _get_tool_config("web_fetch")
 
         wait_until = "networkidle2"
         goto_timeout_ms = 30000
@@ -43,12 +68,14 @@ def web_fetch_tool(url: str) -> str:
         reject_resource_types: list[str] | None = None
         reject_request_pattern: list[str] | None = None
 
-        if config is not None and config.model_extra:
-            wait_until = config.model_extra.get("wait_until", wait_until)
-            goto_timeout_ms = int(config.model_extra.get("goto_timeout_ms", goto_timeout_ms))
-            wait_for_timeout_ms = int(config.model_extra.get("wait_for_timeout_ms", wait_for_timeout_ms))
-            wait_for_selector = config.model_extra.get("wait_for_selector", wait_for_selector)
-            best_attempt = bool(config.model_extra.get("best_attempt", best_attempt))
+        if cfg is not None:
+            wait_until = cfg.get("wait_until", wait_until)
+            raw_goto = cfg.get("goto_timeout_ms", goto_timeout_ms)
+            goto_timeout_ms = int(raw_goto) if not isinstance(raw_goto, int) else raw_goto
+            raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
+            wait_for_timeout_ms = int(raw_wait) if not isinstance(raw_wait, int) else raw_wait
+            wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+            best_attempt = _normalize_bool(cfg.get("best_attempt"), best_attempt)
 
         client = _get_browserless_client()
         html = client.fetch_html(

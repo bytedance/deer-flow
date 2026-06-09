@@ -9,11 +9,20 @@ logger = logging.getLogger(__name__)
 readability_extractor = ReadabilityExtractor()
 
 
+def _get_tool_config(tool_name: str) -> dict | None:
+    """Get tool config extras safely, returning None if not configured."""
+    config = get_app_config().get_tool_config(tool_name)
+    if config is None:
+        return None
+    extras = config.model_extra
+    return extras if extras is not None else {}
+
+
 def _get_searxng_client() -> SearxngClient:
-    config = get_app_config().get_tool_config("web_search")
+    cfg = _get_tool_config("web_search")
     base_url = "http://localhost:8088"
-    if config is not None and "base_url" in config.model_extra:
-        base_url = config.model_extra.get("base_url")
+    if cfg is not None:
+        base_url = cfg.get("base_url", base_url)
     return SearxngClient(base_url=base_url)
 
 
@@ -25,10 +34,11 @@ def web_search_tool(query: str) -> str:
         query: The query to search for.
     """
     try:
-        config = get_app_config().get_tool_config("web_search")
+        cfg = _get_tool_config("web_search")
         max_results = 5
-        if config is not None and "max_results" in config.model_extra:
-            max_results = config.model_extra.get("max_results")
+        if cfg is not None:
+            raw = cfg.get("max_results", max_results)
+            max_results = int(raw) if not isinstance(raw, int) else raw
 
         client = _get_searxng_client()
         results = client.search(query, max_results=max_results)
@@ -41,11 +51,10 @@ def web_search_tool(query: str) -> str:
             }
             for result in results
         ]
-        json_results = json.dumps(normalized_results, indent=2, ensure_ascii=False)
-        return json_results
+        return json.dumps(normalized_results, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error in web_search_tool: {e}")
-        return f"Error: {str(e)}"
+        return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -60,10 +69,24 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        client = _get_searxng_client()
-        html_content = client.fetch(url)
-        if html_content.startswith("Error:"):
-            return html_content
+        # Use a direct HTTP fetch (not through SearXNG proxy)
+        cfg = _get_tool_config("web_fetch")
+        timeout_s = 30
+        if cfg is not None:
+            raw = cfg.get("timeout_s", timeout_s)
+            timeout_s = float(raw) if not isinstance(raw, float) else raw
+
+        import httpx
+        with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
+            resp = client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)"},
+            )
+            resp.raise_for_status()
+            html_content = resp.text
+
+        if not html_content.strip():
+            return "Error: Empty response"
 
         article = readability_extractor.extract_article(html_content)
         return article.to_markdown()[:4096]
