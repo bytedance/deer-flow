@@ -3,7 +3,7 @@
 import pytest
 from starlette.testclient import TestClient
 
-from app.gateway.auth_middleware import AuthMiddleware, _is_public
+from app.gateway.auth_middleware import AuthMiddleware, _is_public, _is_public_request
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 
@@ -25,6 +25,15 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
 )
 def test_public_paths(path: str):
     assert _is_public(path) is True
+
+
+def test_public_share_read_request():
+    assert _is_public_request("GET", "/api/shares/share-1") is True
+    assert _is_public_request("DELETE", "/api/shares/share-1") is False
+    assert _is_public_request("GET", "/api/shares/threads") is False
+    assert _is_public_request("POST", "/api/shares/threads/thread-1") is False
+    assert _is_public_request("GET", "/api/shares/threads/thread-1") is False
+    assert _is_public_request("GET", "/api/shares-anything") is False
 
 
 @pytest.mark.parametrize(
@@ -129,6 +138,26 @@ def _make_app():
     async def future():
         return {"ok": True}
 
+    @app.get("/api/shares/share-1")
+    async def share_get():
+        return {"ok": True}
+
+    @app.delete("/api/shares/share-1")
+    async def share_delete():
+        return {"ok": True}
+
+    @app.get("/api/shares/threads")
+    async def share_threads_reserved():
+        return {"ok": True}
+
+    @app.post("/api/shares/threads/abc")
+    async def share_create():
+        return {"ok": True}
+
+    @app.get("/api/shares-anything")
+    async def shares_prefix_lookalike():
+        return {"ok": True}
+
     return app
 
 
@@ -146,6 +175,31 @@ def test_public_auth_path_no_cookie(client):
     """Public auth endpoints (login/register) pass without cookie."""
     res = client.get("/api/v1/auth/setup-status")
     assert res.status_code == 200
+
+
+def test_public_share_path_no_cookie(client):
+    res = client.get("/api/shares/share-1")
+    assert res.status_code == 200
+
+
+def test_share_create_no_cookie_returns_401(client):
+    res = client.post("/api/shares/threads/abc")
+    assert res.status_code == 401
+
+
+def test_share_revoke_no_cookie_returns_401(client):
+    res = client.delete("/api/shares/share-1")
+    assert res.status_code == 401
+
+
+def test_share_threads_reserved_no_cookie_returns_401(client):
+    res = client.get("/api/shares/threads")
+    assert res.status_code == 401
+
+
+def test_share_prefix_lookalike_no_cookie_returns_401(client):
+    res = client.get("/api/shares-anything")
+    assert res.status_code == 401
 
 
 def test_protected_auth_path_no_cookie(client):

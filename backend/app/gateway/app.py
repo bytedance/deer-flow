@@ -21,6 +21,7 @@ from app.gateway.routers import (
     memory,
     models,
     runs,
+    shares,
     skills,
     suggestions,
     thread_runs,
@@ -178,25 +179,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError(error_msg) from e
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
-
-    # Pre-warm tiktoken encoding cache so the first memory-injection request
-    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
-    # that may be unreachable in restricted networks — see issue #3402).
-    try:
-        from deerflow.agents.memory.prompt import warm_tiktoken_cache
-
-        warmed = await asyncio.wait_for(
-            asyncio.to_thread(warm_tiktoken_cache),
-            timeout=5,
-        )
-        if warmed:
-            logger.info("tiktoken encoding cache warmed successfully")
-        else:
-            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback")
-    except TimeoutError:
-        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback")
-    except Exception:
-        logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app, startup_config):
@@ -369,6 +351,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Public conversation shares are mounted at /api/shares
+    app.include_router(shares.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
