@@ -22,6 +22,7 @@ Two layers of coverage:
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -35,18 +36,59 @@ LAUNCHERS = {
     "docker/dev-entrypoint.sh": REPO_ROOT / "docker" / "dev-entrypoint.sh",
 }
 
+# Shell terminators / redirects that end a simple command's argument list.
+_CMD_BOUNDARY = re.compile(r"[;&|<>]")
+
+
+def _logical_lines(script: str) -> list[str]:
+    """Fold ``\\``-continuations and drop comment lines, yielding logical lines.
+
+    A ``mkdir`` or ``--reload-exclude`` list split across lines with a trailing
+    backslash becomes one line here, so an argument on a continuation line can't
+    be silently dropped by per-line scanning.
+    """
+    folded = script.replace("\\\n", " ")
+    return [line for line in folded.splitlines() if not line.lstrip().startswith("#")]
+
+
+def _shlex(fragment: str) -> list[str]:
+    """Tokenize a shell fragment (quotes stripped, ``$VAR`` kept literal,
+    trailing ``# comment`` honored); tolerate pathological quoting."""
+    try:
+        return shlex.split(fragment, comments=True)
+    except ValueError:
+        return fragment.split()
+
 
 def _reload_exclude_values(script: str) -> list[str]:
-    """Pull every ``--reload-exclude=<value>`` token, stripped of quoting."""
+    """Every ``--reload-exclude=<value>`` value, exact, with quoting removed."""
     values = []
-    for raw in re.findall(r"--reload-exclude=(\S+)", script):
-        values.append(raw.strip().strip("'\""))
+    for line in _logical_lines(script):
+        for raw in re.findall(r"--reload-exclude=(\S+)", line):
+            tokens = _shlex(raw)
+            if tokens:
+                values.append(tokens[0])
     return values
 
 
-def _mkdir_text(script: str) -> str:
-    """Concatenate every ``mkdir -p`` line so we can test membership."""
-    return "\n".join(line for line in script.splitlines() if "mkdir -p" in line)
+def _mkdir_dirs(script: str) -> set[str]:
+    """Exact set of directories created by every ``mkdir`` command.
+
+    Tokenizes each ``mkdir`` argument list rather than substring-matching, so
+    ``/app/backend/sandbox`` is not falsely considered created by, say,
+    ``mkdir -p /app/backend/sandbox-other``.
+    """
+    dirs: set[str] = set()
+    for line in _logical_lines(script):
+        match = re.search(r"\bmkdir\b(.*)", line)
+        if not match:
+            continue
+        args = _CMD_BOUNDARY.split(match.group(1), maxsplit=1)[0]
+        for token in _shlex(args):
+            if token.startswith("-"):  # skip flags such as -p
+                continue
+            dirs.add(token)
+    return dirs
 
 
 @pytest.mark.skipif(
@@ -72,17 +114,19 @@ def test_resolve_reload_patterns_is_safe_once_dir_exists(tmp_path):
 
 @pytest.mark.parametrize("name", list(LAUNCHERS))
 def test_launcher_precreates_every_absolute_reload_exclude(name):
-    """Every absolute ``--reload-exclude`` dir must be ``mkdir -p``'d first.
+    """Every absolute ``--reload-exclude`` dir must be created by ``mkdir`` first.
 
     Relative glob patterns (``*.pyc``, ``__pycache__``) are safe and skipped;
     anything anchored at ``/`` or a shell variable is an absolute path that
-    uvicorn would glob — and crash on — unless it already exists.
+    uvicorn would glob — and crash on — unless it already exists. Membership is
+    an exact match against the parsed ``mkdir`` argument set (not a substring
+    test), so a path-prefix can't produce a false pass.
     """
     script = LAUNCHERS[name].read_text(encoding="utf-8")
-    mkdir_text = _mkdir_text(script)
+    created = _mkdir_dirs(script)
 
     absolute_excludes = [v for v in _reload_exclude_values(script) if v.startswith(("/", "$"))]
     assert absolute_excludes, f"{name}: expected at least one absolute reload-exclude"
 
     for value in absolute_excludes:
-        assert value in mkdir_text, f"{name}: absolute reload-exclude {value!r} is never created via 'mkdir -p'"
+        assert value in created, f"{name}: absolute reload-exclude {value!r} is never created via mkdir (created dirs: {sorted(created)})"
