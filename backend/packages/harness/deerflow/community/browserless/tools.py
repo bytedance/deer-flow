@@ -65,7 +65,7 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch")
 
-        wait_until = "networkidle2"
+        wait_for_event = ""
         goto_timeout_ms = 30000
         wait_for_timeout_ms = 0
         wait_for_selector = ""
@@ -75,7 +75,7 @@ async def web_fetch_tool(url: str) -> str:
         reject_request_pattern: list[str] | None = None
 
         if cfg is not None:
-            wait_until = cfg.get("wait_until", wait_until)
+            wait_for_event = cfg.get("wait_for_event", wait_for_event)
             raw_goto = cfg.get("goto_timeout_ms", goto_timeout_ms)
             goto_timeout_ms = int(raw_goto) if not isinstance(raw_goto, int) else raw_goto
             raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
@@ -86,7 +86,7 @@ async def web_fetch_tool(url: str) -> str:
         client = _get_browserless_client()
         html = await client.fetch_html(
             url=url,
-            wait_until=wait_until,
+            wait_for_event=wait_for_event,
             goto_timeout_ms=goto_timeout_ms,
             wait_for_timeout_ms=wait_for_timeout_ms,
             wait_for_selector=wait_for_selector,

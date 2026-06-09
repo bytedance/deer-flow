@@ -37,7 +37,7 @@ class TestBrowserlessClient:
             assert result == "<html><body>Page content</body></html>"
             call_kwargs = mock_ctx.post.call_args.kwargs
             assert call_kwargs["json"]["url"] == "https://example.com"
-            assert call_kwargs["json"]["waitUntil"] == "networkidle2"
+            assert "waitUntil" not in call_kwargs["json"]
 
     async def test_fetch_html_empty_response(self):
         """fetch_html returns error for empty response."""

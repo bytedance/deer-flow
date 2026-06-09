@@ -17,7 +17,7 @@ class BrowserlessClient:
     async def fetch_html(
         self,
         url: str,
-        wait_until: str = "networkidle2",
+        wait_for_event: str = "",
         goto_timeout_ms: int = 30000,
         wait_for_timeout_ms: int = 0,
         wait_for_selector: str = "",
@@ -30,7 +30,8 @@ class BrowserlessClient:
 
         Args:
             url: The URL to fetch.
-            wait_until: When to consider navigation complete.
+            wait_for_event: Wait for a page event (e.g. "networkidle", "load").
+                            Replaces the deprecated waitUntil parameter.
             goto_timeout_ms: Navigation timeout in milliseconds.
             wait_for_timeout_ms: Extra wait after page load.
             wait_for_selector: CSS selector to wait for.
@@ -44,13 +45,14 @@ class BrowserlessClient:
         """
         payload: dict[str, Any] = {
             "url": url,
-            "waitUntil": wait_until,
             "gotoTimeout": goto_timeout_ms,
             "bestAttempt": best_attempt,
         }
 
         if self.token:
             payload["token"] = self.token
+        if wait_for_event:
+            payload["waitForEvent"] = wait_for_event
         if wait_for_timeout_ms > 0:
             payload["waitForTimeout"] = wait_for_timeout_ms
         if wait_for_selector:
