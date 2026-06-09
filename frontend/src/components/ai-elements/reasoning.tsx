@@ -10,9 +10,9 @@ import { cn } from "@/lib/utils";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, memo, useContext, useEffect, useState } from "react";
-import { Streamdown } from "streamdown";
 import { reasoningPlugins } from "@/core/streamdown/plugins";
 import { Shimmer } from "./shimmer";
+import { ClipboardSafeStreamdown } from "./streamdown";
 
 type ReasoningContextValue = {
   isStreaming: boolean;
@@ -178,7 +178,9 @@ export const ReasoningContent = memo(
       )}
       {...props}
     >
-      <Streamdown {...reasoningPlugins}>{children}</Streamdown>
+      <ClipboardSafeStreamdown {...reasoningPlugins}>
+        {children}
+      </ClipboardSafeStreamdown>
     </CollapsibleContent>
   ),
 );
