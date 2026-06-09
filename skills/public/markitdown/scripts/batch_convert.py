@@ -23,6 +23,10 @@ def convert_file(file_path: Path, output_dir: Path, verbose: bool = False) -> tu
     Routing:
       - image suffix (.jpg/.jpeg/.png) -> mineru_client.ocr_to_markdown
       - else: markitdown.convert(); if text < OCR_FALLBACK_THRESHOLD, fall back to mineru
+
+    On success, the full markdown body is printed to stdout between
+    `--- begin: <path> ---` and `--- end: <path> ---` markers so the agent
+    can include it in its response to the user (not just a file-on-disk signal).
     """
     try:
         suffix = file_path.suffix.lower()
@@ -45,6 +49,11 @@ def convert_file(file_path: Path, output_dir: Path, verbose: bool = False) -> tu
         output_file = output_dir / f"{file_path.stem}.md"
         content = f"# {file_path.stem}\n\n**Source**: {file_path.name}\n\n---\n\n{text}"
         output_file.write_text(content, encoding="utf-8")
+        # Echo the full content to stdout so the agent can surface it to the user.
+        # Delimiters are stable markers the agent (or a parser) can rely on.
+        print(f"--- begin: {output_file} ---")
+        print(content, end="" if content.endswith("\n") else "\n")
+        print(f"--- end: {output_file} ---")
         return True, str(file_path), f"✓ Converted to {output_file.name}"
 
     except FileNotFoundError:

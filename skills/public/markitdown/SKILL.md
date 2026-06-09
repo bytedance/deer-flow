@@ -10,6 +10,12 @@ description: |
   (env: MINERU_API_URL, MINERU_API_KEY).
   markitdown is pre-installed in the sandbox — call directly.
 
+  The full converted Markdown body is **streamed back in your response** (the
+  script prints it to stdout between `--- begin: <path> ---` markers, in
+  addition to saving to /mnt/user-data/outputs/<stem>.md). The user sees
+  the actual content, not just a file path. Always include that body in
+  the final assistant message.
+
   Triggers: "把这份 PDF 转成 markdown", "convert this to md",
   "extract text from this PPT/DOCX", "OCR this screenshot",
   "总结这个文档", "识别这个文件", "把这个截图读一下",
@@ -25,6 +31,12 @@ description: |
 Convert one uploaded document to Markdown. Use for: PDF, PPTX, DOCX, JPG, PNG
 (gotchas), plus XLSX / HTML / CSV / EPUB / JSON / XML (straight convert).
 OCR backend: internal MinerU service (LAN HTTP, returns Markdown).
+
+**Output is surfaced inline.** The converted Markdown body is echoed to
+stdout (between `--- begin: <path> ---` / `--- end: <path> ---` markers) in
+addition to being written to `/mnt/user-data/outputs/<stem>.md`. Always
+include that body in your final message so the user can read the result,
+not just see a file path.
 
 ## 触发匹配规则（Agent 加载后必读）
 
@@ -69,7 +81,13 @@ dst = Path("/mnt/user-data/outputs/report.md")
 
 md = MarkItDown()
 result = md.convert(str(src))
-dst.write_text(result.text_content, encoding="utf-8")
+content = f"# {src.stem}\n\n**Source**: {src.name}\n\n---\n\n{result.text_content or ''}"
+dst.write_text(content, encoding="utf-8")
+# Surface to the user — print the body so the agent can include it in the
+# final response (not just a file-on-disk signal).
+print(f"--- begin: {dst} ---")
+print(content, end="" if content.endswith("\n") else "\n")
+print(f"--- end: {dst} ---")
 ```
 
 ## Quickstart — 图片 / 扫描件
@@ -77,11 +95,17 @@ dst.write_text(result.text_content, encoding="utf-8")
 ```python
 import sys
 sys.path.insert(0, "/mnt/skills/public/markitdown/scripts")
+from pathlib import Path
 import mineru_client
 
-text = mineru_client.ocr_to_markdown("/mnt/user-data/uploads/photo.png")
-with open("/mnt/user-data/outputs/photo.md", "w", encoding="utf-8") as f:
-    f.write(text)
+src = Path("/mnt/user-data/uploads/photo.png")
+dst = Path("/mnt/user-data/outputs/photo.md")
+text = mineru_client.ocr_to_markdown(str(src))
+content = f"# {src.stem}\n\n**Source**: {src.name}\n\n---\n\n{text}"
+dst.write_text(content, encoding="utf-8")
+print(f"--- begin: {dst} ---")
+print(content, end="" if content.endswith("\n") else "\n")
+print(f"--- end: {dst} ---")
 ```
 
 **注意**：`MINERU_API_URL` 和 `MINERU_API_KEY` 必须在容器 env 中设置；缺则 `MinerUError`。
@@ -97,6 +121,8 @@ python /mnt/skills/public/markitdown/scripts/batch_convert.py \
 ```
 
 可选 `--workers N`（默认 4）、`--verbose`。
+
+`batch_convert.py` 在每个文件成功转换后会自动把内容打印到 stdout（带 `--- begin / end ---` 分隔符），多文件按完成顺序输出。agent 只需把这些 body 块按顺序粘到最终回复里即可。
 
 ## Gotchas 详解
 
