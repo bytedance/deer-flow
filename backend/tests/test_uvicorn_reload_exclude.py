@@ -61,25 +61,31 @@ def _shlex(fragment: str) -> list[str]:
         return fragment.split()
 
 
-def _reload_exclude_values(script: str) -> list[str]:
-    """Every ``--reload-exclude`` value, with quoting removed.
+# ``--reload-exclude`` followed by ``=`` or whitespace, then a value that is a
+# single-quoted group, a double-quoted group, or a bare token. The quoted
+# alternatives match a *balanced* pair first, so serve.sh's surrounding
+# ``GATEWAY_EXTRA_FLAGS="..."`` closing quote is never swallowed into the value.
+_RELOAD_EXCLUDE = re.compile(r"""--reload-exclude[=\s]+('[^']*'|"[^"]*"|[^\s'"]+)""")
 
-    Supports both click/uvicorn forms:
-    - ``--reload-exclude=<value>``
-    - ``--reload-exclude <value>``
+
+def _reload_exclude_values(script: str) -> list[str]:
+    """Every ``--reload-exclude`` value, with surrounding quotes removed.
+
+    Handles both CLI forms (``--reload-exclude=<value>`` and the space form
+    ``--reload-exclude <value>``) and both shell quotings the launchers use:
+
+    * ``docker/dev-entrypoint.sh`` puts each flag on its own line.
+    * ``scripts/serve.sh`` packs every flag into a single double-quoted
+      ``GATEWAY_EXTRA_FLAGS="... --reload-exclude='$X' ..."`` assignment. A
+      whole-line ``shlex`` would collapse that assignment into one token and
+      find no flags (this is what regressed serve.sh in CI); matching balanced
+      inner quotes here keeps the assignment's closing ``"`` out of the value,
+      so every exclude — including the last ``$BACKEND_RUNTIME_HOME`` — is seen.
     """
     values: list[str] = []
     for line in _logical_lines(script):
-        tokens = _shlex(line)
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok.startswith("--reload-exclude="):
-                values.append(tok.split("=", 1)[1])
-            elif tok == "--reload-exclude" and i + 1 < len(tokens):
-                values.append(tokens[i + 1])
-                i += 1
-            i += 1
+        for raw in _RELOAD_EXCLUDE.findall(line):
+            values.append(raw.strip("\"'"))
     return values
 
 
