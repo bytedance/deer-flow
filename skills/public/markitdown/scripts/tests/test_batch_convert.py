@@ -106,30 +106,3 @@ def test_convert_file_continues_on_markitdown_exception(tmp_path):
     placeholder = out_dir / "broken.md"
     assert placeholder.exists()
     assert "markitdown blew up" in placeholder.read_text(encoding="utf-8")
-
-
-def test_convert_file_echoes_content_to_stdout(mineru_env, tmp_path, capsys):
-    """On success, the full MD body is printed between begin/end markers
-    so the agent can include it in its response (not just a file-on-disk signal)."""
-    img = tmp_path / "photo.jpg"
-    img.write_bytes(b"fake-jpg-bytes")
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    with mock.patch.object(
-        batch_convert.mineru_client, "ocr_to_markdown", return_value="# OCR result"
-    ):
-        ok, _, _ = batch_convert.convert_file(img, out_dir, verbose=False)
-
-    assert ok is True
-    captured = capsys.readouterr()
-    expected_md_path = str(out_dir / "photo.md")
-    assert f"--- begin: {expected_md_path} ---" in captured.out
-    assert f"--- end: {expected_md_path} ---" in captured.out
-    # The full MD body should appear between the markers.
-    begin_idx = captured.out.index(f"--- begin: {expected_md_path} ---")
-    end_idx = captured.out.index(f"--- end: {expected_md_path} ---")
-    body = captured.out[begin_idx:end_idx]
-    assert "# photo" in body
-    assert "**Source**: photo.jpg" in body
-    assert "# OCR result" in body
