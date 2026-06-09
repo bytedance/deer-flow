@@ -18,26 +18,24 @@ class BrowserlessClient:
         self,
         url: str,
         wait_for_event: str = "",
-        goto_timeout_ms: int = 30000,
         wait_for_timeout_ms: int = 0,
         wait_for_selector: str = "",
         wait_for_selector_timeout_ms: int = 5000,
-        best_attempt: bool = True,
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
     ) -> str:
         """Fetch the rendered HTML of a page using Browserless.
 
+        Only sends accepted parameters for the current Browserless API version.
+        Sets a default navigation timeout (30s) via query param.
+
         Args:
             url: The URL to fetch.
             wait_for_event: Wait for a page event (e.g. "networkidle", "load").
-                            Replaces the deprecated waitUntil parameter.
-            goto_timeout_ms: Navigation timeout in milliseconds.
             wait_for_timeout_ms: Extra wait after page load.
             wait_for_selector: CSS selector to wait for.
             wait_for_selector_timeout_ms: Timeout for selector wait.
-            best_attempt: Whether to attempt multiple strategies.
-            reject_resource_types: Resource types to block.
+            reject_resource_types: Resource types to block (e.g. ["image"]).
             reject_request_pattern: URL patterns to block.
 
         Returns:
@@ -45,8 +43,6 @@ class BrowserlessClient:
         """
         payload: dict[str, Any] = {
             "url": url,
-            "gotoTimeout": goto_timeout_ms,
-            "bestAttempt": best_attempt,
         }
 
         if self.token:

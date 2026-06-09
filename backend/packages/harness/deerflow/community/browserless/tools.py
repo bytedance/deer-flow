@@ -23,21 +23,6 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
-def _normalize_bool(value: bool | str | int | None, default: bool) -> bool:
-    """Normalize a config value to a boolean.
-    Handles env-resolved strings like "false" or "true".
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ("1", "true", "yes", "on")
-    if isinstance(value, int):
-        return bool(value)
-    return default
-
-
 def _get_browserless_client() -> BrowserlessClient:
     cfg = _get_tool_config("web_fetch")
     base_url = "http://localhost:3032"
@@ -66,32 +51,25 @@ async def web_fetch_tool(url: str) -> str:
         cfg = _get_tool_config("web_fetch")
 
         wait_for_event = ""
-        goto_timeout_ms = 30000
         wait_for_timeout_ms = 0
         wait_for_selector = ""
         wait_for_selector_timeout_ms = 5000
-        best_attempt = True
         reject_resource_types: list[str] | None = None
         reject_request_pattern: list[str] | None = None
 
         if cfg is not None:
             wait_for_event = cfg.get("wait_for_event", wait_for_event)
-            raw_goto = cfg.get("goto_timeout_ms", goto_timeout_ms)
-            goto_timeout_ms = int(raw_goto) if not isinstance(raw_goto, int) else raw_goto
             raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
             wait_for_timeout_ms = int(raw_wait) if not isinstance(raw_wait, int) else raw_wait
             wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
-            best_attempt = _normalize_bool(cfg.get("best_attempt"), best_attempt)
 
         client = _get_browserless_client()
         html = await client.fetch_html(
             url=url,
             wait_for_event=wait_for_event,
-            goto_timeout_ms=goto_timeout_ms,
             wait_for_timeout_ms=wait_for_timeout_ms,
             wait_for_selector=wait_for_selector,
             wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
-            best_attempt=best_attempt,
             reject_resource_types=reject_resource_types,
             reject_request_pattern=reject_request_pattern,
         )

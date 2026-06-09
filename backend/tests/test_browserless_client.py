@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import json
 import pytest
 
 from deerflow.community.browserless.browserless_client import BrowserlessClient
@@ -38,6 +37,8 @@ class TestBrowserlessClient:
             call_kwargs = mock_ctx.post.call_args.kwargs
             assert call_kwargs["json"]["url"] == "https://example.com"
             assert "waitUntil" not in call_kwargs["json"]
+            assert "gotoTimeout" not in call_kwargs["json"]
+            assert "bestAttempt" not in call_kwargs["json"]
 
     async def test_fetch_html_empty_response(self):
         """fetch_html returns error for empty response."""
@@ -100,6 +101,47 @@ class TestBrowserlessClient:
 
             payload = mock_ctx.post.call_args.kwargs["json"]
             assert payload["token"] == "my-token"
+
+    async def test_fetch_html_with_wait_for_selector(self):
+        """fetch_html sends waitForSelector when selector is set."""
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = "<html>OK</html>"
+            mock_resp.headers = {}
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = BrowserlessClient(base_url="http://browserless:3000")
+            await client.fetch_html("https://example.com", wait_for_selector="article")
+
+            payload = mock_ctx.post.call_args.kwargs["json"]
+            assert payload["waitForSelector"]["selector"] == "article"
+
+    async def test_fetch_html_with_reject_params(self):
+        """fetch_html sends reject params when set."""
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = "<html>OK</html>"
+            mock_resp.headers = {}
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = BrowserlessClient(base_url="http://browserless:3000")
+            await client.fetch_html(
+                "https://example.com",
+                reject_resource_types=["image"],
+                reject_request_pattern=[r"\.css$"],
+            )
+
+            payload = mock_ctx.post.call_args.kwargs["json"]
+            assert payload["rejectResourceTypes"] == ["image"]
+            assert payload["rejectRequestPattern"] == [r"\.css$"]
 
 
 @pytest.mark.asyncio
