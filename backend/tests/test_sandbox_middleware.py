@@ -376,3 +376,33 @@ async def test_awrap_tool_call_passthrough_when_sandbox_already_in_state() -> No
     result = await middleware.awrap_tool_call(request, handler)
 
     assert result is original
+
+
+def test_wrap_tool_call_preserves_existing_command_fields_when_merging() -> None:
+    """Regression: when merging sandbox_update into an existing Command,
+    all other Command fields (e.g. graph, goto, resume) must be preserved.
+    """
+    middleware = SandboxMiddleware()
+    state: dict = {}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> Command:
+        req.runtime.state["sandbox"] = {"sandbox_id": "sbx-merge"}
+        return Command(
+            update={"existing_key": "existing_value"},
+            graph="parent",
+            goto="next_node",
+            resume="resume-token",
+        )
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert isinstance(result, Command)
+    assert result.update == {
+        "existing_key": "existing_value",
+        "sandbox": {"sandbox_id": "sbx-merge"},
+    }
+    # Critical: other Command fields must NOT be dropped by the merge.
+    assert result.graph == "parent"
+    assert result.goto == "next_node"
+    assert result.resume == "resume-token"

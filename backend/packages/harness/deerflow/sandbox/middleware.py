@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace as dc_replace
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -174,12 +175,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         existing_update = result.update
         if isinstance(existing_update, dict):
             merged_update = {**existing_update, **sandbox_update}
-            return Command(
-                update=merged_update,
-                graph=result.graph,
-                resume=result.resume,
-                goto=result.goto,
-            )
+            return dc_replace(result, update=merged_update)
         return result
 
     @staticmethod
