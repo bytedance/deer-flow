@@ -135,22 +135,30 @@ class KnowledgeBaseService:
         tenant_id: str,
         owner_user_id: str,
     ) -> bool:
-        kb = await self._kb_repo.get(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+        kb = await self._kb_repo.get_by_id_internal(kb_id)
         if kb is None:
             return False
+        if kb.get("visibility") in ("private", "tenant") and kb.get("tenant_id") != tenant_id:
+            return False
+        if kb.get("visibility") == "private" and kb.get("owner_user_id") != owner_user_id:
+            return False
 
-        # Soft-delete all documents
-        await self._doc_repo.soft_delete_by_kb(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+        kb_tenant_id = str(kb.get("tenant_id") or "")
 
-        # Soft-delete the KB
-        deleted = await self._kb_repo.soft_delete(kb_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
+        await self._doc_repo.hard_delete_by_kb(kb_id)
+        await self._job_repo.delete_by_kb(kb_id)
+        await self._perm_repo.delete_by_kb(kb_id)
+        deleted = await self._kb_repo.hard_delete(kb_id, tenant_id=kb_tenant_id)
 
         # Delete the vector collection
         if deleted:
             try:
+                from deerflow.rag.job_context import kb_context
                 from deerflow.rag.vector_store import get_vector_store
+
                 store = get_vector_store()
-                store.delete_collection(kb["collection_name"])
+                with kb_context(tenant_id=kb_tenant_id, user_id=owner_user_id):
+                    store.delete_collection(kb["collection_name"])
             except Exception as e:
                 logger.warning("Failed to delete collection %s: %s", kb["collection_name"], e)
 

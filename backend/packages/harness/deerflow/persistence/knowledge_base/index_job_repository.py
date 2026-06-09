@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.knowledge_base.model import IndexJobRow
@@ -98,6 +98,16 @@ class IndexJobRepository:
             )
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def delete_by_kb(self, kb_id: str) -> int:
+        """Remove all index jobs for a knowledge base."""
+        async with self._sf() as session:
+            stmt = delete(IndexJobRow).where(
+                IndexJobRow.knowledge_base_id == kb_id
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
 
     async def stats_by_kb(self, kb_id: str) -> dict[str, Any]:
         """Aggregated index job statistics for a single knowledge base."""

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.knowledge_base.model import KnowledgeBaseRow
@@ -180,6 +180,21 @@ class KnowledgeBaseRepository:
                     KnowledgeBaseRow.deleted_at.is_(None),
                 )
                 .values(deleted_at=now, updated_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
+
+    async def hard_delete(
+        self,
+        kb_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        async with self._sf() as session:
+            stmt = delete(KnowledgeBaseRow).where(
+                KnowledgeBaseRow.id == kb_id,
+                KnowledgeBaseRow.tenant_id == tenant_id,
             )
             result = await session.execute(stmt)
             await session.commit()

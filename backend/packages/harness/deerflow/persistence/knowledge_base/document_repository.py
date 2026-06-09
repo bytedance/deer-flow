@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow
@@ -177,6 +177,16 @@ class DocumentRepository:
                     KnowledgeBaseDocumentRow.deleted_at.is_(None),
                 )
                 .values(deleted_at=now, updated_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
+
+    async def hard_delete_by_kb(self, knowledge_base_id: str) -> int:
+        """Permanently delete all documents belonging to a knowledge base."""
+        async with self._sf() as session:
+            stmt = delete(KnowledgeBaseDocumentRow).where(
+                KnowledgeBaseDocumentRow.knowledge_base_id == knowledge_base_id,
             )
             result = await session.execute(stmt)
             await session.commit()
