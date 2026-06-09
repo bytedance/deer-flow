@@ -1267,3 +1267,19 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# LLM I/O Trace Configuration (dev tool)
+# ============================================================================
+# Prints model request/response details to the log for debugging. Disabled by
+# default. Toggle via config.yaml or the DEERFLOW_LLM_IO_TRACE_ENABLED env var
+# (true / false). The env var only overrides `enabled`; per-section flags stay
+# in yaml.
+
+# llm_io_trace:
+#   enabled: false              # Master switch. When false the middleware is not mounted at all.
+#   print_system_prompt: false  # Print the system prompt.
+#   print_messages: true        # Print the conversation messages sent to the model.
+#   print_tools: false          # Print tool definitions / schemas.
+#   print_response: true        # Print the model response.
+#   max_messages: 0            # When > 0, only the last N messages are printed (tail). 0 = print all.
