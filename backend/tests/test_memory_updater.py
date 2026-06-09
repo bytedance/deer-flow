@@ -174,12 +174,17 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     ):
         result = updater._apply_updates(current_memory, update_data, thread_id="thread-9")
 
+    # Due to relevance scoring:
+    # "User uses uv" (relevance 0.85) is ranked above "User likes Python" (relevance ~0.50, decayed from March 18).
     assert [fact["content"] for fact in result["facts"]] == [
-        "User likes Python",
         "User uses uv",
+        "User likes Python",
     ]
     assert all(fact["content"] != "User likes noisy logs" for fact in result["facts"])
-    assert result["facts"][1]["source"] == "thread-9"
+
+    # Assert source is preserved for the new fact "User uses uv"
+    uv_fact = next(fact for fact in result["facts"] if fact["content"] == "User uses uv")
+    assert uv_fact["source"] == "thread-9"
 
 
 def test_apply_updates_preserves_source_error() -> None:
@@ -1179,3 +1184,161 @@ class TestUserIdForwarding:
         mock_load.assert_called_once_with(None, user_id="user-99")
         save_call = mock_storage.save.call_args
         assert save_call.kwargs.get("user_id") == "user-99" or (len(save_call.args) > 2 and save_call.args[2] == "user-99")
+
+
+class TestMemoryRelevanceScoring:
+    """Tests for the relevance scoring, temporal decay, and category weighting of memory facts."""
+
+    def test_relevance_score_base_confidence(self):
+        """A new fact with standard category should have relevance equal to confidence."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        fact = {"content": "Likes coding", "confidence": 0.8, "category": "preference", "createdAt": "2026-06-09T12:00:00Z"}
+        score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"preference": 1.0}, now_iso="2026-06-09T12:00:00Z")
+        # 0.8 * 1.0 (decay) * 1.0 (weight) = 0.8
+        assert abs(score - 0.8) < 1e-6
+
+    def test_relevance_score_category_weight(self):
+        """Relevance score should apply category weight correctly."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        fact = {"content": "Explicit correction", "confidence": 0.8, "category": "correction", "createdAt": "2026-06-09T12:00:00Z"}
+        score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"correction": 1.5}, now_iso="2026-06-09T12:00:00Z")
+        # 0.8 * 1.0 (decay) * 1.5 (weight) = 1.2
+        assert abs(score - 1.2) < 1e-6
+
+    def test_relevance_score_temporal_decay(self):
+        """Relevance score should apply temporal decay exponentially."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        # Age is exactly 90 days (one half-life)
+        fact = {"content": "Old fact", "confidence": 0.8, "category": "preference", "createdAt": "2026-03-11T12:00:00Z"}
+        score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"preference": 1.0}, now_iso="2026-06-09T12:00:00Z")
+        # 0.8 * 0.5 (decay) * 1.0 (weight) = 0.4
+        assert abs(score - 0.4) < 1e-6
+
+    def test_relevance_score_composite(self):
+        """Composite of weight and decay is applied correctly."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        fact = {"content": "Old goal", "confidence": 1.0, "category": "goal", "createdAt": "2026-03-11T12:00:00Z"}
+        score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"goal": 1.2}, now_iso="2026-06-09T12:00:00Z")
+        # 1.0 * 0.5 (decay) * 1.2 (weight) = 0.6
+        assert abs(score - 0.6) < 1e-6
+
+    def test_relevance_score_unparseable_date_fallback(self):
+        """An unparseable date should fall back to no decay (decay factor 1.0)."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        fact = {"content": "Invalid date fact", "confidence": 0.8, "category": "preference", "createdAt": "not-a-date"}
+        score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"preference": 1.0}, now_iso="2026-06-09T12:00:00Z")
+        # Decay factor should be 1.0
+        assert abs(score - 0.8) < 1e-6
+
+    def test_eviction_by_relevance(self):
+        """Verify that facts are evicted according to composite relevance, not raw confidence."""
+        updater = MemoryUpdater()
+
+        # Fact 1: confidence 0.9, but 90 days old (relevance = 0.9 * 0.5 * 1.0 = 0.45)
+        # Fact 2: confidence 0.7, correction, new (relevance = 0.7 * 1.0 * 1.5 = 1.05)
+        # Fact 3: confidence 0.6, preference, new (relevance = 0.6 * 1.0 * 1.0 = 0.6)
+
+        current_memory = _make_memory(
+            facts=[
+                {
+                    "id": "fact_old_high_conf",
+                    "content": "Old High Conf",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-03-11T12:00:00Z",
+                }
+            ]
+        )
+
+        update_data = {
+            "newFacts": [
+                {"content": "New Correction", "category": "correction", "confidence": 0.7},
+                {"content": "New Preference", "category": "preference", "confidence": 0.6},
+            ]
+        }
+
+        with (
+            patch(
+                "deerflow.agents.memory.updater.get_memory_config",
+                return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.5, decay_half_life_days=90, category_weights={"correction": 1.5, "preference": 1.0}),
+            ),
+            patch("deerflow.agents.memory.updater.utc_now_iso_z", return_value="2026-06-09T12:00:00Z"),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # Only the top 2 in relevance should be kept:
+        # 1. New Correction (relevance 1.05)
+        # 2. New Preference (relevance 0.6)
+        # The Old High Conf (relevance 0.45) should be evicted
+        contents = [f["content"] for f in result["facts"]]
+        assert "New Correction" in contents
+        assert "New Preference" in contents
+        assert "Old High Conf" not in contents
+
+    def test_injection_ranking_by_relevance(self):
+        """Verify format_memory_for_injection ranks facts by composite relevance."""
+        import sys
+        import types
+        from datetime import UTC, datetime
+
+        from deerflow.agents.memory.prompt import format_memory_for_injection
+
+        frozen_now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+
+        class MockDatetime:
+            @classmethod
+            def now(cls, tz=None):
+                return frozen_now
+
+            @classmethod
+            def fromisoformat(cls, date_string):
+                return datetime.fromisoformat(date_string)
+
+        mock_dt_mod = types.ModuleType("datetime")
+        mock_dt_mod.datetime = MockDatetime
+        mock_dt_mod.UTC = UTC
+
+        # Fact 1: confidence 0.9, 90 days old (relevance = 0.45)
+        # Fact 2: confidence 0.7, correction, new (relevance = 1.05)
+        # Fact 3: confidence 0.6, preference, new (relevance = 0.6)
+        memory_data = _make_memory(
+            facts=[
+                {
+                    "content": "Old High Conf",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-03-11T12:00:00Z",
+                },
+                {
+                    "content": "New Correction",
+                    "category": "correction",
+                    "confidence": 0.7,
+                    "createdAt": "2026-06-09T12:00:00Z",
+                },
+                {
+                    "content": "New Preference",
+                    "category": "preference",
+                    "confidence": 0.6,
+                    "createdAt": "2026-06-09T12:00:00Z",
+                },
+            ]
+        )
+
+        with patch("deerflow.config.memory_config.get_memory_config", return_value=_memory_config(decay_half_life_days=90, category_weights={"correction": 1.5, "preference": 1.0})), patch.dict(sys.modules, {"datetime": mock_dt_mod}):
+            output = format_memory_for_injection(memory_data)
+
+        # Relevance ranking order:
+        # 1. New Correction (1.05)
+        # 2. New Preference (0.6)
+        # 3. Old High Conf (0.45)
+        lines = [line.strip("- ") for line in output.splitlines() if line.startswith("- ")]
+        assert lines == [
+            "[correction | 0.70] New Correction",
+            "[preference | 0.60] New Preference",
+            "[preference | 0.90] Old High Conf",
+        ]

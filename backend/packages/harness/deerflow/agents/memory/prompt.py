@@ -303,12 +303,20 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    # Format facts (sorted by confidence; include as many as token budget allows)
+    # Format facts (sorted by relevance; include as many as token budget allows)
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
+        from deerflow.agents.memory.updater import _compute_relevance_score
+        from deerflow.config.memory_config import get_memory_config
+
+        config = get_memory_config()
         ranked_facts = sorted(
             (f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content").strip()),
-            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
+            key=lambda fact: _compute_relevance_score(
+                fact,
+                decay_half_life_days=config.decay_half_life_days,
+                category_weights=config.category_weights,
+            ),
             reverse=True,
         )
 
