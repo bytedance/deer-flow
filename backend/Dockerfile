@@ -56,8 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     traceroute \
     tcpdump \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-slim /usr/local/bin/node /usr/local/bin/
-COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/node:22.19.0-bookworm /usr/local/bin/node /usr/local/bin/
+COPY --from=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/node:22.19.0-bookworm /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
@@ -119,6 +119,43 @@ RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
     && rm /tmp/acp-bundle.tar.gz \
     && test -x /usr/local/bin/claude-agent-acp \
     && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+
+# ── Install Pi Coding Agent + pi-acp (offline bundled, opt-in) ─────────────
+# pi-acp 在 stdio 通信时 shell out 调 `pi --mode rpc`，所以 acp_agents.pi
+# 需要两个 bundle 同时 vendor：
+#   1. @earendil-works/pi-coding-agent  (pi 二进制本身)
+#   2. pi-acp                           (DeerFlow 调起的 ACP 适配器)
+# 启用：uncomment 下面 + 把对应 tarball 放到 offline-claude/。
+# 关闭（默认）：保持 commented，不影响镜像构建。
+#
+# 产物路径：
+#   offline-claude/bundle-pi-coding-agent.sh → offline-claude/pi-coding-agent-bundled-${VERSION}-linux-x64.tar.gz
+#   offline-claude/bundle-pi-acp.sh   → offline-claude/pi-acp-bundled-${VERSION}-linux-x64.tar.gz
+# 两者都在 Linux x86_64 runner 上执行。
+# pi-web **不** vendor 进镜像，它是独立 Web UI，与 DeerFlow 无联动。
+ARG PI_CODING_AGENT_VERSION=0.78.1
+ARG PI_ACP_VERSION=0.0.27
+COPY offline-claude/pi-coding-agent-bundled-${PI_CODING_AGENT_VERSION}-linux-x64.tar.gz /tmp/pi-agent-bundle.tar.gz
+RUN tar -xzf /tmp/pi-agent-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/pi-agent-bundle.tar.gz \
+    && pi --version \
+    && fd --version \
+    && rg --version
+
+COPY offline-claude/pi-acp-bundled-${PI_ACP_VERSION}-linux-x64.tar.gz /tmp/pi-acp-bundle.tar.gz
+RUN tar -xzf /tmp/pi-acp-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/pi-acp-bundle.tar.gz \
+    && test -x /usr/local/bin/pi-acp
+
+# 离线兜底：pi 运行时若发现新 helper 缺失，默认会去 GitHub Releases 拉。
+# 强制 PI_OFFLINE=1 让它直接 fail-fast（见 dist/utils/tools-manager.js
+# 的 isOfflineModeEnabled()），避免在没网时挂死。
+ENV PI_OFFLINE=1
+
+# Shell convenience aliases — visible to `docker exec ... bash` (interactive bash
+# sources /root/.bashrc) and login sh/bash sessions (source /etc/profile.d/*.sh).
+RUN echo 'alias ll="ls -al"' > /etc/profile.d/ll.sh \
+    && echo 'alias ll="ls -al"' >> /root/.bashrc
 
 EXPOSE 8001 2024
 
@@ -204,12 +241,49 @@ RUN tar -xzf /tmp/claude-bundle.tar.gz -C /usr/local --no-same-owner \
 # ── Install Claude Agent ACP (offline bundled) ─────────────────────────────
 # 离线环境：把 @agentclientprotocol/claude-agent-acp 整包 vendor 到镜像，
 # 这样 acp_agents.claude_code 配的 `npx -y @agentclientprotocol/claude-agent-acp`
-# ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
-# COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
-# RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
-#     && rm /tmp/acp-bundle.tar.gz \
-#     && test -x /usr/local/bin/claude-agent-acp \
-#     && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+ARG CLAUDE_AGENT_ACP_VERSION=0.42.0
+COPY offline-claude/claude-agent-acp-bundled-${CLAUDE_AGENT_ACP_VERSION}-linux-x64.tar.gz /tmp/acp-bundle.tar.gz
+RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/acp-bundle.tar.gz \
+    && test -x /usr/local/bin/claude-agent-acp \
+    && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+
+# ── Install Pi Coding Agent + pi-acp (offline bundled, opt-in) ─────────────
+# pi-acp 在 stdio 通信时 shell out 调 `pi --mode rpc`，所以 acp_agents.pi
+# 需要两个 bundle 同时 vendor：
+#   1. @earendil-works/pi-coding-agent  (pi 二进制本身)
+#   2. pi-acp                           (DeerFlow 调起的 ACP 适配器)
+# 启用：uncomment 下面 + 把对应 tarball 放到 offline-claude/。
+# 关闭（默认）：保持 commented，不影响镜像构建。
+#
+# 产物路径：
+#   offline-claude/bundle-pi-coding-agent.sh → offline-claude/pi-coding-agent-bundled-${VERSION}-linux-x64.tar.gz
+#   offline-claude/bundle-pi-acp.sh   → offline-claude/pi-acp-bundled-${VERSION}-linux-x64.tar.gz
+# 两者都在 Linux x86_64 runner 上执行。
+# pi-web **不** vendor 进镜像，它是独立 Web UI，与 DeerFlow 无联动。
+ARG PI_CODING_AGENT_VERSION=0.78.1
+ARG PI_ACP_VERSION=0.0.27
+COPY offline-claude/pi-coding-agent-bundled-${PI_CODING_AGENT_VERSION}-linux-x64.tar.gz /tmp/pi-agent-bundle.tar.gz
+RUN tar -xzf /tmp/pi-agent-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/pi-agent-bundle.tar.gz \
+    && pi --version \
+    && fd --version \
+    && rg --version
+
+COPY offline-claude/pi-acp-bundled-${PI_ACP_VERSION}-linux-x64.tar.gz /tmp/pi-acp-bundle.tar.gz
+RUN tar -xzf /tmp/pi-acp-bundle.tar.gz -C /usr/local --no-same-owner \
+    && rm /tmp/pi-acp-bundle.tar.gz \
+    && test -x /usr/local/bin/pi-acp
+
+# 离线兜底：pi 运行时若发现新 helper 缺失，默认会去 GitHub Releases 拉。
+# 强制 PI_OFFLINE=1 让它直接 fail-fast（见 dist/utils/tools-manager.js
+# 的 isOfflineModeEnabled()），避免在没网时挂死。
+ENV PI_OFFLINE=1
+
+# Shell convenience aliases — visible to `docker exec ... bash` (interactive bash
+# sources /root/.bashrc) and login sh/bash sessions (source /etc/profile.d/*.sh).
+RUN echo 'alias ll="ls -al"' > /etc/profile.d/ll.sh \
+    && echo 'alias ll="ls -al"' >> /root/.bashrc
 
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/

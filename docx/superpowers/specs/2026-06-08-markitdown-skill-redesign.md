@@ -85,11 +85,6 @@ skills/public/markitdown/
 | `scripts/convert_with_ai.py` | Depends on OpenRouter; out of scope |
 | `scripts/convert_literature.py` | Specialized workflow; replaced by general gotchas |
 
-Note: `batch_convert.py` is being **modified**, not deleted, and the `--plugins`
-flag is dropped because no markitdown plugins are installed in the container
-image (verified by inspection of `backend/Dockerfile` — `pip install` line
-installs only the `[pdf,docx,pptx,xlsx,html]` extras).
-
 ## 5. Frontmatter `description`
 
 The description is the trigger. Per the blog it must be written for the model,

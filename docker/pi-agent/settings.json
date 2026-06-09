@@ -1,0 +1,6 @@
+{
+  "lastChangelogVersion": "0.78.1",
+  "defaultProvider": "MiniMax",
+  "defaultModel": "MiniMax-M3",
+  "quietStartup": true
+}

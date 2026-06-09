@@ -12,6 +12,7 @@ from zens.community.dify.router import invoke_workflow
 def dify_image_recognition_tool(
     query: str,
     config: Annotated[RunnableConfig, InjectedToolArg] = None,
+    files: list[str] | None = None,
 ) -> str:
     """图片识别工具。
 
@@ -20,5 +21,8 @@ def dify_image_recognition_tool(
 
     Args:
         query: 需要识别的图片相关问题或描述。
+        files: 待识别的本地图片文件路径列表，每个文件会先上传到 Dify
+            的 ``/v1/files/upload``，再以 ``upload_file_id`` 形式
+            传入 chat-messages 的 ``files`` 字段。
     """
-    return invoke_workflow("dify_image_recognition", query, config)
+    return invoke_workflow("dify_image_recognition", query, config, files=files)

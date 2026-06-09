@@ -32,6 +32,7 @@ services:
     container_name: deer-flow-postgres
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       POSTGRES_USER: ${POSTGRES_USER:-pgsql}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsql}
       POSTGRES_DB: ${POSTGRES_DB:-pgsql}
@@ -52,6 +53,8 @@ services:
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
     ports:
       - "${PORT:-2026}:2026"
     volumes:
@@ -79,6 +82,7 @@ services:
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - TZ=${TZ:-Asia/Shanghai}
     env_file:
       - ../frontend/.env
     networks:
@@ -100,7 +104,7 @@ services:
       postgres:
         condition: service_healthy
     command: >
-      sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --reload"
+      sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -114,13 +118,18 @@ services:
       # 两者都 bind-mount 到 host 的 docker/claude/ 下，recreate 容器不丢状态。
       - ./claude/.claude.json:/root/.claude.json
       - ./claude/.claude/:/root/.claude/
+      # ~/.pi/agent/  — pi / pi-acp settings (defaultProvider/defaultModel)、sessions、bin
+      # bind-mount 到 host 的 docker/pi-agent/ 下，recreate 容器不丢状态。
+      - ./pi-agent/:/root/.pi/agent/
       # Dev: mount gateway source code for hot-reload
       - ../backend/app/gateway:/app/backend/app/gateway
       - ../backend/packages/harness:/app/backend/packages/harness
+      - ../offline-claude:/root/offline-claude
     working_dir: /app
     environment:
       - CI=true
       - HOME=/root
+      - TZ=${TZ:-Asia/Shanghai}
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml

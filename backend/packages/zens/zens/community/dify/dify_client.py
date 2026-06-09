@@ -2,6 +2,7 @@
 
 import json
 import logging
+import mimetypes
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -9,6 +10,10 @@ import httpx
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Aligns with Dify community edition's default per-file upload limit. Move to
+# config.yaml when per-tool upload-size overrides are needed.
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 # File handler: write to backend/logs/dify.log (sibling to backend/app/)
 _backend_dir = Path(__file__).resolve().parent.parent.parent.parent
@@ -48,6 +53,33 @@ class DifyChunk(BaseModel):
     message_id: str = ""
 
 
+class DifyFileUpload(BaseModel):
+    """Metadata returned by Dify's ``/v1/files/upload`` endpoint.
+
+    The ``id`` field is what gets referenced in the chat-messages ``files``
+    array as ``upload_file_id``. ``mime_type`` is also used to derive the
+    Dify file-ref ``type`` (image / audio / video / document).
+
+    See Dify's API docs for the full response shape; only the fields we
+    actually consume are required — everything else is best-effort.
+    """
+
+    id: str
+    name: str = ""
+    size: int = 0
+    extension: str = ""
+    mime_type: str = ""
+    created_by: str = ""
+    created_at: int = 0
+    user_id: str = ""
+    tenant_id: str = ""
+    conversation_id: str | None = None
+    file_key: str = ""
+    preview_url: str | None = None
+    source_url: str | None = None
+    original_url: str | None = None
+
+
 class DifyClient:
     def __init__(
         self,
@@ -58,14 +90,99 @@ class DifyClient:
         self.base_url = base_url.rstrip("/")
         logger.debug("DifyClient initialized with base_url=%s", self.base_url)
 
+    async def upload_file(
+        self,
+        file_path: str,
+        user: str,
+        timeout: float = 60.0,
+    ) -> DifyFileUpload:
+        """Upload a local file to Dify's ``/v1/files/upload`` endpoint.
+
+        Returns a ``DifyFileUpload`` populated from the parsed JSON response.
+        The ``id`` field on the returned model is the file ID to be referenced
+        in the chat-messages ``files`` field as ``upload_file_id``; the
+        ``mime_type`` field is used to derive the file-ref ``type``.
+
+        Args:
+            file_path: Local filesystem path to the file to upload.
+            user: User identifier forwarded to Dify (same as the chat-messages
+                ``user`` field).
+            timeout: Total HTTP timeout in seconds.
+
+        Raises:
+            FileNotFoundError: If ``file_path`` does not exist or is not a file.
+            DifyAPIError: On non-2xx HTTP response, request timeout, or file
+                exceeding the ``_MAX_UPLOAD_BYTES`` limit.
+        """
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        size = path.stat().st_size
+        if size > _MAX_UPLOAD_BYTES:
+            raise DifyAPIError(
+                0,
+                f"File too large: {size} bytes (max {_MAX_UPLOAD_BYTES} bytes / {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB)",
+            )
+
+        # Guess MIME from the filename so Dify returns the correct ``mime_type``
+        # in its response (which our caller uses to derive the chat-ref ``type``).
+        # Falls back to ``application/octet-stream`` when the extension is unknown.
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+        url = f"{self.base_url}/v1/files/upload"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        logger.info(
+            "Dify file upload: path=%r, user=%r, size=%d, content_type=%s",
+            file_path,
+            user,
+            size,
+            content_type,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as ac:
+                with path.open("rb") as f:
+                    files_data = {"file": (path.name, f, content_type)}
+                    data = {"user": user}
+                    response = await ac.post(url, headers=headers, files=files_data, data=data)
+        except httpx.HTTPError as exc:
+            logger.error("Dify file upload failed: url=%s, error=%s", url, exc)
+            raise DifyAPIError(0, f"Request to Dify failed: {exc}") from exc
+
+        if not response.is_success:
+            try:
+                err = response.json()
+                message = err.get("message", response.text)
+            except (httpx.HTTPError, ValueError):
+                message = response.text or "Unknown error"
+            logger.error("Dify file upload API error: status=%d, message=%s", response.status_code, message)
+            raise DifyAPIError(response.status_code, message)
+
+        return DifyFileUpload(**response.json())
+
     def chat(
         self,
         query: str,
         conversation_id: str,
         user: str,
         timeout: float = 60.0,
+        inputs: dict | None = None,
+        files: list[dict] | None = None,
     ) -> DifyResponse:
-        """Send a chat message to the Dify chatflow."""
+        """Send a chat message to the Dify chatflow.
+
+        Args:
+            query: User message to send.
+            conversation_id: Dify conversation_id for context continuity.
+            user: User identifier forwarded to Dify for analytics/auth.
+            timeout: Total HTTP timeout in seconds.
+            inputs: Optional dict merged into the Dify request's ``inputs`` field,
+                so the workflow can read workflow-level variables
+                (e.g. ``{"mode": "精确回答", "policy_classification": "..."}``).
+            files: Optional list of pre-uploaded Dify file refs
+                (``[{"type": ..., "transfer_method": "local_file", "upload_file_id": ...}]``).
+        """
         logger.info("Dify chat request: query=%r, conversation_id=%r, user=%r", query, conversation_id, user)
         url = f"{self.base_url}/v1/chat-messages"
         headers = {
@@ -73,12 +190,12 @@ class DifyClient:
             "Content-Type": "application/json",
         }
         payload = {
-            "inputs": {},
+            "inputs": inputs if inputs is not None else {},
             "query": query,
             "response_mode": "blocking",
             "conversation_id": conversation_id,
             "user": user,
-            "files": [],
+            "files": files if files is not None else [],
         }
 
         try:
@@ -91,7 +208,7 @@ class DifyClient:
             try:
                 error_body = response.json()
                 message = error_body.get("message", response.text)
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ValueError):
                 message = response.text or "Unknown error"
             logger.error("Dify API error: status=%d, message=%s", response.status_code, message)
             raise DifyAPIError(response.status_code, message)
@@ -114,12 +231,23 @@ class DifyClient:
         conversation_id: str,
         user: str,
         timeout: float = 60.0,
+        inputs: dict | None = None,
+        files: list[dict] | None = None,
     ) -> tuple[list[str], str]:
         """Streaming mode: parse SSE lines, return (chunks, conversation_id).
 
         Dify streaming API returns SSE lines:
             event: message
             data: {"answer": "...", "conversation_id": "...", "message_id": "..."}
+
+        Args:
+            query: User message to send.
+            conversation_id: Dify conversation_id for context continuity.
+            user: User identifier forwarded to Dify for analytics/auth.
+            timeout: Total HTTP timeout in seconds.
+            inputs: Optional dict merged into the Dify request's ``inputs`` field.
+            files: Optional list of pre-uploaded Dify file refs
+                (``[{"type": ..., "transfer_method": "local_file", "upload_file_id": ...}]``).
 
         Returns:
             tuple: (chunks: list[str], conversation_id: str)
@@ -133,12 +261,12 @@ class DifyClient:
             "Content-Type": "application/json",
         }
         payload = {
-            "inputs": {},
+            "inputs": inputs if inputs is not None else {},
             "query": query,
             "response_mode": "streaming",
             "conversation_id": conversation_id,
             "user": user,
-            "files": [],
+            "files": files if files is not None else [],
         }
 
         try:
@@ -151,7 +279,7 @@ class DifyClient:
             try:
                 error_body = response.json()
                 message = error_body.get("message", response.text)
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ValueError):
                 message = response.text or "Unknown error"
             logger.error("Dify streaming API error: status=%d, message=%s", response.status_code, message)
             raise DifyAPIError(response.status_code, message)
@@ -191,6 +319,8 @@ class DifyClient:
         conversation_id: str,
         user: str,
         timeout: float = 60.0,
+        inputs: dict | None = None,
+        files: list[dict] | None = None,
     ) -> AsyncIterator[DifyChunk]:
         """Streaming mode: yield each Dify answer fragment as it arrives.
 
@@ -206,6 +336,9 @@ class DifyClient:
             conversation_id: Dify conversation_id for context continuity.
             user: User identifier forwarded to Dify for analytics/auth.
             timeout: Total HTTP timeout in seconds.
+            inputs: Optional dict merged into the Dify request's ``inputs`` field.
+            files: Optional list of pre-uploaded Dify file refs
+                (``[{"type": ..., "transfer_method": "local_file", "upload_file_id": ...}]``).
 
         Yields:
             ``DifyChunk`` for every ``event: message`` line whose payload
@@ -222,12 +355,12 @@ class DifyClient:
             "Content-Type": "application/json",
         }
         payload = {
-            "inputs": {},
+            "inputs": inputs if inputs is not None else {},
             "query": query,
             "response_mode": "streaming",
             "conversation_id": conversation_id,
             "user": user,
-            "files": [],
+            "files": files if files is not None else [],
         }
 
         try:
@@ -238,7 +371,7 @@ class DifyClient:
                         try:
                             err = json.loads(body)
                             message = err.get("message", body.decode(errors="replace"))
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, UnicodeDecodeError):
                             message = body.decode(errors="replace")
                         logger.error("Dify astream_chat API error: status=%d, message=%s", response.status_code, message)
                         raise DifyAPIError(response.status_code, message)

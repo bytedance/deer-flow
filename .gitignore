@@ -79,3 +79,12 @@ cookies.txt
 # Offline Claude Code bundles (build artifacts; regenerate via scripts/bundle-claude-*.sh on a Linux x86_64 host)
 offline-claude/*.tar.gz
 offline-claude/*.tgz
+offline-claude/*.zip
+
+# Docker pi-agent runtime state (sessions / installed skills; do not commit)
+docker/pi-agent/sessions/
+docker/pi-agent/skills/
+docker/pi-agent/auth.json
+
+# Claude Code local state (startup count, customApiKeyResponses, tips history)
+docker/claude/.claude.json

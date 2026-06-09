@@ -1,5 +1,5 @@
 services:
-  pgvector:
+  postgres:
     image: docker.io/library/postgres:16-alpine
     platform: linux/amd64
     container_name: postgres16

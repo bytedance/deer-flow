@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -754,6 +754,18 @@ sandbox:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#   pi:
+#     # Pi is a lightweight coding agent. For offline deployments, install via
+#     # offline-claude/bundle-pi-coding-agent.sh and offline-claude/bundle-pi-acp.sh, which
+#     # vendor the binaries to /usr/local/bin. For online use, `npx -y pi-acp`
+#     # also works (requires npm registry access).
+#     command: pi-acp
+#     args: []
+#     description: Pi coding agent — light, fast for small code-generation tasks (single-file edits, bug fixes, small refactors)
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   PI_ACP_ENABLE_EMBEDDED_CONTEXT: "true"  # pi-acp-specific knob
 
 # ============================================================================
 # Skills Configuration

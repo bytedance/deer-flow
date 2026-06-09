@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "MiniMax": {
+      "baseUrl": "https://api.minimaxi.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MINIMAX_API_KEY",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "MiniMax-M3",
+          "name": "MiniMax M3",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 524288,
+          "maxTokens": 131072
+        }
+      ]
+    }
+  }
+}

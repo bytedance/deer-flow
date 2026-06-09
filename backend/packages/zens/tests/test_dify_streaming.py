@@ -267,3 +267,101 @@ def test_astream_chat_timeout_raises_dify_api_error():
         asyncio.run(collect())
     assert exc_info.value.status_code == 0
     assert "timed out" in exc_info.value.message
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# upload_file tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_upload_file_sends_multipart_with_guessed_mime(tmp_path):
+    """upload_file posts a multipart payload with the filename's guessed content-type
+    and parses the response into a DifyFileUpload.
+    """
+    from zens.community.dify.dify_client import DifyClient, DifyFileUpload
+
+    test_file = tmp_path / "test.png"
+    test_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    captured: dict = {}
+
+    class _UploadResp:
+        is_success = True
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "id": "abc-123",
+                "name": "test.png",
+                "size": 8,
+                "extension": "png",
+                "mime_type": "image/png",
+            }
+
+    class _UploadAsyncClient:
+        def __init__(self, timeout=None, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, files=None, data=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["files"] = files
+            captured["data"] = data
+            return _UploadResp()
+
+    import asyncio
+
+    with patch("zens.community.dify.dify_client.httpx.AsyncClient", _UploadAsyncClient):
+        client = DifyClient(api_key="k", base_url="http://x")
+        result = asyncio.run(client.upload_file(str(test_file), "user-x"))
+
+    assert captured["url"] == "http://x/v1/files/upload"
+    assert captured["headers"]["Authorization"] == "Bearer k"
+    assert "file" in captured["files"]
+    # (filename, file_obj, content_type) tuple
+    assert captured["files"]["file"][0] == "test.png"
+    assert captured["files"]["file"][2] == "image/png"
+    assert captured["data"] == {"user": "user-x"}
+    assert isinstance(result, DifyFileUpload)
+    assert result.id == "abc-123"
+    assert result.mime_type == "image/png"
+
+
+def test_upload_file_rejects_oversize_file(tmp_path, monkeypatch):
+    """upload_file raises DifyAPIError when the file size exceeds _MAX_UPLOAD_BYTES."""
+    from zens.community.dify import dify_client
+    from zens.community.dify.dify_client import DifyAPIError, DifyClient
+
+    # Shrink the limit so we don't have to write megabytes of test data.
+    monkeypatch.setattr(dify_client, "_MAX_UPLOAD_BYTES", 0)
+
+    test_file = tmp_path / "any.bin"
+    test_file.write_bytes(b"x")
+
+    client = DifyClient(api_key="k", base_url="http://x")
+
+    import asyncio
+
+    with pytest.raises(DifyAPIError) as exc_info:
+        asyncio.run(client.upload_file(str(test_file), "user-x"))
+    assert exc_info.value.status_code == 0
+    assert "too large" in exc_info.value.message
+
+
+def test_upload_file_raises_file_not_found():
+    """upload_file raises FileNotFoundError when the path doesn't exist."""
+    from zens.community.dify.dify_client import DifyClient
+
+    client = DifyClient(api_key="k", base_url="http://x")
+
+    import asyncio
+
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(client.upload_file("/nonexistent/path/to/file.png", "user-x"))

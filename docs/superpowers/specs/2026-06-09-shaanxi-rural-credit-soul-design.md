@@ -145,7 +145,7 @@ skills:
   - markitdown
   - summarize-1.0.0
   - deep-research
-  # 图片识别随 deep-research 加载
+  # 图片识别/OCR 待行方对接视觉服务后启用（TBD-OCR）
 tool_groups: []  # 不开放 dify 等外接工具
 ```
 

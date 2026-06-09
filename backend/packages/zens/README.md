@@ -53,18 +53,25 @@ Agent                    router.py                    Dify API
 
 | 方法 | 用途 | 返回值 |
 |------|------|--------|
-| `chat(query, conversation_id, user)` | Blocking 模式调用 | `DifyResponse(answer, conversation_id, message_id)` |
-| `chat_stream(query, conversation_id, user)` | Streaming 模式调用 | `tuple[list[str], str]` — (chunks, conversation_id) |
+| `chat(query, conversation_id, user, inputs=None, files=None)` | Blocking 模式调用 | `DifyResponse(answer, conversation_id, message_id)` |
+| `chat_stream(query, conversation_id, user, inputs=None, files=None)` | Streaming 模式调用 | `tuple[list[str], str]` — (chunks, conversation_id) |
+| `astream_chat(query, conversation_id, user, inputs=None, files=None)` | Async 流式（按 chunk 推送） | `AsyncIterator[DifyChunk]` |
+| `await upload_file(file_path, user)` | 上传本地文件到 Dify `/v1/files/upload` | `DifyFileUpload` (含 `id` / `mime_type` / `name` / `size` 等) |
+
+`inputs` 是 Dify `/v1/chat-messages` 请求体里的 `inputs` 字段，用于把工作流级变量（如 `mode`、`policy_classification`）注入 Dify workflow；不传则默认为 `{}`。
+`files` 是 chat-messages 请求体里的 `files` 字段，元素是已经上传到 Dify 的文件引用 ``[{"type": ..., "transfer_method": "local_file", "upload_file_id": ...}]``；不传则默认为 `[]`。本地文件需要先调用 `upload_file` 拿到 `upload_file_id` 才能塞进这里。
 
 #### `invoke_workflow` (`router.py`)
 
 统一入口，按 `config.yaml` 中 `response_mode` 字段路由到 blocking 或 streaming：
 
 ```python
-def invoke_workflow(
+async def invoke_workflow(
     tool_name: str,       # "dify_aml" | "dify_knowledge" | "dify_general"
     query: str,           # 用户查询
     config: RunnableConfig = None,
+    inputs: dict | None = None,  # 透传到 Dify 请求的 inputs 字段
+    files: list[str] | None = None,  # 本地文件路径，会自动 upload 后塞进 files 字段
 ) -> str:                # AI 回答文本
 ```
 
