@@ -45,6 +45,9 @@ def convert_file(file_path: Path, output_dir: Path, verbose: bool = False) -> tu
         output_file = output_dir / f"{file_path.stem}.md"
         content = f"# {file_path.stem}\n\n**Source**: {file_path.name}\n\n---\n\n{text}"
         output_file.write_text(content, encoding="utf-8")
+        # Print the body so it surfaces in the chat UI as a tool result block
+        # (same pattern as data-analysis `print(result)` in scripts/analyze.py).
+        print(content)
         return True, str(file_path), f"✓ Converted to {output_file.name}"
 
     except FileNotFoundError:

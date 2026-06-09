@@ -9,6 +9,9 @@ description: |
   OCR for images and scanned PDFs is routed to the internal MinerU service
   (env: MINERU_API_URL, MINERU_API_KEY).
   markitdown is pre-installed in the sandbox — call directly.
+  Output: writes to /mnt/user-data/outputs/<stem>.md AND prints the body
+  to stdout so the agent (and user) can see the full MD inline.
+  For ≥ 500-line results the agent switches to `present_files` to share.
 
   Triggers: "把这份 PDF 转成 markdown", "convert this to md",
   "extract text from this PPT/DOCX", "OCR this screenshot",
@@ -69,7 +72,11 @@ dst = Path("/mnt/user-data/outputs/report.md")
 
 md = MarkItDown()
 result = md.convert(str(src))
-dst.write_text(result.text_content, encoding="utf-8")
+content = result.text_content or ""
+dst.write_text(content, encoding="utf-8")
+# 也把内容写到 stdout，让 agent 在最终回复里直接展示给用户
+# （见 "## 输出与后续处理"）
+print(content)
 ```
 
 ## Quickstart — 图片 / 扫描件
@@ -82,6 +89,9 @@ import mineru_client
 text = mineru_client.ocr_to_markdown("/mnt/user-data/uploads/photo.png")
 with open("/mnt/user-data/outputs/photo.md", "w", encoding="utf-8") as f:
     f.write(text)
+# 也把内容写到 stdout，让 agent 在最终回复里直接展示给用户
+# （见 "## 输出与后续处理"）
+print(text)
 ```
 
 **注意**：`MINERU_API_URL` 和 `MINERU_API_KEY` 必须在容器 env 中设置；缺则 `MinerUError`。
@@ -97,6 +107,18 @@ python /mnt/skills/public/markitdown/scripts/batch_convert.py \
 ```
 
 可选 `--workers N`（默认 4）、`--verbose`。
+
+## 输出与后续处理
+
+script 内部已经 `print(content)` 把 MD body 写到 stdout —— agent 拿到 tool result 后应当：
+
+- 单文件 MD < 500 行：把 content 直接放进 agent 的最终回复里给用户看
+- 单文件 MD ≥ 500 行：内容已经在 `/mnt/user-data/outputs/<stem>.md`，agent 调 `present_files` 工具分享给用户，不要把全文塞进回复
+- 多文件批量：按上面的阈值逐个判断，**整批**全 ≥ 500 行时只 share 文件
+- 关键发现用 2-3 句自然语言总结（标题、章节、表格、图片数等）
+- 不主动建议"要不要也 OCR 别的格式 / 加图片描述" —— 用户追问再处理
+
+> 这套"小结果 inline / 大结果 present_files"是 skills/public/data-analysis 的标准输出模式，参考它的 SKILL.md "## 输出与后续处理" 段。
 
 ## Gotchas 详解
 

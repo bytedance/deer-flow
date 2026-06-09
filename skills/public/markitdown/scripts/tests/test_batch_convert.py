@@ -106,3 +106,23 @@ def test_convert_file_continues_on_markitdown_exception(tmp_path):
     placeholder = out_dir / "broken.md"
     assert placeholder.exists()
     assert "markitdown blew up" in placeholder.read_text(encoding="utf-8")
+
+
+def test_convert_file_echoes_content_to_stdout(mineru_env, tmp_path, capsys):
+    """On success, the full MD body is printed so it surfaces in the chat UI
+    (matches the data-analysis `print(result)` pattern at scripts/analyze.py)."""
+    img = tmp_path / "photo.jpg"
+    img.write_bytes(b"fake-jpg-bytes")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with mock.patch.object(
+        batch_convert.mineru_client, "ocr_to_markdown", return_value="# OCR result"
+    ):
+        ok, _, _ = batch_convert.convert_file(img, out_dir, verbose=False)
+
+    assert ok is True
+    captured = capsys.readouterr()
+    assert "# photo" in captured.out
+    assert "**Source**: photo.jpg" in captured.out
+    assert "# OCR result" in captured.out
