@@ -10,8 +10,8 @@ tool_groups:
   - bash
 exclude_tools: []
 skills:
-  - rotating-device-context
-  - vibration-fault-diagnosis
+  - abnormal-judgment-rotating
+  - monitoring-data
 mcp_servers: null
 tags:
   - abnormal

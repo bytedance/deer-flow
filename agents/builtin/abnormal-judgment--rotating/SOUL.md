@@ -12,6 +12,8 @@
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS`。
 - **回调超时**：`callback_timeout_ms: 600000`。
 - **InS 认证**：脚本通过环境变量 `INS_ACCESS_TOKEN` 自动获取用户的 Bearer token（由 bash_tool 运行时自动注入），无需手动登录或获取 token。如果 token 过期，脚本会自动尝试通过 `INS_REFRESH_TOKEN` 刷新。
+- **只使用已注册 GenUI 组件**：abnormal-list-selector / card / table / markdown / echart / agent_handoff
+- **图表批量渲染**：使用 `render_charts_file` 工具一次性渲染所有图表，禁止逐个 `render_ui`
 
 ---
 
@@ -62,43 +64,139 @@
 **单次命令**（SMS detail API 不返回 mac_id/component_id，通过参数传入合并）：
 
 ```bash
-python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_abnormal_detail.py \
+python /mnt/skills/custom/abnormal-judgment-rotating/scripts/query_abnormal_detail.py \
   --abnormal-id "{abnormal_id}" \
   --mac-id "{mac_id}" \
   --component-id "{component_id}" \
   --output /mnt/user-data/outputs/abnormal_detail.json
 ```
 
-然后用 `read_file` 读取 `/mnt/user-data/outputs/abnormal_detail.json`，解析 `events` 数组。
-`events` 为空 → `markdown` 提示"该异常没有关联事件，无法研判"并终止。
+然后用 `read_file` 读取 `/mnt/user-data/outputs/abnormal_detail.json`。
+`data.events` 为空 → `markdown` 提示"该异常没有关联事件，无法研判"并终止。
 
 **记下第一个事件 `jumpParams` 里的 `factoryId`**，后续 Handoff 步骤需要使用它。
+
+#### `abnormal_detail.json` 数据结构
+
+```jsonc
+{
+  "code": 200,
+  "msg": "操作成功",
+  "data": {
+    "macName": "3#汽动给水泵",
+    "componentName": "汽轮机",
+    "macPath": "化工分公司/热电区域/热电装置",
+    "events": [
+      {
+        "type": "sensor|t|w|k|d",     // 事件类型
+        "eventLevel": 41,              // 事件等级：>=60紧急 41-59重要 21-40一般 <=20提示
+        "time": 1717000000000,         // 事件时间（毫秒时间戳）
+        "desc": "异常描述文本",
+        "description": "异常描述文本",  // 同 desc（两个字段名都可能出现）
+        "runStatus": "running",        // 运行状态
+        "health": 87.0,                // 健康值
+        "jumpParams": {
+          "factoryId": "12345",        // 工厂ID（Handoff需要）
+          "startTime": 1716990000000,  // 趋势起始时间（ms）
+          "endTime": 1717010000000,    // 趋势结束时间（ms）
+          "points": [                  // 关联测点列表
+            {
+              "pointId": "测点ID",
+              "pointName": "测点名称",
+              "pointType": 83,         // positionType：83=轴振(有波形) 82=其他(无波形)
+              "valueType": "pp_value|value"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "mac_id": "CLI传入的设备ID",
+  "component_id": "CLI传入的子设备ID"
+}
+```
+
+> ⚠ **注意**：`events` 在 `data` 对象内，不在顶层。访问方式：`detail["data"]["events"]`
+
+**研判时需要关注的字段**：`data.events[].type`（研判规则选择）、`data.events[].eventLevel`（严重程度）、`data.events[].jumpParams.points[].pointId`（测点数据关联）、`data.events[].jumpParams.startTime/endTime`（趋势时间范围）。
+
 ### 步骤4：拉取监测数据
 
-**批量拉取所有异常测点的趋势数据**（一次命令，并行）：
+**一次命令获取所有测点的趋势+波形数据**（内部调用 monitoring-data Skill，自动路由 2K/6K/8K/9K 端点）：
 
 ```bash
-python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_monitoring.py batch \
+python /mnt/skills/custom/abnormal-judgment-rotating/scripts/fetch_abnormal_monitoring.py \
   --input /mnt/user-data/outputs/abnormal_detail.json \
-  --output /mnt/user-data/outputs/monitoring_trends.json
+  --include-waveform auto \
+  --output-dir /mnt/user-data/outputs/
 ```
 
-然后用 `read_file` 读取 `/mnt/user-data/outputs/monitoring_trends.json`。
-每个测点返回 `min/max/avg/first/last` 统计摘要，用于趋势判断。
+然后用 `read_file` 读取 `/mnt/user-data/outputs/abnormal_monitoring.json`。
+数据包含完整的时序趋势 + 波形（对 type=t/w 且 eventLevel≥21 的事件自动获取波形）。
 
-**波形数据**（仅对 type=t/w 且 eventLevel ≥ 21 的事件）：
+#### `abnormal_monitoring.json` 数据结构
 
-```bash
-python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_monitoring.py waveform \
-  --point-id "{主异常pointId}" \
-  --time "{异常时刻ms}" \
-  --factory-id "{factoryId}" \
-  --output /mnt/user-data/outputs/waveform_{pointId}.json
+```jsonc
+{
+  "schema_version": "2.0",
+  "points": [                            // 测点元数据列表
+    {
+      "point_id": "测点ID",
+      "name": "驱动端水平振动",
+      "point_type": 83,                  // positionType
+      "category": "vib|vibc|process|...", // 测点类别
+      "machine_id": "设备ID",
+      "component_name": "前轴承",
+      "supports_waveform": true          // 是否支持波形
+    }
+  ],
+  "time_range": {"start_ms": 0, "end_ms": 0},
+  "trend": {                             // 趋势数据（按 point_id 索引的 dict）
+    "<point_id>": [                      // 时序数组，每个元素：
+      {
+        "time_ms": 1717000000000,        // 时间戳（ms）
+        "values": {                      // 多特征值
+          "pp_value": 45.2,              // 峰峰值（μm）— 振动类主要看这个
+          "rms": 12.3,                   // 有效值
+          "one_freq_x": 30.1,           // 1X 幅值 X方向
+          "one_freq_y": 28.5,           // 1X 幅值 Y方向
+          "two_freq_x": 5.2,            // 2X 幅值 X方向
+          "two_freq_y": 4.8,            // 2X 幅值 Y方向
+          "speed": 3000,                // 转速（rpm）
+          "gap": 0.5                     // 间隙电压
+        }
+      }
+      // ... 更多时间点
+    ]
+  },
+  "waveform": {                          // 波形数据（按 point_id 索引的 dict，仅振动类测点有）
+    "<point_id>": {
+      "time_ms": 1717000000000,
+      "wave_x": [1.2, 3.4, ...],        // X方向时域波形
+      "wave_y": [2.1, 4.3, ...],        // Y方向时域波形
+      "spec_x": [0.1, 0.5, ...],        // X方向频谱
+      "spec_y": [0.2, 0.4, ...],        // Y方向频谱
+      "sample_rate": 1024,              // 采样率
+      "speed": 3000                     // 转速
+    }
+  },
+  "events": {},                          // 事件数据（8K/9K设备）
+  "data_source": "ins",
+  "data_notes": []                       // 数据备注（如某测点波形获取失败）
+}
 ```
+
+**研判时需要关注的字段**：
+- `trend[point_id]` → 趋势形态（上升/稳定/波动）、特征值大小
+- `trend[point_id][].values.pp_value` → 振动峰峰值，判断是否超限
+- `trend[point_id][].values.one_freq_x/one_freq_y` → 1X 幅值，判断不平衡/不对中
+- `waveform[point_id]` → 波形形态（削顶/毛刺）、频谱特征（1X/2X 占比）
+
+**不需要重新检查数据结构**——以上结构是固定的，直接按字段名读取即可。
 
 ### 步骤5：逐事件研判
 
-对 `events[]` 中每个事件，按 `type` 研判：
+对 `events[]` 中每个事件，按 `type` 研判。故障码对照 `abnormal-judgment-rotating` skill 的 `references/fault_codes.md`：
 
 #### `sensor` — 传感器异常
 - 同位置多测点互校：X/Y同时跳变 → 真实物理变化；仅单点 → 传感器故障
@@ -130,13 +228,13 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_monitoring.py w
 ```
 
 `verdict` 三选一：`real_fault` / `suspected` / `false_alarm`
-`suspected_fault_type` 对照 `vibration-fault-diagnosis` skill 的故障码：
+`suspected_fault_type` 对照故障码：
 `unbalance_1x` / `misalignment` / `critical_response` / `thermal_bend` /
 `permanent_bend` / `rub_seal` / `support_bearing` / `rotating_stall_surge` /
 `runout` / `axial_offset_calibration` / `bearing_temperature_high` /
 `thrust_bearing_temperature_high`
 
-### 步骤6：综合研判
+### 步骤6：综合研判 + 写入研判结果
 
 | 结论 | 条件 |
 |:---|:---|
@@ -146,28 +244,67 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_monitoring.py w
 
 严重程度：eventLevel ≥ 60 → critical | 41-59 → high | 21-40 → medium | ≤ 20 → low
 
-### 步骤7：渲染研判报告
+**将研判结论写入 `judgment_result.json`**（供图表生成和报告导出使用）：
 
-按 `sequence` 递增调用 `render_ui`：
-
-**Card**（sequence=1）：
-```json
-{"component":"card","action":"create","sequence":1,
- "props":{"title":"{macName} - {componentName}","value":"{latestHealth}",
-          "subtitle":"当前健康值 · {macPath}","color":"warning"}}
+```bash
+cat > /mnt/user-data/outputs/judgment_result.json << 'JUDGMENT_EOF'
+{
+  "schema_version": "2.0",
+  "event_verdicts": [
+    {"event_index": 0, "verdict": "real_fault", "confidence": 0.85, "suspected_fault_type": "unbalance_1x", "reasoning": "...", "evidence": ["..."]},
+    ...
+  ],
+  "overall_verdict": "real_fault",
+  "overall_confidence": 0.85,
+  "severity": "medium",
+  "suspected_fault_type": "unbalance_1x",
+  "evidence_summary": ["证据1", "证据2"],
+  "recommendations": ["建议1", "建议2"]
+}
+JUDGMENT_EOF
 ```
 
-**Table**（sequence=2）：
-```json
-{"component":"table","action":"create","sequence":2,
- "props":{"title":"异常事件研判明细",
-   "columns":[{"key":"type_cn","label":"类型"},{"key":"desc","label":"异常描述"},
-              {"key":"level","label":"等级"},{"key":"verdict_cn","label":"判定"},
-              {"key":"confidence","label":"置信度"}],
-   "data":["/* 每个事件一行 */"]}}
+### 步骤7：渲染研判报告（图表批量渲染）
+
+**使用脚本生成图表配置，然后批量渲染**：
+
+```bash
+python /mnt/skills/custom/abnormal-judgment-rotating/scripts/generate_abnormal_charts.py \
+  --detail /mnt/user-data/outputs/abnormal_detail.json \
+  --monitoring /mnt/user-data/outputs/abnormal_monitoring.json \
+  --verdict /mnt/user-data/outputs/judgment_result.json \
+  --mac-name "{mac_name}" \
+  --component-name "{component_name}" \
+  --mac-path "{mac_path}" \
+  --output-dir /mnt/user-data/outputs/
 ```
 
-**Markdown**（sequence=3）：综合结论 + 证据链 + 处置建议。
+然后用 `render_charts_file` 工具一次性渲染所有图表：
+
+```
+render_charts_file(charts_json_path="/mnt/user-data/outputs/charts.json")
+```
+
+**严禁**逐个调用 `render_ui` 渲染每个图表！
+**严禁**写 Python 脚本处理 charts.json！
+
+### 步骤7.5：报告导出
+
+```bash
+python /mnt/skills/custom/abnormal-judgment-rotating/scripts/export_abnormal_report.py \
+  --detail /mnt/user-data/outputs/abnormal_detail.json \
+  --monitoring /mnt/user-data/outputs/abnormal_monitoring.json \
+  --verdict /mnt/user-data/outputs/judgment_result.json \
+  --mac-name "{mac_name}" \
+  --component-name "{component_name}" \
+  --output-dir /mnt/user-data/outputs/
+```
+
+然后暴露下载链接：
+
+```
+present_files(["/mnt/user-data/outputs/judgment_report.md"])
+```
 
 ### 步骤8：Handoff 到故障诊断（条件触发）
 
@@ -176,7 +313,7 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/query_monitoring.py w
 **首先生成 handoff 数据文件**（脚本自动从 detail 提取 factory_id + events，ID 从步骤1 的实际值传入）：
 
 ```bash
-python /mnt/skills/custom/rotating-fault-diagnosis/scripts/build_handoff.py \
+python /mnt/skills/custom/abnormal-judgment-rotating/scripts/build_handoff.py \
   --detail /mnt/user-data/outputs/abnormal_detail.json \
   --mac-id "{mac_id}" \
   --component-id "{component_id}" \
@@ -222,4 +359,5 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/build_handoff.py \
 
 ## 脚本依赖
 
-- `/mnt/skills/custom/rotating-fault-diagnosis/scripts/query_abnormal_detail.py` — 拉取异常详情
+- `abnormal-judgment-rotating` Skill — 提供所有脚本（数据获取、图表生成、报告导出、Handoff构建）
+- `monitoring-data` Skill — 被 `fetch_abnormal_monitoring.py` 内部调用，提供监测数据获取能力
