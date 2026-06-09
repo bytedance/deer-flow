@@ -7,7 +7,10 @@ import { installClipboardFallback } from "@/core/clipboard";
 
 export type ClipboardSafeStreamdownProps = ComponentProps<typeof Streamdown>;
 
-installClipboardFallback();
+// Only patch browser globals in client context; skip during SSR
+if (typeof document !== "undefined") {
+  installClipboardFallback();
+}
 
 export function ClipboardSafeStreamdown(props: ClipboardSafeStreamdownProps) {
   return <Streamdown {...props} />;
