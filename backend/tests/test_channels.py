@@ -22,6 +22,7 @@ from app.channels.message_bus import (
 )
 from app.channels.store import ChannelStore
 from deerflow.skills.types import Skill, SkillCategory
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def test_known_channel_command_detection_only_matches_control_commands():
@@ -1545,6 +1546,123 @@ class TestChannelManager:
             call_args = mock_client.runs.wait.call_args
             assert call_args[1]["input"]["messages"][0]["content"] == "/data-analysis analyze uploads/foo.csv"
             assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_command_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def fake_ingest(thread_id, msg):
+            return [
+                {
+                    "filename": "report.pdf",
+                    "size": 12,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "is_image": False,
+                }
+            ]
+
+        monkeypatch.setattr("app.channels.manager._ingest_inbound_files", fake_ingest)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            original_text = "/data-analysis analyze report.pdf"
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text=original_text,
+                files=[{"filename": "report.pdf"}],
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            human_message = mock_client.runs.wait.call_args[1]["input"]["messages"][0]
+            assert human_message["content"].startswith("<uploaded_files>")
+            assert original_text in human_message["content"]
+            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_streaming_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def fake_ingest(thread_id, msg):
+            return [
+                {
+                    "filename": "report.pdf",
+                    "size": 12,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "is_image": False,
+                }
+            ]
+
+        monkeypatch.setattr("app.channels.manager._ingest_inbound_files", fake_ingest)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(
+                return_value=_make_async_iterator(
+                    [
+                        _make_stream_part(
+                            "values",
+                            {"messages": [{"type": "ai", "content": "streamed response"}]},
+                        )
+                    ]
+                )
+            )
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            original_text = "/data-analysis analyze report.pdf"
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text=original_text,
+                files=[{"filename": "report.pdf"}],
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(message.is_final for message in outbound_received))
+            await manager.stop()
+
+            mock_client.runs.stream.assert_called_once()
+            human_message = mock_client.runs.stream.call_args[1]["input"]["messages"][0]
+            assert human_message["content"].startswith("<uploaded_files>")
+            assert original_text in human_message["content"]
+            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
 
         _run(go())
 

@@ -33,6 +33,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -430,6 +431,13 @@ def _unknown_command_reply(command: str | None = None) -> str:
     if command:
         return f"Unknown command: /{command}. Available commands: {available}"
     return f"Unknown command. Available commands: {available}"
+
+
+def _human_input_message(content: str, *, original_content: str | None = None) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "human", "content": content}
+    if original_content is not None and original_content != content:
+        message["additional_kwargs"] = {ORIGINAL_USER_CONTENT_KEY: original_content}
+    return message
 
 
 def _resolve_slash_skill_command(
@@ -913,9 +921,11 @@ class ChannelManager:
         if extra_context:
             run_context.update(extra_context)
 
+        original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg)
         if uploaded:
             msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
+        human_message = _human_input_message(msg.text, original_content=original_text)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -925,6 +935,7 @@ class ChannelManager:
                 assistant_id,
                 run_config,
                 run_context,
+                human_message,
             )
             return
 
@@ -933,7 +944,7 @@ class ChannelManager:
             result = await client.runs.wait(
                 thread_id,
                 assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
+                input={"messages": [human_message]},
                 config=run_config,
                 context=run_context,
                 multitask_strategy="reject",
@@ -986,6 +997,7 @@ class ChannelManager:
         assistant_id: str,
         run_config: dict[str, Any],
         run_context: dict[str, Any],
+        human_message: dict[str, Any],
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
 
@@ -1001,7 +1013,7 @@ class ChannelManager:
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
+                input={"messages": [human_message]},
                 config=run_config,
                 context=run_context,
                 stream_mode=["messages-tuple", "values"],
