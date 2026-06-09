@@ -85,6 +85,12 @@ from pydantic import PrivateAttr
 _FIXTURE_ENV = "DEERFLOW_REPLAY_FIXTURE"
 _DEFAULT_CALLER = "lead_agent"
 _CALLER_TAG_PREFIXES = ("middleware:", "subagent:")
+_CALLER_NAME_ALIASES = {
+    # TitleMiddleware uses this run_name and tags the call as middleware:title.
+    # Some execution paths do not preserve the tag down to the model callback,
+    # so keep the run_name and tag in the same replay namespace.
+    "title_agent": "middleware:title",
+}
 
 # Process-wide record of replay misses. A miss raises inside the model, but the
 # gateway's LLMErrorHandlingMiddleware swallows it into a normal assistant error
@@ -106,7 +112,9 @@ def reset_replay_misses() -> None:
 
 def _normalize_caller(caller: str | None) -> str:
     value = _normalize_text(str(caller or "").strip())
-    return value or _DEFAULT_CALLER
+    if not value:
+        return _DEFAULT_CALLER
+    return _CALLER_NAME_ALIASES.get(value, value)
 
 
 def _caller_from_tags(tags: list[str] | None) -> str | None:
@@ -276,7 +284,10 @@ class ReplayChatModel(BaseChatModel):
         caller = self._run_callers.pop(run_id, None)
         if caller:
             return caller
-        return caller_identity(tags=getattr(run_manager, "tags", None))
+        return caller_identity(
+            name=getattr(run_manager, "run_name", None) or getattr(run_manager, "name", None),
+            tags=getattr(run_manager, "tags", None),
+        )
 
     def _match(self, messages: list[BaseMessage], run_manager: CallbackManagerForLLMRun | None = None) -> AIMessage:
         caller = self._caller_from_run_manager(run_manager)

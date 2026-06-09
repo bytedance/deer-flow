@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, messages_to_dict
-from replay_provider import ReplayChatModel, hash_messages, hash_replay_input
+from replay_provider import ReplayChatModel, caller_identity, hash_messages, hash_replay_input
 
 
 def _write_fixture(path: Path, turns: list[dict]) -> None:
@@ -70,3 +70,25 @@ def test_replay_supports_legacy_conversation_only_fixture(tmp_path: Path):
     model = ReplayChatModel(fixture=str(fixture_path))
 
     assert model.invoke(messages, config={"run_name": "suggest_agent"}).content == "legacy"
+
+
+def test_title_run_name_uses_middleware_caller_namespace(tmp_path: Path):
+    messages = [HumanMessage(content="title prompt")]
+    fixture_path = tmp_path / "fixture.json"
+
+    _write_fixture(
+        fixture_path,
+        [
+            {
+                "caller": "middleware:title",
+                "conversation_hash": hash_messages(messages),
+                "input_hash": hash_replay_input(messages, caller="middleware:title"),
+                "output": messages_to_dict([AIMessage(content="generated title")])[0],
+            }
+        ],
+    )
+
+    model = ReplayChatModel(fixture=str(fixture_path))
+
+    assert caller_identity(name="title_agent") == "middleware:title"
+    assert model.invoke(messages, config={"run_name": "title_agent"}).content == "generated title"
