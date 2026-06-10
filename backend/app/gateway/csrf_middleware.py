@@ -14,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from app.gateway.auth_disabled import is_auth_disabled
+
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_TOKEN_LENGTH = 64  # bytes
@@ -36,6 +38,9 @@ def should_check_csrf(request: Request) -> bool:
     GET, HEAD, OPTIONS, and TRACE are exempt per RFC 7231.
     """
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
+        return False
+
+    if is_auth_disabled():
         return False
 
     path = request.url.path.rstrip("/")

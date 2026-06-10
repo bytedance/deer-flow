@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { AUTH_DISABLED_USER } from "@/core/auth/auth-disabled-user";
 import { STATIC_WEBSITE_USER } from "@/core/auth/static-user";
 
 vi.mock("next/headers", () => ({
@@ -10,6 +11,8 @@ vi.mock("next/headers", () => ({
 
 const ENV_KEYS = [
   "DEER_FLOW_AUTH_DISABLED",
+  "DEER_FLOW_ENV",
+  "ENVIRONMENT",
   "NEXT_PUBLIC_STATIC_WEBSITE_ONLY",
 ] as const;
 
@@ -51,6 +54,8 @@ describe("getServerSideUser", () => {
   beforeEach(() => {
     saved = snapshotEnv();
     setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
+    setEnv("DEER_FLOW_ENV", undefined);
+    setEnv("ENVIRONMENT", undefined);
     setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
   });
 
@@ -73,5 +78,31 @@ describe("getServerSideUser", () => {
       user: STATIC_WEBSITE_USER,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("bypasses gateway auth in auth-disabled mode", async () => {
+    setEnv("DEER_FLOW_AUTH_DISABLED", "1");
+    const fetchSpy = vi.fn(() => {
+      throw new Error("fetch should not be called in auth-disabled mode");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "authenticated",
+      user: AUTH_DISABLED_USER,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test("does not enable auth-disabled mode in explicit production environments", async () => {
+    setEnv("DEER_FLOW_AUTH_DISABLED", "1");
+    setEnv("DEER_FLOW_ENV", "production");
+
+    const { isAuthDisabledMode } =
+      await import("@/core/auth/auth-disabled-user");
+
+    expect(isAuthDisabledMode()).toBe(false);
   });
 });

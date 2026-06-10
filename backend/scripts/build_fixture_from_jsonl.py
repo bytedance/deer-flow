@@ -36,7 +36,8 @@ def main() -> int:
     for index, turn in enumerate(turns):
         data = turn["output"].get("data", {})
         tool_calls = [tc.get("name") for tc in (data.get("tool_calls") or [])]
-        print(f"  turn {index}: hash={turn['input_hash'][:12]} tool_calls={tool_calls} content={str(data.get('content'))[:50]!r}")
+        caller = turn.get("caller", "legacy")
+        print(f"  turn {index}: caller={caller} hash={turn['input_hash'][:12]} tool_calls={tool_calls} content={str(data.get('content'))[:50]!r}")
     return 0
 
 

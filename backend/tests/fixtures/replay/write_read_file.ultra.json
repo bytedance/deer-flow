@@ -12,7 +12,9 @@
   },
   "turns": [
     {
-      "input_hash": "9c50eda6ab7e8593dabccbdeadc70a4a7bf778b2c0c3f275f1f96cf2c8ab58db",
+      "caller": "lead_agent",
+      "conversation_hash": "9c50eda6ab7e8593dabccbdeadc70a4a7bf778b2c0c3f275f1f96cf2c8ab58db",
+      "input_hash": "27aeb4c11bff2c3ebc182fe52a06556823c21928620a400c7f26be9733c31f3f",
       "output": {
         "type": "ai",
         "data": {
@@ -56,7 +58,9 @@
       }
     },
     {
-      "input_hash": "3598aeb87e221ca8f554e4d61ce6d5e8801754606fa5c95a89c38bd6cb623045",
+      "caller": "middleware:title",
+      "conversation_hash": "3598aeb87e221ca8f554e4d61ce6d5e8801754606fa5c95a89c38bd6cb623045",
+      "input_hash": "75101f9faa453b1a35deff920b1e3c1a9f0b013a7627fbbaa03436752776b953",
       "output": {
         "type": "ai",
         "data": {
@@ -89,7 +93,9 @@
       }
     },
     {
-      "input_hash": "6af134379b2a9efa01b4f63032f88211d5f38f459f8bed621eb6c65e8e05c1f9",
+      "caller": "lead_agent",
+      "conversation_hash": "6af134379b2a9efa01b4f63032f88211d5f38f459f8bed621eb6c65e8e05c1f9",
+      "input_hash": "f7468603a43d301fcc0167c2f7cd10e53137bfc584f1b3d776614b7a612ed7a6",
       "output": {
         "type": "ai",
         "data": {
@@ -132,7 +138,9 @@
       }
     },
     {
-      "input_hash": "04751c4f7b0107b78b5c97d417063883fd586f5ebcbc4acf79be6cb3c0cdaec1",
+      "caller": "lead_agent",
+      "conversation_hash": "04751c4f7b0107b78b5c97d417063883fd586f5ebcbc4acf79be6cb3c0cdaec1",
+      "input_hash": "218645dabc6926a1dbdf45dd20fba8a41e1e690cef78d7752566db3acf5a36ce",
       "output": {
         "type": "ai",
         "data": {
@@ -165,7 +173,9 @@
       }
     },
     {
-      "input_hash": "8b98ebdbb53e88f000556c4753adede8eaa076ff6fd7b8a1285bfd18aee8144d",
+      "caller": "suggest_agent",
+      "conversation_hash": "8b98ebdbb53e88f000556c4753adede8eaa076ff6fd7b8a1285bfd18aee8144d",
+      "input_hash": "dcd855d389d7179a1e4bc7074fa9ba7ce697570af8947225d6bacb538f14a0cb",
       "output": {
         "type": "ai",
         "data": {
