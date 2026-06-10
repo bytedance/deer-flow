@@ -15,7 +15,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import TOKEN_USAGE_ACTIVE_STATUSES, TOKEN_USAGE_TERMINAL_STATUSES, RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -302,8 +302,8 @@ class RunRepository(RunStore):
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage via a single SQL GROUP BY query."""
-        statuses = ("success", "error", "running") if include_active else ("success", "error")
-        _completed = RunRow.status.in_(statuses)
+        statuses = TOKEN_USAGE_ACTIVE_STATUSES if include_active else TOKEN_USAGE_TERMINAL_STATUSES
+        _eligible_status = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
         model_name = func.coalesce(RunRow.model_name, "unknown")
 
@@ -318,7 +318,7 @@ class RunRepository(RunStore):
                 func.coalesce(func.sum(RunRow.subagent_tokens), 0).label("subagent"),
                 func.coalesce(func.sum(RunRow.middleware_tokens), 0).label("middleware"),
             )
-            .where(_thread, _completed)
+            .where(_thread, _eligible_status)
             .group_by(model_name)
         )
 

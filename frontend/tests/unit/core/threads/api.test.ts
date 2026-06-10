@@ -36,7 +36,9 @@ test("fetchThreadTokenUsage uses shared auth fetch without JSON GET headers", as
   });
 
   expect(fetchWithAuth).toHaveBeenCalledWith(
-    expect.stringContaining("/api/threads/thread-1/token-usage"),
+    expect.stringContaining(
+      "/api/threads/thread-1/token-usage?include_active=true",
+    ),
     {
       method: "GET",
     },

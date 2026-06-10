@@ -145,6 +145,7 @@ export default function ChatPage() {
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
+                backendIncludesActive
                 enabled={tokenUsageEnabled}
                 messages={thread.messages}
                 pendingMessages={pendingUsageMessages}

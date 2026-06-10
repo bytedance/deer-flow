@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 async def _make_repo(tmp_path):
@@ -64,6 +65,30 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
 
     await store.update_run_progress("r1", total_tokens=1)
+
+
+@pytest.mark.anyio
+async def test_memory_run_store_aggregate_tokens_counts_terminal_runs():
+    store = MemoryRunStore()
+    await store.put("success-run", thread_id="t1", status="running")
+    await store.update_run_completion("success-run", status="success", total_tokens=100, lead_agent_tokens=100)
+    await store.put("interrupted-run", thread_id="t1", status="running")
+    await store.update_run_completion("interrupted-run", status="interrupted", total_tokens=40, middleware_tokens=40)
+    await store.put("running-run", thread_id="t1", status="running")
+    await store.update_run_progress("running-run", total_tokens=25, subagent_tokens=25)
+
+    without_active = await store.aggregate_tokens_by_thread("t1")
+    with_active = await store.aggregate_tokens_by_thread("t1", include_active=True)
+
+    assert without_active["total_tokens"] == 140
+    assert without_active["total_runs"] == 2
+    assert with_active["total_tokens"] == 165
+    assert with_active["total_runs"] == 3
+    assert with_active["by_caller"] == {
+        "lead_agent": 100,
+        "subagent": 25,
+        "middleware": 40,
+    }
 
 
 class TestRunRepository:
@@ -316,7 +341,7 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
+    async def test_aggregate_tokens_by_thread_counts_terminal_runs(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")
         await repo.update_run_completion(
@@ -339,6 +364,17 @@ class TestRunRepository:
             lead_agent_tokens=40,
             subagent_tokens=10,
         )
+        await repo.put("interrupted-run", thread_id="t1", status="running")
+        await repo.update_run_completion(
+            "interrupted-run",
+            status="interrupted",
+            total_input_tokens=11,
+            total_output_tokens=9,
+            total_tokens=20,
+            lead_agent_tokens=12,
+            subagent_tokens=3,
+            middleware_tokens=5,
+        )
         await repo.put("running-run", thread_id="t1", status="running")
         await repo.update_run_completion(
             "running-run",
@@ -358,15 +394,15 @@ class TestRunRepository:
 
         agg = await repo.aggregate_tokens_by_thread("t1")
 
-        assert agg["total_tokens"] == 150
-        assert agg["total_input_tokens"] == 90
-        assert agg["total_output_tokens"] == 60
-        assert agg["total_runs"] == 2
-        assert agg["by_model"] == {"unknown": {"tokens": 150, "runs": 2}}
+        assert agg["total_tokens"] == 170
+        assert agg["total_input_tokens"] == 101
+        assert agg["total_output_tokens"] == 69
+        assert agg["total_runs"] == 3
+        assert agg["by_model"] == {"unknown": {"tokens": 170, "runs": 3}}
         assert agg["by_caller"] == {
-            "lead_agent": 120,
-            "subagent": 25,
-            "middleware": 5,
+            "lead_agent": 132,
+            "subagent": 28,
+            "middleware": 10,
         }
         await _cleanup()
 
@@ -375,20 +411,22 @@ class TestRunRepository:
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")
         await repo.update_run_completion("success-run", status="success", total_tokens=100, lead_agent_tokens=100)
+        await repo.put("interrupted-run", thread_id="t1", status="running")
+        await repo.update_run_completion("interrupted-run", status="interrupted", total_tokens=40, middleware_tokens=40)
         await repo.put("running-run", thread_id="t1", status="running")
         await repo.update_run_progress("running-run", total_tokens=25, lead_agent_tokens=20, subagent_tokens=5)
 
         without_active = await repo.aggregate_tokens_by_thread("t1")
         with_active = await repo.aggregate_tokens_by_thread("t1", include_active=True)
 
-        assert without_active["total_tokens"] == 100
-        assert without_active["total_runs"] == 1
-        assert with_active["total_tokens"] == 125
-        assert with_active["total_runs"] == 2
+        assert without_active["total_tokens"] == 140
+        assert without_active["total_runs"] == 2
+        assert with_active["total_tokens"] == 165
+        assert with_active["total_runs"] == 3
         assert with_active["by_caller"] == {
             "lead_agent": 120,
             "subagent": 5,
-            "middleware": 0,
+            "middleware": 40,
         }
         await _cleanup()
 

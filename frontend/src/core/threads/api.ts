@@ -7,7 +7,7 @@ export async function fetchThreadTokenUsage(
   threadId: string,
 ): Promise<ThreadTokenUsageResponse | null> {
   const response = await fetchWithAuth(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage`,
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/token-usage?include_active=true`,
     {
       method: "GET",
     },

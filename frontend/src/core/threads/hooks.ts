@@ -351,6 +351,9 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const tokenUsageRefreshTimersRef = useRef<ReturnType<typeof setTimeout>[]>(
+    [],
+  );
   const listeners = useRef({
     onSend,
     onStart,
@@ -394,6 +397,40 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+
+  const clearThreadTokenUsageRefreshTimers = useCallback(() => {
+    tokenUsageRefreshTimersRef.current.forEach((timer) => clearTimeout(timer));
+    tokenUsageRefreshTimersRef.current = [];
+  }, []);
+
+  const refreshThreadTokenUsage = useCallback(
+    (targetThreadId: string | null | undefined) => {
+      if (!targetThreadId || isMock) {
+        return;
+      }
+
+      clearThreadTokenUsageRefreshTimers();
+      const queryKey = threadTokenUsageQueryKey(targetThreadId);
+      const refresh = () => {
+        void queryClient.invalidateQueries({ queryKey });
+      };
+
+      refresh();
+      // The SDK can call onFinish as soon as the final state event arrives,
+      // while the worker is still flushing final run counters to SQL.
+      for (const delayMs of [1_000, 3_000]) {
+        tokenUsageRefreshTimersRef.current.push(setTimeout(refresh, delayMs));
+      }
+    },
+    [clearThreadTokenUsageRefreshTimers, isMock, queryClient],
+  );
+
+  useEffect(
+    () => () => {
+      clearThreadTokenUsageRefreshTimers();
+    },
+    [clearThreadTokenUsageRefreshTimers, threadId],
+  );
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
@@ -528,11 +565,7 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      refreshThreadTokenUsage(threadIdRef.current);
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
@@ -542,11 +575,7 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      refreshThreadTokenUsage(threadIdRef.current);
     },
   });
 
@@ -1106,7 +1135,7 @@ export function useThreadTokenUsage(
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
   });
 }
 

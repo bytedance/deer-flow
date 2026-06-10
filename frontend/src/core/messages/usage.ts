@@ -85,18 +85,36 @@ export function addUsage(base: TokenUsage, delta: TokenUsage): TokenUsage {
 
 export function selectHeaderTokenUsage({
   backendUsage,
+  backendIncludesActive = false,
   messages,
   pendingMessages = [],
 }: {
   backendUsage?: TokenUsage | null;
+  backendIncludesActive?: boolean;
   messages: Message[];
   pendingMessages?: Message[];
 }): TokenUsage | null {
   if (hasNonZeroUsage(backendUsage)) {
+    if (backendIncludesActive) {
+      return backendUsage;
+    }
     const pendingUsage = accumulateUsage(pendingMessages);
     return pendingUsage ? addUsage(backendUsage, pendingUsage) : backendUsage;
   }
   return accumulateUsage(messages);
+}
+
+export function selectNonDecreasingTokenUsage(
+  currentUsage: TokenUsage | null,
+  previousUsage: TokenUsage | null,
+): TokenUsage | null {
+  if (!currentUsage) {
+    return previousUsage;
+  }
+  if (!previousUsage || currentUsage.totalTokens >= previousUsage.totalTokens) {
+    return currentUsage;
+  }
+  return previousUsage;
 }
 
 /**

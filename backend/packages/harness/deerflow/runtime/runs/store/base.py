@@ -13,6 +13,9 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+TOKEN_USAGE_TERMINAL_STATUSES = ("success", "error", "interrupted")
+TOKEN_USAGE_ACTIVE_STATUSES = (*TOKEN_USAGE_TERMINAL_STATUSES, "running")
+
 
 class RunStore(abc.ABC):
     @abc.abstractmethod
@@ -133,7 +136,11 @@ class RunStore(abc.ABC):
 
     @abc.abstractmethod
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
-        """Aggregate token usage for completed runs in a thread.
+        """Aggregate token usage for terminal runs in a thread.
+
+        Terminal usage includes ``success``, ``error``, and ``interrupted``
+        runs because interrupted runs can still persist consumed token counts.
+        Set ``include_active`` to also include running progress snapshots.
 
         Returns a dict with keys: total_tokens, total_input_tokens,
         total_output_tokens, total_runs, by_model (model_name → {tokens, runs}),
