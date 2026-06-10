@@ -23,7 +23,7 @@ function mockChannelsAPI(page: Page) {
             display_name: "Slack",
             enabled: true,
             configured: true,
-            auth_mode: "oauth",
+            auth_mode: "binding_code",
             connection_status: "not_connected",
           },
           {
@@ -31,7 +31,7 @@ function mockChannelsAPI(page: Page) {
             display_name: "Discord",
             enabled: true,
             configured: true,
-            auth_mode: "oauth_and_bot_install",
+            auth_mode: "binding_code",
             connection_status: "not_connected",
           },
         ],
@@ -53,8 +53,10 @@ function mockChannelsAPI(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         provider: "slack",
-        mode: "oauth",
-        url: "http://localhost:3000/mock-slack-oauth?client_id=dev&state=test",
+        mode: "binding_code",
+        url: null,
+        code: "abc123",
+        instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
         expires_in: 600,
       }),
     });
@@ -91,11 +93,10 @@ test.describe("IM channels", () => {
     const connectButtons = dialog.getByRole("button", { name: "Connect" });
     await expect(connectButtons).toHaveCount(3);
 
-    const popupPromise = page.waitForEvent("popup");
     await connectButtons.nth(1).click();
-    const popup = await popupPromise;
     await expect(page).toHaveURL(/\/workspace\/chats\/new/);
-    await expect(popup).toHaveURL(/\/mock-slack-oauth/);
-    await popup.close();
+    await expect(
+      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+    ).toBeVisible();
   });
 });

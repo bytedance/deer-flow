@@ -35,6 +35,8 @@ export interface ChannelConnectionsResponse {
 export interface ChannelConnectResponse {
   provider: ChannelProviderId;
   mode: string;
-  url: string;
+  url?: string | null;
+  code: string;
+  instruction: string;
   expires_in: number;
 }

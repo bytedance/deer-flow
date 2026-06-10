@@ -109,13 +109,3 @@ class ChannelConversationRow(Base):
             name="uq_channel_conversation_connection_external",
         ),
     )
-
-
-class ChannelWebhookDeliveryRow(Base):
-    __tablename__ = "channel_webhook_deliveries"
-
-    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
-    delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)

@@ -1135,54 +1135,28 @@ run_events:
 # User-Owned IM Channel Connections
 # ============================================================================
 # Lets logged-in users connect their own Telegram, Slack, and Discord accounts
-# from the DeerFlow frontend. This is separate from the legacy operator-owned
-# `channels` block below:
-# - `channel_connections` stores per-user connection records and encrypted
-#   provider credentials.
-# - `channels` still configures legacy operator-owned bots and local polling /
-#   socket-mode workers.
+# from the DeerFlow frontend while reusing the existing `channels` runtime
+# configuration below.
 #
 # Security notes:
-# - `mode: local` supports local/private deployments. Telegram deep-link
-#   binding works with long polling and does not require a public URL.
-# - `mode: public` requires `public_base_url`, an externally reachable HTTPS
-#   origin for provider callbacks and webhooks. Slack HTTP Events and Telegram
-#   webhooks need this, or a tunnel, even when DeerFlow itself runs locally.
-# - `encryption_key` is used to encrypt provider tokens at rest. Generate a
-#   long random value and keep it stable. Telegram deep-link binding can run
-#   without it because it does not store per-user provider tokens. Slack and
-#   Discord connections require it.
-# - OAuth callbacks and provider webhooks are public routes, but they are
-#   protected by one-time state tokens or provider signatures/secrets.
+# - No public IP, OAuth callback URL, or provider webhook is required.
+# - Provider bot/app credentials stay under `channels.*`.
+# - `channel_connections` stores per-user bindings and one-time connect codes.
+# - Telegram uses a deep link when `bot_username` is configured.
+# - Slack and Discord use `/connect <code>` through the already-running bot.
 #
 # channel_connections:
 #   enabled: false
-#   mode: local
-#   # public_base_url: https://deerflow.example.com
-#   # encryption_key: $DEER_FLOW_CHANNEL_CONNECTIONS_KEY
 #
 #   telegram:
 #     enabled: false
-#     bot_token: $TELEGRAM_BOT_TOKEN
 #     bot_username: $TELEGRAM_BOT_USERNAME
-#     delivery: polling
-#     # webhook_secret: $TELEGRAM_WEBHOOK_SECRET
 #
 #   slack:
 #     enabled: false
-#     client_id: $SLACK_CLIENT_ID
-#     client_secret: $SLACK_CLIENT_SECRET
-#     signing_secret: $SLACK_SIGNING_SECRET
-#     scopes: ["app_mentions:read", "chat:write", "channels:history", "channels:read"]
-#     event_delivery: http
 #
 #   discord:
 #     enabled: false
-#     client_id: $DISCORD_CLIENT_ID
-#     client_secret: $DISCORD_CLIENT_SECRET
-#     bot_token: $DISCORD_BOT_TOKEN
-#     permissions: "274877975552"
-#     require_message_content_intent: true
 
 # ============================================================================
 # IM Channels Configuration

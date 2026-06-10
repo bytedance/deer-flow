@@ -18,7 +18,6 @@ from deerflow.persistence.channel_connections.model import (
     ChannelConversationRow,
     ChannelCredentialRow,
     ChannelOAuthStateRow,
-    ChannelWebhookDeliveryRow,
 )
 from deerflow.utils.time import coerce_iso
 
@@ -345,30 +344,3 @@ class ChannelConnectionRepository:
                 ChannelConversationRow.external_topic_id == (external_topic_id or ""),
             )
             return (await session.execute(stmt)).scalar_one_or_none()
-
-    async def record_webhook_delivery(
-        self,
-        *,
-        provider: str,
-        delivery_id: str,
-        payload_sha256: str,
-        event_type: str | None = None,
-    ) -> bool:
-        async with self.session_factory() as session:
-            existing = await session.get(
-                ChannelWebhookDeliveryRow,
-                {"provider": provider, "delivery_id": delivery_id},
-            )
-            if existing is not None:
-                return False
-
-            session.add(
-                ChannelWebhookDeliveryRow(
-                    provider=provider,
-                    delivery_id=delivery_id,
-                    payload_sha256=payload_sha256,
-                    event_type=event_type,
-                )
-            )
-            await session.commit()
-            return True

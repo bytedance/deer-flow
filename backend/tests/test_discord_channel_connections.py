@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.channels.discord import DiscordChannel
@@ -48,3 +51,38 @@ async def test_discord_inbound_attaches_owner_identity_from_user_level_connectio
     assert attached.connection_id == connection["id"]
     assert attached.owner_user_id == "alice"
     assert attached.workspace_id is None
+
+
+@pytest.mark.anyio
+async def test_discord_connect_command_binds_gateway_identity(repo):
+    state = "discord-bind-code"
+    await repo.create_oauth_state(
+        owner_user_id="deerflow-user-1",
+        provider="discord",
+        state=state,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    channel = DiscordChannel(
+        bus=MessageBus(),
+        config={"bot_token": "discord-bot", "connection_repo": repo},
+    )
+    message = MagicMock()
+    message.author.id = 987
+    message.author.display_name = "Alice"
+    message.guild.id = 123
+    message.guild.name = "Deer Guild"
+    message.channel.id = 456
+    message.channel.send = AsyncMock()
+
+    handled = await channel._bind_connection_from_connect_code(message, state)
+
+    connections = await repo.list_connections("deerflow-user-1")
+    assert handled is True
+    assert len(connections) == 1
+    assert connections[0]["provider"] == "discord"
+    assert connections[0]["external_account_id"] == "987"
+    assert connections[0]["external_account_name"] == "Alice"
+    assert connections[0]["workspace_id"] == "123"
+    assert connections[0]["workspace_name"] == "Deer Guild"
+    assert connections[0]["metadata"]["channel_id"] == "456"
+    message.channel.send.assert_awaited_once()

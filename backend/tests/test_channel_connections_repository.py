@@ -12,7 +12,6 @@ from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelCredentialCipher,
     ChannelCredentialRow,
-    ChannelWebhookDeliveryRow,
 )
 
 
@@ -201,25 +200,3 @@ class TestChannelConnectionRepository:
 
         assert disconnected is False
         assert (await repo.list_connections("alice"))[0]["status"] == "connected"
-
-    @pytest.mark.anyio
-    async def test_record_webhook_delivery_returns_false_for_duplicate_delivery_id(self, repo):
-        first = await repo.record_webhook_delivery(
-            provider="slack",
-            delivery_id="Ev123",
-            payload_sha256="abc",
-            event_type="app_mention",
-        )
-        second = await repo.record_webhook_delivery(
-            provider="slack",
-            delivery_id="Ev123",
-            payload_sha256="abc",
-            event_type="app_mention",
-        )
-
-        assert first is True
-        assert second is False
-        async with repo.session_factory() as session:
-            rows = (await session.execute(select(ChannelWebhookDeliveryRow))).scalars().all()
-        assert len(rows) == 1
-        assert rows[0].event_type == "app_mention"

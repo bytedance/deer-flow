@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
 
+def _extract_connect_code(text: str) -> str | None:
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    command = parts[0].lower()
+    if command in {"/connect", "connect"}:
+        return parts[1]
+    return None
+
+
 class DiscordChannel(Channel):
     """Discord bot channel.
 
@@ -288,6 +298,10 @@ class DiscordChannel(Channel):
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
 
+        connect_code = _extract_connect_code(text)
+        if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
+            return
+
         # --- Determine thread/channel routing and typing target ---
         thread_id = None
         chat_id = None
@@ -463,6 +477,51 @@ class DiscordChannel(Channel):
         inbound.owner_user_id = connection["owner_user_id"]
         inbound.workspace_id = connection.get("workspace_id")
         return inbound
+
+    async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
+        if state is None:
+            await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+            return True
+
+        guild = getattr(message, "guild", None)
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        user_id = str(getattr(author, "id", "") or "")
+        if not user_id:
+            await self._send_connection_reply(message, "Discord connection could not be completed from this message.")
+            return True
+
+        guild_id = str(getattr(guild, "id", "") or "") or None
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="discord",
+            external_account_id=user_id,
+            external_account_name=getattr(author, "display_name", None) or getattr(author, "name", None),
+            workspace_id=guild_id,
+            workspace_name=getattr(guild, "name", None) if guild is not None else None,
+            metadata={
+                "guild_id": guild_id,
+                "channel_id": str(getattr(channel, "id", "") or ""),
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(message, "Discord connected to DeerFlow.")
+        return True
+
+    @staticmethod
+    async def _send_connection_reply(message, text: str) -> None:
+        channel = getattr(message, "channel", None)
+        send = getattr(channel, "send", None)
+        if send is None:
+            return
+        try:
+            await send(text)
+        except Exception:
+            logger.exception("[Discord] failed to send connection reply")
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

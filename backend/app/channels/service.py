@@ -57,37 +57,14 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return
 
-    telegram = getattr(connection_config, "telegram", None)
-    if telegram is not None and getattr(telegram, "enabled", False) and getattr(telegram, "configured", False):
-        telegram_config = dict(channels_config.get("telegram", {})) if isinstance(channels_config.get("telegram"), dict) else {}
-        telegram_config.setdefault("enabled", True)
-        telegram_config.setdefault("bot_token", telegram.bot_token)
-        channels_config["telegram"] = telegram_config
-
-    slack = getattr(connection_config, "slack", None)
-    if slack is not None and getattr(slack, "enabled", False) and getattr(slack, "configured", False):
-        slack_config = dict(channels_config.get("slack", {})) if isinstance(channels_config.get("slack"), dict) else {}
-        slack_config.setdefault("enabled", True)
-        slack_config.setdefault("event_delivery", slack.event_delivery)
-        slack_config.setdefault("signing_secret", slack.signing_secret)
-        channels_config["slack"] = slack_config
-
-    discord = getattr(connection_config, "discord", None)
-    if discord is not None and getattr(discord, "enabled", False) and getattr(discord, "configured", False):
-        discord_config = dict(channels_config.get("discord", {})) if isinstance(channels_config.get("discord"), dict) else {}
-        discord_config.setdefault("enabled", True)
-        discord_config.setdefault("bot_token", discord.bot_token)
-        channels_config["discord"] = discord_config
-
 
 def _make_connection_repo(app_config: AppConfig):
     connection_config = getattr(app_config, "channel_connections", None)
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
-    encryption_key = getattr(connection_config, "encryption_key", "")
 
     try:
-        from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+        from deerflow.persistence.channel_connections import ChannelConnectionRepository
         from deerflow.persistence.engine import get_session_factory
     except Exception:
         logger.exception("Failed to import channel connection repository")
@@ -97,8 +74,7 @@ def _make_connection_repo(app_config: AppConfig):
     if session_factory is None:
         logger.warning("Channel connections are enabled but database persistence is not available")
         return None
-    cipher = ChannelCredentialCipher.from_key(encryption_key) if encryption_key else None
-    return ChannelConnectionRepository(session_factory, cipher=cipher)
+    return ChannelConnectionRepository(session_factory)
 
 
 class ChannelService:

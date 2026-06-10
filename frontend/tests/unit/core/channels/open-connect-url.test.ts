@@ -69,9 +69,11 @@ describe("channel connect window helpers", () => {
   test("falls back to current-window navigation when no popup is available", () => {
     const { assign } = stubWindow(null);
 
-    openConnectUrl("https://slack.com/oauth/v2/authorize");
+    openConnectUrl("https://t.me/deerflow_bot?start=state");
 
-    expect(assign).toHaveBeenCalledWith("https://slack.com/oauth/v2/authorize");
+    expect(assign).toHaveBeenCalledWith(
+      "https://t.me/deerflow_bot?start=state",
+    );
   });
 
   test("closes a prepared popup on connect failure", () => {

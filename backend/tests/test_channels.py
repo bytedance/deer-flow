@@ -3276,7 +3276,7 @@ class TestChannelService:
 
         assert service._config == {"telegram": {"enabled": False}}
 
-    def test_from_app_config_merges_telegram_channel_connections_config(self):
+    def test_from_app_config_does_not_create_runtime_channels_from_channel_connections(self):
         from app.channels.service import ChannelService
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
@@ -3285,74 +3285,43 @@ class TestChannelService:
             channel_connections=ChannelConnectionsConfig.model_validate(
                 {
                     "enabled": True,
-                    "public_base_url": "https://deerflow.example.com",
-                    "encryption_key": "secret",
-                    "telegram": {
-                        "enabled": True,
-                        "bot_token": "telegram-token",
-                        "bot_username": "deerflow_bot",
-                        "webhook_secret": "webhook-secret",
-                    },
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
                 }
             ),
         )
 
         service = ChannelService.from_app_config(app_config)
 
-        assert service._config["telegram"]["enabled"] is True
+        assert service._config == {}
+
+    def test_from_app_config_preserves_existing_runtime_channels_with_channel_connections_enabled(self):
+        from app.channels.service import ChannelService
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": True, "bot_token": "telegram-token"},
+                    "slack": {"enabled": True, "bot_token": "xoxb", "app_token": "xapp"},
+                    "discord": {"enabled": True, "bot_token": "discord-bot-token"},
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
         assert service._config["telegram"]["bot_token"] == "telegram-token"
-
-    def test_from_app_config_merges_slack_http_channel_connections_config(self):
-        from app.channels.service import ChannelService
-        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
-
-        app_config = SimpleNamespace(
-            model_extra={},
-            channel_connections=ChannelConnectionsConfig.model_validate(
-                {
-                    "enabled": True,
-                    "public_base_url": "https://deerflow.example.com",
-                    "encryption_key": "secret",
-                    "slack": {
-                        "enabled": True,
-                        "client_id": "slack-client",
-                        "client_secret": "slack-secret",
-                        "signing_secret": "signing-secret",
-                        "event_delivery": "http",
-                    },
-                }
-            ),
-        )
-
-        service = ChannelService.from_app_config(app_config)
-
-        assert service._config["slack"]["enabled"] is True
-        assert service._config["slack"]["event_delivery"] == "http"
-
-    def test_from_app_config_merges_discord_channel_connections_config(self):
-        from app.channels.service import ChannelService
-        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
-
-        app_config = SimpleNamespace(
-            model_extra={},
-            channel_connections=ChannelConnectionsConfig.model_validate(
-                {
-                    "enabled": True,
-                    "public_base_url": "https://deerflow.example.com",
-                    "encryption_key": "secret",
-                    "discord": {
-                        "enabled": True,
-                        "client_id": "discord-client",
-                        "client_secret": "discord-secret",
-                        "bot_token": "discord-bot-token",
-                    },
-                }
-            ),
-        )
-
-        service = ChannelService.from_app_config(app_config)
-
-        assert service._config["discord"]["enabled"] is True
+        assert service._config["slack"]["app_token"] == "xapp"
         assert service._config["discord"]["bot_token"] == "discord-bot-token"
 
     def test_connection_repo_is_forwarded_to_manager(self):

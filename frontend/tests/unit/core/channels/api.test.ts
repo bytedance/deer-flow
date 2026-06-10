@@ -85,6 +85,8 @@ describe("channels api", () => {
         provider: "telegram",
         mode: "deep_link",
         url: "https://t.me/deerflow_bot?start=state",
+        code: "state",
+        instruction: "Send /start state to the DeerFlow Telegram bot.",
         expires_in: 600,
       }),
     );
@@ -92,11 +94,32 @@ describe("channels api", () => {
     await expect(connectChannelProvider("telegram")).resolves.toMatchObject({
       provider: "telegram",
       url: "https://t.me/deerflow_bot?start=state",
+      instruction: "Send /start state to the DeerFlow Telegram bot.",
     });
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/channels/telegram/connect",
       { method: "POST" },
     );
+  });
+
+  test("starts a binding-code connection flow", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        provider: "slack",
+        mode: "binding_code",
+        url: null,
+        code: "abc123",
+        instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+        expires_in: 600,
+      }),
+    );
+
+    await expect(connectChannelProvider("slack")).resolves.toMatchObject({
+      provider: "slack",
+      url: null,
+      code: "abc123",
+      instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+    });
   });
 
   test("disconnects a channel connection", async () => {

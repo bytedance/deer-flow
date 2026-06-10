@@ -34,7 +34,6 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/docs",
     "/redoc",
     "/openapi.json",
-    "/api/channels/webhooks/",
 )
 
 # Exact auth paths that are public (login/register/status check).
@@ -46,8 +45,6 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/logout",
         "/api/v1/auth/setup-status",
         "/api/v1/auth/initialize",
-        "/api/channels/slack/callback",
-        "/api/channels/discord/callback",
     }
 )
 

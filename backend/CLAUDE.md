@@ -380,8 +380,8 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` / `discord.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured)
-- `app/gateway/routers/channel_connections.py` - Browser-facing user connection APIs plus provider callbacks/webhooks
-- `deerflow.persistence.channel_connections` - SQL-backed user-owned connection, credential, OAuth state, conversation, and webhook delivery store
+- `app/gateway/routers/channel_connections.py` - Browser-facing user connection and disconnect APIs
+- `deerflow.persistence.channel_connections` - SQL-backed user-owned connection, optional credential, connect state, and conversation store
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
@@ -402,14 +402,13 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming)
 
 **User-owned channel connections** (`config.yaml` -> `channel_connections`):
-- Disabled by default. `mode: local` is the default for local/private deployments; `mode: public` requires `public_base_url`.
-- `public_base_url` is only required for provider-to-server public callbacks/webhooks such as Slack HTTP Events and Telegram webhooks. If it is omitted, OAuth redirect URLs fall back to the current request origin for localhost/private testing.
-- `encryption_key` is required before storing provider OAuth credentials for Slack and Discord. Telegram deep-link binding can run without it because it stores only connection identity/state, not per-user provider tokens.
+- Disabled by default. It is a user-binding layer on top of the existing `channels.*` runtime config, not a replacement for provider bot credentials.
+- No public IP, OAuth callback URL, or provider webhook route is required by the current implementation.
+- Telegram uses a deep-link `/start <code>` flow over the existing long-polling worker. Slack uses `/connect <code>` over the existing Socket Mode worker. Discord uses `/connect <code>` over the existing Gateway worker.
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
-- Public provider routes: Slack/Discord OAuth callbacks and Slack/Telegram webhooks are explicitly allowed through AuthMiddleware; webhooks are exempt from CSRF because they are provider-to-server calls and validate Slack signatures or Telegram secret tokens.
-- Slack HTTP Events mode uses per-connection encrypted bot tokens for replies. Legacy Slack Socket Mode remains available through the `channels.slack` config.
-- Telegram supports frontend deep-link binding and can process signed webhook updates; long polling remains the local/self-host fallback.
-- Discord OAuth stores the user identity and guild metadata; Gateway messages from `discord.py` resolve to connection identity before reaching `ChannelManager`.
+- Browser APIs remain protected by normal Gateway auth/CSRF. Provider messages arrive through the already-configured channel workers.
+- Slack replies use the configured operator bot token from `channels.slack` unless a future provider-token flow stores per-connection credentials.
+- Telegram, Slack, and Discord workers resolve incoming platform identities to connection records before reaching `ChannelManager`.
 - See `backend/docs/IM_CHANNEL_CONNECTIONS.md` for provider setup and operational notes.
 
 

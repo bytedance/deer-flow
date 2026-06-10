@@ -7,13 +7,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from app.channels.message_bus import MessageBus
 from app.channels.telegram import TelegramChannel
-from app.gateway.routers import channel_connections
-from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
 
 @pytest.fixture
@@ -102,44 +98,3 @@ async def test_bound_telegram_message_publishes_connection_identity(repo):
     assert inbound.user_id == "42"
     assert inbound.chat_id == "100"
     assert inbound.text == "hello"
-
-
-@pytest.mark.anyio
-async def test_telegram_webhook_verifies_secret_and_deduplicates_updates(repo):
-    channel = MagicMock()
-    channel.process_webhook_update = AsyncMock(return_value=True)
-    app = FastAPI()
-    app.state.channel_connections_config = ChannelConnectionsConfig.model_validate(
-        {
-            "enabled": True,
-            "public_base_url": "https://deerflow.example.com",
-            "encryption_key": "telegram-secret",
-            "telegram": {
-                "enabled": True,
-                "bot_token": "telegram-token",
-                "bot_username": "deerflow_bot",
-                "webhook_secret": "webhook-secret",
-            },
-        }
-    )
-    app.state.channel_connection_repo = repo
-    app.state.channel_instances = {"telegram": channel}
-    app.include_router(channel_connections.router)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/channels/webhooks/telegram",
-            json={"update_id": 123, "message": {"text": "hello"}},
-            headers={"X-Telegram-Bot-Api-Secret-Token": "webhook-secret"},
-        )
-        duplicate = client.post(
-            "/api/channels/webhooks/telegram",
-            json={"update_id": 123, "message": {"text": "hello"}},
-            headers={"X-Telegram-Bot-Api-Secret-Token": "webhook-secret"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "processed": True}
-    assert duplicate.status_code == 200
-    assert duplicate.json() == {"ok": True, "duplicate": True, "processed": False}
-    channel.process_webhook_update.assert_awaited_once_with({"update_id": 123, "message": {"text": "hello"}})

@@ -106,12 +106,20 @@ export function WorkspaceChannelsList() {
                   disabled={!canConnect || isPending}
                   title={getProviderDisabledReason(provider, t)}
                   onClick={() => {
-                    const connectWindow = prepareConnectWindow();
+                    const connectWindow =
+                      provider.auth_mode === "deep_link"
+                        ? prepareConnectWindow()
+                        : null;
                     void connectMutation
                       .mutateAsync(provider.provider)
-                      .then((result) =>
-                        openConnectUrl(result.url, connectWindow),
-                      )
+                      .then((result) => {
+                        if (result.url) {
+                          openConnectUrl(result.url, connectWindow);
+                          return;
+                        }
+                        closeConnectWindow(connectWindow);
+                        toast.success(result.instruction);
+                      })
                       .catch((error) => {
                         closeConnectWindow(connectWindow);
                         toast.error(

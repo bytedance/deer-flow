@@ -47,6 +47,16 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     return text[end + 1 :].lstrip()
 
 
+def _extract_connect_code(text: str) -> str | None:
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    command = parts[0].lower()
+    if command in {"/connect", "connect"}:
+        return parts[1]
+    return None
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -219,8 +229,7 @@ class SlackChannel(Channel):
             credentials = await self._connection_repo.get_credentials(msg.connection_id)
             access_token = credentials.get("access_token") if credentials else None
             if not access_token:
-                logger.warning("[Slack] no bot token found for connection=%s", msg.connection_id)
-                return None
+                return self._web_client
             if self._web_client_factory is None:
                 from slack_sdk import WebClient
 
@@ -282,12 +291,15 @@ class SlackChannel(Channel):
 
             # Handle message events (DM or @mention)
             if etype in ("message", "app_mention"):
-                self._handle_message_event(event)
+                self._handle_message_event(
+                    event,
+                    team_id=req.payload.get("team_id") or req.payload.get("team") or event.get("team"),
+                )
 
         except Exception:
             logger.exception("Error processing Slack event")
 
-    def _handle_message_event(self, event: dict) -> None:
+    def _handle_message_event(self, event: dict, *, team_id: str | None = None) -> None:
         # Ignore bot messages
         if event.get("bot_id") or event.get("subtype"):
             return
@@ -303,6 +315,19 @@ class SlackChannel(Channel):
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
         if not text:
+            return
+
+        connect_code = _extract_connect_code(text)
+        if connect_code:
+            if self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._bind_connection_from_connect_code(
+                        event=event,
+                        team_id=str(team_id or event.get("team") or ""),
+                        code=connect_code,
+                    ),
+                    self._loop,
+                )
             return
 
         channel_id = event.get("channel", "")
@@ -330,4 +355,73 @@ class SlackChannel(Channel):
             self._add_reaction(channel_id, event.get("ts", thread_ts), "eyes")
             # Send "running" reply first (fire-and-forget from SDK thread)
             self._send_running_reply(channel_id, thread_ts)
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)
+            if self._connection_repo is None:
+                asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)
+            else:
+                asyncio.run_coroutine_threadsafe(self._publish_inbound_with_connection(inbound, team_id=team_id), self._loop)
+
+    async def _publish_inbound_with_connection(self, inbound, *, team_id: str | None = None) -> None:
+        inbound = await self._attach_connection_identity(inbound, team_id=team_id)
+        await self.bus.publish_inbound(inbound)
+
+    async def _attach_connection_identity(self, inbound, *, team_id: str | None = None):
+        if self._connection_repo is None:
+            return inbound
+
+        workspace_id = str(team_id or inbound.metadata.get("team_id") or "")
+        if not workspace_id:
+            return inbound
+
+        connection = await self._connection_repo.find_connection_by_external_identity(
+            provider="slack",
+            external_account_id=inbound.user_id,
+            workspace_id=workspace_id,
+        )
+        if connection is None:
+            return inbound
+
+        inbound.connection_id = connection["id"]
+        inbound.owner_user_id = connection["owner_user_id"]
+        inbound.workspace_id = connection.get("workspace_id")
+        return inbound
+
+    async def _bind_connection_from_connect_code(self, *, event: dict, team_id: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        channel_id = str(event.get("channel") or "")
+        thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
+        state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
+        if state is None:
+            self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+            return True
+
+        user_id = str(event.get("user") or "")
+        if not user_id or not team_id:
+            self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="slack",
+            external_account_id=user_id,
+            workspace_id=team_id,
+            metadata={
+                "team_id": team_id,
+                "channel_id": channel_id,
+            },
+            status="connected",
+        )
+        self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
+        return True
+
+    def _post_connection_reply(self, channel_id: str, text: str, thread_ts: str | None = None) -> None:
+        if not self._web_client or not channel_id:
+            return
+        kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            self._web_client.chat_postMessage(**kwargs)
+        except Exception:
+            logger.exception("[Slack] failed to send connection reply in channel=%s", channel_id)
