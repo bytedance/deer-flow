@@ -100,9 +100,8 @@ describe("getServerSideUser", () => {
     setEnv("DEER_FLOW_AUTH_DISABLED", "1");
     setEnv("DEER_FLOW_ENV", "production");
 
-    const { isAuthDisabledMode } = await import(
-      "@/core/auth/auth-disabled-user"
-    );
+    const { isAuthDisabledMode } =
+      await import("@/core/auth/auth-disabled-user");
 
     expect(isAuthDisabledMode()).toBe(false);
   });
