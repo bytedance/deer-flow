@@ -2,793 +2,286 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## 目录
 
-DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
+- [项目概述](#项目概述)
+- [命令](#命令)
+- [架构](#架构)
+  - [Harness / App 分层](#harness--app-分层)
+  - [Agent 系统](#agent-系统)
+  - [中间件链](#中间件链)
+  - [配置系统](#配置系统)
+  - [Gateway API](#gateway-api)
+- [核心系统](#核心系统)
+  - [工具系统](#工具系统)
+  - [报告模板](#报告模板)
+  - [记忆系统](#记忆系统)
+  - [洞察系统](#洞察系统)
+  - [知识库](#知识库)
+- [开发工作流](#开发工作流)
 
-**Architecture**:
-- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
-- **Frontend** (port 3000): Next.js web interface
-- **Nginx** (port 2026): Unified reverse proxy entry point
-- **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
+---
 
-**Runtime**:
-- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
+## 项目概述
 
-**Project Structure**:
+DeerFlow 是一个基于 LangGraph 的 AI 超级代理系统，具有全栈架构。后端提供"超级代理"，具备沙箱执行、持久记忆、子代理委派和可扩展工具集成——所有操作都在每线程隔离的环境中运行。
+
+**架构**:
+- **Gateway API** (端口 8001): REST API + 嵌入式 LangGraph 兼容代理运行时
+- **Frontend** (端口 3000): Next.js Web 界面
+- **Nginx** (端口 2026): 统一反向代理入口
+- **Provisioner** (端口 8002, 可选): 仅在配置沙箱 provisioner/Kubernetes 模式时启动
+
+**项目结构**:
 ```
 deer-flow/
-├── Makefile                    # Root commands (check, install, dev, stop)
-├── config.yaml                 # Main application configuration
-├── extensions_config.json      # MCP servers and skills configuration
-├── backend/                    # Backend application (this directory)
-│   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph Studio graph configuration
-│   ├── packages/
-│   │   └── harness/           # deerflow-harness package (import: deerflow.*)
-│   │       ├── pyproject.toml
-│   │       └── deerflow/
-│   │           ├── agents/            # LangGraph agent system
-│   │           │   ├── lead_agent/    # Main agent (factory + system prompt)
-│   │           │   ├── middlewares/   # 10 middleware components
-│   │           │   ├── memory/        # Memory extraction, queue, prompts
-│   │           │   └── thread_state.py # ThreadState schema
-│   │           ├── sandbox/           # Sandbox execution system
-│   │           │   ├── local/         # Local filesystem provider
-│   │           │   ├── sandbox.py     # Abstract Sandbox interface
-│   │           │   ├── tools.py       # bash, ls, read/write/str_replace
-│   │           │   └── middleware.py  # Sandbox lifecycle management
-│   │           ├── subagents/         # Subagent delegation system
-│   │           │   ├── builtins/      # general-purpose, bash agents
-│   │           │   ├── executor.py    # Background execution engine
-│   │           │   └── registry.py    # Agent registry
-│   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image)
-│   │           ├── mcp/               # MCP integration (tools, cache, client)
-│   │           ├── models/            # Model factory with thinking/vision support
-│   │           ├── skills/            # Skills discovery, loading, parsing
-│   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
-│   │           ├── community/         # Community tools (tavily, jina_ai, firecrawl, image_search, aio_sandbox)
-│   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │           ├── utils/             # Utilities (network, readability)
-│   │           └── client.py          # Embedded Python client (DeerFlowClient)
-│   ├── app/                   # Application layer (import: app.*)
+├── backend/
+│   ├── packages/harness/      # deerflow-harness 包 (import: deerflow.*)
+│   │   └── deerflow/
+│   │       ├── agents/        # LangGraph 代理系统
+│   │       ├── sandbox/       # 沙箱执行系统
+│   │       ├── subagents/     # 子代理委派系统
+│   │       ├── tools/         # 内置工具
+│   │       ├── mcp/           # MCP 集成
+│   │       ├── models/        # 模型工厂
+│   │       ├── skills/        # 技能系统
+│   │       ├── config/        # 配置系统
+│   │       └── client.py      # 嵌入式 Python 客户端
+│   ├── app/                   # 应用层 (import: app.*)
 │   │   ├── gateway/           # FastAPI Gateway API
-│   │   │   ├── app.py         # FastAPI application
-│   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
-│   │   └── channels/          # IM platform integrations
-│   ├── tests/                 # Test suite
-│   └── docs/                  # Documentation
-├── frontend/                   # Next.js frontend application
-└── skills/                     # Agent skills directory
-    ├── public/                # Public skills (committed)
-    └── custom/                # Custom skills (gitignored)
+│   │   └── channels/          # IM 平台集成
+│   └── tests/
+└── frontend/
 ```
 
-## Important Development Guidelines
+---
 
-### Documentation Update Policy
-**CRITICAL: Always update README.md and CLAUDE.md after every code change**
+## 命令
 
-When making code changes, you MUST update the relevant documentation:
-- Update `README.md` for user-facing changes (features, setup, usage instructions)
-- Update `CLAUDE.md` for development changes (architecture, commands, workflows, internal systems)
-- Keep documentation synchronized with the codebase at all times
-- Ensure accuracy and timeliness of all documentation
-
-## Commands
-
-**Root directory** (for full application):
+**根目录** (完整应用):
 ```bash
-make check      # Check system requirements
-make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
-make start      # Start production services locally
-make stop       # Stop all services
+make check      # 检查系统要求
+make install    # 安装所有依赖
+make dev        # 启动所有服务 (Gateway + Frontend + Nginx)
+make start      # 启动生产服务
+make stop       # 停止所有服务
 ```
 
-**Backend directory** (for backend development only):
+**Backend 目录** (仅后端开发):
 ```bash
-make install    # Install backend dependencies
-make dev        # Run Gateway API with reload (port 8001)
-make gateway    # Run Gateway API only (port 8001)
-make test       # Run all backend tests
-make lint       # Lint with ruff
-make format     # Format code with ruff
+make install    # 安装后端依赖
+make dev        # 运行 Gateway API (带热重载, 端口 8001)
+make gateway    # 仅运行 Gateway API (端口 8001)
+make test       # 运行所有后端测试
+make lint       # ruff 代码检查
+make format     # ruff 代码格式化
 ```
 
-Regression tests related to Docker/provisioner behavior:
-- `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
-- `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+**回归测试**:
+- `tests/test_docker_sandbox_mode_detection.py` - Docker 模式检测
+- `tests/test_provisioner_kubeconfig.py` - kubeconfig 处理
+- `tests/test_harness_boundary.py` - Harness → App 导入防火墙
 
-Boundary check (harness → app import firewall):
-- `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
+---
 
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
+## 架构
 
-## Architecture
+### Harness / App 分层
 
-### Harness / App Split
+后端分为两层，依赖方向严格:
 
-The backend is split into two layers with a strict dependency direction:
+- **Harness** (`packages/harness/deerflow/`): 可发布的代理框架包 (`deerflow-harness`)。导入前缀: `deerflow.*`。包含代理编排、工具、沙箱、模型、MCP、技能、配置。
+- **App** (`app/`): 未发布的应用代码。导入前缀: `app.*`。包含 FastAPI Gateway API 和 IM 渠道集成。
 
-- **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
-- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk).
+**依赖规则**: App 导入 deerflow，但 deerflow **永不**导入 app。此边界由 `tests/test_harness_boundary.py` 在 CI 中强制执行。
 
-**Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
-
-**Import conventions**:
 ```python
-# Harness internal
-from deerflow.agents import make_lead_agent
-from deerflow.models import create_chat_model
+# 允许
+from deerflow.config import get_app_config  # App → Harness
 
-# App internal
-from app.gateway.app import app
-from app.channels.service import start_channel_service
-
-# App → Harness (allowed)
-from deerflow.config import get_app_config
-
-# Harness → App (FORBIDDEN — enforced by test_harness_boundary.py)
-# from app.gateway.routers.uploads import ...  # ← will fail CI
+# 禁止 (CI 失败)
+from app.gateway.routers.uploads import ...  # Harness → App
 ```
 
-### Agent System
+### Agent 系统
 
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
-- Entry point: `make_lead_agent(config: RunnableConfig)` registered in `langgraph.json`
-- Dynamic model selection via `create_chat_model()` with thinking/vision support
-- Tools loaded via `get_available_tools()` - combines sandbox, built-in, MCP, community, and subagent tools
-- System prompt generated by `apply_prompt_template()` with skills, memory, subagent instructions, and default runtime identity `EHM AI 工作台`
+- 入口: `make_lead_agent(config: RunnableConfig)` 在 `langgraph.json` 注册
+- 动态模型选择，支持 thinking/vision
+- 工具通过 `get_available_tools()` 加载
 
 **ThreadState** (`packages/harness/deerflow/agents/thread_state.py`):
-- Extends `AgentState` with: `sandbox`, `thread_data`, `title`, `artifacts`, `todos`, `uploaded_files`, `viewed_images`
-- Uses custom reducers: `merge_artifacts` (deduplicate), `merge_viewed_images` (merge/clear)
-
-**Runtime Configuration** (via `config.configurable`):
-- `thinking_enabled` - Enable model's extended thinking
-- `model_name` - Select specific LLM model
-- `is_plan_mode` - Enable TodoList middleware
-- `subagent_enabled` - Enable task delegation tool
-
-### Middleware Chain
-
-Lead-agent middlewares are assembled in strict append order across `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`build_lead_runtime_middlewares`) and `packages/harness/deerflow/agents/lead_agent/agent.py` (`_build_middlewares`):
-
-1. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode); Web UI thread deletion now follows LangGraph thread removal with Gateway cleanup of the local thread directory
-2. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation
-3. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
-4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption), including raw provider tool-call payloads preserved only in `additional_kwargs["tool_calls"]`
-5. **LLMErrorHandlingMiddleware** - Normalizes provider/model invocation failures into recoverable assistant-facing errors before later middleware/tool stages run
-6. **GuardrailMiddleware** - Pre-tool-call authorization via pluggable `GuardrailProvider` protocol (optional, if `guardrails.enabled` in config). Evaluates each tool call and returns error ToolMessage on deny. Three provider options: built-in `AllowlistProvider` (zero deps), OAP policy providers (e.g. `aport-agent-guardrails`), or custom providers. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md) for setup, usage, and how to implement a provider.
-7. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations for security logging before tool execution continues
-8. **ToolErrorHandlingMiddleware** - Converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting
-9. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
-10. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
-11. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional)
-12. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
-13. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
-14. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
-15. **DeferredToolFilterMiddleware** - Hides deferred tool schemas from the bound model until tool search is enabled (optional)
-16. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if `subagent_enabled`)
-17. **LoopDetectionMiddleware** - Detects repeated tool-call loops; hard-stop responses clear both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer
-18. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
-
-### Configuration System
-
-**Main Configuration** (`config.yaml`):
-
-Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
-
-**Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
-
-**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path changes or the file's mtime increases. This keeps Gateway and LangGraph reads aligned with `config.yaml` edits without requiring a manual process restart.
-
-Configuration priority:
-1. Explicit `config_path` argument
-2. `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current directory (backend/)
-4. `config.yaml` in parent directory (project root - **recommended location**)
-
-Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
-`ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
-
-**Extensions Configuration** (`extensions_config.json`):
-
-MCP servers and skills are configured together in `extensions_config.json` in project root:
-
-Configuration priority:
-1. Explicit `config_path` argument
-2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
-
-### Gateway API (`app/gateway/`)
-
-FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
-
-**Routers**:
-
-| Router | Endpoints |
-|--------|-----------|
-| **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
-| **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
-| **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
-| **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
-| **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
-| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
-| **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
-| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens |
-| **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
-| **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
-| **Agents** (`/api/agents`) | `GET /` - three-level merged listing; `GET /mine` - user's agents; `PUT /{name}/enabled` - enable/disable; `POST /fork/{name}` - fork to user; `POST /{name}/usage` - record usage; `GET /stats` - tenant counts; `GET /stats/mine` - user counts; `GET /recommend?q=` - recommendations |
-| **Tenant Agents** (`/api/tenants/{id}/agents`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable; `POST /{name}/permissions` - set permissions |
-| **Tenant MCP Servers** (`/api/tenants/{id}/mcp-servers`) | `POST /` - create; `GET /` - list; `GET /{name}` - details; `PUT /{name}` - update; `DELETE /{name}` - delete; `PUT /{name}/enabled` - enable/disable |
-| **Report Templates** (`/api/report-templates`) | `GET /` - list (filter by `visibility`); `POST /` - create draft; `GET /{id}` - metadata; `PUT /{id}` - update draft (etag); `GET /{id}/versions` - list versions; `GET /{id}/versions/{n}` - version snapshot; `POST /{id}/validate` - DSL validate; `POST /{id}/publish` - publish new version; `POST /{id}/fork` - fork into private draft; `POST /{id}/archive` - soft-archive; `DELETE /{id}` - hard-delete |
-| **Report Runs** (`/api/report-runs`) | `GET /` - list visible runs; `GET /{rid}` - run record; `GET /{rid}/payload` - read assembled `report_payload.json`. `POST /{rid}/cancel` is deferred until an independent runner exists (see design §8.3); MVP runs are bound to a live thread/run and cancel via that path |
+- 扩展 `AgentState`，包含: `sandbox`, `thread_data`, `title`, `artifacts`, `todos`, `uploaded_files`, `viewed_images`
 
-Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
+**多级 Agent 系统**: 三级发现，优先级覆盖 **user > tenant > builtin**
+- 详见 [docs/AGENTS_SYSTEM.md](docs/AGENTS_SYSTEM.md)
 
-### Sandbox System (`packages/harness/deerflow/sandbox/`)
+### 中间件链
 
-**Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`
-**Provider Pattern**: `SandboxProvider` with `acquire`, `get`, `release` lifecycle
-**Implementations**:
-- `LocalSandboxProvider` - Singleton local filesystem execution with path mappings
-- `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation
-
-**Virtual Path System**:
-- Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
-- Physical: `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/...`, `deer-flow/skills/`
-- Translation: `replace_virtual_path()` / `replace_virtual_paths_in_command()`
-- Detection: `is_local_sandbox()` checks `sandbox_id == "local"`
+Lead-agent 中间件按严格顺序组装，共 18 个中间件:
 
-**Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
-- `bash` - Execute commands with path translation and error handling
-- `ls` - Directory listing (tree format, max 2 levels)
-- `read_file` - Read file contents with optional line range
-- `write_file` - Write/append to files, creates directories
-- `str_replace` - Substring replacement (single or all occurrences); same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process
+1. ThreadDataMiddleware → 2. UploadsMiddleware → 3. SandboxMiddleware → 4. DanglingToolCallMiddleware → 5. LLMErrorHandlingMiddleware → 6. GuardrailMiddleware (可选) → 7. SandboxAuditMiddleware → 8. ToolErrorHandlingMiddleware → 9. SummarizationMiddleware (可选) → 10. TodoListMiddleware (可选) → 11. TokenUsageMiddleware (可选) → 12. TitleMiddleware → 13. MemoryMiddleware → 14. ViewImageMiddleware → 15. DeferredToolFilterMiddleware (可选) → 16. SubagentLimitMiddleware (可选) → 17. LoopDetectionMiddleware → 18. ClarificationMiddleware (必须最后)
 
-### Subagent System (`packages/harness/deerflow/subagents/`)
+详见 [docs/MIDDLEWARES.md](docs/MIDDLEWARES.md)
 
-**Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
-**Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
-**Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
-**Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
-**Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
+### 配置系统
 
-### Multi-Level Agent System
+**主配置** (`config.yaml`):
+- 从 `config.example.yaml` 复制
+- 配置优先级: 显式路径 > `DEER_FLOW_EXTENSIONS_CONFIG_PATH` > 当前目录 > 父目录
+- `$` 开头的值解析为环境变量
+- `get_app_config()` 缓存配置，文件 mtime 变更时自动重载
 
-Three-tier agent discovery with priority-based override: **user > tenant > builtin**.
+**扩展配置** (`extensions_config.json`):
+- MCP 服务器和技能配置
 
-**Levels**:
+**配置版本**: `config.example.yaml` 有 `config_version` 字段。启动时比较版本，过时则警告。运行 `make config-upgrade` 自动合并缺失字段。
 
-- **Builtin** (`packages/harness/deerflow/agents/builtin/`): Shipped with the platform, read-only. Discovered via `scan_builtin_agents()`.
-- **Tenant** (`{base_dir}/tenants/{tenant_id}/agents/{name}/`): Shared within a tenant org. Managed via CRUD API + filesystem sync. Discovered via `scan_tenant_agents(tenant_id)`.
-- **User** (`{base_dir}/users/{user_id}/agents/{name}/`): Per-user custom agents. Created via fork or bootstrap.
+### Gateway API
 
-**Discovery** (`deerflow/config/agents_config.py`):
+FastAPI 应用，端口 8001，健康检查 `GET /health`。
 
-- `list_available_agents(tenant_id, user_id)` — merges all three levels, higher priority wins on name collision
-- `load_agent_config(name)` — resolves user → tenant → builtin fallback chain
-- `scan_tenant_agents(tenant_id)` / `load_tenant_agent_soul(tenant_id, name)` — tenant-level filesystem scan
+**主要路由**:
 
-**Agent Config** (`AgentConfig` Pydantic model):
+| 路由 | 端点 |
+|------|------|
+| Models | `GET /api/models` |
+| MCP | `GET/PUT /api/mcp/config` |
+| Skills | `GET /api/skills`, `POST /api/skills/install` |
+| Memory | `GET /api/memory`, `POST /api/memory/reload` |
+| Uploads | `POST /api/threads/{id}/uploads` |
+| Threads | `DELETE /api/threads/{id}` |
+| Thread Runs | `POST /api/threads/{id}/runs/stream` |
+| Feedback | `PUT/GET /api/threads/{id}/runs/{rid}/feedback` |
+| Agents | `GET /api/agents`, `POST /api/agents/fork/{name}` |
+| Tenant Agents | `POST/GET /api/tenants/{id}/agents` |
+| Report Templates | `GET/POST /api/report-templates` |
+| Report Runs | `GET /api/report-runs` |
+| Insights | `GET /api/insights/*` |
 
-- Fields: `name`, `description`, `display_name`, `icon`, `model`, `tool_groups`, `skills`, `mcp_servers`, `tags`, `visibility`
-- `mcp_servers` filters MCP tools by server name prefix (`server_name__tool_name`)
+Nginx 代理: `/api/langgraph/*` → LangGraph, 其他 `/api/*` → Gateway。
 
-**Tenant Agent CRUD** (`app/gateway/routers/tenant_agents.py`):
+---
 
-- `POST /api/tenants/{tenant_id}/agents` — create (writes config.yaml + SOUL.md to filesystem)
-- `GET /api/tenants/{tenant_id}/agents` — list tenant agents
-- `PUT /api/tenants/{tenant_id}/agents/{name}` — update
-- `DELETE /api/tenants/{tenant_id}/agents/{name}` — delete (removes DB row + filesystem dir)
-- `PUT /api/tenants/{tenant_id}/agents/{name}/enabled` — enable/disable
-- `POST /api/tenants/{tenant_id}/agents/{name}/permissions` — set permissions
-- Requires tenant admin role (`superadmin` or `tenant_admin`)
+## 核心系统
 
-**Agent API Extensions** (`app/gateway/routers/agents.py`):
+### 工具系统
 
-- `GET /api/agents` — three-level merged listing with disabled state
-- `GET /api/agents/mine` — user's own agents only
-- `PUT /api/agents/{name}/enabled` — per-user enable/disable (stored in `disabled_agents.json`)
-- `POST /api/agents/fork/{name}` — fork builtin/tenant agent to user directory
-- `POST /api/agents/{name}/usage` — record usage event
-- `GET /api/agents/stats` — tenant-wide usage counts
-- `GET /api/agents/stats/mine` — user's usage counts
-- `GET /api/agents/recommend?q=` — keyword-based top-3 recommendations
+`get_available_tools()` 组装:
+1. **配置定义工具** - `config.yaml` via `resolve_variable()`
+2. **MCP 工具** - 启用的 MCP 服务器（懒加载，mtime 缓存失效）
+3. **内置工具**: `present_files`, `ask_clarification`, `view_image`, `http_connector`, `setup_agent`, `update_agent`, `create/list/update/close_closure_ticket`
+4. **子代理工具** (可选): `task`
 
-**Tenant MCP Servers** (`app/gateway/routers/tenant_mcp_servers.py`):
+详见 [docs/TOOLS_SYSTEM.md](docs/TOOLS_SYSTEM.md)
 
-- CRUD at `/api/tenants/{tenant_id}/mcp-servers`
-- Config validation: type must be `stdio`/`sse`/`http`; stdio requires `command`, sse/http requires `url`
-- Tenant MCP tools merged into `get_available_tools()` — tenant tools override global tools with same server prefix
+### 报告模板
 
-**Persistence** (`packages/harness/deerflow/persistence/`):
+DSL 驱动的报告生成平台:
+- 用户用 YAML 描述报告
+- 运行时通过 GenUI 收集输入
+- 白名单脚本执行
+- 输出 Markdown/PDF
 
-- `agent/repository.py` — `AgentRepository` (SQLAlchemy async, tenant-level agent rows)
-- `agent/usage_repository.py` — `AgentUsageRepository` (record/count usage events)
-- `agent/tenant_init.py` — `initialize_tenant_agents()` (auto-fork builtin agents to new tenants)
-- `mcp_server/repository.py` — `TenantMcpServerRepository` (CRUD for tenant MCP server configs)
+**两条执行路径**:
+- `executor_type: dsl` (默认) - DSL 模板引擎
+- `executor_type: direct` - 直接脚本执行
 
-**MCP Tool Merge** (`deerflow/tools/tools.py`):
+详见 [docs/REPORT_TEMPLATES.md](docs/REPORT_TEMPLATES.md)
 
-- `get_available_tools()` accepts optional `tenant_mcp_configs` parameter
-- Tenant tools replace global tools sharing the same server name prefix
-- Agent-level `mcp_servers` filter applies after merge
+### 记忆系统
 
-**Tests**: `tests/test_multi_level_agents.py` (59 tests covering all levels, isolation, security, recommendations)
+基于 LLM 的长期记忆:
+- 每用户隔离存储
+- LLM 事实提取
+- 防抖更新队列
+- 原子文件 I/O
 
-### Report Template Platform (`packages/harness/deerflow/report_templates/`)
+详见 [docs/MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md)
 
-DSL-driven report generation: users describe a report (forms, data steps, transforms, sections) in YAML; the runtime collects inputs through GenUI, runs allowlisted scripts inside the existing thread/run, and writes a `report_payload.json` plus Markdown/PDF artifacts. Full design: [docs/plans/2026-05-14-ai-report-custom-template-design.md](../docs/plans/2026-05-14-ai-report-custom-template-design.md).
+### 洞察系统
 
-**Module layout**:
+闭环反馈系统:
+- 反馈分析
+- 闭环知识提取
+- 改进建议生成
+- 记忆集成
 
-```text
-report_templates/
-  schema.py                  # DSL v1 Pydantic schema (form_steps, data_steps, transforms, sections, export)
-  validator.py               # Cross-ref / JSONPath / script registry / section type checks
-  source_resolver.py         # JSONPath subset (whitelist: root / field / array-all; depth ≤ 8)
-  script_registry.py         # Loads `report_scripts.yaml` from each enabled skill
-  repository.py              # FileSystemReportTemplateRepository (etag + atomic rename + fcntl)
-  records.py                 # ReportTemplate / ReportTemplateVersion / ReportRun Pydantic models
-  permissions.py             # private/tenant/builtin matrix, reuses superadmin/tenant_admin
-  service.py                 # Cross-cutting orchestration used by routes + tools
-  push_block.py              # Helper for streaming GenUI blocks from tool implementations
-  generic_renderer.py        # sections → Markdown (must) + ECharts SVG (PDF fallback)
-  runtime/
-    state.py                 # status.json state machine + step transition checks
-    step_renderer.py         # form_step + before_step → GenUI form block
-    step_submitter.py        # form payload validation + dispatch
-    data_runner.py           # subprocess-based allowlist execution; outputs to run-scoped dir
-    payload_builder.py       # assemble report_payload.json from sections
-    report_renderer.py       # sections → GenUI blocks pushed via get_stream_writer
-    exporter.py              # invokes export_report.py for .md (required) / .pdf (optional)
-```
+详见 [docs/INSIGHTS_SYSTEM.md](docs/INSIGHTS_SYSTEM.md)
 
-**LLM-driven runtime**: the runtime is not a background worker — it is a set of 14 builtin tools the `ai-report--custom` agent calls in sequence under SOUL guidance. Cross-tool state lives in `{run_output_dir}/status.json`. Every tool verifies `report_run_id` + `expected_step` against status.json before acting; mismatch returns `STATE_MISMATCH` so the LLM cannot drift.
+### 知识库
 
-**Tools** (in `packages/harness/deerflow/tools/builtins/`):
+RAG 知识库访问:
+- `KnowledgeBaseRepository` 管理
+- 租户隔离
+- KB 绑定 embedding
+- 异步索引调度器
 
-| File | Tools |
-|------|-------|
-| `report_template_tools.py` | `report_template_list`, `report_template_get`, `report_template_validate`, `report_template_save_draft`, `report_template_publish`, `report_template_fork` |
-| `report_template_runtime_tools.py` | `report_template_prepare_run`, `report_template_render_step`, `report_template_submit_step`, `report_template_run_data_steps`, `report_template_assemble_payload`, `report_template_render_report`, `report_template_export`, `report_template_resume_run` |
+详见 [docs/RAG.md](docs/RAG.md)
 
-Tools are thin shells (≤50 lines each) that unpack args, call a `runtime/` module, and wrap errors. `user_id` / `tenant_id` always come from the auth context — never from request body or LLM args.
+---
 
-**Storage**:
+## 开发工作流
 
-- User/tenant templates (writable): `{DEER_FLOW_HOME}/report-templates/{users|tenants}/{owner_id}/{template_id}/`. Each contains `template.json` (metadata + etag), `versions/v{N}.json` (immutable snapshots holding both parsed `dsl` and original `dsl_yaml`), and `runs/{report_run_id}.json` (lightweight index — payload + artifacts live under the thread).
-- Builtin templates (read-only, version-controlled): `agents/builtin/report-templates/{template-name}/{default.yaml,metadata.yaml}`. Loaded into an in-memory index at startup; cannot be written through the API — modify via code PR + restart.
-- Run-scoped output: `{thread_output_dir}/report-runs/{report_run_id}/{parameters.json,template_version.json,status.json,data/*.json,report_payload.json,exports/{report.md,report.pdf?}}`. Thread is the lifecycle root: deleting a thread also deletes its ReportRun index entries and outputs.
+### 测试驱动开发 (TDD) — 强制
 
-**Concurrency / safety**:
-
-- All writes: temp file + atomic rename, `expected_etag` optimistic lock returning 409 on mismatch, fcntl/Windows fallback for cross-process locks, `index.json` updated under the same lock as `template.json`.
-- ID validation: `template_id` matches `^tpl_[A-Z0-9]{20,32}$`, `report_run_id` matches `^rr_[A-Z0-9]{20,32}$`. All paths go through `Path.resolve()` + `relative_to()` containment checks before writes.
-
-**Script registry** (skill-contributed):
-
-Each skill may ship a `report_scripts.yaml` at its root. The registry scans enabled skills and exposes scripts namespaced as `{skill_name}/{script_name}` (e.g. `daily-report/query_daily`). DSL `data_steps[].name` must use the qualified name. `ScriptDescriptorYaml` supports `args_aliases: dict[str, dict[str, str]]` for translating short DSL names to canonical script enum values (consumed by `runtime/data_runner.py`).
-
-**Section components**: `markdown`, `card`, `card_group`, `echart`, `table`, `image`. Validator warns when a `section.source` tail doesn't look like the component's expected payload (e.g. `echart` should point at something ending in `chart`/`option`).
-
-**Builtin templates shipped**: `daily-equipment`, `weekly-equipment`, `monthly-equipment`, `trend-equipment`, `diagnosis-fault`, `failure-analysis`, `closure-summary`, `inspection`. The CI test `tests/test_builtin_report_templates.py` validates every `agents/builtin/report-templates/*/default.yaml` against the validator on each push.
-
-**Interpretive reports** (§13.2): trend / diagnosis / failure-analysis stub transforms output `findings[]`, `evidence[]` (with `source_type`, `source_id`, `snapshot_path`, `checksum`, `time_range`, `retrieved_at`), `confidence`, `assumptions[]`, `data_coverage`, and `human_review_required: true`.
-
-**Export**: Markdown is required (failed Markdown render = ReportRun failed). PDF is optional — `weasyprint` ImportError is caught and `pdf_skipped_reason = "weasyprint_unavailable"` is recorded.
-
-**ai-report--daily fallback**: the DSL path is preferred; the legacy hardcoded SOUL.md path remains as a fallback (triggered on `report_template_*` errors / missing builtin / disabled skill / validator regression). `ai-report--custom` and any from-scratch agent have **no fallback** — they fail loudly when the platform is down.
-
-**Direct Report Executor** (`packages/harness/deerflow/report_executor/`):
-
-Agents declare their execution strategy via `executor_type` field in `config.yaml`. This decouples routing logic from agent names, allowing any agent to use direct execution without code changes.
-
-- **Agent config**: Set `executor_type: direct` in agent's `config.yaml` to use direct execution path; omit or set to `dsl` for DSL template engine (default)
-- **Module**: `report_executor/executor.py` — `DirectReportExecutor` class orchestrates script execution (`query_*.py` → `*_kpi.py` → `export_report.py`) via subprocess
-- **Tool**: `report_direct_execute` (in `tools/builtins/report_direct_tools.py`) — LangChain tool wrapping the executor, returns structured JSON with `{report_run_id, artifacts, status}` or `{error: {code, message, step}, status: "failed"}`
-- **Routing**: `report_executor/router.py` — `get_report_tools_for_agent(agent_config)` reads `executor_type` from config, returns `[report_direct_execute]` for `direct` agents, `[report_template_*]` for `dsl` agents
-- **Error handling**: `DirectExecutionError` hierarchy with codes `SCRIPT_FAILED`, `NO_DATA`, `INTERNAL_ERROR`
-- **SOUL.md simplification**: Direct-execution agents' SOUL.md files no longer contain DSL state machine constraints; deep-link parameters trigger `report_direct_execute` directly
-
-**Tests**: 48 tests across `tests/test_report_direct_executor.py`, `tests/test_report_direct_execute_tool.py`, `tests/test_report_executor_router.py`, `tests/test_ai_report_deeplink_soul.py`, and `tests/test_blueprint_executor_type.py` cover the direct execution path, error handling, routing logic, and blueprint executor_type field.
-
-**Tests**: 347 tests across `tests/test_report_template_*.py`, `tests/test_builtin_report_templates.py`, and `tests/test_ai_report_weekly_*.py` cover schema, validator, source resolver, repository, permissions, runtime modules, registry, lifecycle tools, runtime tools, REST routes, generic renderer, push-block, and CI validation of all shipped builtin DSL files.
-
-**Telemetry (Phase 7)**: `report_templates/telemetry.py` provides a thread-safe in-memory collector mirroring the `RenderUIMetrics` pattern — no Prometheus / OTel dependency. Six event types are emitted from埋点 inside the platform: `report_run_outcome` (state.transition → terminal), `fallback_triggered` (via the `report_template_record_fallback` tool LLMs call in `ai-report--daily/SOUL.md`), `validator_outcome` (validator.validate_dsl), `storage_snapshot` + `version_count_snapshot` (storage_scanner, invoked by `POST /api/telemetry/report-templates/scan-storage|scan-versions`), and `skill_unavailable` (data_runner + script_registry). Events are simultaneously counted in memory and appended to `{DEER_FLOW_HOME}/report-templates/.telemetry.log` (JSONL) so the charter §4.2 30-day fallback-cohort report can be reconstructed offline. Disable the JSONL sink with `DEER_FLOW_REPORT_TELEMETRY_LOG=0`. HTTP surface: `GET /api/telemetry/report-templates/summary` returns the live counter snapshot. See [docs/plans/2026-05-18-phase7-charter.md](../docs/plans/2026-05-18-phase7-charter.md) for the alert thresholds and [docs/admin-guide/report-templates.md](../docs/admin-guide/report-templates.md) §5 for indicator semantics + alert wiring.
-
-### Tool System (`packages/harness/deerflow/tools/`)
-
-`get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
-1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
-2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with mtime invalidation)
-3. **Built-in tools**:
-   - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
-   - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
-   - `view_image` - Read image as base64 (added only if model supports vision)
-   - `http_connector` - Call pre-configured HTTP endpoints by name (async, with retry/truncation/structured logging). Config-driven via `config.yaml` `http_connectors` section, keyed by tenant_id
-   - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
-   - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
-   - `create_closure_ticket` / `list_closure_tickets` / `update_closure_ticket` / `close_closure_ticket` - Closed-loop ticket workflows. Thin shells over `closed_loop.service`; resolve `tenant_id` / `actor_id` from the runnable config (never from LLM args). `update_closure_ticket` rejects `status` writes with `STATUS_FORBIDDEN` — status moves go through `close_closure_ticket` (verify-close / reject) or the `/api/closure/tickets/{id}/transition` route. `close_closure_ticket` requires `closure:verify`, granted to `is_superadmin` / `is_tenant_admin` principals.
-4. **Subagent tool** (if enabled):
-   - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
-
-**Community tools** (`packages/harness/deerflow/community/`):
-- `tavily/` - Web search (5 results default) and web fetch (4KB limit)
-- `jina_ai/` - Web fetch via Jina reader API with readability extraction
-- `firecrawl/` - Web scraping via Firecrawl API
-
-**ACP agent tools**:
-- `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
-- ACP launchers must be real ACP adapters. The standard `codex` CLI is not ACP-compatible by itself; configure a wrapper such as `npx -y @zed-industries/codex-acp` or an installed `codex-acp` binary
-- Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
-- Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
-- `image_search/` - Image search via DuckDuckGo
-
-### MCP System (`packages/harness/deerflow/mcp/`)
-
-- Uses `langchain-mcp-adapters` `MultiServerMCPClient` for multi-server management
-- **Lazy initialization**: Tools loaded on first use via `get_cached_mcp_tools()`
-- **Cache invalidation**: Detects config file changes via mtime comparison
-- **Transports**: stdio (command-based), SSE, HTTP
-- **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
-- **Runtime updates**: Gateway API saves to extensions_config.json; LangGraph detects via mtime
-
-### Skills System (`packages/harness/deerflow/skills/`)
-
-- **Location**: `deer-flow/skills/{public,custom}/`
-- **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools)
-- **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
-- **Injection**: Enabled skills listed in agent system prompt with container paths
-- **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
-- **Data-analyst InS reports**: `skills/custom/daily-report/scripts/query_daily.py`, `query_weekly.py`, and `query_monthly.py` always run through the InS provider — there is no demo-fallback path. Output carries top-level `data_source="ins"` and `data_notes=[]` so downstream KPI/export steps can preserve provenance. Any InS-side failure (network/auth/missing point/features-tool unavailable) emits `{"error": "HttpProviderError: ..."}` to stdout; the SOUL must surface that error to the user instead of generating a fake report. The InS adapter handles four endpoint series — `2k` (legacy vibration, nested name-based payload), `6k` (corrosion monitoring, nested key-based payload), `8k` (default rotating machinery, flat payload), and `9k` (high-end rotating / reciprocating, flat payload). See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md#设备日周月报真数据ins) for failure handling and 2k threshold semantics.
-- **Skill Source Protection** (3-layer defense): Skill script source code (`.py` files) and `SKILL.md` files under `/mnt/skills/` are protected from being read or displayed to users:
-  - **Layer 1 — Prompt**: `_build_skill_protection_section()` in `agents/lead_agent/prompt.py` injects a `<skill_source_protection>` directive into every agent's system prompt, instructing the agent to refuse source code display
-  - **Layer 2 — Tool**: `_is_protected_skill_source_path()` and `_is_skill_source_read_command()` in `sandbox/tools.py` block `read_file` access to `.py`/`SKILL.md` under `/mnt/skills/` and intercept bash commands (cat/head/tail/vim/python open) targeting skill source
-  - **Layer 3 — Audit**: `_HIGH_RISK_PATTERNS` in `agents/middlewares/sandbox_audit_middleware.py` classifies skill source read commands as `block`
-  - Non-sensitive files (README.md, .yaml, .json) and normal script execution (`python /mnt/skills/.../script.py`) are allowed
-
-### Model Factory (`packages/harness/deerflow/models/factory.py`)
-
-- `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
-- Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
-- Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
-- Supports `supports_vision` flag for image understanding models
-- Config values starting with `$` resolved as environment variables
-- Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
-
-### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
-
-- `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints
-- Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns
-- Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
-
-### IM Channels System (`app/channels/`)
-
-Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the DeerFlow agent via the LangGraph Server.
-
-
-**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
-
-**Components**:
-- `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
-- `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
-- `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, routes commands, keeps Slack/Telegram on `client.runs.wait()`, and uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates
-- `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
-- `service.py` - Manages lifecycle of all configured channels from `config.yaml`
-- `slack.py` / `feishu.py` / `telegram.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured)
-
-**Message Flow**:
-1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
-2. `ChannelManager._dispatch_loop()` consumes from queue
-3. For chat: look up/create thread through Gateway's LangGraph-compatible API
-4. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
-5. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
-6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-7. DingTalk AI Card mode (when `card_template_id` configured): `runs.stream()` → create card with initial text → stream updates via `PUT /v1.0/card/streaming` → finalize on `is_final=True`. Falls back to `sampleMarkdown` if card creation or streaming fails
-8. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
-9. Outbound → channel callbacks → platform reply
-
-**Configuration** (`config.yaml` -> `channels`):
-- `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
-- `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
-- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming)
-
-
-### RAG Knowledge Base Access
-
-- `deerflow.rag.tools:search_knowledge_base` now resolves both session-selected KBs and explicit `collection` requests through `KnowledgeBaseRepository` before retrieval.
-- Explicit `collection` names are no longer trusted as raw vector-store handles; retrieval is allowed only when the collection belongs to an active knowledge base owned by the current `tenant_id` and `user_id`.
-- In no-auth mode, KB access remains blocked unless `rag.allow_no_auth_kb` is explicitly enabled.
-- Tool failures return a generic error message while detailed diagnostics stay in server logs.
-
-### KB Indexing — Sprint B (dispatcher / async middleware / KB-bound embedding)
-
-The KB pipeline runs writes through an async dispatcher and binds each KB to the embedding model that produced its vectors. Full design + sprint plan: [docs/plans/2026-05-19-knowledge-base-usability-improvement-design.md](../docs/plans/2026-05-19-knowledge-base-usability-improvement-design.md), [docs/plans/2026-05-19-knowledge-base-usability-improvement-sprint-plan.md](../docs/plans/2026-05-19-knowledge-base-usability-improvement-sprint-plan.md).
-
-**Dispatcher** (`packages/harness/deerflow/knowledge_base/dispatcher.py`): `IndexingDispatcher` is an `asyncio.Queue`-backed worker pool that drains `IndexJobRequest` items into `IndexingService.execute_index_job`. Started/stopped via the gateway lifespan. `submit()` is non-blocking and idempotent — duplicate `(kb_id, doc_id, version)` collapse via an in-memory `_inflight` set. `recover()` re-enqueues docs left in `pending` / `indexing` after a crash. Workers wrap each job in `with_kb_context(tenant_id=..., user_id=...)` (B.4.2) so the submitter's tenant context is restored — ContextVars do **not** propagate across `asyncio.Task` boundaries by themselves. Configure via `rag.indexing_workers` (0 disables; service falls back to inline execution via `KnowledgeBaseService._run_index_job`), `rag.indexing_queue_max`, `rag.indexing_shutdown_timeout`.
-
-**KB-bound embedding** (Sprint B.3): each `KnowledgeBase` row stores `embedding_model` + `embedding_dim`. New documents always use the KB's stored model (resolved via `get_embedding_provider(model_spec)` which now accepts a per-call override). On the first successful index, `KnowledgeBaseRepository.update_embedding_binding(kb_id, embedding_dim=...)` lazily backfills `embedding_dim`. Subsequent ingests pass `expected_dim` to `DocumentIngestor`; a mismatch raises `EmbeddingDimensionMismatchError` *before* any chunks land in Chroma. Cross-KB retrieval (`multi_kb_retrieve`) builds a per-spec embedder cache (one provider per unique model spec) and stamps `metadata["embedding_model"]` on every result. Admin-only `POST /api/knowledge-bases/{kb_id}/reindex-all` (B.3.5) drops the Chroma collection, clears `embedding_dim`, bumps document versions, and re-dispatches the lot.
-
-**`with_kb_context`** (`packages/harness/deerflow/rag/job_context.py`): the `@asynccontextmanager` background workers use to restore tenant + user contextvars. Refuses empty / `"default"` tenants up-front so a misconfigured caller doesn't silently fall back to the global tenant collection. The same module also provides sync `kb_context(...)` for query-time retrieval offloaded to worker threads (`asyncio.to_thread`, `ThreadPoolExecutor`).
-
-**Chroma default-tenant guard** (`packages/harness/deerflow/rag/backends/chroma.py`): `ChromaVectorStore._collection_name()` raises `RuntimeError` when the resolved tenant is `"default"` and `rag.allow_no_auth_kb=False`. Without this, a worker that lost its context would silently mix every tenant's vectors into the `default_*` collection.
-
-### Document Conversion Error Codes — Sprint C.1 / C.3
-
-`packages/harness/deerflow/utils/file_conversion.py:convert_file_to_markdown` returns a `ConversionResult` instead of `Path | None`. On failure the result carries a stable `ConversionErrorCode` (`EMPTY_RESULT`, `ENCRYPTED_PDF`, `UNSUPPORTED_FORMAT`, `MARKITDOWN_UNAVAILABLE`, `INTERNAL_ERROR`) plus an English `error_detail`. The upload routers (`POST /api/threads/{thread_id}/uploads`, `POST /api/knowledge-bases/{kb_id}/documents/upload`) map failures to `422` with body `{code, message, filename}` so the frontend can switch on the stable code for localised toasts. The `_EMPTY_RESULT_CHAR_THRESHOLD = 200` guard inside `convert_file_to_markdown` short-circuits scanned/image PDFs that produce sub-threshold text — no `.md` is written and `EMPTY_RESULT` is reported.
-
-`resolve_pdf_converter()` (Sprint C.3.1) returns a `ResolvedPdfConverter` snapshot of `configured` vs `effective` converter plus per-package availability and a human-readable `warning` when the configuration is broken. Gateway lifespan calls `log_pdf_converter_status()` once at boot. `GET /api/system/pdf-converter` (Sprint C.3.3, admin-only) exposes the same snapshot for runtime introspection.
-
-### Memory System (`packages/harness/deerflow/agents/memory/`)
-
-**Components**:
-- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication (trims leading/trailing whitespace before comparing), and atomic file I/O
-- `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time); captures `user_id` at enqueue time so it survives the `threading.Timer` boundary
-- `prompt.py` - Prompt templates for memory updates
-- `storage.py` - File-based storage with per-user isolation; cache keyed by `(user_id, agent_name)` tuple
-
-**Per-User Isolation**:
-- Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
-- Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`
-- Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
-- `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
-- In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
-- Absolute `storage_path` in config opts out of per-user isolation
-- **Migration**: Run `PYTHONPATH=. python scripts/migrate_user_isolation.py` to move legacy `memory.json`, `threads/`, and `agents/` into per-user layout. Supports `--dry-run` (preview changes) and `--user-id USER_ID` (assign unowned legacy data to a user, defaults to `default`).
-
-**Data Structure** (stored in `{base_dir}/users/{user_id}/memory.json`):
-- **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
-- **History**: `recentMonths`, `earlierContext`, `longTermBackground`
-- **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
-
-**Workflow**:
-1. `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`
-2. Queue debounces (30s default), batches updates, deduplicates per-thread
-3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
-4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
-5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
-
-Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
-
-**Configuration** (`config.yaml` → `memory`):
-- `enabled` / `injection_enabled` - Master switches
-- `storage_path` - Path to memory.json (absolute path opts out of per-user isolation)
-- `debounce_seconds` - Wait time before processing (default: 30)
-- `model_name` - LLM for updates (null = default model)
-- `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
-- `max_injection_tokens` - Token limit for prompt injection (2000)
-
-### Insights System (`packages/harness/deerflow/insights/`)
-
-Closes the feedback loop: collects feedback and closure data, generates improvement suggestions, and feeds verified improvements into agent memory.
-
-**Components**:
-- `analytics.py` - `FeedbackAggregator` aggregates feedback patterns by agent via dual JOIN (ThreadMetaRow for tenant isolation, AgentUsageRow for optional agent correlation)
-- `knowledge_extractor.py` - `ClosureKnowledgeExtractor` extracts KB candidates from verified closure tickets (query `ClosureTicketEventRow` for `submit_verification`/`verify_close` events)
-- `kb_candidate_store.py` - `KBCandidateStore` persists KB candidates as JSON files with tenant isolation at `{DEER_FLOW_HOME}/insights/{tenant_id}/kb_candidates/`
-- `improvement.py` - `ImprovementEngine` generates ranked `ImprovementSuggestion` objects with confidence scoring and deduplication
-- `memory_integration.py` - `FeedbackMemoryIntegration` creates memory facts with `source="feedback_loop"` when suggestions are applied
-- `scheduler.py` - `InsightsScheduler` runs batch aggregation on configurable interval (default: 6 hours)
-- `cache.py` - `JsonFileInsightsCache` stores aggregation results with tenant isolation
-
-**Data Flow**:
-1. **Feedback Analytics**: `FeedbackAggregator` JOINs `FeedbackRow` with `ThreadMetaRow` (tenant isolation) and `AgentUsageRow` (agent correlation, nullable), computes positive/negative ratios, detects negative clusters
-2. **Closure Knowledge**: `ClosureKnowledgeExtractor` hooks into `ClosureService.transition()` on `verify_close`, extracts `verification_summary` and `evidence` from event payloads
-3. **Improvement Generation**: `ImprovementEngine` analyzes feedback trends and closure patterns, generates suggestions with confidence scores
-4. **Memory Integration**: When admin applies a suggestion via dashboard, `FeedbackMemoryIntegration` creates a memory fact with `source="feedback_loop"`, `category="improvement"`, `confidence=0.9`
-
-**Admin Dashboard API** (`app/gateway/routers/insights.py`):
-- `GET /api/insights/feedback-trends` - Aggregated feedback metrics per agent
-- `GET /api/insights/closure-metrics` - Closure ticket SLA compliance and resolution rates
-- `GET /api/insights/improvements` - Ranked improvement suggestions
-- `POST /api/insights/improvements/{id}/apply` - Apply a suggestion (triggers memory integration)
-- `POST /api/insights/improvements/{id}/dismiss` - Dismiss a suggestion with reason
-- `GET /api/insights/closure-knowledge` - List KB candidates (pending_review/approved/dismissed)
-- `POST /api/insights/closure-knowledge/{ticket_id}/promote` - Approve and index a KB candidate
-- `POST /api/insights/closure-knowledge/{ticket_id}/dismiss` - Dismiss a KB candidate
-
-**Permissions**: All endpoints require `insights:read` (GET) or `insights:write` (POST). Registered in `app/gateway/authz.py` with default grants to superadmin and tenant_admin roles.
-
-**Configuration** (`config.yaml` → `insights`):
-- `enabled` - Master switch (default: true)
-- `aggregation_interval_hours` - Batch aggregation interval (default: 6)
-- `cluster_threshold` - Negative feedback cluster threshold per hour (default: 5)
-- `low_confidence_threshold` - Suppress suggestions below this confidence (default: 0.3)
-- `improvement_model_name` - Model for LLM-based suggestion generation (null = default)
-
-**Soft Prerequisite**: `migrate-current-system-to-postgresql` improves JOIN performance but SQLite mode works for MVP.
-
-### Reflection System (`packages/harness/deerflow/reflection/`)
-
-- `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)
-- `resolve_class(path, base_class)` - Import and validate class against base class
-
-### Config Schema
-
-**`config.yaml`** key sections:
-- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
-- vLLM reasoning models should use `deerflow.models.vllm_provider:VllmChatModel`; for Qwen-style parsers prefer `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking`, and DeerFlow will also normalize the older `thinking` alias
-- `tools[]` - Tool configs with `use` variable path and `group`
-- `tool_groups[]` - Logical groupings for tools
-- `sandbox.use` - Sandbox provider class path
-- `skills.path` / `skills.container_path` - Host and container paths to skills directory
-- `title` - Auto-title generation (enabled, max_words, max_chars, prompt_template)
-- `summarization` - Context summarization (enabled, trigger conditions, keep policy)
-- `subagents.enabled` - Master switch for subagent delegation
-- `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
-- `http_connectors` - Pre-configured HTTP endpoints keyed by tenant_id. Each connector: name, url, method, auth_type, auth_token_env, timeout_seconds, max_response_bytes, max_retries, retry_on_status, cache_ttl_seconds. See [docs/HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md)
-
-**`extensions_config.json`**:
-- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
-- `skills` - Map of skill name → state (enabled)
-
-Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` methods.
-
-### Embedded Client (`packages/harness/deerflow/client.py`)
-
-`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
-
-**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares the same config files and data directories. No FastAPI dependency.
-
-**Agent Conversation**:
-- `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
-- `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
-  - `"values"` — full state snapshot (title, messages, artifacts); AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries
-  - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each
-  - `"custom"` — forwarded from `StreamWriter`
-  - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
-- Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
-- Supports `checkpointer` parameter for state persistence across turns
-- `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
-- See [docs/STREAMING.md](docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
-
-**Gateway Equivalent Methods** (replaces Gateway API):
-
-| Category | Methods | Return format |
-|----------|---------|---------------|
-| Models | `list_models()`, `get_model(name)` | `{"models": [...]}`, `{name, display_name, ...}` |
-| MCP | `get_mcp_config()`, `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
-| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` | `{"skills": [...]}` |
-| Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
-| Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
-| Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
-
-**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
-
-**Tests**: `tests/test_client.py` (77 unit tests including `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests, requires config.yaml)
-
-**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
-
-## Development Workflow
-
-### Test-Driven Development (TDD) — MANDATORY
-
-**Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
-
-- Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
-- Run the full suite before and after your change: `make test`
-- Tests must pass before a feature is considered complete
-- For lightweight config/utility modules, prefer pure unit tests with no external dependencies
-- If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
+**每个新功能或 bug 修复必须附带单元测试。无例外。**
 
 ```bash
-# Run all tests
+# 运行所有测试
 make test
 
-# Run a specific test file
+# 运行特定测试文件
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
 
-### Running the Full Application
+### 运行完整应用
 
-From the **project root** directory:
+从**项目根目录**:
 ```bash
 make dev
 ```
 
-This starts all services and makes the application available at `http://localhost:2026`.
+应用访问地址: `http://localhost:2026`
 
-**All startup modes:**
+| 模式 | 命令 |
+|------|------|
+| 本地前台 | `make dev` |
+| 本地后台 | `make dev-daemon` |
+| Docker 开发 | `make docker-start` |
+| Docker 生产 | `make up` |
 
-| | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
-|---|---|---|---|---|
-| **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
-| **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+### Nginx 路由
 
-| Action | Local | Docker Dev | Docker Prod |
-|---|---|---|---|
-| **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
-| **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
+- `/api/langgraph/*` → Gateway 嵌入式运行时 (8001)，重写为 `/api/*`
+- `/api/*` (其他) → Gateway API (8001)
+- `/` (非 API) → Frontend (3000)
 
-**Nginx routing**:
-- `/api/langgraph/*` → Gateway embedded runtime (8001), rewritten to `/api/*`
-- `/api/*` (other) → Gateway API (8001)
-- `/` (non-API) → Frontend (3000)
+### 代码风格
 
-### Running Backend Services Separately
+- 使用 `ruff` 进行代码检查和格式化
+- 行长度: 240 字符
+- Python 3.12+ 带类型提示
+- 双引号，空格缩进
 
-From the **backend** directory:
+---
 
-```bash
-# Gateway API
-make gateway
-```
+## 文档
 
-Direct access (without nginx):
-- Gateway: `http://localhost:8001`
+详见 `docs/` 目录:
 
-### Frontend Configuration
-
-The frontend uses environment variables to connect to backend services:
-- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Defaults to `/api/langgraph` (through nginx)
-- `NEXT_PUBLIC_BACKEND_BASE_URL` - Defaults to empty string (through nginx)
-
-When using `make dev` from root, the frontend automatically connects through nginx.
-
-## Key Features
-
-### File Upload
-
-Multi-file upload with automatic document conversion:
-- Endpoint: `POST /api/threads/{thread_id}/uploads`
-- Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directory inputs before copying so uploads stay all-or-nothing
-- Reuses one conversion worker per request when called from an active event loop
-- Files stored in thread-isolated directories
-- Agent receives uploaded file list via `UploadsMiddleware`
-
-See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
-
-### Plan Mode
-
-TodoList middleware for complex multi-step tasks:
-- Controlled via runtime config: `config.configurable.is_plan_mode = True`
-- Provides `write_todos` tool for task tracking
-- One task in_progress at a time, real-time updates
-
-See [docs/plan_mode_usage.md](docs/plan_mode_usage.md) for details.
-
-### Context Summarization
-
-Automatic conversation summarization when approaching token limits:
-- Configured in `config.yaml` under `summarization` key
-- Trigger types: tokens, messages, or fraction of max input
-- Keeps recent messages while summarizing older ones
-
-See [docs/summarization.md](docs/summarization.md) for details.
-
-### Vision Support
-
-For models with `supports_vision: true`:
-- `ViewImageMiddleware` processes images in conversation
-- `view_image_tool` added to agent's toolset
-- Images automatically converted to base64 and injected into state
-
-## Code Style
-
-- Uses `ruff` for linting and formatting
-- Line length: 240 characters
-- Python 3.12+ with type hints
-- Double quotes, space indentation
-
-## Documentation
-
-See `docs/` directory for detailed documentation:
-- [CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration options
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Architecture details
-- [API.md](docs/API.md) - API reference
-- [SETUP.md](docs/SETUP.md) - Setup guide
-- [FILE_UPLOAD.md](docs/FILE_UPLOAD.md) - File upload feature
-- [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
-- [summarization.md](docs/summarization.md) - Context summarization
-- [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
-- [HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md) - HTTP connector tool for external data sources
-- [data_catalog_mcp_protocol.md](docs/data_catalog_mcp_protocol.md) - MCP protocol for data catalog integration
+| 文档 | 说明 |
+|------|------|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构概览 |
+| [API.md](docs/API.md) | API 参考 |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | 配置选项 |
+| [SETUP.md](docs/SETUP.md) | 安装指南 |
+| [MIDDLEWARES.md](docs/MIDDLEWARES.md) | 中间件系统详解 |
+| [AGENTS_SYSTEM.md](docs/AGENTS_SYSTEM.md) | 多级 Agent 系统 |
+| [REPORT_TEMPLATES.md](docs/REPORT_TEMPLATES.md) | 报告模板平台 |
+| [TOOLS_SYSTEM.md](docs/TOOLS_SYSTEM.md) | 工具系统 |
+| [MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md) | 记忆系统 |
+| [INSIGHTS_SYSTEM.md](docs/INSIGHTS_SYSTEM.md) | 洞察系统 |
+| [RAG.md](docs/RAG.md) | 知识库 |
+| [HTTP_CONNECTORS.md](docs/HTTP_CONNECTORS.md) | HTTP 连接器 |
+| [STREAMING.md](docs/STREAMING.md) | 流式设计 |

@@ -11,16 +11,31 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
 | [SETUP.md](SETUP.md) | Quick setup guide |
 
+## Core Systems
+
+| Document | Description |
+|----------|-------------|
+| [MIDDLEWARES.md](MIDDLEWARES.md) | 18 个中间件详解，执行顺序和交互图 |
+| [AGENTS_SYSTEM.md](AGENTS_SYSTEM.md) | 多级 Agent 系统 (Builtin/Tenant/User) |
+| [REPORT_TEMPLATES.md](REPORT_TEMPLATES.md) | DSL 报告模板平台 |
+| [TOOLS_SYSTEM.md](TOOLS_SYSTEM.md) | 工具系统详解 |
+| [MEMORY_SYSTEM.md](MEMORY_SYSTEM.md) | 记忆系统 (每用户隔离、事实提取) |
+| [INSIGHTS_SYSTEM.md](INSIGHTS_SYSTEM.md) | 洞察系统 (反馈闭环) |
+| [RAG.md](RAG.md) | 知识库 (RAG) |
+| [HTTP_CONNECTORS.md](HTTP_CONNECTORS.md) | HTTP 连接器工具 |
+| [STREAMING.md](STREAMING.md) | 流式设计 (Gateway vs DeerFlowClient) |
+| [MCP_SERVER.md](MCP_SERVER.md) | MCP 服务器配置 |
+
 ## Feature Documentation
 
 | Document | Description |
 |----------|-------------|
-| [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
 | [summarization.md](summarization.md) | Context summarization feature |
 | [plan_mode_usage.md](plan_mode_usage.md) | Plan mode with TodoList |
 | [AUTO_TITLE_GENERATION.md](AUTO_TITLE_GENERATION.md) | Automatic title generation |
+| [GUARDRAILS.md](GUARDRAILS.md) | Guardrail middleware and providers |
 
 ## Development
 
