@@ -46,6 +46,19 @@ function mockChannelsAPI(page: Page) {
       body: JSON.stringify({ connections: [] }),
     });
   });
+
+  void page.route("**/api/channels/slack/connect", (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        provider: "slack",
+        mode: "oauth",
+        url: "http://localhost:3000/mock-slack-oauth?client_id=dev&state=test",
+        expires_in: 600,
+      }),
+    });
+  });
 }
 
 test.describe("IM channels", () => {
@@ -73,5 +86,16 @@ test.describe("IM channels", () => {
     await expect(page.getByText("Telegram direct messages")).toBeVisible();
     await expect(page.getByText("Slack workspace messages")).toBeVisible();
     await expect(page.getByText("Discord server messages")).toBeVisible();
+
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    const connectButtons = dialog.getByRole("button", { name: "Connect" });
+    await expect(connectButtons).toHaveCount(3);
+
+    const popupPromise = page.waitForEvent("popup");
+    await connectButtons.nth(1).click();
+    const popup = await popupPromise;
+    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    await expect(popup).toHaveURL(/\/mock-slack-oauth/);
+    await popup.close();
   });
 });

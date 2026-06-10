@@ -24,6 +24,11 @@ import {
   useConnectChannelProvider,
   useDisconnectChannelConnection,
 } from "@/core/channels/hooks";
+import {
+  closeConnectWindow,
+  openConnectUrl,
+  prepareConnectWindow,
+} from "@/core/channels/open-connect-url";
 import type { ChannelConnection, ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
@@ -31,13 +36,6 @@ import { cn } from "@/lib/utils";
 import { ChannelProviderIcon } from "../channels/channel-provider-icon";
 
 import { SettingsSection } from "./settings-section";
-
-function openConnectUrl(url: string) {
-  const opened = window.open(url, "_blank", "noopener,noreferrer");
-  if (!opened) {
-    window.location.assign(url);
-  }
-}
 
 function getProviderDescription(
   provider: ChannelProvider,
@@ -144,8 +142,11 @@ function ChannelProviderItem({
             disabled={!canConnect || isConnecting}
             title={!provider.configured ? t.channels.unconfigured : undefined}
             onClick={() => {
+              const connectWindow = prepareConnectWindow();
               connectMutation.mutate(provider.provider, {
-                onSuccess: (result) => openConnectUrl(result.url),
+                onSuccess: (result) =>
+                  openConnectUrl(result.url, connectWindow),
+                onError: () => closeConnectWindow(connectWindow),
               });
             }}
           >
