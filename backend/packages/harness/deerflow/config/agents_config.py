@@ -52,9 +52,13 @@ class AgentConfig(BaseModel):
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     """Return the on-disk directory for an agent, preferring the per-user layout.
 
-    Resolution order:
+    Resolution order considers only directories that contain ``config.yaml``:
     1. ``{base_dir}/users/{user_id}/agents/{name}/`` (per-user, current layout).
     2. ``{base_dir}/agents/{name}/`` (legacy shared layout — read-only fallback).
+
+    A per-user directory that only contains agent memory (for example,
+    ``memory.json``) is not treated as an agent config directory and does not
+    shadow a shared legacy agent.
 
     If neither exists, the per-user path is returned so callers that intend to
     create the agent write into the new layout.
@@ -67,11 +71,11 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     paths = get_paths()
     effective_user = user_id or get_effective_user_id()
     user_path = paths.user_agent_dir(effective_user, name)
-    if user_path.exists():
+    if (user_path / "config.yaml").exists():
         return user_path
 
     legacy_path = paths.agent_dir(name)
-    if legacy_path.exists():
+    if (legacy_path / "config.yaml").exists():
         return legacy_path
 
     return user_path
