@@ -3,6 +3,8 @@ import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
+  type InfiniteData,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -311,6 +313,56 @@ export function upsertThreadInSearchCache(
   );
 }
 
+export function upsertThreadInInfiniteCache(
+  queryClient: QueryClient,
+  thread: AgentThread,
+) {
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) => {
+      if (!oldData) {
+        return oldData;
+      }
+
+      const merged = oldData.pages.map((page) =>
+        page.map((t) =>
+          t.thread_id === thread.thread_id
+            ? {
+                ...thread,
+                ...t,
+                metadata: {
+                  ...(thread.metadata ?? {}),
+                  ...(t.metadata ?? {}),
+                },
+                values: {
+                  ...thread.values,
+                  ...t.values,
+                },
+              }
+            : t,
+        ),
+      );
+
+      const exists = merged.some((page) =>
+        page.some((t) => t.thread_id === thread.thread_id),
+      );
+      if (exists) {
+        return { ...oldData, pages: merged };
+      }
+
+      const firstPage = merged[0] ?? [];
+      const restPages = merged.slice(1);
+      return {
+        ...oldData,
+        pages: [[thread, ...firstPage], ...restPages],
+      };
+    },
+  );
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -417,6 +469,19 @@ export function useThreadStream({
         },
         interrupts: {},
       });
+      upsertThreadInInfiniteCache(queryClient, {
+        thread_id: meta.thread_id,
+        created_at: now,
+        updated_at: now,
+        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        status: "busy",
+        values: {
+          title: t.pages.newChat,
+          messages: [],
+          artifacts: [],
+        },
+        interrupts: {},
+      });
       if (context.agent_name && !isMock) {
         void getAPIClient()
           .threads.update(meta.thread_id, {
@@ -488,6 +553,27 @@ export function useThreadStream({
               });
             },
           );
+          const nextTitle: string = update.title;
+          void queryClient.setQueriesData(
+            {
+              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+              exact: false,
+            },
+            (oldData: InfiniteData<AgentThread[]> | undefined) =>
+              mapInfiniteThreadsCache(
+                oldData,
+                (t): AgentThread =>
+                  t.thread_id === threadIdRef.current
+                    ? {
+                        ...t,
+                        values: {
+                          ...t.values,
+                          title: nextTitle,
+                        },
+                      }
+                    : t,
+              ),
+          );
         }
       }
     },
@@ -542,6 +628,9 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
@@ -801,6 +890,9 @@ export function useThreadStream({
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        void queryClient.invalidateQueries({
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        });
       } catch (error) {
         setOptimisticMessages([]);
         setIsUploading(false);
@@ -1100,6 +1192,86 @@ export function useThreads(
   });
 }
 
+export const INFINITE_THREADS_PAGE_SIZE = 50;
+
+export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
+  "threads",
+  "searchInfinite",
+] as const;
+
+type InfiniteThreadsParams = Omit<
+  Parameters<ThreadsClient["search"]>[0],
+  "limit" | "offset"
+>;
+
+export function getInfiniteThreadsNextPageParam(
+  lastPage: AgentThread[],
+  allPages: AgentThread[][],
+  pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+): number | undefined {
+  if (lastPage.length < pageSize) {
+    return undefined;
+  }
+  return allPages.reduce((sum, page) => sum + page.length, 0);
+}
+
+export function mapInfiniteThreadsCache(
+  oldData: InfiniteData<AgentThread[]> | undefined,
+  mapper: (thread: AgentThread) => AgentThread,
+): InfiniteData<AgentThread[]> | undefined {
+  if (!oldData) {
+    return oldData;
+  }
+  return {
+    ...oldData,
+    pages: oldData.pages.map((page) => page.map(mapper)),
+  };
+}
+
+export function filterInfiniteThreadsCache(
+  oldData: InfiniteData<AgentThread[]> | undefined,
+  predicate: (thread: AgentThread) => boolean,
+): InfiniteData<AgentThread[]> | undefined {
+  if (!oldData) {
+    return oldData;
+  }
+  return {
+    ...oldData,
+    pages: oldData.pages.map((page) => page.filter(predicate)),
+  };
+}
+
+export function useInfiniteThreads(
+  params: InfiniteThreadsParams = {
+    sortBy: "updated_at",
+    sortOrder: "desc",
+    select: ["thread_id", "updated_at", "values", "metadata"],
+  },
+) {
+  const apiClient = getAPIClient();
+  return useInfiniteQuery<
+    AgentThread[],
+    Error,
+    InfiniteData<AgentThread[]>,
+    readonly unknown[],
+    number
+  >({
+    queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const response = (await apiClient.threads.search<AgentThreadState>({
+        ...params,
+        limit: INFINITE_THREADS_PAGE_SIZE,
+        offset: pageParam,
+      })) as AgentThread[];
+      return response;
+    },
+    getNextPageParam: (lastPage, allPages) =>
+      getInfiniteThreadsNextPageParam(lastPage, allPages),
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
@@ -1183,9 +1355,21 @@ export function useDeleteThread() {
           return oldData.filter((t) => t.thread_id !== threadId);
         },
       );
+      queryClient.setQueriesData(
+        {
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          exact: false,
+        },
+        (oldData: InfiniteData<AgentThread[]> | undefined) =>
+          filterInfiniteThreadsCache(oldData, (t) => t.thread_id !== threadId),
+      );
     },
+
     onSettled() {
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
     },
   });
 }
@@ -1225,6 +1409,24 @@ export function useRenameThread() {
             return t;
           });
         },
+      );
+      queryClient.setQueriesData(
+        {
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          exact: false,
+        },
+        (oldData: InfiniteData<AgentThread[]> | undefined) =>
+          mapInfiniteThreadsCache(oldData, (t) =>
+            t.thread_id === threadId
+              ? {
+                  ...t,
+                  values: {
+                    ...t.values,
+                    title,
+                  },
+                }
+              : t,
+          ),
       );
     },
   });
