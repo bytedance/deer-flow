@@ -101,7 +101,8 @@ test.describe("real backend render (replay, no API key)", () => {
       EXPECTED_SUGGESTION,
       "fixture should contain a suggestions turn (re-record; the record spec waits for /suggestions)",
     ).not.toBe("");
-    await expect(page.getByText(EXPECTED_TITLE)).toBeVisible({
+    const chat = page.getByTestId("chat");
+    await expect(chat.getByText(EXPECTED_TITLE)).toBeVisible({
       timeout: 60_000,
     });
     await expect(page.getByText(EXPECTED_SUGGESTION)).toBeVisible({

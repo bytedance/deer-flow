@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth_disabled import get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -80,8 +81,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             internal_user = get_internal_user()
 
+        auth_source = "session"
+
         # Non-public path: require session cookie
-        if internal_user is None and not request.cookies.get("access_token"):
+        if internal_user is not None:
+            user = internal_user
+            auth_source = "internal"
+        elif is_auth_disabled():
+            user = get_auth_disabled_user()
+            auth_source = "auth_disabled"
+        elif not request.cookies.get("access_token"):
             return JSONResponse(
                 status_code=401,
                 content={
@@ -91,23 +100,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     ).model_dump()
                 },
             )
-
-        # Strict JWT validation: reject junk/expired tokens with 401
-        # right here instead of silently passing through. This closes
-        # the "junk cookie bypass" gap (AUTH_TEST_PLAN test 7.5.8):
-        # without this, non-isolation routes like /api/models would
-        # accept any cookie-shaped string as authentication.
-        #
-        # We call the *strict* resolver so that fine-grained error
-        # codes (token_expired, token_invalid, user_not_found, …)
-        # propagate from AuthErrorCode, not get flattened into one
-        # generic code. BaseHTTPMiddleware doesn't let HTTPException
-        # bubble up, so we catch and render it as JSONResponse here.
-        from app.gateway.deps import get_current_user_from_request
-
-        if internal_user is not None:
-            user = internal_user
         else:
+            # Strict JWT validation: reject junk/expired tokens with 401
+            # right here instead of silently passing through. This closes
+            # the "junk cookie bypass" gap (AUTH_TEST_PLAN test 7.5.8):
+            # without this, non-isolation routes like /api/models would
+            # accept any cookie-shaped string as authentication.
+            #
+            # We call the *strict* resolver so that fine-grained error
+            # codes (token_expired, token_invalid, user_not_found, …)
+            # propagate from AuthErrorCode, not get flattened into one
+            # generic code. BaseHTTPMiddleware doesn't let HTTPException
+            # bubble up, so we catch and render it as JSONResponse here.
+            from app.gateway.deps import get_current_user_from_request
+
             try:
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
@@ -118,6 +124,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # None" branch short-circuits instead of running the entire
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
+        request.state.auth_source = auth_source
         request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
         token = set_current_user(user)
         try:

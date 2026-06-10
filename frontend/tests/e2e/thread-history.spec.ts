@@ -18,6 +18,7 @@ const THREADS = [
     updated_at: "2025-06-02T12:00:00Z",
   },
 ];
+const DEMO_THREAD_ID = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
 
 test.describe("Thread history", () => {
   test("sidebar shows existing threads", async ({ page }) => {
@@ -59,6 +60,50 @@ test.describe("Thread history", () => {
     await expect(
       page.getByText("Response in thread First conversation"),
     ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("mock thread does not load run messages from the real backend", async ({
+    page,
+  }) => {
+    const backendRunMessageUrls: string[] = [];
+    page.on("request", (request) => {
+      const url = request.url();
+      if (
+        request.method() === "GET" &&
+        url.includes(`/api/threads/${DEMO_THREAD_ID}/runs/`)
+      ) {
+        backendRunMessageUrls.push(url);
+      }
+    });
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: DEMO_THREAD_ID,
+          title: "Forecasting 2026 Trends and Opportunities",
+          updated_at: "2025-06-01T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: `run-human-${DEMO_THREAD_ID}`,
+              content: [
+                {
+                  type: "text",
+                  text: "This run-message endpoint should not be called.",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${DEMO_THREAD_ID}?mock=true`);
+
+    await expect(
+      page.getByText("What might be the trends and opportunities in 2026?"),
+    ).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(500);
+    expect(backendRunMessageUrls).toEqual([]);
   });
 
   test("chats list page shows all threads", async ({ page }) => {

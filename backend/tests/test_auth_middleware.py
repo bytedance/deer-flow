@@ -88,7 +88,9 @@ def test_unknown_api_path_is_protected():
 
 def _make_app():
     """Create a minimal FastAPI app with AuthMiddleware for testing."""
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
+
+    from deerflow.runtime.user_context import get_effective_user_id
 
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
@@ -98,8 +100,16 @@ def _make_app():
         return {"status": "ok"}
 
     @app.get("/api/v1/auth/me")
-    async def auth_me():
-        return {"id": "1", "email": "test@test.com"}
+    async def auth_me(request: Request):
+        from app.gateway.deps import get_current_user_from_request
+
+        user = await get_current_user_from_request(request)
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "system_role": user.system_role,
+            "needs_setup": user.needs_setup,
+        }
 
     @app.get("/api/v1/auth/setup-status")
     async def setup_status():
@@ -108,6 +118,16 @@ def _make_app():
     @app.get("/api/models")
     async def models_get():
         return {"models": []}
+
+    @app.get("/api/whoami")
+    async def whoami(request: Request):
+        user = request.state.user
+        return {
+            "id": str(user.id),
+            "email": getattr(user, "email", None),
+            "system_role": getattr(user, "system_role", None),
+            "context_user_id": get_effective_user_id(),
+        }
 
     @app.put("/api/mcp/config")
     async def mcp_put():
@@ -133,7 +153,8 @@ def _make_app():
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     return TestClient(_make_app())
 
 
@@ -159,6 +180,46 @@ def test_protected_path_no_cookie_returns_401(client):
     assert res.status_code == 401
     body = res.json()
     assert body["detail"]["code"] == "not_authenticated"
+
+
+def test_auth_disabled_allows_protected_path_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/models")
+
+    assert res.status_code == 200
+    assert res.json() == {"models": []}
+
+
+def test_auth_disabled_stamps_e2e_admin_user_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/whoami")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "e2e-user",
+        "email": "e2e@test.local",
+        "system_role": "admin",
+        "context_user_id": "e2e-user",
+    }
+
+
+def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = TestClient(_make_app())
+
+    res = client.get("/api/v1/auth/me")
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "id": "e2e-user",
+        "email": "e2e@test.local",
+        "system_role": "admin",
+        "needs_setup": False,
+    }
 
 
 def test_protected_path_with_junk_cookie_rejected(client):
