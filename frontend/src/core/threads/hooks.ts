@@ -1172,8 +1172,11 @@ export function useDeleteThread() {
       );
     },
     onSettled() {
-      // Optimistic removal can shrink a page below the page size and briefly
-      // flip `hasMore`; the refetch re-tiles the pages back to real offsets.
+      // Optimistic removal changes a page's length, so until this refetch
+      // re-tiles every page back to real server offsets, the cumulative
+      // `offset` in getNextPageParam can drift by one (and a shrunk last page
+      // can briefly flip `hasMore` to false). A loadMore in that window could
+      // repeat/skip a row; the invalidate is what keeps pagination consistent.
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });

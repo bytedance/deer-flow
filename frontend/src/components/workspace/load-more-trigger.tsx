@@ -35,8 +35,16 @@ export function LoadMoreTrigger({
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadRef = useRef(0);
 
+  // The throttle can fire a *trailing* call after a delay, so it must read the
+  // current props rather than the ones captured when it was scheduled —
+  // otherwise it could call `loadMore` after the list already ended.
+  const latestRef = useRef({ hasMore, isLoading, loadMore });
+  useEffect(() => {
+    latestRef.current = { hasMore, isLoading, loadMore };
+  });
+
   const throttledLoadMore = useCallback(() => {
-    if (!hasMore || isLoading) {
+    if (!latestRef.current.hasMore || latestRef.current.isLoading) {
       return;
     }
 
@@ -45,7 +53,7 @@ export function LoadMoreTrigger({
 
     if (remaining <= 0) {
       lastLoadRef.current = now;
-      loadMore?.();
+      latestRef.current.loadMore?.();
       return;
     }
 
@@ -55,17 +63,24 @@ export function LoadMoreTrigger({
 
     timeoutRef.current = setTimeout(() => {
       timeoutRef.current = null;
-      if (!hasMore || isLoading) {
+      const { hasMore: stillHasMore, isLoading: nowLoading, loadMore: load } =
+        latestRef.current;
+      if (!stillHasMore || nowLoading) {
         return;
       }
       lastLoadRef.current = Date.now();
-      loadMore?.();
+      load?.();
     }, remaining);
-  }, [hasMore, isLoading, loadMore]);
+  }, []);
 
   useEffect(() => {
     const element = sentinelRef.current;
     if (!element || !hasMore) {
+      return;
+    }
+
+    // No IntersectionObserver (SSR / older test envs): fall back to the button.
+    if (typeof IntersectionObserver === "undefined") {
       return;
     }
 
