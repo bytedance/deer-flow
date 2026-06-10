@@ -1000,8 +1000,8 @@ memory:
   #     network-restricted environments this download can block for a long
   #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
   #     to "char" to avoid it.
-  #   char - network-free character-based estimate (len(text) // 4); never
-  #     touches tiktoken. Slightly less precise budgeting, zero network I/O.
+  #   char - network-free CJK-aware character-based estimate; never touches
+  #     tiktoken. Slightly less precise budgeting, zero network I/O.
   token_counting: tiktoken
 
 # ============================================================================

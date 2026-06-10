@@ -70,8 +70,7 @@ class MemoryConfig(BaseModel):
             "downloaded from a public network endpoint on first use, which "
             "can block for a long time in network-restricted environments "
             "(see issue #3402/#3429). 'char' uses a network-free "
-            "character-based estimate (len(text) // 4) and never touches "
-            "tiktoken."
+            "CJK-aware character-based estimate and never touches tiktoken."
         ),
     )
 

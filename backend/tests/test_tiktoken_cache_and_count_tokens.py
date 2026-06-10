@@ -222,6 +222,31 @@ class TestCountTokens:
         get_encoding_spy.assert_not_called()
         loader_spy.assert_not_called()
 
+    def test_cjk_estimate_is_denser_than_plain_quarter(self, monkeypatch):
+        """CJK text should estimate more tokens than the plain len // 4 heuristic.
+
+        CJK characters are ~2 chars/token, so the char-based estimate must not
+        under-fill the budget the way ``len(text) // 4`` would.
+        """
+        monkeypatch.setattr("deerflow.agents.memory.prompt.TIKTOKEN_AVAILABLE", False)
+        # "User prefers concise answers" rendered in CJK (Chinese) characters.
+        text = "\u7528\u6237\u504f\u597d\u7b80\u6d01\u7684\u4e2d\u6587\u56de\u7b54\u5e76\u5173\u6ce8\u91d1\u878d\u9886\u57df"
+        result = _count_tokens(text)
+        # Each CJK char counts as ~1/2 token (vs 1/4 for the plain heuristic).
+        assert result == len(text) // 2
+        assert result > len(text) // 4
+
+    def test_cjk_estimate_combines_cjk_and_non_cjk_characters(self, monkeypatch):
+        """Mixed-language text should apply the CJK density only to CJK chars."""
+        monkeypatch.setattr("deerflow.agents.memory.prompt.TIKTOKEN_AVAILABLE", False)
+        # ASCII words mixed with CJK (Chinese) characters: "User" + "likes" + "Python and data analysis".
+        text = "User\u559c\u6b22Python\u548c\u6570\u636e\u5206\u6790"
+        cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+
+        result = _count_tokens(text)
+
+        assert result == (len(text) - cjk) // 4 + cjk // 2
+
 
 # ---------------------------------------------------------------------------
 # warm_tiktoken_cache

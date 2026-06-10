@@ -183,6 +183,11 @@ Return ONLY valid JSON."""
 # config to skip tiktoken entirely.
 _TIKTOKEN_ENCODING_MISSING = object()
 _TIKTOKEN_ENCODING_LOADING = object()
+# Cooldown before a *failed* tiktoken load is re-attempted. This is an internal
+# tuning constant rather than a user-facing config: it only affects how quickly
+# the default ``tiktoken`` mode self-heals after a transient network outage.
+# Deployments that want to avoid tiktoken's network dependency entirely should
+# set ``memory.token_counting: char`` instead of tuning this value.
 _TIKTOKEN_RETRY_COOLDOWN_S = 600.0
 _tiktoken_encoding_cache: dict[str, Any] = {}
 _tiktoken_encoding_cache_lock = threading.Lock()
@@ -235,6 +240,26 @@ def _get_tiktoken_encoding(encoding_name: str = "cl100k_base") -> tiktoken.Encod
     return encoding
 
 
+def _char_based_token_estimate(text: str) -> int:
+    """Network-free token estimate that accounts for CJK density.
+
+    The plain ``len(text) // 4`` heuristic is reasonable for English/code
+    (~4 chars per token) but significantly under-estimates token counts for
+    Chinese, Japanese, and Korean text, where the ratio is closer to 1.5-2
+    characters per token. Counting CJK characters separately (~2 chars per
+    token) avoids over-filling the injection budget for CJK-heavy memory
+    content.
+    """
+    cjk = sum(
+        1
+        for ch in text
+        if "\u4e00" <= ch <= "\u9fff"  # CJK Unified Ideographs
+        or "\u3040" <= ch <= "\u30ff"  # Hiragana + Katakana
+        or "\uac00" <= ch <= "\ud7a3"  # Hangul syllables
+    )
+    return (len(text) - cjk) // 4 + cjk // 2
+
+
 def _count_tokens(text: str, encoding_name: str = "cl100k_base", *, use_tiktoken: bool = True) -> int:
     """Count tokens in text using tiktoken.
 
@@ -249,19 +274,19 @@ def _count_tokens(text: str, encoding_name: str = "cl100k_base", *, use_tiktoken
         The number of tokens in the text.
     """
     if not use_tiktoken:
-        return len(text) // 4
+        return _char_based_token_estimate(text)
 
     encoding = _get_tiktoken_encoding(encoding_name)
     if encoding is None:
-        # Fallback to character-based estimation if tiktoken is not available
-        # or the encoding failed to load.
-        return len(text) // 4
+        # Fallback to CJK-aware character estimation if tiktoken is not
+        # available or the encoding failed to load.
+        return _char_based_token_estimate(text)
 
     try:
         return len(encoding.encode(text))
     except Exception:
-        # Fallback to character-based estimation on error
-        return len(text) // 4
+        # Fallback to CJK-aware character estimation on error.
+        return _char_based_token_estimate(text)
 
 
 def warm_tiktoken_cache() -> bool:
@@ -364,11 +389,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         base_tokens = _count_tokens(base_text, use_tiktoken=use_tiktoken) if base_text else 0
         # Account for the separator between existing sections and the facts section.
         facts_header = "Facts:\n"
-        separator_tokens = (
-            _count_tokens("\n\n" + facts_header, use_tiktoken=use_tiktoken)
-            if base_text
-            else _count_tokens(facts_header, use_tiktoken=use_tiktoken)
-        )
+        separator_tokens = _count_tokens("\n\n" + facts_header, use_tiktoken=use_tiktoken) if base_text else _count_tokens(facts_header, use_tiktoken=use_tiktoken)
         running_tokens = base_tokens + separator_tokens
 
         fact_lines: list[str] = []
