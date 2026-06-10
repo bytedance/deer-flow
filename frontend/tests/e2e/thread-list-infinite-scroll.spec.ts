@@ -11,10 +11,9 @@ const TOTAL_THREADS = 120;
 const PAGE_SIZE = 50;
 
 const THREADS = Array.from({ length: TOTAL_THREADS }, (_, i) => {
-  // Pad index so titles sort deterministically as strings, and offset the
-  // updated_at so the backend's `sortBy: updated_at desc` mock is honoured
-  // by the slice helper in mock-api.ts (which keeps the array order it was
-  // handed).
+  // Pad index so titles sort deterministically as strings. The thread-search
+  // mock returns threads in the order provided, so paging boundaries are
+  // stable across runs.
   const index = String(i + 1).padStart(3, "0");
   return {
     thread_id: `00000000-0000-0000-0000-0000000${index.padStart(5, "0")}`,
