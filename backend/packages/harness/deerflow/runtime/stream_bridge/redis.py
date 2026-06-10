@@ -117,8 +117,14 @@ class RedisStreamBridge(StreamBridge):
         while True:
             try:
                 response = await self._redis.xread({key: stream_id}, count=1, block=block_ms)
-            except ResponseError:
-                if stream_id != "0-0":
+            except ResponseError as exc:
+                # Only fall back when Redis rejects the provided stream ID (bad Last-Event-ID).
+                message = str(exc)
+                if stream_id != "0-0" and (
+                    "ID specified" in message
+                    or "stream ID" in message
+                    or "Invalid" in message
+                ):
                     logger.warning(
                         "Invalid Last-Event-ID %r for Redis stream bridge; replaying from earliest retained event",
                         stream_id,
