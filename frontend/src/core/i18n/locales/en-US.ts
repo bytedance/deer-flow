@@ -268,6 +268,7 @@ export const enUS: Translations = {
     disabled: "Disabled",
     unconfigured: "Not configured",
     unavailable: "Channel connections are unavailable right now.",
+    unavailableShort: "Unavailable",
     descriptions: {
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",

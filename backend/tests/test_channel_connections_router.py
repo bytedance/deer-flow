@@ -25,15 +25,13 @@ def _user() -> User:
     )
 
 
-async def _make_repo(tmp_path):
+async def _make_repo(tmp_path, encryption_key: str | None = "router-secret"):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
     from deerflow.persistence.engine import get_session_factory, init_engine
 
     await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'router.db'}", sqlite_dir=str(tmp_path))
-    return ChannelConnectionRepository(
-        get_session_factory(),
-        cipher=ChannelCredentialCipher.from_key("router-secret"),
-    )
+    cipher = ChannelCredentialCipher.from_key(encryption_key) if encryption_key else None
+    return ChannelConnectionRepository(get_session_factory(), cipher=cipher)
 
 
 def _make_app(config: ChannelConnectionsConfig, repo):
@@ -164,6 +162,74 @@ def test_connect_telegram_returns_deep_link_and_persists_state(tmp_path):
     anyio.run(repo.close)
 
 
+def test_connect_telegram_local_mode_without_public_url_or_encryption_key(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path, None)
+    app = _make_app(
+        ChannelConnectionsConfig.model_validate(
+            {
+                "enabled": True,
+                "mode": "local",
+                "telegram": {
+                    "enabled": True,
+                    "bot_token": "telegram-token",
+                    "bot_username": "deerflow_bot",
+                },
+            }
+        ),
+        repo,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/telegram/connect")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "telegram"
+    assert body["url"].startswith("https://t.me/deerflow_bot?start=")
+
+    async def count_states():
+        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="telegram")
+
+    assert anyio.run(count_states) == 1
+
+    anyio.run(repo.close)
+
+
+def test_get_providers_reports_slack_http_unavailable_without_public_url(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "mode": "local",
+            "encryption_key": "router-secret",
+            "slack": {
+                "enabled": True,
+                "client_id": "slack-client",
+                "client_secret": "slack-secret",
+                "signing_secret": "slack-signing-secret",
+                "event_delivery": "http",
+            },
+        }
+    )
+    app = _make_app(config, repo)
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    slack = next(item for item in response.json()["providers"] if item["provider"] == "slack")
+    assert slack["enabled"] is True
+    assert slack["configured"] is True
+    assert slack["connectable"] is False
+    assert "public_base_url" in slack["unavailable_reason"]
+
+    anyio.run(repo.close)
+
+
 def test_connect_unconfigured_provider_returns_400(tmp_path):
     import anyio
 
@@ -185,6 +251,99 @@ def test_connect_unconfigured_provider_returns_400(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Channel provider is not configured"
+
+    anyio.run(repo.close)
+
+
+def test_connect_slack_http_without_public_url_returns_400(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(
+        ChannelConnectionsConfig.model_validate(
+            {
+                "enabled": True,
+                "mode": "local",
+                "encryption_key": "router-secret",
+                "slack": {
+                    "enabled": True,
+                    "client_id": "slack-client",
+                    "client_secret": "slack-secret",
+                    "signing_secret": "slack-signing-secret",
+                    "event_delivery": "http",
+                },
+            }
+        ),
+        repo,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/slack/connect")
+
+    assert response.status_code == 400
+    assert "public_base_url" in response.json()["detail"]
+
+    anyio.run(repo.close)
+
+
+def test_connect_discord_uses_request_base_url_without_public_base_url(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(
+        ChannelConnectionsConfig.model_validate(
+            {
+                "enabled": True,
+                "mode": "local",
+                "encryption_key": "router-secret",
+                "discord": {
+                    "enabled": True,
+                    "client_id": "discord-client",
+                    "client_secret": "discord-secret",
+                    "bot_token": "discord-bot",
+                    "permissions": "274877975552",
+                },
+            }
+        ),
+        repo,
+    )
+
+    with TestClient(app, base_url="http://localhost:2026") as client:
+        response = client.post("/api/channels/discord/connect")
+
+    assert response.status_code == 200
+    parsed = urlparse(response.json()["url"])
+    query = parse_qs(parsed.query)
+    assert query["redirect_uri"] == ["http://localhost:2026/api/channels/discord/callback"]
+
+    anyio.run(repo.close)
+
+
+def test_connect_discord_without_encryption_key_returns_400(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path, None)
+    app = _make_app(
+        ChannelConnectionsConfig.model_validate(
+            {
+                "enabled": True,
+                "mode": "local",
+                "discord": {
+                    "enabled": True,
+                    "client_id": "discord-client",
+                    "client_secret": "discord-secret",
+                    "bot_token": "discord-bot",
+                },
+            }
+        ),
+        repo,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/channels/discord/connect")
+
+    assert response.status_code == 400
+    assert "encryption_key" in response.json()["detail"]
 
     anyio.run(repo.close)
 

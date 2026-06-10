@@ -53,7 +53,7 @@ class ChannelConnectionRepository:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        cipher: ChannelCredentialCipher,
+        cipher: ChannelCredentialCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self._cipher = cipher
@@ -76,6 +76,13 @@ class ChannelConnectionRepository:
         if value is None or value.tzinfo is not None:
             return value
         return value.replace(tzinfo=UTC)
+
+    def _encrypt_optional_secret(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if self._cipher is None:
+            raise RuntimeError("channel connection encryption key is required")
+        return self._cipher.encrypt_text(value)
 
     @staticmethod
     def _connection_to_dict(row: ChannelConnectionRow) -> dict[str, Any]:
@@ -166,6 +173,8 @@ class ChannelConnectionRepository:
         refresh_expires_at: datetime | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
+        if self._cipher is None:
+            raise RuntimeError("channel connection encryption key is required")
         async with self.session_factory() as session:
             row = await session.get(ChannelCredentialRow, connection_id)
             if row is None:
@@ -181,6 +190,8 @@ class ChannelConnectionRepository:
             await session.commit()
 
     async def get_credentials(self, connection_id: str) -> dict[str, Any] | None:
+        if self._cipher is None:
+            return None
         async with self.session_factory() as session:
             row = await session.get(ChannelCredentialRow, connection_id)
             if row is None:
@@ -217,7 +228,7 @@ class ChannelConnectionRepository:
             state_hash=self.hash_state(state),
             owner_user_id=owner_user_id,
             provider=provider,
-            code_verifier_encrypted=self._cipher.encrypt_text(code_verifier),
+            code_verifier_encrypted=self._encrypt_optional_secret(code_verifier),
             nonce_hash=nonce_hash,
             redirect_after=redirect_after,
             requested_scopes_json=list(requested_scopes or []),

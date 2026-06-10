@@ -256,6 +256,7 @@ export const zhCN: Translations = {
     disabled: "已停用",
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
+    unavailableShort: "不可用",
     descriptions: {
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",

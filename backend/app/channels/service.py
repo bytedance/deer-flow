@@ -85,8 +85,6 @@ def _make_connection_repo(app_config: AppConfig):
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
     encryption_key = getattr(connection_config, "encryption_key", "")
-    if not encryption_key:
-        return None
 
     try:
         from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
@@ -99,7 +97,8 @@ def _make_connection_repo(app_config: AppConfig):
     if session_factory is None:
         logger.warning("Channel connections are enabled but database persistence is not available")
         return None
-    return ChannelConnectionRepository(session_factory, cipher=ChannelCredentialCipher.from_key(encryption_key))
+    cipher = ChannelCredentialCipher.from_key(encryption_key) if encryption_key else None
+    return ChannelConnectionRepository(session_factory, cipher=cipher)
 
 
 class ChannelService:

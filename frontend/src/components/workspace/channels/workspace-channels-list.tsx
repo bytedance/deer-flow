@@ -1,6 +1,7 @@
 "use client";
 
 import { CheckIcon, LoaderCircleIcon } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,10 +29,22 @@ import { ChannelProviderIcon } from "./channel-provider-icon";
 
 function providerCanConnect(provider: ChannelProvider): boolean {
   return (
-    provider.enabled &&
-    provider.configured &&
+    (provider.connectable ?? (provider.enabled && provider.configured)) &&
     provider.connection_status !== "connected"
   );
+}
+
+function getProviderDisabledReason(
+  provider: ChannelProvider,
+  t: ReturnType<typeof useI18n>["t"],
+): string | undefined {
+  if (!provider.enabled) {
+    return t.channels.disabled;
+  }
+  if (!provider.configured) {
+    return t.channels.unconfigured;
+  }
+  return provider.unavailable_reason ?? undefined;
 }
 
 export function WorkspaceChannelsList() {
@@ -91,9 +104,7 @@ export function WorkspaceChannelsList() {
                     isConnected && "gap-1",
                   )}
                   disabled={!canConnect || isPending}
-                  title={
-                    !provider.configured ? t.channels.unconfigured : undefined
-                  }
+                  title={getProviderDisabledReason(provider, t)}
                   onClick={() => {
                     const connectWindow = prepareConnectWindow();
                     void connectMutation
@@ -101,7 +112,14 @@ export function WorkspaceChannelsList() {
                       .then((result) =>
                         openConnectUrl(result.url, connectWindow),
                       )
-                      .catch(() => closeConnectWindow(connectWindow));
+                      .catch((error) => {
+                        closeConnectWindow(connectWindow);
+                        toast.error(
+                          error instanceof Error
+                            ? error.message
+                            : t.channels.unavailable,
+                        );
+                      });
                   }}
                 >
                   {isPending ? (

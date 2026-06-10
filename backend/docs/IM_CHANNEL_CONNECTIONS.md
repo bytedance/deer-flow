@@ -6,9 +6,27 @@ DeerFlow supports user-owned IM channel connections for Telegram, Slack, and Dis
 
 Enable the top-level `channel_connections` block in `config.yaml`:
 
+Local/private deployment:
+
 ```yaml
 channel_connections:
   enabled: true
+  mode: local
+
+  telegram:
+    enabled: true
+    bot_token: $TELEGRAM_BOT_TOKEN
+    bot_username: $TELEGRAM_BOT_USERNAME
+```
+
+This mode is intended for a DeerFlow instance running on a developer machine or a private network. Telegram uses the existing long-polling worker, so it does not need a public URL. The frontend `Connect` button returns a Telegram deep link and stores a one-time state locally so the `/start` message can bind the Telegram chat to the current DeerFlow user.
+
+Public deployment:
+
+```yaml
+channel_connections:
+  enabled: true
+  mode: public
   public_base_url: https://deerflow.example.com
   encryption_key: $DEER_FLOW_CHANNEL_CONNECTIONS_KEY
 
@@ -33,7 +51,9 @@ channel_connections:
     permissions: "274877975552"
 ```
 
-`public_base_url` must be the externally reachable HTTPS origin used by provider callbacks and webhooks. `encryption_key` encrypts provider tokens at rest with Fernet. Keep it stable; v1 does not support transparent key rotation, so changing it requires users to reconnect.
+`public_base_url` is only required for public callback/webhook deployments. If it is omitted, OAuth redirect URLs are built from the current request origin, which is suitable for localhost development when the provider allows an exact localhost redirect URI. Provider-to-server webhooks such as Slack HTTP Events and Telegram webhooks still need a reachable public URL or a tunnel.
+
+`encryption_key` encrypts provider tokens at rest with Fernet. Telegram deep-link binding does not store user provider tokens, so it can run locally without this key. Slack and Discord connections store OAuth credentials and require a stable key; v1 does not support transparent key rotation, so changing it requires users to reconnect.
 
 ## Frontend Flow
 
@@ -44,10 +64,10 @@ The workspace sidebar shows a Channels group with Telegram, Slack, and Discord. 
 Telegram:
 
 - Register a bot with BotFather.
-- Configure the bot username, bot token, and a random webhook secret.
+- Configure the bot username and bot token.
 - Users connect with a deep link: `https://t.me/<bot_username>?start=<state>`.
-- Production webhook path: `POST /api/channels/webhooks/telegram`, protected by `X-Telegram-Bot-Api-Secret-Token`.
-- Local/self-hosted long polling still works through the existing Telegram channel worker.
+- Local/private delivery uses the existing long-polling channel worker and does not require `public_base_url`.
+- Production webhook path: `POST /api/channels/webhooks/telegram`, protected by `X-Telegram-Bot-Api-Secret-Token`; webhook delivery requires `webhook_secret` and a public `public_base_url`.
 
 Slack:
 
@@ -57,11 +77,12 @@ Slack:
 - Required signing secret: Slack's request signing secret, not the deprecated verification token.
 - Suggested MVP bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`.
 - Slack events are signature-verified, deduplicated by `event_id`, and then routed to a matching user connection.
+- In local/private mode, Slack HTTP Events are reported as unavailable unless `public_base_url` is set to a tunnel or public HTTPS URL.
 
 Discord:
 
 - Create a Discord application and bot.
-- Redirect URL: `https://<public_base_url>/api/channels/discord/callback`.
+- Redirect URL: `https://<public_base_url>/api/channels/discord/callback` in public mode, or the matching localhost callback URL in local development if the Discord application is configured to allow it.
 - DeerFlow starts OAuth with `identify guilds bot applications.commands` and the configured bot permissions.
 - The Discord Gateway is still handled by `discord.py`; message content may require the privileged Message Content Intent depending on your bot setup.
 

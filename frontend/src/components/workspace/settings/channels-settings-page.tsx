@@ -7,6 +7,7 @@ import {
   PlugIcon,
   UnplugIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,6 +65,9 @@ function getStatusLabel(
   if (!provider.configured) {
     return t.channels.unconfigured;
   }
+  if (provider.unavailable_reason) {
+    return t.channels.unavailableShort;
+  }
   const status = connection?.status ?? provider.connection_status;
   if (status === "connected") {
     return t.channels.connected;
@@ -77,6 +81,19 @@ function getStatusLabel(
   return t.channels.notConnected;
 }
 
+function getProviderDisabledReason(
+  provider: ChannelProvider,
+  t: ReturnType<typeof useI18n>["t"],
+): string | undefined {
+  if (!provider.enabled) {
+    return t.channels.disabled;
+  }
+  if (!provider.configured) {
+    return t.channels.unconfigured;
+  }
+  return provider.unavailable_reason ?? undefined;
+}
+
 function ChannelProviderItem({
   provider,
   connection,
@@ -88,7 +105,9 @@ function ChannelProviderItem({
   const connectMutation = useConnectChannelProvider();
   const disconnectMutation = useDisconnectChannelConnection();
   const isConnected = connection?.status === "connected";
-  const canConnect = provider.enabled && provider.configured && !isConnected;
+  const canConnect =
+    (provider.connectable ?? (provider.enabled && provider.configured)) &&
+    !isConnected;
   const isConnecting =
     connectMutation.isPending &&
     connectMutation.variables === provider.provider;
@@ -97,6 +116,7 @@ function ChannelProviderItem({
     disconnectMutation.variables === connection?.id;
   const connectionLabel = connection ? getConnectionLabel(connection) : null;
   const statusLabel = getStatusLabel(provider, connection, t);
+  const unavailableReason = getProviderDisabledReason(provider, t);
 
   return (
     <Item variant="outline" className="w-full items-start">
@@ -117,6 +137,9 @@ function ChannelProviderItem({
         <ItemDescription className="line-clamp-none">
           {getProviderDescription(provider, t.channels.descriptions)}
           {connectionLabel ? ` ${t.channels.connectedAs(connectionLabel)}` : ""}
+          {!isConnected && provider.unavailable_reason
+            ? ` ${provider.unavailable_reason}`
+            : ""}
         </ItemDescription>
       </ItemContent>
       <ItemActions className="ml-auto">
@@ -140,13 +163,20 @@ function ChannelProviderItem({
             type="button"
             size="sm"
             disabled={!canConnect || isConnecting}
-            title={!provider.configured ? t.channels.unconfigured : undefined}
+            title={unavailableReason}
             onClick={() => {
               const connectWindow = prepareConnectWindow();
               void connectMutation
                 .mutateAsync(provider.provider)
                 .then((result) => openConnectUrl(result.url, connectWindow))
-                .catch(() => closeConnectWindow(connectWindow));
+                .catch((error) => {
+                  closeConnectWindow(connectWindow);
+                  toast.error(
+                    error instanceof Error
+                      ? error.message
+                      : t.channels.unavailable,
+                  );
+                });
             }}
           >
             {isConnecting ? (

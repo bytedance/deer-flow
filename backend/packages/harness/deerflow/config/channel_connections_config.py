@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
+
+ChannelConnectionMode = Literal["local", "private", "public"]
+TelegramDeliveryMode = Literal["polling", "webhook"]
 
 
 class SlackChannelConnectionConfig(BaseModel):
@@ -29,13 +34,16 @@ class TelegramChannelConnectionConfig(BaseModel):
     enabled: bool = False
     bot_token: str = ""
     bot_username: str = ""
+    delivery: TelegramDeliveryMode = "polling"
     webhook_secret: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
 
     @property
     def configured(self) -> bool:
-        return bool(self.bot_token and self.bot_username and self.webhook_secret)
+        if self.delivery == "webhook":
+            return bool(self.bot_token and self.bot_username and self.webhook_secret)
+        return bool(self.bot_token and self.bot_username)
 
 
 class DiscordChannelConnectionConfig(BaseModel):
@@ -55,6 +63,7 @@ class ChannelConnectionsConfig(BaseModel):
     """Top-level config for browser-connectable IM channels."""
 
     enabled: bool = False
+    mode: ChannelConnectionMode = "local"
     public_base_url: str = ""
     encryption_key: str = ""
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)
@@ -64,10 +73,8 @@ class ChannelConnectionsConfig(BaseModel):
     @model_validator(mode="after")
     def _require_shared_config_when_enabled(self) -> ChannelConnectionsConfig:
         missing: list[str] = []
-        if self.enabled and not self.public_base_url:
-            missing.append("public_base_url is required when channel_connections.enabled is true")
-        if self.enabled and not self.encryption_key:
-            missing.append("encryption_key is required when channel_connections.enabled is true")
+        if self.enabled and self.mode == "public" and not self.public_base_url:
+            missing.append("public_base_url is required when channel_connections.mode is public")
         if missing:
             raise ValueError("; ".join(missing))
         return self

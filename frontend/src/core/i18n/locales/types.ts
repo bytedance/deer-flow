@@ -199,6 +199,7 @@ export interface Translations {
     disabled: string;
     unconfigured: string;
     unavailable: string;
+    unavailableShort: string;
     descriptions: Record<string, string>;
     connectedAs: (name: string) => string;
   };

@@ -1143,24 +1143,30 @@ run_events:
 #   socket-mode workers.
 #
 # Security notes:
-# - `enabled: true` requires a public HTTPS base URL for OAuth callbacks and
-#   webhooks.
+# - `mode: local` supports local/private deployments. Telegram deep-link
+#   binding works with long polling and does not require a public URL.
+# - `mode: public` requires `public_base_url`, an externally reachable HTTPS
+#   origin for provider callbacks and webhooks. Slack HTTP Events and Telegram
+#   webhooks need this, or a tunnel, even when DeerFlow itself runs locally.
 # - `encryption_key` is used to encrypt provider tokens at rest. Generate a
-#   long random value and keep it stable. V1 does not support transparent key
-#   rotation; changing it requires users to reconnect.
+#   long random value and keep it stable. Telegram deep-link binding can run
+#   without it because it does not store per-user provider tokens. Slack and
+#   Discord connections require it.
 # - OAuth callbacks and provider webhooks are public routes, but they are
 #   protected by one-time state tokens or provider signatures/secrets.
 #
 # channel_connections:
 #   enabled: false
-#   public_base_url: https://deerflow.example.com
-#   encryption_key: $DEER_FLOW_CHANNEL_CONNECTIONS_KEY
+#   mode: local
+#   # public_base_url: https://deerflow.example.com
+#   # encryption_key: $DEER_FLOW_CHANNEL_CONNECTIONS_KEY
 #
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     bot_username: $TELEGRAM_BOT_USERNAME
-#     webhook_secret: $TELEGRAM_WEBHOOK_SECRET
+#     delivery: polling
+#     # webhook_secret: $TELEGRAM_WEBHOOK_SECRET
 #
 #   slack:
 #     enabled: false

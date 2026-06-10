@@ -5,6 +5,8 @@ export interface ChannelProvider {
   display_name: string;
   enabled: boolean;
   configured: boolean;
+  connectable?: boolean;
+  unavailable_reason?: string | null;
   auth_mode: string;
   connection_status: string;
 }

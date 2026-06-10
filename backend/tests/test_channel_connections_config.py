@@ -17,13 +17,35 @@ def test_channel_connections_disabled_by_default():
     assert config.discord.enabled is False
 
 
-def test_enabled_channel_connections_require_public_url_and_encryption_key():
-    with pytest.raises(ValidationError) as excinfo:
-        ChannelConnectionsConfig(enabled=True)
+def test_enabled_channel_connections_can_run_in_local_mode_without_public_url_or_encryption_key():
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "mode": "local",
+            "telegram": {
+                "enabled": True,
+                "bot_token": "telegram-token",
+                "bot_username": "deerflow_bot",
+            },
+        }
+    )
 
-    message = str(excinfo.value)
-    assert "public_base_url is required" in message
-    assert "encryption_key is required" in message
+    assert config.public_base_url == ""
+    assert config.encryption_key == ""
+    assert config.provider_status("telegram") == {"enabled": True, "configured": True}
+
+
+def test_public_mode_requires_public_url():
+    with pytest.raises(ValidationError) as excinfo:
+        ChannelConnectionsConfig.model_validate(
+            {
+                "enabled": True,
+                "mode": "public",
+                "encryption_key": "test-secret",
+            }
+        )
+
+    assert "public_base_url is required when channel_connections.mode is public" in str(excinfo.value)
 
 
 def test_provider_config_completeness_is_reported_without_crashing():

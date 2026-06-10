@@ -402,7 +402,9 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming)
 
 **User-owned channel connections** (`config.yaml` -> `channel_connections`):
-- Disabled by default. When enabled, `public_base_url` and `encryption_key` are required.
+- Disabled by default. `mode: local` is the default for local/private deployments; `mode: public` requires `public_base_url`.
+- `public_base_url` is only required for provider-to-server public callbacks/webhooks such as Slack HTTP Events and Telegram webhooks. If it is omitted, OAuth redirect URLs fall back to the current request origin for localhost/private testing.
+- `encryption_key` is required before storing provider OAuth credentials for Slack and Discord. Telegram deep-link binding can run without it because it stores only connection identity/state, not per-user provider tokens.
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
 - Public provider routes: Slack/Discord OAuth callbacks and Slack/Telegram webhooks are explicitly allowed through AuthMiddleware; webhooks are exempt from CSRF because they are provider-to-server calls and validate Slack signatures or Telegram secret tokens.
 - Slack HTTP Events mode uses per-connection encrypted bot tokens for replies. Legacy Slack Socket Mode remains available through the `channels.slack` config.
