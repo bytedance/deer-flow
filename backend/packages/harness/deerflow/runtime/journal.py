@@ -92,6 +92,11 @@ class RunJournal(BaseCallbackHandler):
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
 
+        # Partial message tracking — populated by on_llm_new_token, cleared by on_llm_end.
+        # Anything remaining when flush_partial_messages() is called was interrupted.
+        self._partial_llm_tokens: dict[str, list[str]] = {}
+        self._partial_llm_tags: dict[str, list[str] | None] = {}
+
         # LLM request/response tracking
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
@@ -240,6 +245,14 @@ class RunJournal(BaseCallbackHandler):
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
 
+    def on_llm_new_token(self, token: str, *, run_id: UUID, tags: list[str] | None = None, **kwargs: Any) -> None:
+        rid = str(run_id)
+        if rid not in self._partial_llm_tokens:
+            self._partial_llm_tokens[rid] = []
+            self._partial_llm_tags[rid] = tags
+        if token:
+            self._partial_llm_tokens[rid].append(token)
+
     def on_llm_end(
         self,
         response: Any,
@@ -331,6 +344,11 @@ class RunJournal(BaseCallbackHandler):
 
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
+
+        # This LLM call completed — clear any partial tracking.
+        rid = str(run_id)
+        self._partial_llm_tokens.pop(rid, None)
+        self._partial_llm_tags.pop(rid, None)
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
@@ -506,6 +524,28 @@ class RunJournal(BaseCallbackHandler):
             category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def flush_partial_messages(self) -> None:
+        """Write partial AI messages for LLM calls that were interrupted before completion.
+
+        Called by the worker when a run ends with status=interrupted so that the
+        partial response is preserved in the event store and visible in run history.
+        """
+        for rid, tokens in list(self._partial_llm_tokens.items()):
+            content = "".join(tokens)
+            if not content:
+                continue
+            tags = self._partial_llm_tags.get(rid)
+            caller = self._identify_caller(tags)
+            partial_msg = AIMessage(content=content)
+            self._put(
+                event_type="llm.ai.partial",
+                category="message",
+                content=partial_msg.model_dump(),
+                metadata={"caller": caller, "partial": True},
+            )
+        self._partial_llm_tokens.clear()
+        self._partial_llm_tags.clear()
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

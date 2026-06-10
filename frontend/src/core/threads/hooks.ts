@@ -463,6 +463,7 @@ export function useThreadStream({
         messagesRef.current = [];
       }
 
+
       const updates: Array<Partial<AgentThreadState> | null> = Object.values(
         data || {},
       );
@@ -492,6 +493,19 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "messages_archived" &&
+        "messages" in event &&
+        Array.isArray(event.messages)
+      ) {
+        appendMessages(event.messages as Message[]);
+        messagesRef.current = [];
+        return;
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&
@@ -559,7 +573,6 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
-  const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
   // from "messages-tuple" events arrive before the input human message from
@@ -567,7 +580,6 @@ export function useThreadStream({
   const prevHumanMsgCountRef = useRef(humanMessageCount);
 
   latestMessageCountsRef.current = { humanMessageCount };
-  summarizedRef.current ??= new Set<string>();
 
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
@@ -999,6 +1011,31 @@ export function useThreadHistory(threadId: string) {
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
+
+  // Load archive on mount so page reloads show the full pre-summarization history.
+  useEffect(() => {
+    if (!threadId) return;
+    const requestThreadId = threadId;
+    fetch(
+      `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/message-archive`,
+      {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      },
+    )
+      .then((res) => res.json())
+      .then((result: { data: Message[] }) => {
+        const archived = result.data ?? [];
+        if (archived.length > 0 && threadIdRef.current === requestThreadId) {
+          setMessages((prev) =>
+            dedupeMessagesByIdentity([...archived, ...prev]),
+          );
+        }
+      })
+      .catch(() => {});
+  }, [threadId]);
+
   const hasMore = indexRef.current >= 0 || !runs.data;
   return {
     runs: runs.data,

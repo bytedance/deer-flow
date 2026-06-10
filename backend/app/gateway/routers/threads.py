@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
@@ -25,7 +26,7 @@ from app.gateway.deps import get_checkpointer
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
@@ -605,6 +606,7 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
 
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
+
     try:
         async for checkpoint_tuple in checkpointer.alist(config, limit=body.limit):
             ckpt_config = getattr(checkpoint_tuple, "config", {})
@@ -658,3 +660,31 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
         raise HTTPException(status_code=500, detail="Failed to get thread history")
 
     return entries
+
+
+@router.get("/{thread_id}/message-archive")
+@require_permission("threads", "read", owner_check=True)
+async def get_message_archive(thread_id: str, request: Request) -> dict:
+    """Return messages archived by summarization. Empty list if thread has never been summarized."""
+    user_id = get_effective_user_id()
+    try:
+        archive_path = get_paths().thread_dir(thread_id, user_id=user_id) / "message_archive.jsonl"
+    except ValueError:
+        return {"data": [], "has_more": False}
+    if not archive_path.exists():
+        return {"data": [], "has_more": False}
+    messages: list[Any] = []
+    try:
+        with archive_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    messages.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning("Skipping corrupt line in message archive for thread %s", sanitize_log_param(thread_id))
+    except OSError:
+        logger.exception("Failed to read message archive for thread %s", sanitize_log_param(thread_id))
+        return {"data": [], "has_more": False}
+    return {"data": messages, "has_more": False}
