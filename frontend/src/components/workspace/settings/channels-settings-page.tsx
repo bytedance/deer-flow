@@ -143,11 +143,10 @@ function ChannelProviderItem({
             title={!provider.configured ? t.channels.unconfigured : undefined}
             onClick={() => {
               const connectWindow = prepareConnectWindow();
-              connectMutation.mutate(provider.provider, {
-                onSuccess: (result) =>
-                  openConnectUrl(result.url, connectWindow),
-                onError: () => closeConnectWindow(connectWindow),
-              });
+              void connectMutation
+                .mutateAsync(provider.provider)
+                .then((result) => openConnectUrl(result.url, connectWindow))
+                .catch(() => closeConnectWindow(connectWindow));
             }}
           >
             {isConnecting ? (

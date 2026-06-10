@@ -96,11 +96,12 @@ export function WorkspaceChannelsList() {
                   }
                   onClick={() => {
                     const connectWindow = prepareConnectWindow();
-                    connectMutation.mutate(provider.provider, {
-                      onSuccess: (result) =>
+                    void connectMutation
+                      .mutateAsync(provider.provider)
+                      .then((result) =>
                         openConnectUrl(result.url, connectWindow),
-                      onError: () => closeConnectWindow(connectWindow),
-                    });
+                      )
+                      .catch(() => closeConnectWindow(connectWindow));
                   }}
                 >
                   {isPending ? (
