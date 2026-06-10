@@ -341,8 +341,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
     - Re-issues session cookie with new token_version
     """
     from app.gateway.auth.password import hash_password_async, verify_password_async
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED
 
     user = await get_current_user_from_request(request)
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_AUTH_DISABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.INVALID_CREDENTIALS,
+                message="Password changes are not available when DEER_FLOW_AUTH_DISABLED=1.",
+            ).model_dump(),
+        )
 
     if user.password_hash is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="OAuth users cannot change password").model_dump())
