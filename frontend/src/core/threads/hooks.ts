@@ -169,8 +169,20 @@ export function buildRunMessagesUrl(
   runId: string,
   beforeSeq?: number,
 ) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
+  const isAbsoluteUrl = /^[a-z][a-z\d+\-.]*:\/\//i.test(normalizedBaseUrl);
+  if (!isAbsoluteUrl) {
+    const rootRelativeBaseUrl =
+      normalizedBaseUrl && !normalizedBaseUrl.startsWith("/")
+        ? `/${normalizedBaseUrl}`
+        : normalizedBaseUrl;
+    const url = `${rootRelativeBaseUrl}${path}`;
+    if (beforeSeq !== undefined) {
+      return `${url}?${new URLSearchParams({ before_seq: String(beforeSeq) })}`;
+    }
+    return url;
+  }
   const url = new URL(
     `${normalizedBaseUrl}${path}`,
     typeof window !== "undefined" ? window.location.origin : "http://localhost",
@@ -178,7 +190,7 @@ export function buildRunMessagesUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
-  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
+  return url.toString();
 }
 
 export function mergeMessages(
@@ -927,10 +939,10 @@ export function useThreadHistory(threadId: string) {
         if (threadIdRef.current !== requestThreadId) {
           return;
         }
+        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
-        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
           pendingLoadRef.current = true;

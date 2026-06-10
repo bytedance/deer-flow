@@ -323,6 +323,39 @@ test("buildRunMessagesUrl omits before_seq when loading the latest page", () => 
   ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
 });
 
+test("buildRunMessagesUrl supports the default relative backend URL", () => {
+  expect(buildRunMessagesUrl("", "thread-1", "run-1", 18)).toBe(
+    "/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(buildRunMessagesUrl("", "thread-1", "run-1")).toBe(
+    "/api/threads/thread-1/runs/run-1/messages",
+  );
+});
+
+test("buildRunMessagesUrl preserves configured backend base paths", () => {
+  expect(buildRunMessagesUrl("/backend/", "thread-1", "run-1", 18)).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(buildRunMessagesUrl("/backend", "thread-1", "run-1")).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages",
+  );
+  expect(buildRunMessagesUrl("backend/", "thread-1", "run-1", 18)).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages?before_seq=18",
+  );
+  expect(buildRunMessagesUrl("backend", "thread-1", "run-1")).toBe(
+    "/backend/api/threads/thread-1/runs/run-1/messages",
+  );
+  expect(
+    buildRunMessagesUrl(
+      "https://api.example.test/backend/",
+      "thread-1",
+      "run-1",
+    ),
+  ).toBe(
+    "https://api.example.test/backend/api/threads/thread-1/runs/run-1/messages",
+  );
+});
+
 test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
