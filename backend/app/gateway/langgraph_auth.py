@@ -20,6 +20,7 @@ from langgraph_sdk import Auth
 
 from app.gateway.auth.errors import TokenError
 from app.gateway.auth.jwt import decode_token
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
 from app.gateway.deps import get_local_provider
 
 auth = Auth()
@@ -36,6 +37,9 @@ def _check_csrf(request) -> None:
     """
     method = getattr(request, "method", "") or ""
     if method.upper() not in _CSRF_METHODS:
+        return
+
+    if is_auth_disabled():
         return
 
     cookie_token = request.cookies.get("csrf_token")
@@ -65,6 +69,9 @@ async def authenticate(request):
     # CSRF check before authentication so forged cross-site requests
     # are rejected early, even if the cookie carries a valid JWT.
     _check_csrf(request)
+
+    if is_auth_disabled():
+        return AUTH_DISABLED_USER_ID
 
     token = request.cookies.get("access_token")
     if not token:

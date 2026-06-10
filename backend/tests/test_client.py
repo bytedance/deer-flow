@@ -928,7 +928,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -953,7 +953,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer),
@@ -978,7 +978,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", side_effect=fake_build_middlewares),
+            patch("deerflow.client.build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -997,7 +997,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
@@ -1490,6 +1490,7 @@ class TestUploads:
             assert result["success"] is True
             assert len(result["files"]) == 1
             assert result["files"][0]["filename"] == "test.txt"
+            assert result["files"][0]["size"] == len("hello")
             assert "artifact_url" in result["files"][0]
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
@@ -1569,6 +1570,8 @@ class TestUploads:
             assert len(result["files"]) == 2
             names = {f["filename"] for f in result["files"]}
             assert names == {"a.txt", "b.txt"}
+            sizes = {f["filename"]: f["size"] for f in result["files"]}
+            assert sizes == {"a.txt": 1, "b.txt": 2}
             # Verify artifact_url is present
             for f in result["files"]:
                 assert "artifact_url" in f
@@ -1972,7 +1975,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -2000,7 +2003,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -2025,7 +2028,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -2476,6 +2479,7 @@ class TestGatewayConformance:
         parsed = UploadResponse(**result)
         assert parsed.success is True
         assert len(parsed.files) == 1
+        assert parsed.files[0].size == len("hello")
 
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()

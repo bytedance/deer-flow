@@ -54,6 +54,23 @@ def test_search_invalid_regex_falls_back_to_literal():
     assert cat.search("zzz(") == []
 
 
+def test_search_empty_query_returns_empty(catalog):
+    # An empty / whitespace-only query is meaningless; rather than let the empty
+    # regex match every tool, search() returns nothing so the model gets a clear
+    # "no match" signal and re-queries instead of acting on noise.
+    assert catalog.search("") == []
+    assert catalog.search("   ") == []
+
+
+def test_search_bare_plus_returns_empty(catalog):
+    # A "+" prefix with no required token is malformed model input. It must
+    # return no matches, not raise IndexError on parts[0]. " + " strips to "+",
+    # so it routes here too and must be handled the same way.
+    assert catalog.search("+") == []
+    assert catalog.search(" + ") == []
+    assert catalog.search("+   ") == []
+
+
 def test_hash_stable_across_instances():
     c1 = DeferredToolCatalog((alpha_search, beta_translate))
     c2 = DeferredToolCatalog((beta_translate, alpha_search))

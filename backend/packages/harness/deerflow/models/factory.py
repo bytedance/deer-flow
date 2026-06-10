@@ -47,6 +47,38 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
         model_settings_from_config["stream_usage"] = True
 
 
+# Default chunk-gap budget for OpenAI-compatible streaming responses.
+#
+# langchain-openai raises ``StreamChunkTimeoutError`` after this many seconds
+# without receiving a chunk. Its own default is 60s, which is too aggressive for
+# reasoning models (DeepSeek-R1, Doubao-thinking, GPT-5) whose first chunk can
+# legitimately take 90~150s. We default to 240s so the streaming layer rarely
+# trips on long thinking pauses; the LLMErrorHandlingMiddleware still retries
+# (budget=2) if a real stall happens. Users can override per-model in config.yaml.
+_DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS: float = 240.0
+
+
+def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from_config: dict) -> None:
+    """Inject a generous ``stream_chunk_timeout`` for OpenAI-compatible clients.
+
+    The ``stream_chunk_timeout`` kwarg is specific to ``langchain_openai:ChatOpenAI``
+    and is rejected by other providers' constructors as an unexpected keyword
+    argument. Behaviour:
+
+    * OpenAI-compatible path: an explicit value in ``config.yaml`` is preserved.
+      An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
+      and therefore treated as "unset", so the default is injected.
+    * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
+      constructor (which would raise ``TypeError: unexpected keyword argument``).
+    """
+    if model_use_path != "langchain_openai:ChatOpenAI":
+        model_settings_from_config.pop("stream_chunk_timeout", None)
+        return
+    if "stream_chunk_timeout" in model_settings_from_config:
+        return
+    model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -128,6 +160,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         model_settings_from_config.pop("reasoning_effort", None)
 
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
+    _apply_stream_chunk_timeout_default(model_config.use, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel

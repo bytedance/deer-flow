@@ -228,10 +228,13 @@ Get current MCP server configurations.
 GET /api/mcp/config
 ```
 
+Requires an authenticated admin session. Sensitive env/header/OAuth secret
+values are masked in the response.
+
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -255,10 +258,15 @@ PUT /api/mcp/config
 Content-Type: application/json
 ```
 
+Requires an authenticated admin session. API-managed `stdio` MCP servers may
+only use allowed executable names for `command` (default: `npx`, `uvx`). Set
+`DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` to a comma-separated list when a
+deployment needs additional trusted launchers.
+
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -276,8 +284,18 @@ Content-Type: application/json
 **Response:**
 ```json
 {
-  "success": true,
-  "message": "MCP configuration updated"
+  "mcp_servers": {
+    "github": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "***"
+      },
+      "description": "GitHub operations"
+    }
+  }
 }
 ```
 

@@ -645,6 +645,98 @@ class RunManager:
             self._runs.pop(run_id, None)
         logger.debug("Run record %s cleaned up", run_id)
 
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Cancel and bounded-await all in-flight runs on process shutdown.
+
+        Chat runs execute in fire-and-forget background ``asyncio`` tasks that
+        write checkpoints through a shared checkpointer. On shutdown the
+        checkpointer's resources (e.g. the postgres connection pool owned by the
+        gateway's ``AsyncExitStack``) are torn down; if a run task is still
+        mid-graph at that point, langgraph's
+        ``AsyncPregelLoop._checkpointer_put_after_previous`` runs its
+        ``finally: await checkpointer.aput(...)`` against the closed pool. Because
+        that put runs in a langgraph-internal task (not on ``run_agent``'s call
+        stack), the resulting ``psycopg_pool.PoolClosed`` is not catchable by the
+        worker and surfaces as an unhandled exception during ``asyncio.run()``
+        shutdown (bytedance/deer-flow issue #3373).
+
+        Draining in-flight runs *before* the checkpointer is closed lets each
+        run that settles within ``timeout`` flush its final checkpoint while
+        resources are still open. Only runs that do **not** settle on their own
+        are marked ``interrupted`` — a run that completes (e.g. ``success``)
+        during the drain keeps its real terminal status instead of being
+        blanket-overwritten. The whole drain, including the trailing status
+        persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
+        slow store under DB pressure) cannot hang worker shutdown — the
+        precondition for the signal-reentrancy deadlock guarded by
+        ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
+        after ``timeout`` are logged and may still race teardown.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async with self._lock:
+            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            for record in inflight:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                record.task.cancel()  # type: ignore[union-attr]  # filtered above
+                # Status is decided AFTER the drain (below), not here: a run that
+                # completes on its own during the drain must keep its real status.
+
+        if not inflight:
+            return
+
+        tasks = [record.task for record in inflight]
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+
+        # Only mark/persist ``interrupted`` for runs that did not settle on their
+        # own (still pending after the timeout, or ended cancelled). A run that
+        # finished normally during the drain keeps the status it set for itself.
+        to_persist: list[RunRecord] = []
+        async with self._lock:
+            for record in inflight:
+                task = record.task
+                if task not in pending and not task.cancelled():
+                    # Completed on its own — retrieve any surfaced exception so it
+                    # is not reported as "never retrieved", and keep its status.
+                    task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    continue
+                if record.status in (RunStatus.pending, RunStatus.running):
+                    record.status = RunStatus.interrupted
+                    record.updated_at = _now_iso()
+                to_persist.append(record)
+
+        # Bound the trailing status persistence within the remaining budget so a
+        # slow store (``_call_store_with_retry`` can back off under DB pressure)
+        # cannot push shutdown past ``timeout``.
+        if to_persist:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("Run drain budget exhausted before persisting %d interrupted run(s) on shutdown", len(to_persist))
+            else:
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    logger.warning("Run drain status persistence exceeded the %.1fs budget; %d record(s) may not be persisted", timeout, len(to_persist))
+                else:
+                    # ``_persist_status`` is best-effort: it catches and logs its
+                    # own failures, returning ``False``. Inspect the aggregate so a
+                    # partial failure is surfaced at shutdown level (with the
+                    # run_id) instead of being silently swallowed by the gather.
+                    for record, result in zip(to_persist, results):
+                        if isinstance(result, Exception):
+                            logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
+                        elif result is False:
+                            logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
+
+        if pending:
+            logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
+        logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+
 
 class ConflictError(Exception):
     """Raised when multitask_strategy=reject and thread has inflight runs."""
