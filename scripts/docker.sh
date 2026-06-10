@@ -41,6 +41,24 @@ load_proxy_env_from_dotenv() {
     done
 }
 
+ensure_env_file() {
+    local example_file="$1"
+    local env_file="$2"
+    local label="$3"
+
+    if [ -f "$env_file" ]; then
+        return
+    fi
+
+    if [ ! -f "$example_file" ]; then
+        echo -e "${YELLOW}✗ $label not found and no example file to copy from: $example_file${NC}"
+        exit 1
+    fi
+
+    cp "$example_file" "$env_file"
+    echo -e "${BLUE}Created $label from example${NC}"
+}
+
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
     local sandbox_use=""
@@ -245,6 +263,9 @@ start() {
             echo -e "${BLUE}Created empty extensions_config.json${NC}"
         fi
     fi
+
+    ensure_env_file "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env" ".env"
+    ensure_env_file "$PROJECT_ROOT/frontend/.env.example" "$PROJECT_ROOT/frontend/.env" "frontend/.env"
 
     load_proxy_env_from_dotenv
 
