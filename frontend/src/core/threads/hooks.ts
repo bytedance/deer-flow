@@ -542,6 +542,15 @@ export function useThreadStream({
           .filter((id): id is string => Boolean(id)),
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      // Refresh the thread's run list so useThreadHistory can discover runs
+      // that were created during this streaming session (e.g. runs split by
+      // context summarization). Without this, hasMore stays false and the
+      // user cannot scroll-to-top to load older history on the active page.
+      if (threadIdRef.current) {
+        void queryClient.invalidateQueries({
+          queryKey: ["thread", threadIdRef.current],
+        });
+      }
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
