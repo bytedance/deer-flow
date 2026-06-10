@@ -313,6 +313,56 @@ export function upsertThreadInSearchCache(
   );
 }
 
+export function upsertThreadInInfiniteCache(
+  queryClient: QueryClient,
+  thread: AgentThread,
+) {
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) => {
+      if (!oldData) {
+        return oldData;
+      }
+
+      const merged = oldData.pages.map((page) =>
+        page.map((t) =>
+          t.thread_id === thread.thread_id
+            ? {
+                ...thread,
+                ...t,
+                metadata: {
+                  ...(thread.metadata ?? {}),
+                  ...(t.metadata ?? {}),
+                },
+                values: {
+                  ...thread.values,
+                  ...t.values,
+                },
+              }
+            : t,
+        ),
+      );
+
+      const exists = merged.some((page) =>
+        page.some((t) => t.thread_id === thread.thread_id),
+      );
+      if (exists) {
+        return { ...oldData, pages: merged };
+      }
+
+      const firstPage = merged[0] ?? [];
+      const restPages = merged.slice(1);
+      return {
+        ...oldData,
+        pages: [[thread, ...firstPage], ...restPages],
+      };
+    },
+  );
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -407,6 +457,19 @@ export function useThreadStream({
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
+        thread_id: meta.thread_id,
+        created_at: now,
+        updated_at: now,
+        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        status: "busy",
+        values: {
+          title: t.pages.newChat,
+          messages: [],
+          artifacts: [],
+        },
+        interrupts: {},
+      });
+      upsertThreadInInfiniteCache(queryClient, {
         thread_id: meta.thread_id,
         created_at: now,
         updated_at: now,

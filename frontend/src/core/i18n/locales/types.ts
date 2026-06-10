@@ -185,6 +185,7 @@ export interface Translations {
     searchChats: string;
     loadMoreToSearch: string;
     loadingMore: string;
+    loadOlderChats: string;
   };
 
   // Page titles (document title)

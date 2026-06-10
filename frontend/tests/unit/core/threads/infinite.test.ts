@@ -1,11 +1,13 @@
-import type { InfiniteData } from "@tanstack/react-query";
+import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 import { describe, expect, test } from "vitest";
 
 import {
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   INFINITE_THREADS_PAGE_SIZE,
+  INFINITE_THREADS_QUERY_KEY_PREFIX,
   mapInfiniteThreadsCache,
+  upsertThreadInInfiniteCache,
 } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 
@@ -171,5 +173,56 @@ describe("filterInfiniteThreadsCache", () => {
     // useDeleteThread invalidates the query in onSettled, so pages are
     // refetched from offset 0 rather than relying on this number.
     expect(recomputed).toBe(99);
+  });
+});
+
+describe("upsertThreadInInfiniteCache", () => {
+  function seedClient(initial?: InfiniteData<AgentThread[]>): QueryClient {
+    const client = new QueryClient();
+    if (initial) {
+      client.setQueryData([...INFINITE_THREADS_QUERY_KEY_PREFIX, {}], initial);
+    }
+    return client;
+  }
+
+  function readCache(
+    client: QueryClient,
+  ): InfiniteData<AgentThread[]> | undefined {
+    return client.getQueryData([...INFINITE_THREADS_QUERY_KEY_PREFIX, {}]);
+  }
+
+  test("no-op when the infinite cache has not been initialised yet", () => {
+    const client = seedClient();
+    upsertThreadInInfiniteCache(client, makeThread("new"));
+    expect(readCache(client)).toBeUndefined();
+  });
+
+  test("prepends a brand-new thread to the first page", () => {
+    const client = seedClient({
+      pages: [[makeThread("a"), makeThread("b")]],
+      pageParams: [0],
+    });
+    upsertThreadInInfiniteCache(client, makeThread("new"));
+    const cache = readCache(client);
+    expect(cache?.pages[0]?.map((t) => t.thread_id)).toEqual(["new", "a", "b"]);
+  });
+
+  test("merges into the existing entry instead of duplicating it", () => {
+    const existing = makeThread("a", "Old title");
+    const client = seedClient({
+      pages: [[existing, makeThread("b")]],
+      pageParams: [0],
+    });
+    // Simulate an onCreated upsert that races with a thread already in cache:
+    // the cache copy should win for title/metadata (it represents later state),
+    // but no duplicate row should appear.
+    upsertThreadInInfiniteCache(client, {
+      ...makeThread("a", "New title"),
+      status: "busy",
+    });
+    const cache = readCache(client);
+    const ids = cache?.pages[0]?.map((t) => t.thread_id);
+    expect(ids).toEqual(["a", "b"]);
+    expect(cache?.pages[0]?.[0]?.values.title).toBe("Old title");
   });
 });

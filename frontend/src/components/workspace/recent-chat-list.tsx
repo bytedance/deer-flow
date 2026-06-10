@@ -296,12 +296,26 @@ export function RecentChatList() {
                 );
               })}
               {hasNextPage && (
-                <div
-                  ref={sentinelRef}
-                  aria-hidden="true"
-                  className="h-px w-full"
-                  data-testid="recent-chat-list-sentinel"
-                />
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mx-2 my-1 w-[calc(100%-1rem)] justify-center text-xs"
+                    onClick={() => void fetchNextPage()}
+                    disabled={isFetchingNextPage}
+                    data-testid="recent-chat-list-load-more"
+                  >
+                    {isFetchingNextPage
+                      ? t.chats.loadingMore
+                      : t.chats.loadOlderChats}
+                  </Button>
+                  <div
+                    ref={sentinelRef}
+                    aria-hidden="true"
+                    className="h-px w-full"
+                    data-testid="recent-chat-list-sentinel"
+                  />
+                </>
               )}
             </div>
           </SidebarMenu>
