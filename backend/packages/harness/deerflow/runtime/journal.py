@@ -86,6 +86,8 @@ class RunJournal(BaseCallbackHandler):
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
         self._msg_count = 0
+        self._had_llm_error_fallback = False
+        self._llm_error_fallback_message: str | None = None
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
@@ -162,7 +164,18 @@ class RunJournal(BaseCallbackHandler):
                 metadata={"caller": caller, **(metadata or {})},
             )
 
-    def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_end(
+        self,
+        outputs: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Nested chain ends fire for internal graph nodes; only the root chain
+        # represents the user-visible run lifecycle.
+        if parent_run_id is not None:
+            return
         self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
@@ -256,6 +269,18 @@ class RunJournal(BaseCallbackHandler):
             # Token usage from message
             usage = getattr(message, "usage_metadata", None)
             usage_dict = dict(usage) if usage else {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+                self._had_llm_error_fallback = True
+                detail = additional_kwargs.get("error_detail")
+                reason = additional_kwargs.get("error_reason")
+                fallback_text = self._message_text(message).strip()
+                if isinstance(detail, str) and detail.strip():
+                    self._llm_error_fallback_message = detail.strip()
+                elif isinstance(reason, str) and reason.strip():
+                    self._llm_error_fallback_message = reason.strip()
+                elif fallback_text:
+                    self._llm_error_fallback_message = fallback_text[:2000]
 
             # Resolve call index
             call_index = self._llm_call_index
@@ -569,3 +594,11 @@ class RunJournal(BaseCallbackHandler):
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    @property
+    def had_llm_error_fallback(self) -> bool:
+        return self._had_llm_error_fallback
+
+    @property
+    def llm_error_fallback_message(self) -> str | None:
+        return self._llm_error_fallback_message

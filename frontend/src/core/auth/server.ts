@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
+import { AUTH_DISABLED_USER, isAuthDisabledMode } from "./auth-disabled-user";
 import { getGatewayConfig } from "./gateway-config";
 import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
@@ -20,15 +21,10 @@ export async function getServerSideUser(): Promise<AuthResult> {
     };
   }
 
-  if (process.env.DEER_FLOW_AUTH_DISABLED === "1") {
+  if (isAuthDisabledMode()) {
     return {
       tag: "authenticated",
-      user: {
-        id: "e2e-user",
-        email: "e2e@test.local",
-        system_role: "admin",
-        needs_setup: false,
-      },
+      user: AUTH_DISABLED_USER,
     };
   }
 

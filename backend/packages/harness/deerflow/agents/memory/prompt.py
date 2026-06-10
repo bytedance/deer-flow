@@ -1,8 +1,13 @@
 """Prompt templates for memory update and injection."""
 
+from __future__ import annotations
+
+import logging
 import math
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     import tiktoken
@@ -160,6 +165,39 @@ Rules:
 Return ONLY valid JSON."""
 
 
+# Module-level tiktoken encoding cache.  Populated lazily on first use;
+# subsequent calls are a dict lookup (no network I/O).  Pre-warming at
+# startup via :func:`warm_tiktoken_cache` avoids blocking a request on the
+# (potentially slow) first ``get_encoding`` call.
+_tiktoken_encoding_cache: dict[str, tiktoken.Encoding] = {}
+
+
+def _get_tiktoken_encoding(encoding_name: str = "cl100k_base") -> tiktoken.Encoding | None:
+    """Return a cached tiktoken encoding, or ``None`` on failure / unavailability.
+
+    On the very first call for a given *encoding_name*, tiktoken may need to
+    download the BPE data from ``openaipublic.blob.core.windows.net``.  In
+    network-restricted environments (e.g. deployments behind the GFW) this
+    download can block for tens of minutes before the OS TCP timeout kicks in.
+    The caller must therefore be prepared for this to block and should run it
+    off the event loop (e.g. via ``asyncio.to_thread``).
+    """
+    if not TIKTOKEN_AVAILABLE:
+        return None
+
+    cached = _tiktoken_encoding_cache.get(encoding_name)
+    if cached is not None:
+        return cached
+
+    try:
+        encoding = tiktoken.get_encoding(encoding_name)
+        _tiktoken_encoding_cache[encoding_name] = encoding
+        return encoding
+    except Exception:
+        logger.warning("Failed to load tiktoken encoding %r; falling back to char-based estimation", encoding_name, exc_info=True)
+        return None
+
+
 def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
     """Count tokens in text using tiktoken.
 
@@ -170,16 +208,28 @@ def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
     Returns:
         The number of tokens in the text.
     """
-    if not TIKTOKEN_AVAILABLE:
+    encoding = _get_tiktoken_encoding(encoding_name)
+    if encoding is None:
         # Fallback to character-based estimation if tiktoken is not available
+        # or the encoding failed to load.
         return len(text) // 4
 
     try:
-        encoding = tiktoken.get_encoding(encoding_name)
         return len(encoding.encode(text))
     except Exception:
         # Fallback to character-based estimation on error
         return len(text) // 4
+
+
+def warm_tiktoken_cache() -> bool:
+    """Pre-warm the tiktoken encoding cache.
+
+    Call at startup (off the event loop) so the first request never blocks
+    on the BPE download.  Returns ``True`` if the encoding was loaded
+    successfully (or was already cached), ``False`` if tiktoken is
+    unavailable or the download failed.
+    """
+    return _get_tiktoken_encoding("cl100k_base") is not None
 
 
 def _coerce_confidence(value: Any, default: float = 0.0) -> float:

@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
 
 import {
   Artifact,
@@ -20,6 +19,7 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -38,6 +38,7 @@ import {
   HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill } from "@/core/skills/api";
@@ -237,14 +238,20 @@ export function ArtifactFileDetail({
                 icon={CopyIcon}
                 label={t.clipboard.copyToClipboard}
                 disabled={!content}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(visibleContent ?? "");
+                onClick={() => {
+                  void (async () => {
+                    const didCopy = await writeTextToClipboard(
+                      visibleContent ?? "",
+                    );
+                    if (!didCopy) {
+                      toast.error(t.clipboard.failedToCopyToClipboard);
+                      return;
+                    }
+
                     toast.success(t.clipboard.copiedToClipboard);
-                  } catch (error) {
-                    toast.error("Failed to copy to clipboard");
-                    console.error(error);
-                  }
+                  })().catch(() => {
+                    toast.error(t.clipboard.failedToCopyToClipboard);
+                  });
                 }}
                 tooltip={t.clipboard.copyToClipboard}
               />
@@ -393,13 +400,13 @@ export function ArtifactFilePreview({
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
-        <Streamdown
+        <ClipboardSafeStreamdown
           className="size-full"
           {...streamdownPlugins}
           components={{ a: ArtifactLink }}
         >
           {content ?? ""}
-        </Streamdown>
+        </ClipboardSafeStreamdown>
       </div>
     );
   }

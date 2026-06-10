@@ -28,6 +28,7 @@ Date-update format:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -42,6 +43,12 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+# Upper bound (seconds) for a single _inject() offload.  If the warm-up at
+# gateway startup failed silently, the first request may still hit a cold
+# tiktoken BPE download that blocks until the OS TCP timeout (~26 min).
+# This cap ensures the request degrades gracefully instead of hanging.
+_INJECT_TIMEOUT_SECONDS = 5.0
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
@@ -201,4 +208,25 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+        # _inject() performs synchronous file I/O (memory JSON loading) and
+        # potentially blocking network calls (tiktoken encoding download on
+        # first use).  Offload to a thread so the event loop is never blocked
+        # — a blocking call here starves all concurrent HTTP handlers (auth,
+        # SSE heartbeats, etc.).  See issue #3402.
+        #
+        # Bounded timeout: if startup warm-up failed silently (e.g. network
+        # blip during deploy), the first request's cold tiktoken download can
+        # block for tens of minutes (OS TCP timeout).  Time-box injection so
+        # the request degrades gracefully (no memory context) rather than
+        # hanging.
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._inject, state),
+                timeout=_INJECT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "DynamicContextMiddleware: injection timed out (%.1fs); skipping memory/date injection for this turn",
+                _INJECT_TIMEOUT_SECONDS,
+            )
+            return None

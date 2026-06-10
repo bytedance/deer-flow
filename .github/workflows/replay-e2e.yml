@@ -1,0 +1,108 @@
+name: Replay E2E (front-back contract)
+
+# Guards the front-back contract via record/replay (no API key in CI):
+#   Layer 1 — backend golden: replay a recorded trace through the real gateway,
+#             assert the SSE event sequence matches the committed golden.
+#   Layer 2 — full-stack render: real Next.js frontend + real gateway (replay
+#             model) + Chromium; assert the replayed turns render in the browser.
+# Triggered by changes on EITHER side of the contract so a backend change can no
+# longer pass without the frontend-facing checks running.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "frontend/**"
+      - "backend/app/gateway/**"
+      - "backend/packages/harness/**"
+      - "backend/tests/fixtures/replay/**"
+      - "backend/tests/replay_provider.py"
+      - "backend/tests/_replay_fixture.py"
+      - "backend/tests/seed_runs_router.py"
+      - "backend/tests/test_replay_golden.py"
+      - "backend/scripts/run_replay_gateway.py"
+      - ".github/workflows/replay-e2e.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "frontend/**"
+      - "backend/app/gateway/**"
+      - "backend/packages/harness/**"
+      - "backend/tests/fixtures/replay/**"
+      - "backend/tests/replay_provider.py"
+      - "backend/tests/_replay_fixture.py"
+      - "backend/tests/seed_runs_router.py"
+      - "backend/tests/test_replay_golden.py"
+      - "backend/scripts/run_replay_gateway.py"
+      - ".github/workflows/replay-e2e.yml"
+
+concurrency:
+  group: replay-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-replay-golden:
+    name: Layer 1 — backend golden (no API key)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Replay golden (backend SSE contract)
+        working-directory: backend
+        run: PYTHONPATH=. uv run pytest tests/test_replay_golden.py -v
+
+  fullstack-replay-render:
+    name: Layer 2 — full-stack render (no API key)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install backend dependencies (replay gateway)
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Use pinned pnpm version
+        run: corepack prepare pnpm@10.26.2 --activate
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install chromium --with-deps
+      - name: Full-stack replay render (DOM assertions are the gate)
+        working-directory: frontend
+        run: pnpm exec playwright test -c playwright.real-backend.config.ts
+      - name: Upload report + render artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: replay-render
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
