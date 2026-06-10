@@ -429,6 +429,12 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
 5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
+**Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
+- `_count_tokens` budgets the injection. In default `tiktoken` mode, the encoding is loaded lazily and cached.
+- Failed tiktoken loads are cached with a timestamp. During the fixed cooldown (`_TIKTOKEN_RETRY_COOLDOWN_S`, 600s), callers fall back to char estimation immediately instead of re-triggering the blocking BPE download; after the cooldown, transient outages can self-heal without a restart.
+- In-flight loads are cached as a LOADING sentinel so concurrent callers fall back instead of spawning more blocking threads.
+- Set `memory.token_counting: char` to skip tiktoken entirely and use the network-free CJK-aware char estimate.
+
 Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
 
 **Configuration** (`config.yaml` → `memory`):
@@ -438,6 +444,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `model_name` - LLM for updates (null = default model)
 - `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
 - `max_injection_tokens` - Token limit for prompt injection (2000)
+- `token_counting` - Token counting strategy for the injection budget: `tiktoken` (default, accurate but may download BPE data from a public endpoint on first use — can block for a long time in network-restricted environments, see issues #3402/#3429) or `char` (network-free CJK-aware char estimate, never touches tiktoken)
 
 ### Reflection System (`packages/harness/deerflow/reflection/`)
 
