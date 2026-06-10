@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
@@ -172,6 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
         logger.info("Configuration loaded successfully")
+        warn_if_auth_disabled_enabled()
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
@@ -182,21 +184,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
     # that may be unreachable in restricted networks — see issue #3402).
-    try:
-        from deerflow.agents.memory.prompt import warm_tiktoken_cache
+    # When memory.token_counting is "char", token counting never touches
+    # tiktoken, so skip the warm-up entirely (avoids even the 5s probe in
+    # network-restricted deployments — see issue #3429).
+    if startup_config.memory.token_counting == "char":
+        logger.info("memory.token_counting='char'; skipping tiktoken warm-up (network-free token estimation)")
+    else:
+        try:
+            from deerflow.agents.memory.prompt import warm_tiktoken_cache
 
-        warmed = await asyncio.wait_for(
-            asyncio.to_thread(warm_tiktoken_cache),
-            timeout=5,
-        )
-        if warmed:
-            logger.info("tiktoken encoding cache warmed successfully")
-        else:
-            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback")
-    except TimeoutError:
-        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback")
-    except Exception:
-        logger.warning("tiktoken warm-up skipped", exc_info=True)
+            warmed = await asyncio.wait_for(
+                asyncio.to_thread(warm_tiktoken_cache),
+                timeout=5,
+            )
+            if warmed:
+                logger.info("tiktoken encoding cache warmed successfully")
+            else:
+                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
+        except TimeoutError:
+            logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
+        except Exception:
+            logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app, startup_config):

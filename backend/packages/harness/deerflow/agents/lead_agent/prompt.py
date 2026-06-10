@@ -586,7 +586,11 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
+        memory_content = format_memory_for_injection(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            use_tiktoken=(config.token_counting == "tiktoken"),
+        )
 
         if not memory_content.strip():
             return ""
@@ -624,6 +628,11 @@ You have access to skills that provide optimized workflows for specific tasks. E
 3. The skill file contains references to external resources under the same folder
 4. Load referenced resources only when needed during execution
 5. Follow the skill's instructions precisely
+
+**Explicit Slash Skill Activation:**
+- If the user starts a request with `/<skill-name>`, that skill was explicitly requested for the current turn.
+- Follow the activated skill before choosing a general workflow.
+- The runtime injects the activated skill content for explicit slash activations; do not call `read_file` for that SKILL.md again unless the injected skill references supporting resources you need.
 
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}

@@ -240,6 +240,9 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    loadMoreToSearch: "加载更多以搜索更早的对话",
+    loadingMore: "正在加载...",
+    loadOlderChats: "加载更早的对话",
   },
 
   // Page titles (document title)

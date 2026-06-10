@@ -147,7 +147,17 @@ class LocalSandboxProvider(SandboxProvider):
                             mount.container_path,
                         )
                         continue
-                    # Ensure the host path exists before adding mapping
+                    # Ensure the host path exists before adding mapping.
+                    #
+                    # ``host_path`` is resolved against the filesystem of the
+                    # process running this provider — for ``make dev`` that is
+                    # the host machine, but for ``make up`` it is the
+                    # ``deer-flow-gateway`` container, so any host path that
+                    # isn't bind-mounted into the gateway image will be missing
+                    # here. Skipping silently makes this a high-cost-to-debug
+                    # silent failure (sandbox skill / tool reads an empty dir
+                    # instead of the configured mount), so escalate to ERROR
+                    # and include actionable guidance. See #3244.
                     if host_path.exists():
                         mappings.append(
                             PathMapping(
@@ -157,10 +167,16 @@ class LocalSandboxProvider(SandboxProvider):
                             )
                         )
                     else:
-                        logger.warning(
-                            "Mount host_path does not exist, skipping: %s -> %s",
+                        logger.error(
+                            "sandbox.mounts entry %s -> %s ignored: host_path %s does not exist from the "
+                            "perspective of the gateway process. In Docker deployments (make up / docker-compose), "
+                            "this path must also be bind-mounted into the gateway container — add a matching "
+                            "volume entry under services.gateway.volumes in docker/docker-compose.yaml (and use "
+                            "the in-container path here), or run in local mode (make dev) where the gateway sees "
+                            "the host filesystem directly.",
                             mount.host_path,
                             mount.container_path,
+                            mount.host_path,
                         )
         except Exception as e:
             # Log but don't fail if config loading fails

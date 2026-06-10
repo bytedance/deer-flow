@@ -168,9 +168,12 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
         ],
     }
 
-    with patch(
-        "deerflow.agents.memory.updater.get_memory_config",
-        return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.7),
+    with (
+        patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=2, fact_confidence_threshold=0.7),
+        ),
+        patch("deerflow.agents.memory.updater.utc_now_iso_z", return_value="2026-06-09T12:00:00Z"),
     ):
         result = updater._apply_updates(current_memory, update_data, thread_id="thread-9")
 
@@ -1234,6 +1237,22 @@ class TestMemoryRelevanceScoring:
         score = _compute_relevance_score(fact, decay_half_life_days=90, category_weights={"preference": 1.0}, now_iso="2026-06-09T12:00:00Z")
         # Decay factor should be 1.0
         assert abs(score - 0.8) < 1e-6
+
+    def test_relevance_score_missing_date_fallback(self):
+        """A missing or None createdAt should fall back to no decay and log a warning."""
+        from deerflow.agents.memory.updater import _compute_relevance_score
+
+        fact = {"content": "Missing date fact", "confidence": 0.8, "category": "preference"}
+        with patch("deerflow.agents.memory.updater.logger") as mock_logger:
+            score = _compute_relevance_score(
+                fact,
+                decay_half_life_days=90,
+                category_weights={"preference": 1.0},
+                now_iso="2026-06-09T12:00:00Z",
+            )
+        # Decay factor should be 1.0
+        assert abs(score - 0.8) < 1e-6
+        mock_logger.warning.assert_called_once()
 
     def test_eviction_by_relevance(self):
         """Verify that facts are evicted according to composite relevance, not raw confidence."""

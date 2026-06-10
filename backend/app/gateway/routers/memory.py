@@ -98,6 +98,7 @@ class MemoryConfigResponse(BaseModel):
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
+    token_counting: str = Field(..., description="Token counting strategy for memory injection ('tiktoken' or 'char')")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -310,7 +311,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
             "max_facts": 100,
             "fact_confidence_threshold": 0.7,
             "injection_enabled": true,
-            "max_injection_tokens": 2000
+            "max_injection_tokens": 2000,
+            "token_counting": "tiktoken"
         }
         ```
     """
@@ -323,6 +325,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         fact_confidence_threshold=config.fact_confidence_threshold,
         injection_enabled=config.injection_enabled,
         max_injection_tokens=config.max_injection_tokens,
+        token_counting=config.token_counting,
     )
 
 
@@ -351,6 +354,7 @@ async def get_memory_status() -> MemoryStatusResponse:
             fact_confidence_threshold=config.fact_confidence_threshold,
             injection_enabled=config.injection_enabled,
             max_injection_tokens=config.max_injection_tokens,
+            token_counting=config.token_counting,
         ),
         data=MemoryResponse(**memory_data),
     )

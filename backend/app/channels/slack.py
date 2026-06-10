@@ -9,6 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,20 @@ def _normalize_allowed_users(allowed_users: Any) -> set[str]:
     return {str(user_id) for user_id in values if str(user_id)}
 
 
+def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
+    if not bot_user_id:
+        return text
+    if not text.startswith("<@"):
+        return text
+    end = text.find(">")
+    if end <= 2:
+        return text
+    mentioned_user_id = text[2:end].split("|", 1)[0].lstrip("!")
+    if mentioned_user_id != bot_user_id:
+        return text
+    return text[end + 1 :].lstrip()
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -49,6 +64,8 @@ class SlackChannel(Channel):
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
+        configured_bot_user_id = config.get("bot_user_id")
+        self._bot_user_id = str(configured_bot_user_id).lstrip("@") if configured_bot_user_id else None
 
     async def start(self) -> None:
         if self._running:
@@ -72,6 +89,17 @@ class SlackChannel(Channel):
             return
 
         self._web_client = WebClient(token=bot_token)
+        if self._bot_user_id is None:
+            try:
+                auth_info = await asyncio.to_thread(self._web_client.auth_test)
+                user_id = auth_info.get("user_id") if isinstance(auth_info, dict) else None
+                if user_id is None:
+                    auth_get = getattr(auth_info, "get", None)
+                    user_id = auth_get("user_id") if callable(auth_get) else None
+                if isinstance(user_id, str) and user_id:
+                    self._bot_user_id = user_id
+            except Exception:
+                logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
         self._socket_client = SocketModeClient(
             app_token=app_token,
             web_client=self._web_client,
@@ -210,6 +238,12 @@ class SlackChannel(Channel):
             if event_type != "events_api":
                 return
 
+            if self._bot_user_id is None:
+                authorization = next((item for item in req.payload.get("authorizations", []) if isinstance(item, dict)), None)
+                user_id = authorization.get("user_id") if authorization else None
+                if isinstance(user_id, str) and user_id:
+                    self._bot_user_id = user_id
+
             event = req.payload.get("event", {})
             etype = event.get("type", "")
 
@@ -233,13 +267,15 @@ class SlackChannel(Channel):
             return
 
         text = event.get("text", "").strip()
+        if event.get("type") == "app_mention":
+            text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
         if not text:
             return
 
         channel_id = event.get("channel", "")
         thread_ts = event.get("thread_ts") or event.get("ts", "")
 
-        if text.startswith("/"):
+        if is_known_channel_command(text):
             msg_type = InboundMessageType.COMMAND
         else:
             msg_type = InboundMessageType.CHAT

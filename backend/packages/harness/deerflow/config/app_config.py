@@ -7,7 +7,7 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -148,6 +148,21 @@ class AppConfig(BaseModel):
         ),
     )
 
+    @field_validator("models", "tools", "tool_groups", mode="before")
+    @classmethod
+    def _coerce_null_list_sections(cls, value: Any) -> Any:
+        """Treat a present-but-empty config section as an empty list.
+
+        Commenting out every entry under a top-level YAML key — e.g. ``models:``
+        with only comments beneath it, exactly as shipped in
+        ``config.example.yaml`` — makes PyYAML parse the value as ``None``.
+        Without this, the documented ``cp config.example.yaml config.yaml``
+        first-run flow crashes with an opaque ``Input should be a valid list``
+        pydantic error. Coercing ``None`` to ``[]`` keeps that flow working and
+        matches the field's own ``default_factory=list``.
+        """
+        return [] if value is None else value
+
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
         """Resolve the config file path.
@@ -209,6 +224,11 @@ class AppConfig(BaseModel):
         config_data["extensions"] = extensions_config.model_dump()
 
         result = cls.model_validate(config_data)
+        if not result.models:
+            logger.warning(
+                "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
+                resolved_path,
+            )
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result

@@ -35,10 +35,40 @@ export type MockAgent = {
   system_prompt?: string;
 };
 
+export type MockSkill = {
+  name: string;
+  description: string;
+  category?: string;
+  license?: string | null;
+  enabled?: boolean;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
+  skills?: MockSkill[];
 };
+
+const DEFAULT_SKILLS: MockSkill[] = [
+  {
+    name: "data-analysis",
+    description: "Analyze structured data and produce charts.",
+    category: "public",
+    enabled: true,
+  },
+  {
+    name: "frontend-design",
+    description: "Create polished frontend interfaces.",
+    category: "public",
+    enabled: true,
+  },
+  {
+    name: "disabled-skill",
+    description: "Hidden from slash autocomplete.",
+    category: "public",
+    enabled: false,
+  },
+];
 
 // ---------------------------------------------------------------------------
 // mockLangGraphAPI
@@ -52,9 +82,10 @@ export type MockAPIOptions = {
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const threads = options?.threads ?? [];
   const agents = options?.agents ?? [];
+  const skills = options?.skills ?? DEFAULT_SKILLS;
 
   // Thread search — sidebar thread list & chats list page
-  void page.route("**/api/langgraph/threads/search", (route) => {
+  void page.route("**/api/langgraph/threads/search", async (route) => {
     const body = threads.map((t) => ({
       thread_id: t.thread_id,
       created_at: "2025-01-01T00:00:00Z",
@@ -63,10 +94,33 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       status: "idle",
       values: { title: t.title ?? "Untitled" },
     }));
+
+    let limit: number | undefined;
+    let offset = 0;
+    try {
+      const postData = route.request().postDataJSON() as {
+        limit?: number;
+        offset?: number;
+      } | null;
+      if (postData) {
+        if (typeof postData.limit === "number") {
+          limit = postData.limit;
+        }
+        if (typeof postData.offset === "number") {
+          offset = postData.offset;
+        }
+      }
+    } catch {
+      // No / invalid JSON body — fall back to returning the full list.
+    }
+
+    const sliced =
+      typeof limit === "number" ? body.slice(offset, offset + limit) : body;
+
     return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(body),
+      body: JSON.stringify(sliced),
     });
   });
 
@@ -254,6 +308,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           models: [],
           token_usage: { enabled: false },
         }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Skills list — settings page and slash autocomplete
+  void page.route("**/api/skills", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ skills }),
       });
     }
     return route.fallback();

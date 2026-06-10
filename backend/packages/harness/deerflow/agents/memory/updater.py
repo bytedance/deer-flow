@@ -381,20 +381,28 @@ def _compute_relevance_score(fact: dict[str, Any], *, decay_half_life_days: int,
     """Compute a composite relevance score for a memory fact.
 
     Score formula:
-        relevance = confidence x decay_factor x category_weight
+        relevance = confidence * decay_factor * category_weight
 
     Where:
-        - confidence: the fact's stored confidence (0-1)
-        - decay_factor: exponential decay based on age in days decay_factor = 0.5 ^ (age_days / half_life) Ranges from 1.0 (brand new) t0 ~0 (very old).
-        - category_weigth: per-category multiplier from config (default 1.0; correction=1.5, goal=1.2)
+        - confidence: the fact's stored confidence (0-1).
+        - decay_factor: exponential decay based on age in days:
+          decay_factor = 0.5 ** (age_days / half_life)
+          Ranges from 1.0 (brand new) to ~0.0 (very old).
+        - category_weight: per-category multiplier from config (default 1.0; correction=1.5, goal=1.2).
     """
+
     from datetime import UTC, datetime
 
-    from deerflow.agents.memory.prompt import _coerce_confidence
+    # Coerce confidence to a bounded float in [0.0, 1.0] locally to avoid circular imports
+    try:
+        confidence = float(fact.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
 
-    confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-
-    # Temporal decay: age in dayss since creation
+    # Temporal decay: age in days since creation
     created_at_str = fact.get("createdAt", "")
     age_days = 0.0
     if created_at_str:
@@ -414,6 +422,8 @@ def _compute_relevance_score(fact: dict[str, Any], *, decay_half_life_days: int,
             age_days = max(0.0, delta.total_seconds() / 86400)
         except (ValueError, TypeError, OverflowError):
             age_days = 0.0
+    else:
+        logger.warning("Memory fact missing 'createdAt' timestamp (id=%s). Temporal decay will not be applied to this fact.", fact.get("id", "unknown"))
 
     # Exponential decay: 0.5 ^ (age_days / half_life)
     if decay_half_life_days > 0 and age_days > 0:
@@ -726,9 +736,10 @@ class MemoryUpdater:
         # Enforce max facts limit
         if len(current_memory["facts"]) > config.max_facts:
             # Sort by relevance score and keep top ones
-            current_memory["facts"] = sorted(current_memory["facts"], key=lambda f: _compute_relevance_score(f, decay_half_life_days=config.decay_half_life_days, category_weights=config.category_weights, now_iso=now), reverse=True)[
-                : config.max_facts
-            ]
+            def get_relevance(f):
+                return _compute_relevance_score(f, decay_half_life_days=config.decay_half_life_days, category_weights=config.category_weights, now_iso=now)
+
+            current_memory["facts"] = sorted(current_memory["facts"], key=get_relevance, reverse=True)[: config.max_facts]
 
         return current_memory
 
