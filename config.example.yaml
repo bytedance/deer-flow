@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 11
+config_version: 12
 
 # ============================================================================
 # Logging
@@ -1024,6 +1024,15 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  # Token counting strategy for memory-injection budgeting:
+  #   tiktoken (default) - accurate, but the encoding's BPE data may be
+  #     downloaded from a public network endpoint on first use. In
+  #     network-restricted environments this download can block for a long
+  #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
+  #     to "char" to avoid it.
+  #   char - network-free CJK-aware character-based estimate; never touches
+  #     tiktoken. Slightly less precise budgeting, zero network I/O.
+  token_counting: tiktoken
 
 # ============================================================================
 # Custom Agent Management API
