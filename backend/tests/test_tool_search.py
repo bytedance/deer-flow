@@ -8,8 +8,8 @@ filter middleware are covered by:
 - tests/test_thread_state_promoted.py
 """
 
-from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
 
 
 class TestToolSearchConfig:

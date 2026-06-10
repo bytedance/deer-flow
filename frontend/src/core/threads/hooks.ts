@@ -364,7 +364,7 @@ export function useThreadStream({
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     appendMessages,
-  } = useThreadHistory(onStreamThreadId ?? "");
+  } = useThreadHistory(onStreamThreadId ?? "", { enabled: !isMock });
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -854,8 +854,15 @@ export function useThreadStream({
   } as const;
 }
 
-export function useThreadHistory(threadId: string) {
-  const runs = useThreadRuns(threadId);
+type ThreadHistoryOptions = {
+  enabled?: boolean;
+};
+
+export function useThreadHistory(
+  threadId: string,
+  { enabled = true }: ThreadHistoryOptions = {},
+) {
+  const runs = useThreadRuns(threadId, { enabled });
   const threadIdRef = useRef(threadId);
   const runsRef = useRef(runs.data ?? []);
   const indexRef = useRef(-1);
@@ -864,10 +871,15 @@ export function useThreadHistory(threadId: string) {
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
+  const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
   const loadMessages = useCallback(async () => {
+    if (!enabled) {
+      return;
+    }
+    const loadGeneration = loadGenerationRef.current;
     if (loadingRef.current) {
       const pendingRunIndex = findLatestUnloadedRunIndex(
         runsRef.current,
@@ -921,12 +933,15 @@ export function useThreadHistory(threadId: string) {
         }).then((res) => {
           return res.json();
         });
+        if (
+          loadGenerationRef.current !== loadGeneration ||
+          threadIdRef.current !== requestThreadId
+        ) {
+          return;
+        }
         const _messages = result.data
           .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
           .map((m) => m.content);
-        if (threadIdRef.current !== requestThreadId) {
-          return;
-        }
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
@@ -961,16 +976,19 @@ export function useThreadHistory(threadId: string) {
     } catch (err) {
       console.error(err);
     } finally {
-      loadingRef.current = false;
-      loadingRunIdRef.current = null;
-      setLoading(false);
+      if (loadGenerationRef.current === loadGeneration) {
+        loadingRef.current = false;
+        loadingRunIdRef.current = null;
+        setLoading(false);
+      }
     }
-  }, []);
+  }, [enabled]);
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
     threadIdRef.current = threadId;
 
-    if (threadChanged) {
+    if (!enabled || threadChanged) {
+      loadGenerationRef.current += 1;
       runsRef.current = [];
       indexRef.current = -1;
       pendingLoadRef.current = false;
@@ -980,6 +998,10 @@ export function useThreadHistory(threadId: string) {
       loadingRef.current = false;
       setLoading(false);
       setMessages([]);
+    }
+
+    if (!enabled) {
+      return;
     }
 
     if (runs.data && runs.data.length > 0) {
@@ -992,14 +1014,15 @@ export function useThreadHistory(threadId: string) {
     loadMessages().catch(() => {
       toast.error("Failed to load thread history.");
     });
-  }, [threadId, runs.data, loadMessages]);
+  }, [enabled, threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
     setMessages((prev) => {
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
-  const hasMore = indexRef.current >= 0 || !runs.data;
+  const hasMore =
+    enabled && Boolean(threadId) && (indexRef.current >= 0 || !runs.data);
   return {
     runs: runs.data,
     messages,
@@ -1077,7 +1100,10 @@ export function useThreads(
   });
 }
 
-export function useThreadRuns(threadId?: string) {
+export function useThreadRuns(
+  threadId?: string,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const apiClient = getAPIClient();
   return useQuery<Run[]>({
     queryKey: ["thread", threadId],
@@ -1088,6 +1114,7 @@ export function useThreadRuns(threadId?: string) {
       const response = await apiClient.runs.list(threadId);
       return response;
     },
+    enabled: enabled && Boolean(threadId),
     refetchOnWindowFocus: false,
   });
 }
