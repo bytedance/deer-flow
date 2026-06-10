@@ -318,6 +318,32 @@ def test_auth_disabled_is_ignored_in_explicit_production_env(monkeypatch):
     assert res.status_code == 401
 
 
+def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
+        warn_if_auth_disabled_enabled()
+
+    assert "authentication is bypassed" in caplog.text
+    assert "e2e-user" in caplog.text
+
+
+def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(monkeypatch, caplog):
+    from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
+        warn_if_auth_disabled_enabled()
+
+    assert "authentication is bypassed" not in caplog.text
+
+
 def test_protected_path_with_junk_cookie_rejected(client):
     """Junk cookie → 401. Middleware strictly validates the JWT now
     (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad

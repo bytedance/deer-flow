@@ -62,19 +62,9 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
-  test("mock thread does not load run messages from the real backend", async ({
+  test("mock thread does not load real backend run history", async ({
     page,
   }) => {
-    const backendRunMessageUrls: string[] = [];
-    page.on("request", (request) => {
-      const url = request.url();
-      if (
-        request.method() === "GET" &&
-        url.includes(`/api/threads/${DEMO_THREAD_ID}/runs/`)
-      ) {
-        backendRunMessageUrls.push(url);
-      }
-    });
     mockLangGraphAPI(page, {
       threads: [
         {
@@ -96,14 +86,58 @@ test.describe("Thread history", () => {
         },
       ],
     });
+    const backendRunHistoryUrls: string[] = [];
+    await page.route(
+      /\/api\/langgraph\/threads\/[^/]+\/runs(?:\?|$)/,
+      (route) => {
+        if (
+          route.request().method() === "GET" &&
+          route
+            .request()
+            .url()
+            .includes(`/api/langgraph/threads/${DEMO_THREAD_ID}/runs`)
+        ) {
+          backendRunHistoryUrls.push(route.request().url());
+          return route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "mock=true must not load real runs",
+            }),
+          });
+        }
+        return route.fallback();
+      },
+    );
+    await page.route(
+      /\/api\/threads\/[^/]+\/runs\/[^/]+\/messages(?:\?|$)/,
+      (route) => {
+        if (
+          route.request().method() === "GET" &&
+          route.request().url().includes(`/api/threads/${DEMO_THREAD_ID}/runs/`)
+        ) {
+          backendRunHistoryUrls.push(route.request().url());
+          return route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "mock=true must not load real run messages",
+            }),
+          });
+        }
+        return route.fallback();
+      },
+    );
 
     await page.goto(`/workspace/chats/${DEMO_THREAD_ID}?mock=true`);
 
     await expect(
       page.getByText("What might be the trends and opportunities in 2026?"),
     ).toBeVisible({ timeout: 15_000 });
-    await page.waitForTimeout(500);
-    expect(backendRunMessageUrls).toEqual([]);
+    await expect(
+      page.getByText("I've created a modern, minimalist website"),
+    ).toBeVisible();
+    expect(backendRunHistoryUrls).toEqual([]);
   });
 
   test("chats list page shows all threads", async ({ page }) => {

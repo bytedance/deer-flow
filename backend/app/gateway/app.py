@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
@@ -172,6 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
         logger.info("Configuration loaded successfully")
+        warn_if_auth_disabled_enabled()
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
