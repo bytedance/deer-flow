@@ -136,7 +136,10 @@ class RunRepository(RunStore):
             row = await session.get(RunRow, run_id)
             if row is None:
                 return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            # legacy rows with empty user_id are not hard-filtered (problem
+            # H-compat): only reject when the row has a non-empty user_id that
+            # mismatches; owner_check + thread_id validation backstop access.
+            if resolved_user_id is not None and row.user_id and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
 

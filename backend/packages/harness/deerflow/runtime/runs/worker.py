@@ -161,6 +161,16 @@ async def run_agent(
             run_id,
         )
 
+    # Active-run TTL keeper: only meaningful for backends with a TTL (redis).
+    # Keeps a long-idle run's retained stream alive independent of event rate
+    # (problem L); cancelled in the finally block regardless of outcome.
+    ttl_keeper_task: asyncio.Task | None = None
+    keeper_ttl = getattr(bridge, "ttl_seconds", None)
+    if isinstance(keeper_ttl, int) and keeper_ttl > 0:
+        ttl_keeper_task = asyncio.create_task(
+            _run_stream_ttl_keeper(bridge, run_id, keeper_ttl)
+        )
+
     try:
         # Initialize RunJournal + write human_message event.
         # These are inside the try block so any exception (e.g. a DB
@@ -388,16 +398,24 @@ async def run_agent(
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
-        await bridge.publish(
-            run_id,
-            "error",
-            {
-                "message": error_msg,
-                "name": type(exc).__name__,
-            },
-        )
+        # best-effort: a failing error event must not mask the original error
+        try:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": type(exc).__name__,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to publish error event for run %s", run_id, exc_info=True)
 
     finally:
+        # Stop the active-run TTL keeper regardless of outcome.
+        if ttl_keeper_task is not None:
+            ttl_keeper_task.cancel()
+
         # Flush any buffered journal events and persist completion data
         if journal is not None:
             try:
@@ -433,13 +451,41 @@ async def run_agent(
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        # best-effort: a failing end event must not override the run status
+        try:
+            await bridge.publish_end(run_id)
+        except Exception:
+            logger.warning("Failed to publish stream end for run %s", run_id, exc_info=True)
+        asyncio.create_task(_safe_cleanup_bridge(bridge, run_id, delay=60))
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _run_stream_ttl_keeper(bridge: StreamBridge, run_id: str, ttl_seconds: int) -> None:
+    """Periodically refresh a run's stream TTL while it is still executing.
+
+    Keeps long-idle runs from losing their retained stream when events are
+    sparse (problem L).  ``refresh_ttl`` is best-effort and never recreates a
+    missing key.  Cancelled by the worker once the run reaches a terminal state.
+    """
+    refresh_every = max(30, min(300, ttl_seconds // 4))
+    try:
+        while True:
+            await asyncio.sleep(refresh_every)
+            await bridge.refresh_ttl(run_id)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _safe_cleanup_bridge(bridge: StreamBridge, run_id: str, *, delay: float = 0) -> None:
+    """best-effort bridge cleanup; failures are logged, never raised."""
+    try:
+        await bridge.cleanup(run_id, delay=delay)
+    except Exception:
+        logger.warning("Failed to cleanup stream bridge for run %s", run_id, exc_info=True)
 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:

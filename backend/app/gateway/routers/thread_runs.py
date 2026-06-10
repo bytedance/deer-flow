@@ -22,8 +22,8 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
+from app.gateway.services import sse_consumer, start_run, terminal_stream_response, wait_for_run_completion
+from deerflow.runtime import TERMINAL_STATUSES, RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -107,6 +107,25 @@ def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     if record.status in (RunStatus.pending, RunStatus.running):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
+
+
+async def _terminal_short_circuit(bridge: Any, record: RunRecord) -> StreamingResponse | None:
+    """Short-circuit a late join on an already-terminal run (problem J/Q/T).
+
+    Returns a single terminal ``end`` response when the run is terminal *and*
+    its retained stream is gone; otherwise ``None`` so the caller falls through
+    to a normal subscribe (which replays any retained events and reads the real
+    END).  A probe failure is treated conservatively as "stream may exist".
+    """
+    if record.status not in TERMINAL_STATUSES:
+        return None
+    try:
+        retained = await bridge.has_retained_stream(record.run_id)
+    except Exception:
+        retained = True
+    if retained:
+        return None
+    return terminal_stream_response(record)
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -261,13 +280,19 @@ async def cancel_run(
 async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await get_current_user(request)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only:
-        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     bridge = get_stream_bridge(request)
+    if record.store_only and not bridge.supports_cross_process_subscribe:
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
+
+    short_circuit = await _terminal_short_circuit(bridge, record)
+    if short_circuit is not None:
+        return short_circuit
+
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -301,14 +326,27 @@ async def stream_existing_run(
     remaining buffered events so the client observes a clean shutdown.
     """
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await get_current_user(request)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only and action is None:
+
+    bridge = get_stream_bridge(request)
+    if record.store_only and action is None and not bridge.supports_cross_process_subscribe:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
+        if record.store_only:
+            # Cross-worker cancel is not supported: the task lives on another
+            # worker and the Redis bridge does not forward control commands.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Run is active on another worker. Cross-worker cancel is not "
+                    "supported yet; retry on the owner worker or enable sticky routing."
+                ),
+            )
         cancelled = await run_mgr.cancel(run_id, action=action)
         if not cancelled:
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
@@ -319,7 +357,10 @@ async def stream_existing_run(
                 pass
             return Response(status_code=204)
 
-    bridge = get_stream_bridge(request)
+    short_circuit = await _terminal_short_circuit(bridge, record)
+    if short_circuit is not None:
+        return short_circuit
+
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",

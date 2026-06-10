@@ -50,6 +50,25 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         return
 
     if config.type == "redis":
-        raise NotImplementedError("Redis stream bridge planned for Phase 2")
+        try:
+            from deerflow.runtime.stream_bridge.redis import (
+                RedisStreamBridge,
+                mask_redis_url,
+            )
+        except ImportError as exc:
+            raise ImportError(
+                "Install deerflow-harness[redis] to use stream_bridge.type=redis"
+            ) from exc
+
+        bridge = RedisStreamBridge.from_config(config)
+        await bridge.ping()
+        logger.info(
+            "Stream bridge initialised: redis (%s)", mask_redis_url(config.redis_url)
+        )
+        try:
+            yield bridge
+        finally:
+            await bridge.close()
+        return
 
     raise ValueError(f"Unknown stream bridge type: {config.type!r}")

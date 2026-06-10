@@ -11,20 +11,23 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
-from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_current_user, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    TERMINAL_STATUSES,
     ConflictError,
     DisconnectMode,
     RunManager,
@@ -32,11 +35,17 @@ from deerflow.runtime import (
     RunStatus,
     StreamBridge,
     UnsupportedStrategyError,
+    build_end_payload,
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
 
 logger = logging.getLogger(__name__)
+
+# Sustained-silence window after which an active subscription reconciles its run
+# against the RunStore (problem K/S).  Decoupled from the heartbeat period; the
+# worst-case hang for a lost ``publish_end`` is bounded by this value.
+RECONCILE_INTERVAL = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +67,32 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
     parts.append("")
     parts.append("")
     return "\n".join(parts)
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def terminal_stream_response(record: RunRecord) -> StreamingResponse:
+    """Emit a single terminal ``end`` frame for an already-finished run.
+
+    Used by the router-level terminal short-circuit (problem J/Q): when a run
+    is terminal and its retained stream is gone, a late join must not hang on
+    heartbeats.  Reuses :func:`build_end_payload` so this end frame shares the
+    same ``{status, error}`` schema as the real and synthetic end frames.
+    """
+
+    async def _gen() -> Any:
+        yield format_sse("end", build_end_payload(record))
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -394,27 +429,95 @@ async def sse_consumer(
     The ``finally`` block implements ``on_disconnect`` semantics:
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
+
+    For cross-process backends an active subscription may hang on heartbeats if
+    a best-effort ``publish_end`` was lost (problem K/U).  During sustained
+    silence the consumer reconciles against the RunStore: if the run is terminal
+    and no event exists after the current cursor, it synthesises an ``end`` frame
+    and closes.  All three end paths (real / short-circuit / synthetic) share the
+    same ``{status, error}`` payload via :func:`build_end_payload`.
     """
     last_event_id = request.headers.get("Last-Event-ID")
+    user_id = await get_current_user(request)
+    last_reconcile_at = time.monotonic()
+    last_seen_event_id = last_event_id or "0-0"
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
 
             if entry is HEARTBEAT_SENTINEL:
+                now = time.monotonic()
+                if now - last_reconcile_at >= RECONCILE_INTERVAL:
+                    last_reconcile_at = now
+                    synthetic = await _reconcile_terminal_end(
+                        bridge, record.run_id, last_seen_event_id, run_mgr, user_id
+                    )
+                    if synthetic is not None:
+                        yield synthetic
+                        return
                 yield ": heartbeat\n\n"
                 continue
 
+            last_reconcile_at = time.monotonic()
+
             if entry is END_SENTINEL:
-                yield format_sse("end", None, event_id=entry.id or None)
+                latest = await _safe_get_run(run_mgr, record.run_id, user_id) or record
+                yield format_sse("end", build_end_payload(latest), event_id=entry.id or None)
                 return
 
+            if entry.id:
+                last_seen_event_id = entry.id
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
         if record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                if record.store_only:
+                    # Cross-worker run: cancel is a no-op here (the owner worker
+                    # holds the task). Declare the degradation rather than
+                    # silently swallowing it (problem A).
+                    logger.info(
+                        "on_disconnect=cancel skipped for cross-worker run %s; "
+                        "owner worker retains the task",
+                        record.run_id,
+                    )
+                else:
+                    await run_mgr.cancel(record.run_id)
+
+
+async def _safe_get_run(run_mgr: RunManager, run_id: str, user_id: str | None) -> RunRecord | None:
+    """best-effort RunStore read; failures degrade to None (no synthetic end)."""
+    try:
+        return await run_mgr.get(run_id, user_id=user_id)
+    except Exception:
+        logger.warning("Reconcile RunStore lookup failed for run %s", run_id, exc_info=True)
+        return None
+
+
+async def _reconcile_terminal_end(
+    bridge: StreamBridge,
+    run_id: str,
+    last_seen_event_id: str,
+    run_mgr: RunManager,
+    user_id: str | None,
+) -> str | None:
+    """Return a synthetic terminal ``end`` frame if the run is done and drained.
+
+    Returns ``None`` (keep streaming heartbeats) unless the run is terminal in
+    the RunStore *and* no unconsumed event exists after ``last_seen_event_id``.
+    Any probe failure is conservative: return ``None``.
+    """
+    latest = await _safe_get_run(run_mgr, run_id, user_id)
+    if latest is None or latest.status not in TERMINAL_STATUSES:
+        return None
+    try:
+        if await bridge.has_events_after(run_id, last_seen_event_id):
+            return None
+    except Exception:
+        logger.warning("Reconcile has_events_after failed for run %s", run_id, exc_info=True)
+        return None
+    return format_sse("end", build_end_payload(latest))
 
 
 async def wait_for_run_completion(

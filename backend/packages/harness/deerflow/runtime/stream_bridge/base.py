@@ -37,6 +37,17 @@ END_SENTINEL = StreamEvent(id="", event="__end__", data=None)
 class StreamBridge(abc.ABC):
     """Abstract base for stream bridges."""
 
+    @property
+    def supports_cross_process_subscribe(self) -> bool:
+        """Whether subscribers on a different worker can read this run's events.
+
+        ``False`` for in-process backends (memory).  Backends that share
+        events across processes (redis) return ``True`` so routers can allow
+        ``store_only`` runs to be joined/streamed without knowing the concrete
+        backend type.
+        """
+        return False
+
     @abc.abstractmethod
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         """Enqueue a single event for *run_id* (producer side)."""
@@ -70,3 +81,31 @@ class StreamBridge(abc.ABC):
 
     async def close(self) -> None:
         """Release backend resources.  Default is a no-op."""
+
+    async def refresh_ttl(self, run_id: str) -> None:
+        """Refresh the retention TTL for a still-running stream.
+
+        Default is a no-op for backends without a TTL concept (memory).
+        """
+
+    async def has_retained_stream(self, run_id: str) -> bool:
+        """Whether the backend still retains replayable events for *run_id*.
+
+        Used by terminal short-circuit logic to avoid hanging late joins on
+        a run whose retained stream has already been cleaned up.  Default
+        returns ``True`` (conservative: assume events may exist, fall through
+        to a normal subscribe).
+        """
+        return True
+
+    async def has_events_after(self, run_id: str, last_event_id: str | None) -> bool:
+        """Whether any unconsumed event exists strictly after *last_event_id*.
+
+        Used by the service-layer terminal reconciliation to decide whether a
+        synthetic end is safe.  Default returns ``True`` (conservative).
+        """
+        return True
+
+    async def ping(self) -> None:
+        """Startup health check.  Default is a no-op."""
+

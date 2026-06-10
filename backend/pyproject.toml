@@ -25,11 +25,13 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["deerflow-harness[postgres]"]
+redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
 
 [dependency-groups]
 dev = [
     "blockbuster>=1.5.26,<1.6",
+    "fakeredis>=2.21",
     "prompt-toolkit>=3.0.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
