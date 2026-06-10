@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 11
+config_version: 12
 
 # ============================================================================
 # Logging
@@ -1100,6 +1100,53 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# User-Owned IM Channel Connections
+# ============================================================================
+# Lets logged-in users connect their own Telegram, Slack, and Discord accounts
+# from the DeerFlow frontend. This is separate from the legacy operator-owned
+# `channels` block below:
+# - `channel_connections` stores per-user connection records and encrypted
+#   provider credentials.
+# - `channels` still configures legacy operator-owned bots and local polling /
+#   socket-mode workers.
+#
+# Security notes:
+# - `enabled: true` requires a public HTTPS base URL for OAuth callbacks and
+#   webhooks.
+# - `encryption_key` is used to encrypt provider tokens at rest. Generate a
+#   long random value and keep it stable. V1 does not support transparent key
+#   rotation; changing it requires users to reconnect.
+# - OAuth callbacks and provider webhooks are public routes, but they are
+#   protected by one-time state tokens or provider signatures/secrets.
+#
+# channel_connections:
+#   enabled: false
+#   public_base_url: https://deerflow.example.com
+#   encryption_key: $DEER_FLOW_CHANNEL_CONNECTIONS_KEY
+#
+#   telegram:
+#     enabled: false
+#     bot_token: $TELEGRAM_BOT_TOKEN
+#     bot_username: $TELEGRAM_BOT_USERNAME
+#     webhook_secret: $TELEGRAM_WEBHOOK_SECRET
+#
+#   slack:
+#     enabled: false
+#     client_id: $SLACK_CLIENT_ID
+#     client_secret: $SLACK_CLIENT_SECRET
+#     signing_secret: $SLACK_SIGNING_SECRET
+#     scopes: ["app_mentions:read", "chat:write", "channels:history", "channels:read"]
+#     event_delivery: http
+#
+#   discord:
+#     enabled: false
+#     client_id: $DISCORD_CLIENT_ID
+#     client_secret: $DISCORD_CLIENT_SECRET
+#     bot_token: $DISCORD_BOT_TOKEN
+#     permissions: "274877975552"
+#     require_message_content_intent: true
 
 # ============================================================================
 # IM Channels Configuration

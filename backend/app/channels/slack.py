@@ -49,6 +49,8 @@ class SlackChannel(Channel):
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
+        self._connection_repo = config.get("connection_repo")
+        self._web_client_factory = config.get("web_client_factory")
 
     async def start(self) -> None:
         if self._running:
@@ -63,15 +65,24 @@ class SlackChannel(Channel):
             return
 
         self._SocketModeResponse = SocketModeResponse
+        if self._web_client_factory is None:
+            self._web_client_factory = WebClient
 
         bot_token = self.config.get("bot_token", "")
         app_token = self.config.get("app_token", "")
+
+        if self._connection_repo is not None and self.config.get("event_delivery") == "http":
+            self._loop = asyncio.get_event_loop()
+            self._running = True
+            self.bus.subscribe_outbound(self._on_outbound)
+            logger.info("Slack channel started in HTTP Events mode")
+            return
 
         if not bot_token or not app_token:
             logger.error("Slack channel requires bot_token and app_token")
             return
 
-        self._web_client = WebClient(token=bot_token)
+        self._web_client = self._web_client_factory(token=bot_token)
         self._socket_client = SocketModeClient(
             app_token=app_token,
             web_client=self._web_client,
@@ -96,7 +107,8 @@ class SlackChannel(Channel):
         logger.info("Slack channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
-        if not self._web_client:
+        web_client = await self._get_web_client_for_message(msg)
+        if not web_client:
             return
 
         kwargs: dict[str, Any] = {
@@ -109,11 +121,12 @@ class SlackChannel(Channel):
         last_exc: Exception | None = None
         for attempt in range(_max_retries):
             try:
-                await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
+                await asyncio.to_thread(web_client.chat_postMessage, **kwargs)
                 # Add a completion reaction to the thread root
                 if msg.thread_ts:
                     await asyncio.to_thread(
-                        self._add_reaction,
+                        self._add_reaction_with_client,
+                        web_client,
                         msg.chat_id,
                         msg.thread_ts,
                         "white_check_mark",
@@ -137,7 +150,8 @@ class SlackChannel(Channel):
         if msg.thread_ts:
             try:
                 await asyncio.to_thread(
-                    self._add_reaction,
+                    self._add_reaction_with_client,
+                    web_client,
                     msg.chat_id,
                     msg.thread_ts,
                     "x",
@@ -149,7 +163,8 @@ class SlackChannel(Channel):
         raise last_exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        if not self._web_client:
+        web_client = await self._get_web_client_for_message(msg)
+        if not web_client:
             return False
 
         try:
@@ -162,7 +177,7 @@ class SlackChannel(Channel):
             if msg.thread_ts:
                 kwargs["thread_ts"] = msg.thread_ts
 
-            await asyncio.to_thread(self._web_client.files_upload_v2, **kwargs)
+            await asyncio.to_thread(web_client.files_upload_v2, **kwargs)
             logger.info("[Slack] file uploaded: %s to channel=%s", attachment.filename, msg.chat_id)
             return True
         except Exception:
@@ -171,12 +186,24 @@ class SlackChannel(Channel):
 
     # -- internal ----------------------------------------------------------
 
-    def _add_reaction(self, channel_id: str, timestamp: str, emoji: str) -> None:
-        """Add an emoji reaction to a message (best-effort, non-blocking)."""
-        if not self._web_client:
-            return
+    async def _get_web_client_for_message(self, msg: OutboundMessage):
+        if msg.connection_id and self._connection_repo is not None:
+            credentials = await self._connection_repo.get_credentials(msg.connection_id)
+            access_token = credentials.get("access_token") if credentials else None
+            if not access_token:
+                logger.warning("[Slack] no bot token found for connection=%s", msg.connection_id)
+                return None
+            if self._web_client_factory is None:
+                from slack_sdk import WebClient
+
+                self._web_client_factory = WebClient
+            return self._web_client_factory(token=access_token)
+        return self._web_client
+
+    @staticmethod
+    def _add_reaction_with_client(web_client, channel_id: str, timestamp: str, emoji: str) -> None:
         try:
-            self._web_client.reactions_add(
+            web_client.reactions_add(
                 channel=channel_id,
                 timestamp=timestamp,
                 name=emoji,
@@ -184,6 +211,12 @@ class SlackChannel(Channel):
         except Exception as exc:
             if "already_reacted" not in str(exc):
                 logger.warning("[Slack] failed to add reaction %s: %s", emoji, exc)
+
+    def _add_reaction(self, channel_id: str, timestamp: str, emoji: str) -> None:
+        """Add an emoji reaction to a message (best-effort, non-blocking)."""
+        if not self._web_client:
+            return
+        self._add_reaction_with_client(self._web_client, channel_id, timestamp, emoji)
 
     def _send_running_reply(self, channel_id: str, thread_ts: str) -> None:
         """Send a 'Working on it......' reply in the thread (called from SDK thread)."""

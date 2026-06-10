@@ -39,6 +39,8 @@ def should_check_csrf(request: Request) -> bool:
         return False
 
     path = request.url.path.rstrip("/")
+    if path.startswith("/api/channels/webhooks/"):
+        return False
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
         return False

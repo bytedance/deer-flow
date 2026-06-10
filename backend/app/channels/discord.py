@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class DiscordChannel(Channel):
         self._discord_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._discord_module = None
+        self._connection_repo = config.get("connection_repo")
 
     async def start(self) -> None:
         if self._running:
@@ -314,6 +315,7 @@ class DiscordChannel(Channel):
                     },
                 )
                 inbound.topic_id = thread_id
+                inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
                 self._publish(inbound)
                 # Start typing indicator in the thread
                 if typing_target:
@@ -421,6 +423,7 @@ class DiscordChannel(Channel):
             },
         )
         inbound.topic_id = thread_id
+        inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
         # Start typing indicator in the correct target (thread or channel)
         if typing_target:
@@ -434,6 +437,31 @@ class DiscordChannel(Channel):
         if self._main_loop and self._main_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
             future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
+        if self._connection_repo is None:
+            return inbound
+
+        connection = None
+        if guild_id:
+            connection = await self._connection_repo.find_connection_by_external_identity(
+                provider="discord",
+                external_account_id=inbound.user_id,
+                workspace_id=guild_id,
+            )
+        if connection is None:
+            connection = await self._connection_repo.find_connection_by_external_identity(
+                provider="discord",
+                external_account_id=inbound.user_id,
+                workspace_id=None,
+            )
+        if connection is None:
+            return inbound
+
+        inbound.connection_id = connection["id"]
+        inbound.owner_user_id = connection["owner_user_id"]
+        inbound.workspace_id = connection.get("workspace_id")
+        return inbound
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

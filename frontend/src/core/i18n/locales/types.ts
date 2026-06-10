@@ -117,6 +117,7 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    channels: string;
   };
 
   // Agents
@@ -183,6 +184,23 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+  };
+
+  // Channels
+  channels: {
+    title: string;
+    connect: string;
+    reconnect: string;
+    disconnect: string;
+    connected: string;
+    notConnected: string;
+    pending: string;
+    revoked: string;
+    disabled: string;
+    unconfigured: string;
+    unavailable: string;
+    descriptions: Record<string, string>;
+    connectedAs: (name: string) => string;
   };
 
   // Page titles (document title)
@@ -281,6 +299,7 @@ export interface Translations {
     sections: {
       account: string;
       appearance: string;
+      channels: string;
       memory: string;
       tools: string;
       skills: string;
@@ -375,6 +394,11 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+    };
+    channels: {
+      title: string;
+      description: string;
+      disabled: string;
     };
     skills: {
       title: string;

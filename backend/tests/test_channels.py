@@ -468,6 +468,17 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
+async def _make_channel_connection_repo(tmp_path: Path):
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'channel-connections.db'}", sqlite_dir=str(tmp_path))
+    return ChannelConnectionRepository(
+        get_session_factory(),
+        cipher=ChannelCredentialCipher.from_key("test-channel-key"),
+    )
+
+
 def _make_stream_part(event: str, data):
     return SimpleNamespace(event=event, data=data)
 
@@ -1808,6 +1819,22 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] == "123456"
         assert run_context["channel_user_id"] == "123456"
 
+    def test_connection_owner_user_id_takes_precedence_over_platform_user_id(self):
+        manager = self._manager()
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U-platform",
+            owner_user_id="deerflow-user-1",
+            connection_id="connection-1",
+            text="hi",
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "deerflow-user-1"
+        assert run_context["channel_user_id"] == "U-platform"
+
     def test_unsafe_user_id_is_normalized_but_raw_preserved(self):
         from deerflow.config.paths import make_safe_user_id
 
@@ -1830,6 +1857,80 @@ class TestResolveRunParamsUserId:
 
         assert "user_id" not in run_context
         assert "channel_user_id" not in run_context
+
+
+class TestChannelManagerConnectionRouting:
+    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.persistence.engine import close_engine
+
+        async def go():
+            repo = await _make_channel_connection_repo(tmp_path)
+            alice = await repo.upsert_connection(
+                owner_user_id="alice",
+                provider="slack",
+                external_account_id="U-alice",
+                workspace_id="T1",
+            )
+            bob = await repo.upsert_connection(
+                owner_user_id="bob",
+                provider="slack",
+                external_account_id="U-bob",
+                workspace_id="T1",
+            )
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "legacy-store.json")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
+            mock_client = _make_mock_langgraph_client()
+            mock_client.threads.create = AsyncMock(
+                side_effect=[
+                    {"thread_id": "thread-alice"},
+                    {"thread_id": "thread-bob"},
+                ]
+            )
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-alice",
+                    owner_user_id="alice",
+                    connection_id=alice["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-bob",
+                    owner_user_id="bob",
+                    connection_id=bob["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+
+            assert await repo.get_thread_id(alice["id"], "C-shared", "1710000000.000100") == "thread-alice"
+            assert await repo.get_thread_id(bob["id"], "C-shared", "1710000000.000100") == "thread-bob"
+            assert store.list_entries() == []
+
+            first_context = mock_client.runs.wait.call_args_list[0].kwargs["context"]
+            second_context = mock_client.runs.wait.call_args_list[1].kwargs["context"]
+            assert first_context["user_id"] == "alice"
+            assert first_context["channel_user_id"] == "U-alice"
+            assert second_context["user_id"] == "bob"
+            assert second_context["channel_user_id"] == "U-bob"
+
+        try:
+            _run(go())
+        finally:
+            _run(close_engine())
 
 
 # ---------------------------------------------------------------------------
@@ -2618,6 +2719,93 @@ class TestChannelService:
             service = ChannelService.from_app_config(app_config)
 
         assert service._config == {"telegram": {"enabled": False}}
+
+    def test_from_app_config_merges_telegram_channel_connections_config(self):
+        from app.channels.service import ChannelService
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "public_base_url": "https://deerflow.example.com",
+                    "encryption_key": "secret",
+                    "telegram": {
+                        "enabled": True,
+                        "bot_token": "telegram-token",
+                        "bot_username": "deerflow_bot",
+                        "webhook_secret": "webhook-secret",
+                    },
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["telegram"]["enabled"] is True
+        assert service._config["telegram"]["bot_token"] == "telegram-token"
+
+    def test_from_app_config_merges_slack_http_channel_connections_config(self):
+        from app.channels.service import ChannelService
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "public_base_url": "https://deerflow.example.com",
+                    "encryption_key": "secret",
+                    "slack": {
+                        "enabled": True,
+                        "client_id": "slack-client",
+                        "client_secret": "slack-secret",
+                        "signing_secret": "signing-secret",
+                        "event_delivery": "http",
+                    },
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["slack"]["enabled"] is True
+        assert service._config["slack"]["event_delivery"] == "http"
+
+    def test_from_app_config_merges_discord_channel_connections_config(self):
+        from app.channels.service import ChannelService
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "public_base_url": "https://deerflow.example.com",
+                    "encryption_key": "secret",
+                    "discord": {
+                        "enabled": True,
+                        "client_id": "discord-client",
+                        "client_secret": "discord-secret",
+                        "bot_token": "discord-bot-token",
+                    },
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["discord"]["enabled"] is True
+        assert service._config["discord"]["bot_token"] == "discord-bot-token"
+
+    def test_connection_repo_is_forwarded_to_manager(self):
+        from app.channels.service import ChannelService
+
+        repo = object()
+        service = ChannelService(channels_config={}, connection_repo=repo)
+
+        assert service.manager._connection_repo is repo
 
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""

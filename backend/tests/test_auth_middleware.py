@@ -21,6 +21,10 @@ from app.gateway.auth_middleware import AuthMiddleware, _is_public
         "/api/v1/auth/register",
         "/api/v1/auth/logout",
         "/api/v1/auth/setup-status",
+        "/api/channels/slack/callback",
+        "/api/channels/discord/callback",
+        "/api/channels/webhooks/slack/events",
+        "/api/channels/webhooks/telegram",
     ],
 )
 def test_public_paths(path: str):

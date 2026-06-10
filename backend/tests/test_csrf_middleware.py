@@ -22,6 +22,10 @@ def _make_app() -> FastAPI:
     async def protected_mutation():
         return {"ok": True}
 
+    @app.post("/api/channels/webhooks/slack/events")
+    async def slack_events_webhook():
+        return {"ok": True}
+
     return app
 
 
@@ -233,3 +237,14 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token mismatch."
+
+
+def test_channel_webhook_post_skips_double_submit_csrf():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.post(
+        "/api/channels/webhooks/slack/events",
+        headers={"Origin": "https://slack.com"},
+    )
+
+    assert response.status_code == 200

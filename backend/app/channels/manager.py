@@ -614,6 +614,7 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        connection_repo: Any | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -623,6 +624,7 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._connection_repo = connection_repo
         self._client = None  # lazy init — langgraph_sdk async client
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -671,12 +673,16 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
-        # ``user_id`` drives user-scoped filesystem buckets that only accept
-        # ``[A-Za-z0-9_-]``, so normalize the channel id and keep the raw value
-        # under ``channel_user_id`` for platform-facing lookups.
+        # ``user_id`` drives DeerFlow-owned memory, files, and thread buckets.
+        # For browser-connected IM channels, prefer the DeerFlow account that
+        # owns the connection. Preserve the raw platform user under
+        # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
-        if msg.user_id:
+        if msg.owner_user_id:
+            run_context_identity["user_id"] = make_safe_user_id(msg.owner_user_id)
+        elif msg.user_id:
             run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
+        if msg.user_id:
             run_context_identity["channel_user_id"] = msg.user_id
 
         run_context = _merge_dicts(
@@ -792,10 +798,27 @@ class ChannelManager:
 
     # -- chat handling -----------------------------------------------------
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread through Gateway and store the mapping."""
-        thread = await client.threads.create()
-        thread_id = thread["thread_id"]
+    async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
+        if msg.connection_id and self._connection_repo is not None:
+            return await self._connection_repo.get_thread_id(
+                msg.connection_id,
+                msg.chat_id,
+                msg.topic_id,
+            )
+        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+
+    async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
+        if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
+            await self._connection_repo.set_thread_id(
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                provider=msg.channel_name,
+                external_conversation_id=msg.chat_id,
+                external_topic_id=msg.topic_id,
+                thread_id=thread_id,
+            )
+            return
+
         self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
@@ -803,6 +826,12 @@ class ChannelManager:
             topic_id=msg.topic_id,
             user_id=msg.user_id,
         )
+
+    async def _create_thread(self, client, msg: InboundMessage) -> str:
+        """Create a new thread through Gateway and store the mapping."""
+        thread = await client.threads.create()
+        thread_id = thread["thread_id"]
+        await self._store_thread_id(msg, thread_id)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
@@ -812,7 +841,7 @@ class ChannelManager:
         # Look up existing DeerFlow thread.
         # topic_id may be None (e.g. Telegram private chats) — the store
         # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        thread_id = await self._lookup_thread_id(msg)
         if thread_id:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
 
@@ -896,6 +925,8 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
@@ -958,6 +989,8 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
                         metadata=_response_metadata(msg.metadata),
                     )
                 )
@@ -1004,6 +1037,8 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    connection_id=msg.connection_id,
+                    owner_user_id=msg.owner_user_id,
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
@@ -1028,16 +1063,10 @@ class ChannelManager:
             client = self._get_client()
             thread = await client.threads.create()
             new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
-                msg.channel_name,
-                msg.chat_id,
-                new_thread_id,
-                topic_id=msg.topic_id,
-                user_id=msg.user_id,
-            )
+            await self._store_thread_id(msg, new_thread_id)
             reply = "New conversation started."
         elif command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+            thread_id = await self._lookup_thread_id(msg)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
@@ -1060,9 +1089,11 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
@@ -1098,9 +1129,11 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
