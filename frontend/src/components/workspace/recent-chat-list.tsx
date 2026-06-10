@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -51,8 +51,8 @@ import {
 } from "@/core/threads/export";
 import {
   useDeleteThread,
+  useInfiniteThreads,
   useRenameThread,
-  useThreads,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
@@ -68,7 +68,35 @@ export function RecentChatList() {
       thread_id: string;
       agent_name?: string;
     }>();
-  const { data: threads = [] } = useThreads();
+  const {
+    data: infiniteThreads,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteThreads();
+  const threads = useMemo(
+    () => infiniteThreads?.pages.flat() ?? [],
+    [infiniteThreads],
+  );
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const element = sentinelRef.current;
+    if (!element || !hasNextPage) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { rootMargin: "120px 0px 120px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -267,6 +295,14 @@ export function RecentChatList() {
                   </SidebarMenuItem>
                 );
               })}
+              {hasNextPage && (
+                <div
+                  ref={sentinelRef}
+                  aria-hidden="true"
+                  className="h-px w-full"
+                  data-testid="recent-chat-list-sentinel"
+                />
+              )}
             </div>
           </SidebarMenu>
         </SidebarGroupContent>

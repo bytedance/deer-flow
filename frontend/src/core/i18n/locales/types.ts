@@ -183,6 +183,8 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    loadMoreToSearch: string;
+    loadingMore: string;
   };
 
   // Page titles (document title)
