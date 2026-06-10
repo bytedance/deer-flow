@@ -84,9 +84,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
 
-  // Thread search — sidebar thread list & chats list page
+  // Thread search — sidebar thread list & chats list page.
+  // Honors the `limit`/`offset` paging the client sends so tests can exercise
+  // incremental loading the same way the real backend pages results.
   void page.route("**/api/langgraph/threads/search", (route) => {
-    const body = threads.map((t) => ({
+    const allThreads = threads.map((t) => ({
       thread_id: t.thread_id,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
@@ -94,6 +96,21 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       status: "idle",
       values: { title: t.title ?? "Untitled" },
     }));
+
+    const search = (route.request().postDataJSON() ?? {}) as {
+      limit?: number;
+      offset?: number;
+    };
+    const offset =
+      typeof search.offset === "number" && search.offset > 0
+        ? Math.floor(search.offset)
+        : 0;
+    const limit =
+      typeof search.limit === "number" && search.limit > 0
+        ? Math.floor(search.limit)
+        : allThreads.length;
+    const body = allThreads.slice(offset, offset + limit);
+
     return route.fulfill({
       status: 200,
       contentType: "application/json",

@@ -2,12 +2,14 @@ import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import {
+  type InfiniteData,
   type QueryClient,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -24,6 +26,12 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import {
+  type ThreadSearchCache,
+  patchThreadInSearchCache,
+  removeThreadFromSearchCache,
+  upsertThreadIntoSearchCache,
+} from "./search-cache";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -278,36 +286,7 @@ export function upsertThreadInSearchCache(
       queryKey: ["threads", "search"],
       exact: false,
     },
-    (oldData: Array<AgentThread> | undefined) => {
-      if (!oldData) {
-        return [thread];
-      }
-
-      const existingIndex = oldData.findIndex(
-        (t) => t.thread_id === thread.thread_id,
-      );
-      if (existingIndex === -1) {
-        return [thread, ...oldData];
-      }
-
-      return oldData.map((t, index) => {
-        if (index !== existingIndex) {
-          return t;
-        }
-        return {
-          ...thread,
-          ...t,
-          metadata: {
-            ...(thread.metadata ?? {}),
-            ...(t.metadata ?? {}),
-          },
-          values: {
-            ...thread.values,
-            ...t.values,
-          },
-        };
-      });
-    },
+    (oldData: ThreadSearchCache) => upsertThreadIntoSearchCache(oldData, thread),
   );
 }
 
@@ -466,27 +445,23 @@ export function useThreadStream({
       const updates: Array<Partial<AgentThreadState> | null> = Object.values(
         data || {},
       );
+      const titleThreadId = threadIdRef.current;
       for (const update of updates) {
-        if (update && "title" in update && update.title) {
+        if (titleThreadId && update && "title" in update && update.title) {
+          const title = update.title;
           void queryClient.setQueriesData(
             {
               queryKey: ["threads", "search"],
               exact: false,
             },
-            (oldData: Array<AgentThread> | undefined) => {
-              return oldData?.map((t) => {
-                if (t.thread_id === threadIdRef.current) {
-                  return {
-                    ...t,
-                    values: {
-                      ...t.values,
-                      title: update.title,
-                    },
-                  };
-                }
-                return t;
-              });
-            },
+            (oldData: ThreadSearchCache) =>
+              patchThreadInSearchCache(oldData, titleThreadId, (t) => ({
+                ...t,
+                values: {
+                  ...t.values,
+                  title,
+                },
+              })),
           );
         }
       }
@@ -1033,71 +1008,87 @@ export function useThreadHistory(
   };
 }
 
+export const THREADS_PAGE_SIZE = 50;
+
+export type UseThreadsParams = Omit<
+  Parameters<ThreadsClient["search"]>[0],
+  "limit" | "offset"
+>;
+
+export type UseThreadsResult = {
+  /** All threads loaded so far, flattened across fetched pages. */
+  threads: AgentThread[];
+  /** True while the first page is loading. */
+  isLoading: boolean;
+  /** True when another page is available to fetch. */
+  hasMore: boolean;
+  /** True while a subsequent page is being fetched. */
+  isFetchingMore: boolean;
+  /** Fetch the next page (older threads), appended to {@link threads}. */
+  loadMore: () => void;
+};
+
+/**
+ * Paginated thread list backed by ``threads.search``.
+ *
+ * The list is fetched lazily one page at a time (see {@link THREADS_PAGE_SIZE})
+ * via ``offset`` so the sidebar and the chats page can keep loading older
+ * conversations as the user scrolls, instead of being capped at the first page.
+ * ``getNextPageParam`` stops once a short page comes back, which is the only
+ * reliable end-of-list signal the search API exposes (it returns no total).
+ */
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
-    limit: 50,
+  params: UseThreadsParams = {
     sortBy: "updated_at",
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
-) {
+): UseThreadsResult {
   const apiClient = getAPIClient();
-  return useQuery<AgentThread[]>({
+  const query = useInfiniteQuery<
+    AgentThread[],
+    Error,
+    InfiniteData<AgentThread[], number>,
+    readonly unknown[],
+    number
+  >({
     queryKey: ["threads", "search", params],
-    queryFn: async () => {
-      const maxResults = params.limit;
-      const initialOffset = params.offset ?? 0;
-      const DEFAULT_PAGE_SIZE = 50;
-
-      // Preserve prior semantics: if a non-positive limit is explicitly provided,
-      // delegate to a single search call with the original parameters.
-      if (maxResults !== undefined && maxResults <= 0) {
-        const response =
-          await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const response = (await apiClient.threads.search<AgentThreadState>({
+        ...params,
+        limit: THREADS_PAGE_SIZE,
+        offset: pageParam,
+      })) as AgentThread[];
+      return response;
+    },
+    getNextPageParam: (lastPage, allPages) => {
+      // A short page means the server has nothing more to give.
+      if (lastPage.length < THREADS_PAGE_SIZE) {
+        return undefined;
       }
-
-      const pageSize =
-        typeof maxResults === "number" && maxResults > 0
-          ? Math.min(DEFAULT_PAGE_SIZE, maxResults)
-          : DEFAULT_PAGE_SIZE;
-
-      const threads: AgentThread[] = [];
-      let offset = initialOffset;
-
-      while (true) {
-        if (typeof maxResults === "number" && threads.length >= maxResults) {
-          break;
-        }
-
-        const currentLimit =
-          typeof maxResults === "number"
-            ? Math.min(pageSize, maxResults - threads.length)
-            : pageSize;
-
-        if (typeof maxResults === "number" && currentLimit <= 0) {
-          break;
-        }
-
-        const response = (await apiClient.threads.search<AgentThreadState>({
-          ...params,
-          limit: currentLimit,
-          offset,
-        })) as AgentThread[];
-
-        threads.push(...response);
-
-        if (response.length < currentLimit) {
-          break;
-        }
-
-        offset += response.length;
-      }
-
-      return threads;
+      return allPages.reduce((total, page) => total + page.length, 0);
     },
     refetchOnWindowFocus: false,
   });
+
+  const threads = useMemo(
+    () => query.data?.pages.flat() ?? [],
+    [query.data],
+  );
+
+  const { fetchNextPage } = query;
+  const loadMore = useCallback(() => {
+    void fetchNextPage();
+  }, [fetchNextPage]);
+
+  return {
+    threads,
+    isLoading: query.isLoading,
+    hasMore: query.hasNextPage,
+    isFetchingMore: query.isFetchingNextPage,
+    loadMore,
+  };
 }
 
 export function useThreadRuns(
@@ -1176,15 +1167,13 @@ export function useDeleteThread() {
           queryKey: ["threads", "search"],
           exact: false,
         },
-        (oldData: Array<AgentThread> | undefined) => {
-          if (oldData == null) {
-            return oldData;
-          }
-          return oldData.filter((t) => t.thread_id !== threadId);
-        },
+        (oldData: ThreadSearchCache) =>
+          removeThreadFromSearchCache(oldData, threadId),
       );
     },
     onSettled() {
+      // Optimistic removal can shrink a page below the page size and briefly
+      // flip `hasMore`; the refetch re-tiles the pages back to real offsets.
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
@@ -1211,20 +1200,14 @@ export function useRenameThread() {
           queryKey: ["threads", "search"],
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title,
-                },
-              };
-            }
-            return t;
-          });
-        },
+        (oldData: ThreadSearchCache) =>
+          patchThreadInSearchCache(oldData, threadId, (t) => ({
+            ...t,
+            values: {
+              ...t.values,
+              title,
+            },
+          })),
       );
     },
   });

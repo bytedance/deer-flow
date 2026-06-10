@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { LoadMoreTrigger } from "@/components/workspace/load-more-trigger";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -17,7 +18,7 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 export default function ChatsPage() {
   const { t } = useI18n();
-  const { data: threads } = useThreads();
+  const { threads, hasMore, isFetchingMore, loadMore } = useThreads();
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -25,7 +26,7 @@ export default function ChatsPage() {
   }, [t.pages.chats, t.pages.appName]);
 
   const filteredThreads = useMemo(() => {
-    return threads?.filter((thread) => {
+    return threads.filter((thread) => {
       return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
     });
   }, [threads, search]);
@@ -47,7 +48,7 @@ export default function ChatsPage() {
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
-                {filteredThreads?.map((thread) => (
+                {filteredThreads.map((thread) => (
                   <Link key={thread.thread_id} href={pathOfThread(thread)}>
                     <div className="flex flex-col gap-2 border-b p-4">
                       <div>
@@ -61,6 +62,12 @@ export default function ChatsPage() {
                     </div>
                   </Link>
                 ))}
+                <LoadMoreTrigger
+                  className="py-4"
+                  hasMore={hasMore}
+                  isLoading={isFetchingMore}
+                  loadMore={loadMore}
+                />
               </div>
             </ScrollArea>
           </main>

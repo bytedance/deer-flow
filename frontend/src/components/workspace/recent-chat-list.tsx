@@ -42,6 +42,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { LoadMoreTrigger } from "@/components/workspace/load-more-trigger";
 import { getAPIClient } from "@/core/api";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
@@ -68,7 +69,7 @@ export function RecentChatList() {
       thread_id: string;
       agent_name?: string;
     }>();
-  const { data: threads = [] } = useThreads();
+  const { threads, hasMore, isFetchingMore, loadMore } = useThreads();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -267,6 +268,11 @@ export function RecentChatList() {
                   </SidebarMenuItem>
                 );
               })}
+              <LoadMoreTrigger
+                hasMore={hasMore}
+                isLoading={isFetchingMore}
+                loadMore={loadMore}
+              />
             </div>
           </SidebarMenu>
         </SidebarGroupContent>
