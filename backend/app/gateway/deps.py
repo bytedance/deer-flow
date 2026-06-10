@@ -333,22 +333,17 @@ async def get_current_user_from_request(request: Request):
     """
     state = getattr(request, "state", None)
     state_user = getattr(state, "user", None)
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+
     if state_user is not None and getattr(state, "auth_source", None) in {
-        "session",
-        "auth_disabled",
+        AUTH_SOURCE_SESSION,
+        AUTH_SOURCE_AUTH_DISABLED,
+        AUTH_SOURCE_INTERNAL,
     }:
         return state_user
 
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
-    from app.gateway.auth_disabled import get_auth_disabled_user, is_auth_disabled
-
-    if is_auth_disabled():
-        user = get_auth_disabled_user()
-        if state is not None:
-            state.user = user
-            state.auth_source = "auth_disabled"
-        return user
 
     access_token = request.cookies.get("access_token")
     if not access_token:

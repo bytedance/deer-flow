@@ -871,6 +871,7 @@ export function useThreadHistory(
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
+  const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -878,6 +879,7 @@ export function useThreadHistory(
     if (!enabled) {
       return;
     }
+    const loadGeneration = loadGenerationRef.current;
     if (loadingRef.current) {
       const pendingRunIndex = findLatestUnloadedRunIndex(
         runsRef.current,
@@ -931,12 +933,15 @@ export function useThreadHistory(
         }).then((res) => {
           return res.json();
         });
+        if (
+          loadGenerationRef.current !== loadGeneration ||
+          threadIdRef.current !== requestThreadId
+        ) {
+          return;
+        }
         const _messages = result.data
           .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
           .map((m) => m.content);
-        if (threadIdRef.current !== requestThreadId) {
-          return;
-        }
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),
         );
@@ -971,9 +976,11 @@ export function useThreadHistory(
     } catch (err) {
       console.error(err);
     } finally {
-      loadingRef.current = false;
-      loadingRunIdRef.current = null;
-      setLoading(false);
+      if (loadGenerationRef.current === loadGeneration) {
+        loadingRef.current = false;
+        loadingRunIdRef.current = null;
+        setLoading(false);
+      }
     }
   }, [enabled]);
   useEffect(() => {
@@ -981,6 +988,7 @@ export function useThreadHistory(
     threadIdRef.current = threadId;
 
     if (!enabled || threadChanged) {
+      loadGenerationRef.current += 1;
       runsRef.current = [];
       indexRef.current = -1;
       pendingLoadRef.current = false;
@@ -1013,7 +1021,8 @@ export function useThreadHistory(
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
-  const hasMore = enabled && (indexRef.current >= 0 || !runs.data);
+  const hasMore =
+    enabled && Boolean(threadId) && (indexRef.current >= 0 || !runs.data);
   return {
     runs: runs.data,
     messages,

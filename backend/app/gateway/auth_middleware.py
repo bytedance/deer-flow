@@ -17,7 +17,13 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.auth_disabled import get_auth_disabled_user, is_auth_disabled
+from app.gateway.auth_disabled import (
+    AUTH_SOURCE_AUTH_DISABLED,
+    AUTH_SOURCE_INTERNAL,
+    AUTH_SOURCE_SESSION,
+    get_auth_disabled_user,
+    is_auth_disabled,
+)
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -81,26 +87,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             internal_user = get_internal_user()
 
-        auth_source = "session"
+        auth_source = AUTH_SOURCE_SESSION
+        access_token = request.cookies.get("access_token")
 
         # Non-public path: require session cookie
         if internal_user is not None:
             user = internal_user
-            auth_source = "internal"
-        elif is_auth_disabled():
-            user = get_auth_disabled_user()
-            auth_source = "auth_disabled"
-        elif not request.cookies.get("access_token"):
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": AuthErrorResponse(
-                        code=AuthErrorCode.NOT_AUTHENTICATED,
-                        message="Authentication required",
-                    ).model_dump()
-                },
-            )
-        else:
+            auth_source = AUTH_SOURCE_INTERNAL
+        elif access_token:
             # Strict JWT validation: reject junk/expired tokens with 401
             # right here instead of silently passing through. This closes
             # the "junk cookie bypass" gap (AUTH_TEST_PLAN test 7.5.8):
@@ -117,7 +111,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
             try:
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
-                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                if not is_auth_disabled():
+                    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                user = get_auth_disabled_user()
+                auth_source = AUTH_SOURCE_AUTH_DISABLED
+        elif is_auth_disabled():
+            user = get_auth_disabled_user()
+            auth_source = AUTH_SOURCE_AUTH_DISABLED
+        else:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": AuthErrorResponse(
+                        code=AuthErrorCode.NOT_AUTHENTICATED,
+                        message="Authentication required",
+                    ).model_dump()
+                },
+            )
 
         # Stamp both request.state.user (for the contextvar pattern)
         # and request.state.auth (so @require_permission's "auth is
