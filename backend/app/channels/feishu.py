@@ -98,7 +98,10 @@ class FeishuChannel(Channel):
         return (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message)
-            .register_p2_im_message_message_read_v1(self._on_message_read)
+            .register_p2_im_message_message_read_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_created_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_deleted_v1(self._on_ignored_message_event)
+            .register_p2_im_message_recalled_v1(self._on_ignored_message_event)
             .build()
         )
 
@@ -209,8 +212,8 @@ class FeishuChannel(Channel):
                 logger.exception("Feishu WebSocket error")
             self._running = False
 
-    def _on_message_read(self, event) -> None:
-        logger.debug("[Feishu] ignoring message read event: %s", type(event).__name__)
+    def _on_ignored_message_event(self, event) -> None:
+        logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
 
     async def stop(self) -> None:
         self._running = False
