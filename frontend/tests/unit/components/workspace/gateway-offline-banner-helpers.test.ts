@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   OFFLINE_BANNER_AUTH_FAILURE_THRESHOLD,
   OFFLINE_BANNER_RETRY_INTERVAL_MS,
+  classifyProbe,
   decideProbeAction,
   shouldShowOfflineBanner,
 } from "@/components/workspace/gateway-offline-banner-helpers";
@@ -14,6 +15,10 @@ const fakeUser: User = {
   system_role: "user",
   needs_setup: false,
 };
+
+function makeResponse(status: number, ok = status >= 200 && status < 300) {
+  return { status, ok } as Response;
+}
 
 describe("shouldShowOfflineBanner", () => {
   it("hides when the gateway is reachable", () => {
@@ -44,16 +49,62 @@ describe("OFFLINE_BANNER_AUTH_FAILURE_THRESHOLD", () => {
   });
 });
 
+describe("classifyProbe", () => {
+  it("returns transient when fetch errored", () => {
+    expect(classifyProbe(null, true)).toEqual({ kind: "transient" });
+  });
+
+  it("returns transient when response is null with no error flag", () => {
+    expect(classifyProbe(null, false)).toEqual({ kind: "transient" });
+  });
+
+  it("returns ok with parsed user for a 2xx response with body", () => {
+    expect(classifyProbe(makeResponse(200), false, fakeUser)).toEqual({
+      kind: "ok",
+      user: fakeUser,
+    });
+  });
+
+  it("returns transient for a 2xx response whose body failed to parse", () => {
+    // Defensive: a 200 with malformed JSON / schema mismatch should not be
+    // treated as 'ok' because the caller has no user to apply.
+    expect(classifyProbe(makeResponse(200), false, null)).toEqual({
+      kind: "transient",
+    });
+  });
+
+  it("returns unauthorized for a 401 response", () => {
+    expect(classifyProbe(makeResponse(401), false)).toEqual({
+      kind: "unauthorized",
+    });
+  });
+
+  it("returns transient for 5xx responses", () => {
+    expect(classifyProbe(makeResponse(503), false)).toEqual({
+      kind: "transient",
+    });
+    expect(classifyProbe(makeResponse(500), false)).toEqual({
+      kind: "transient",
+    });
+  });
+
+  it("returns transient for unexpected non-401 4xx responses", () => {
+    expect(classifyProbe(makeResponse(429), false)).toEqual({
+      kind: "transient",
+    });
+  });
+});
+
 describe("decideProbeAction", () => {
-  it("delegates to refreshUser as 'recovered' on a 2xx response", () => {
-    expect(decideProbeAction(0, { kind: "ok" })).toEqual({
-      type: "delegate-refresh",
-      reason: "recovered",
+  it("returns apply-user with the body on a 2xx response", () => {
+    expect(decideProbeAction(0, { kind: "ok", user: fakeUser })).toEqual({
+      type: "apply-user",
+      user: fakeUser,
     });
     // Even if we'd accumulated some 401s, a 200 wins immediately.
-    expect(decideProbeAction(2, { kind: "ok" })).toEqual({
-      type: "delegate-refresh",
-      reason: "recovered",
+    expect(decideProbeAction(2, { kind: "ok", user: fakeUser })).toEqual({
+      type: "apply-user",
+      user: fakeUser,
     });
   });
 
@@ -65,8 +116,6 @@ describe("decideProbeAction", () => {
   });
 
   it("treats consecutive 401s below the threshold as still transient", () => {
-    // With default threshold = 3, two consecutive 401s should not yet
-    // be flagged as session-expired.
     expect(decideProbeAction(1, { kind: "unauthorized" })).toEqual({
       type: "noop",
       nextFailureCount: 2,
@@ -74,7 +123,6 @@ describe("decideProbeAction", () => {
   });
 
   it("delegates to refreshUser as 'session-expired' once 401s reach the threshold", () => {
-    // Default threshold = 3 → third consecutive 401 trips the wire.
     expect(decideProbeAction(2, { kind: "unauthorized" })).toEqual({
       type: "delegate-refresh",
       reason: "session-expired",
@@ -82,7 +130,6 @@ describe("decideProbeAction", () => {
   });
 
   it("honours a custom threshold (parameterised for safer tests)", () => {
-    // threshold=2: first 401 is still noop, second 401 expires.
     expect(decideProbeAction(0, { kind: "unauthorized" }, 2)).toEqual({
       type: "noop",
       nextFailureCount: 1,
@@ -93,17 +140,46 @@ describe("decideProbeAction", () => {
     });
   });
 
-  it("resets the auth-failure streak on a transient (5xx / network / abort) outcome", () => {
-    // We had 2 consecutive 401s, but the next probe hits a 5xx or network
-    // error — that is an *unrelated* gateway hiccup and must not be counted
-    // toward "session expired". The streak resets to 0.
+  it("decrements (not resets) the auth-failure streak on a transient outcome", () => {
+    // Was 2 → 1, so a flapping gateway (401↔5xx) still converges on the
+    // threshold instead of indefinitely masking session expiry.
     expect(decideProbeAction(2, { kind: "transient" })).toEqual({
       type: "noop",
-      nextFailureCount: 0,
+      nextFailureCount: 1,
     });
+    // Floored at 0; never goes negative.
     expect(decideProbeAction(0, { kind: "transient" })).toEqual({
       type: "noop",
       nextFailureCount: 0,
+    });
+    expect(decideProbeAction(1, { kind: "transient" })).toEqual({
+      type: "noop",
+      nextFailureCount: 0,
+    });
+  });
+
+  it("convergence: alternating 401/transient still triggers session-expired", () => {
+    // Simulate the exact scenario from #3493 CR: flapping gateway alternates
+    // 401 (session gone) and 503 (overloaded). With decrement-by-1, the
+    // counter still nets +1 per 401/transient pair and reaches threshold.
+    let count = 0;
+    const seq: Array<"unauthorized" | "transient"> = [
+      "unauthorized", // count -> 1
+      "transient", // count -> 0
+      "unauthorized", // count -> 1
+      "unauthorized", // count -> 2
+      "transient", // count -> 1
+      "unauthorized", // count -> 2
+    ];
+    for (const kind of seq) {
+      const action = decideProbeAction(count, { kind });
+      expect(action.type).toBe("noop");
+      if (action.type === "noop") count = action.nextFailureCount;
+    }
+    // Next 401 should trip the wire (2 -> 3 == threshold).
+    expect(decideProbeAction(count, { kind: "unauthorized" })).toEqual({
+      type: "delegate-refresh",
+      reason: "session-expired",
     });
   });
 });

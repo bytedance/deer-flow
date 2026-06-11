@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
@@ -27,10 +28,13 @@ export default async function WorkspaceLayout({
     case "unauthenticated":
       redirect("/login");
     case "gateway_unavailable":
+      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
+      // already mounts the banner inside its sidebar layout, so renderBanner
+      // stays false here to avoid double-mounting.
       return (
-        <AuthProvider initialUser={null}>
+        <GatewayOfflineFallback>
           <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
-        </AuthProvider>
+        </GatewayOfflineFallback>
       );
     case "config_error":
       throw new Error(result.message);

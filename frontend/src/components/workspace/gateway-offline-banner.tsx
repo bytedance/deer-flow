@@ -3,13 +3,14 @@
 import { useEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
+import { userSchema, type User } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
 import {
   OFFLINE_BANNER_RETRY_INTERVAL_MS,
+  classifyProbe,
   decideProbeAction,
   shouldShowOfflineBanner,
-  type ProbeOutcome,
 } from "./gateway-offline-banner-helpers";
 
 interface GatewayOfflineBannerProps {
@@ -25,7 +26,7 @@ export function GatewayOfflineBanner({
   gatewayUnavailable,
 }: GatewayOfflineBannerProps) {
   const { t } = useI18n();
-  const { user, refreshUser, logout } = useAuth();
+  const { user, applyUser, refreshUser, logout } = useAuth();
   // Guard against piling up probe calls while the gateway is still slow.
   const inFlightRef = useRef(false);
   // Count consecutive 401s so we can distinguish "transient warm-up 401"
@@ -40,24 +41,34 @@ export function GatewayOfflineBanner({
     // server-rendered prop and stays true until a full reload).
     if (user !== null) return;
 
-    const classify = (res: Response | null, errored: boolean): ProbeOutcome => {
-      if (errored || res === null) return { kind: "transient" };
-      if (res.ok) return { kind: "ok" };
-      if (res.status === 401) return { kind: "unauthorized" };
-      return { kind: "transient" };
-    };
-
     const probe = async () => {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       let res: Response | null = null;
       let errored = false;
+      let parsedUser: User | null = null;
       try {
         res = await fetch("/api/v1/auth/me", {
           credentials: "include",
           cache: "no-store",
         });
-      } catch {
+        // Reuse the probe's own response body instead of triggering a
+        // second /auth/me request via refreshUser() — halves the recovery
+        // burst against an already-struggling gateway.
+        if (res.ok) {
+          try {
+            const data = await res.json();
+            const parsed = userSchema.safeParse(data);
+            if (parsed.success) parsedUser = parsed.data;
+          } catch (err) {
+            console.warn(
+              "[gateway-offline-banner] probe body parse failed:",
+              err,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn("[gateway-offline-banner] probe failed:", err);
         errored = true;
       } finally {
         inFlightRef.current = false;
@@ -65,13 +76,16 @@ export function GatewayOfflineBanner({
 
       const action = decideProbeAction(
         authFailuresRef.current,
-        classify(res, errored),
+        classifyProbe(res, errored, parsedUser),
       );
 
+      if (action.type === "apply-user") {
+        authFailuresRef.current = 0;
+        applyUser(action.user);
+        return;
+      }
       if (action.type === "delegate-refresh") {
-        // Reset counter and hand off to AuthProvider. On "recovered" it
-        // will populate `user` (banner unmounts on next render). On
-        // "session-expired" it will /login-redirect from its 401 branch.
+        // Hand off to AuthProvider, which on 401 will /login-redirect.
         authFailuresRef.current = 0;
         await refreshUser();
         return;
@@ -86,7 +100,7 @@ export function GatewayOfflineBanner({
     return () => {
       window.clearInterval(handle);
     };
-  }, [gatewayUnavailable, user, refreshUser]);
+  }, [gatewayUnavailable, user, applyUser, refreshUser]);
 
   if (!shouldShowOfflineBanner(user, gatewayUnavailable)) {
     return null;
