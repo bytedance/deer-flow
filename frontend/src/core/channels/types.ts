@@ -7,6 +7,8 @@ export interface ChannelCredentialField {
   required: boolean;
 }
 
+export type ChannelRuntimeConfigValues = Record<string, string>;
+
 export interface ChannelProvider {
   provider: ChannelProviderId;
   display_name: string;
@@ -17,6 +19,7 @@ export interface ChannelProvider {
   auth_mode: string;
   connection_status: string;
   credential_fields: ChannelCredentialField[];
+  credential_values?: ChannelRuntimeConfigValues;
 }
 
 export interface ChannelProvidersResponse {
@@ -48,5 +51,3 @@ export interface ChannelConnectResponse {
   instruction: string;
   expires_in: number;
 }
-
-export type ChannelRuntimeConfigValues = Record<string, string>;

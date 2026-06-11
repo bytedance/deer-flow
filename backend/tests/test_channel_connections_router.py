@@ -132,20 +132,42 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     assert set(by_provider) == {"telegram", "slack", "discord", "feishu", "dingtalk", "wechat", "wecom"}
     assert by_provider["telegram"]["configured"] is True
     assert by_provider["telegram"]["auth_mode"] == "deep_link"
+    assert by_provider["telegram"]["credential_values"] == {
+        "bot_token": "********",
+        "bot_username": "deerflow_bot",
+    }
     assert by_provider["slack"]["configured"] is True
     assert by_provider["slack"]["auth_mode"] == "binding_code"
     assert by_provider["slack"]["connection_status"] == "connected"
+    assert by_provider["slack"]["credential_values"] == {
+        "bot_token": "********",
+        "app_token": "********",
+    }
     assert by_provider["discord"]["configured"] is True
     assert by_provider["discord"]["auth_mode"] == "binding_code"
+    assert by_provider["discord"]["credential_values"] == {"bot_token": "********"}
     assert by_provider["feishu"]["configured"] is True
     assert by_provider["feishu"]["auth_mode"] == "binding_code"
     assert by_provider["feishu"]["connection_status"] == "connected"
+    assert by_provider["feishu"]["credential_values"] == {
+        "app_id": "feishu-app",
+        "app_secret": "********",
+    }
     assert by_provider["dingtalk"]["configured"] is True
     assert by_provider["dingtalk"]["auth_mode"] == "binding_code"
+    assert by_provider["dingtalk"]["credential_values"] == {
+        "client_id": "dingtalk-client",
+        "client_secret": "********",
+    }
     assert by_provider["wechat"]["configured"] is True
     assert by_provider["wechat"]["auth_mode"] == "binding_code"
+    assert by_provider["wechat"]["credential_values"] == {"bot_token": "********"}
     assert by_provider["wecom"]["configured"] is True
     assert by_provider["wecom"]["auth_mode"] == "binding_code"
+    assert by_provider["wecom"]["credential_values"] == {
+        "bot_id": "wecom-bot",
+        "bot_secret": "********",
+    }
 
     anyio.run(repo.close)
 
@@ -454,6 +476,62 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
         "enabled": True,
         "bot_token": "xoxb-ui",
         "app_token": "xapp-ui",
+    }
+
+    anyio.run(repo.close)
+
+
+def test_configure_provider_runtime_credentials_preserves_masked_secrets(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "feishu": {"enabled": True},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(
+        config,
+        repo,
+        {
+            "feishu": {
+                "enabled": True,
+                "app_id": "old-app-id",
+                "app_secret": "old-secret",
+            }
+        },
+        runtime_config_store=runtime_config_store,
+    )
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/feishu/runtime-config",
+            json={
+                "values": {
+                    "app_id": "new-app-id",
+                    "app_secret": "********",
+                }
+            },
+        )
+        providers_response = client.get("/api/channels/providers")
+
+    assert configure_response.status_code == 200
+    assert app.state.channels_config["feishu"] == {
+        "enabled": True,
+        "app_id": "new-app-id",
+        "app_secret": "old-secret",
+    }
+    assert runtime_config_store.get_provider_config("feishu") == {
+        "enabled": True,
+        "app_id": "new-app-id",
+        "app_secret": "old-secret",
+    }
+    by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
+    assert by_provider["feishu"]["credential_values"] == {
+        "app_id": "new-app-id",
+        "app_secret": "********",
     }
 
     anyio.run(repo.close)

@@ -45,6 +45,10 @@ describe("channels api", () => {
             configured: true,
             auth_mode: "deep_link",
             connection_status: "not_connected",
+            credential_values: {
+              bot_token: "********",
+              bot_username: "deerflow_bot",
+            },
           },
         ],
       }),
@@ -52,7 +56,16 @@ describe("channels api", () => {
 
     await expect(listChannelProviders()).resolves.toMatchObject({
       enabled: true,
-      providers: [{ provider: "telegram", display_name: "Telegram" }],
+      providers: [
+        {
+          provider: "telegram",
+          display_name: "Telegram",
+          credential_values: {
+            bot_token: "********",
+            bot_username: "deerflow_bot",
+          },
+        },
+      ],
     });
     expect(mockedFetch).toHaveBeenCalledWith("/backend/api/channels/providers");
   });

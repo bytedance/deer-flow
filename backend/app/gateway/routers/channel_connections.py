@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api/channels", tags=["channel-connections"])
 logger = logging.getLogger(__name__)
 
 _STATE_TTL_SECONDS = 600
+_MASKED_CREDENTIAL_VALUE = "********"
 
 
 class ChannelCredentialFieldResponse(BaseModel):
@@ -42,6 +43,7 @@ class ChannelProviderResponse(BaseModel):
     auth_mode: str
     connection_status: str
     credential_fields: list[ChannelCredentialFieldResponse] = Field(default_factory=list)
+    credential_values: dict[str, str] = Field(default_factory=dict)
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -304,6 +306,20 @@ def _credential_fields(provider: str) -> list[ChannelCredentialFieldResponse]:
     return [ChannelCredentialFieldResponse(**field) for field in fields]
 
 
+def _credential_values(provider: str, channels_config: dict[str, Any]) -> dict[str, str]:
+    runtime_config = channels_config.get(provider)
+    if not isinstance(runtime_config, dict):
+        return {}
+
+    values: dict[str, str] = {}
+    for field in _credential_fields(provider):
+        value = str(runtime_config.get(field.name) or "").strip()
+        if not value:
+            continue
+        values[field.name] = _MASKED_CREDENTIAL_VALUE if field.type == "password" else value
+    return values
+
+
 def _provider_response(
     config: ChannelConnectionsConfig,
     channels_config: dict[str, Any],
@@ -318,6 +334,11 @@ def _provider_response(
         connection_status = "connected"
     else:
         connection_status = "not_connected"
+    credential_values = _credential_values(provider, channels_config)
+    if provider == "telegram" and not credential_values.get("bot_username"):
+        bot_username = str(_provider_config(config, provider).bot_username or "").strip()
+        if bot_username:
+            credential_values["bot_username"] = bot_username
     return ChannelProviderResponse(
         provider=provider,
         display_name=meta["display_name"],
@@ -328,15 +349,26 @@ def _provider_response(
         auth_mode=meta["auth_mode"],
         connection_status=connection_status,
         credential_fields=_credential_fields(provider),
+        credential_values=credential_values,
     )
 
 
-def _required_runtime_values(provider: str, values: dict[str, str]) -> dict[str, str]:
+def _required_runtime_values(
+    provider: str,
+    values: dict[str, str],
+    existing_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
     fields = _credential_fields(provider)
     cleaned: dict[str, str] = {}
     missing: list[str] = []
+    existing_config = existing_config or {}
     for field in fields:
         raw_value = values.get(field.name, "")
+        if field.type == "password" and raw_value == _MASKED_CREDENTIAL_VALUE:
+            existing_value = str(existing_config.get(field.name) or "").strip()
+            if existing_value:
+                cleaned[field.name] = existing_value
+                continue
         value = raw_value.strip() if isinstance(raw_value, str) else str(raw_value or "").strip()
         if field.required and not value:
             missing.append(field.label)
@@ -509,10 +541,10 @@ async def configure_channel_provider_runtime(
     if not provider_config.enabled:
         raise HTTPException(status_code=400, detail="Channel provider is not enabled")
 
-    values = _required_runtime_values(provider, body.values)
     channels_config = _get_channels_config(request)
     existing = channels_config.get(provider)
     runtime_config = dict(existing) if isinstance(existing, dict) else {}
+    values = _required_runtime_values(provider, body.values, runtime_config)
     runtime_config["enabled"] = True
 
     for key in _RUNTIME_REQUIREMENTS[provider]:

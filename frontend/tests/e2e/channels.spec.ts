@@ -27,6 +27,7 @@ type MockChannelProvider = {
     type: string;
     required: boolean;
   }>;
+  credential_values?: Record<string, string>;
 };
 
 function defaultProviders(): MockChannelProvider[] {
@@ -166,6 +167,12 @@ test.describe("IM channels", () => {
                   required: true,
                 },
               ],
+              credential_values: slackConfigured
+                ? {
+                    bot_token: "********",
+                    app_token: "********",
+                  }
+                : {},
             },
             {
               provider: "discord",
@@ -208,6 +215,7 @@ test.describe("IM channels", () => {
           auth_mode: "binding_code",
           connection_status: "connected",
           credential_fields: [],
+          credential_values: {},
         }),
       });
     });
@@ -244,9 +252,59 @@ test.describe("IM channels", () => {
     await expect(
       page.getByRole("dialog", { name: "Modify Slack" }),
     ).toBeVisible();
+    await expect(page.getByLabel("Bot token")).toHaveValue("********");
+    await expect(page.getByLabel("App token")).toHaveValue("********");
     expect(submittedValues).toEqual({
       bot_token: "xoxb-ui",
       app_token: "xapp-ui",
     });
+  });
+
+  test("runtime setup dialog prefills editable credential values", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    mockChannelsAPI(page, [
+      {
+        provider: "feishu",
+        display_name: "Feishu",
+        enabled: true,
+        configured: true,
+        connectable: true,
+        auth_mode: "binding_code",
+        connection_status: "connected",
+        credential_fields: [
+          {
+            name: "app_id",
+            label: "App ID",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "app_secret",
+            label: "App secret",
+            type: "password",
+            required: true,
+          },
+        ],
+        credential_values: {
+          app_id: "cli_feishu_app",
+          app_secret: "********",
+        },
+      },
+    ]);
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    await expect(sidebar.getByText("Feishu")).toBeVisible({ timeout: 15_000 });
+    await sidebar.getByRole("button", { name: "Connected" }).click();
+
+    const setupDialog = page.getByRole("dialog", { name: "Modify Feishu" });
+    await expect(setupDialog).toBeVisible();
+    await expect(setupDialog.getByLabel("App ID")).toHaveValue(
+      "cli_feishu_app",
+    );
+    await expect(setupDialog.getByLabel("App secret")).toHaveValue("********");
   });
 });

@@ -57,6 +57,10 @@ export function ChannelRuntimeConfigDialog({
     () => provider?.credential_fields ?? [],
     [provider?.credential_fields],
   );
+  const credentialValues = useMemo<ChannelRuntimeConfigValues>(
+    () => provider?.credential_values ?? {},
+    [provider?.credential_values],
+  );
 
   useEffect(() => {
     if (!open || !provider) {
@@ -64,11 +68,14 @@ export function ChannelRuntimeConfigDialog({
       return;
     }
     setValues(
-      Object.fromEntries(fields.map((field) => [field.name, ""])) as
-        | ChannelRuntimeConfigValues
-        | {},
+      Object.fromEntries(
+        fields.map((field) => [
+          field.name,
+          credentialValues[field.name] ?? "",
+        ]),
+      ) as ChannelRuntimeConfigValues,
     );
-  }, [fields, open, provider]);
+  }, [credentialValues, fields, open, provider]);
 
   if (!provider) {
     return null;
