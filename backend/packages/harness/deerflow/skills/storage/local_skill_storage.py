@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
+# Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
+# cannot hold back the install outcome propagating out of the finally block.
+_INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS = 5.0
+
 
 class LocalSkillStorage(SkillStorage):
     """Skill storage backed by the local filesystem.
@@ -112,7 +116,13 @@ class LocalSkillStorage(SkillStorage):
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s", skill_name, target)
         finally:
-            await asyncio.to_thread(self._cleanup_install_tmp, tmp)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._cleanup_install_tmp, tmp),
+                    timeout=_INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("Timed out cleaning up skill install temp dir %s", tmp)
 
         return {
             "success": True,
