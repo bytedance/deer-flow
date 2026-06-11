@@ -1,5 +1,6 @@
 """Tests for user-scoped path resolution in Paths."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ class TestMakeSafeUserId:
         # Sanitized prefix plus a stable digest of the original.
         assert result.startswith("user-example-com-")
         assert len(result.rsplit("-", 1)[1]) == 16
-        assert result == "user-example-com-63a710569261a24b"
+        assert result == "user-example-com-b4c9a289323b21a0"
         assert make_safe_user_id("user@example.com") == result
 
     def test_sanitized_id_passes_validation(self, paths: Paths):
@@ -69,6 +70,37 @@ class TestMakeSafeUserId:
 class TestUserDir:
     def test_user_dir(self, paths: Paths):
         assert paths.user_dir("alice") == paths.base_dir / "users" / "alice"
+
+    def test_prepare_user_dir_migrates_unique_legacy_unsafe_bucket(self, paths: Paths):
+        from deerflow.config.paths import make_safe_user_id
+
+        raw = "user@example.com"
+        safe = make_safe_user_id(raw)
+        legacy_dir = paths.base_dir / "users" / "user-example-com-63a710569261a24b"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "memory.json").write_text('{"legacy": true}\n', encoding="utf-8")
+
+        assert paths.prepare_user_dir_for_raw_id(raw) == safe
+
+        current_dir = paths.user_dir(safe)
+        assert current_dir.exists()
+        assert not legacy_dir.exists()
+        assert (current_dir / "memory.json").read_text(encoding="utf-8") == '{"legacy": true}\n'
+
+    def test_prepare_user_dir_skips_ambiguous_legacy_unsafe_buckets(self, paths: Paths, caplog):
+        from deerflow.config.paths import make_safe_user_id
+
+        users_dir = paths.base_dir / "users"
+        (users_dir / "a-b-1111111111111111").mkdir(parents=True)
+        (users_dir / "a-b-2222222222222222").mkdir(parents=True)
+
+        caplog.set_level(logging.WARNING)
+        assert paths.prepare_user_dir_for_raw_id("a.b") == make_safe_user_id("a.b")
+
+        assert not paths.user_dir(make_safe_user_id("a.b")).exists()
+        assert (users_dir / "a-b-1111111111111111").exists()
+        assert (users_dir / "a-b-2222222222222222").exists()
+        assert any("Multiple legacy unsafe-id user directories matched" in r.message for r in caplog.records)
 
 
 class TestUserMemoryFile:

@@ -2461,6 +2461,28 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] != raw
         assert run_context["channel_user_id"] == raw
 
+    def test_unsafe_user_id_migrates_unique_legacy_bucket(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths, make_safe_user_id
+
+        paths = Paths(tmp_path)
+        legacy_dir = paths.base_dir / "users" / "user-example-com-63a710569261a24b"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "memory.json").write_text('{"legacy": true}\n', encoding="utf-8")
+        monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        safe = make_safe_user_id(raw)
+        assert run_context["user_id"] == safe
+        assert paths.user_dir(safe).exists()
+        assert not legacy_dir.exists()
+        assert (paths.user_dir(safe) / "memory.json").read_text(encoding="utf-8") == '{"legacy": true}\n'
+
     @pytest.mark.parametrize("raw_user_id", ["", None])
     def test_empty_or_none_user_id_is_not_injected(self, raw_user_id, monkeypatch):
         manager = self._manager()

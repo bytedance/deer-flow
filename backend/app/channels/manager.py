@@ -483,6 +483,16 @@ def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
     return create_internal_auth_headers(owner_user_id=owner_user_id)
 
 
+def _safe_user_id_for_run(raw_user_id: str) -> str:
+    from deerflow.config.paths import get_paths
+
+    try:
+        return get_paths().prepare_user_dir_for_raw_id(raw_user_id)
+    except Exception:
+        logger.exception("Failed to prepare channel run user directory")
+        return make_safe_user_id(raw_user_id)
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
@@ -780,9 +790,9 @@ class ChannelManager:
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
         owner_user_id = _effective_owner_user_id(msg)
         if owner_user_id:
-            run_context_identity["user_id"] = make_safe_user_id(owner_user_id)
+            run_context_identity["user_id"] = _safe_user_id_for_run(owner_user_id)
         elif msg.user_id:
-            run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
+            run_context_identity["user_id"] = _safe_user_id_for_run(msg.user_id)
         if msg.user_id:
             run_context_identity["channel_user_id"] = msg.user_id
 
