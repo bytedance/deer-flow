@@ -226,6 +226,12 @@ test.describe("IM channels", () => {
 
     const setupDialog = page.getByRole("dialog", { name: "Connect Slack" });
     await expect(setupDialog).toBeVisible();
+    const botTokenInput = setupDialog.getByLabel("Bot token");
+    await expect(botTokenInput).toHaveAttribute("type", "text");
+    await expect(botTokenInput).toHaveAttribute("autocomplete", "off");
+    await expect(botTokenInput).toHaveAttribute("data-lpignore", "true");
+    await expect(botTokenInput).toHaveAttribute("data-1p-ignore", "true");
+    await expect(botTokenInput).toHaveCSS("-webkit-text-security", "disc");
     await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
     await setupDialog.getByLabel("App token").fill("xapp-ui");
     await setupDialog.getByRole("button", { name: "Save and connect" }).click();

@@ -1,7 +1,13 @@
 "use client";
 
 import { LoaderCircleIcon } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +34,14 @@ type ChannelRuntimeConfigDialogProps = {
     provider: ChannelProvider,
     values: ChannelRuntimeConfigValues,
   ) => void;
+};
+
+type SecretInputStyle = CSSProperties & {
+  WebkitTextSecurity?: "disc";
+};
+
+const SECRET_INPUT_STYLE: SecretInputStyle = {
+  WebkitTextSecurity: "disc",
 };
 
 export function ChannelRuntimeConfigDialog({
@@ -83,6 +97,7 @@ export function ChannelRuntimeConfigDialog({
           <div className="space-y-3">
             {fields.map((field) => {
               const inputId = `channel-${provider.provider}-${field.name}`;
+              const isSecretField = field.type === "password";
               return (
                 <div key={field.name} className="space-y-1.5">
                   <label
@@ -93,10 +108,18 @@ export function ChannelRuntimeConfigDialog({
                   </label>
                   <Input
                     id={inputId}
-                    type={field.type === "password" ? "password" : "text"}
+                    type="text"
                     value={values[field.name] ?? ""}
                     required={field.required}
                     autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    data-1p-ignore={isSecretField ? "true" : undefined}
+                    data-bwignore={isSecretField ? "true" : undefined}
+                    data-form-type={isSecretField ? "other" : undefined}
+                    data-lpignore={isSecretField ? "true" : undefined}
+                    style={isSecretField ? SECRET_INPUT_STYLE : undefined}
                     onChange={(event) => {
                       setValues((current) => ({
                         ...current,
