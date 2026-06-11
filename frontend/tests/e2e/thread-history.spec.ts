@@ -179,15 +179,13 @@ test.describe("Thread history", () => {
       `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
     );
     await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
-    await expect(
-      sidebarThread.getByLabel("Feishu channel"),
-    ).toBeVisible();
+    await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
 
     await page.goto("/workspace/chats");
 
-    const mainThread = page.locator("main").locator(
-      `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
-    );
+    const mainThread = page
+      .locator("main")
+      .locator(`a[href='/workspace/chats/${MOCK_THREAD_ID}']`);
     await expect(mainThread.getByText("Feishu conversation")).toBeVisible({
       timeout: 15_000,
     });

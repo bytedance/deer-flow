@@ -8,7 +8,9 @@ type ThreadsSearchClient = {
   };
 };
 
-export type ThreadSearchParams = NonNullable<Parameters<ThreadsClient["search"]>[0]>;
+export type ThreadSearchParams = NonNullable<
+  Parameters<ThreadsClient["search"]>[0]
+>;
 
 export const DEFAULT_THREAD_SEARCH_PARAMS: ThreadSearchParams = {
   limit: 50,

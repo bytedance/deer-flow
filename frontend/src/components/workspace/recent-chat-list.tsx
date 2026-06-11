@@ -225,7 +225,7 @@ export function RecentChatList() {
                     <SidebarMenuButton isActive={isActive} asChild>
                       <div>
                         <Link
-                          className="text-muted-foreground flex min-w-0 items-center gap-1.5 whitespace-nowrap pr-7 group-hover/side-menu-item:overflow-hidden"
+                          className="text-muted-foreground flex min-w-0 items-center gap-1.5 pr-7 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                           href={pathOfThread(thread)}
                         >
                           <ThreadChannelIcon source={channelSource} />
