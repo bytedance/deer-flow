@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { pathOfThread } from "@/core/threads/utils";
+import { channelSourceOfThread, pathOfThread } from "@/core/threads/utils";
 
 test("uses standard chat route when thread has no agent context", () => {
   expect(pathOfThread("thread-123")).toBe("/workspace/chats/thread-123");
@@ -43,4 +43,41 @@ test("prefers context.agent_name over metadata.agent_name", () => {
       metadata: { agent_name: "from-metadata" },
     }),
   ).toBe("/workspace/agents/from-context/chats/thread-789");
+});
+
+test("reads IM channel source metadata", () => {
+  expect(
+    channelSourceOfThread({
+      metadata: {
+        channel_source: {
+          type: "im_channel",
+          provider: "feishu",
+          chat_id: "oc_123",
+        },
+      },
+    }),
+  ).toEqual({
+    type: "im_channel",
+    provider: "feishu",
+    label: "Feishu",
+  });
+});
+
+test("ignores threads without valid IM channel source metadata", () => {
+  expect(channelSourceOfThread({ metadata: {} })).toBeNull();
+  expect(
+    channelSourceOfThread({
+      metadata: { channel_source: { provider: "" } },
+    }),
+  ).toBeNull();
+  expect(
+    channelSourceOfThread({
+      metadata: {
+        channel_source: {
+          type: "other",
+          provider: "feishu",
+        },
+      },
+    }),
+  ).toBeNull();
 });

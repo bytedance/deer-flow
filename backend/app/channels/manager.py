@@ -274,6 +274,22 @@ def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: 
     return metadata
 
 
+def _thread_channel_metadata(msg: InboundMessage) -> dict[str, Any]:
+    channel_source: dict[str, Any] = {
+        "type": "im_channel",
+        "provider": msg.channel_name,
+        "chat_id": msg.chat_id,
+    }
+    if msg.topic_id:
+        channel_source["topic_id"] = msg.topic_id
+    if msg.thread_ts:
+        channel_source["thread_ts"] = msg.thread_ts
+    if msg.connection_id:
+        channel_source["connection_id"] = msg.connection_id
+
+    return {"channel_source": channel_source}
+
+
 def _extract_text_content(content: Any) -> str:
     """Extract text from a streaming payload content field."""
     if isinstance(content, str):
@@ -943,15 +959,26 @@ class ChannelManager:
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
         """Create a new thread through Gateway and store the mapping."""
+        metadata = _thread_channel_metadata(msg)
         owner_headers = _owner_headers(msg)
         if owner_headers:
-            thread = await client.threads.create(headers=owner_headers)
+            thread = await client.threads.create(metadata=metadata, headers=owner_headers)
         else:
-            thread = await client.threads.create()
+            thread = await client.threads.create(metadata=metadata)
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
+
+    async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
+        """Best-effort source metadata backfill for existing IM-created threads."""
+        update_kwargs: dict[str, Any] = {"metadata": _thread_channel_metadata(msg)}
+        if owner_headers := _owner_headers(msg):
+            update_kwargs["headers"] = owner_headers
+        try:
+            await client.threads.update(thread_id, **update_kwargs)
+        except Exception:
+            logger.debug("[Manager] failed to update channel metadata for thread_id=%s", thread_id, exc_info=True)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
@@ -962,6 +989,7 @@ class ChannelManager:
         thread_id = await self._lookup_thread_id(msg)
         if thread_id:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+            await self._update_thread_channel_metadata(client, msg, thread_id)
 
         # No existing thread found — create a new one
         if thread_id is None:
@@ -1202,9 +1230,7 @@ class ChannelManager:
         if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
-            thread = await client.threads.create()
-            new_thread_id = thread["thread_id"]
-            await self._store_thread_id(msg, new_thread_id)
+            await self._create_thread(client, msg)
             reply = "New conversation started."
         elif reply is None and command == "status":
             thread_id = await self._lookup_thread_id(msg)

@@ -487,6 +487,7 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
 
     # threads.create() returns a Thread-like dict
     mock_client.threads.create = AsyncMock(return_value={"thread_id": thread_id})
+    mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
 
     # threads.get() returns thread info (succeeds by default)
     mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id})
@@ -667,16 +668,34 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text="hi")
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                topic_id="topic1",
+                thread_ts="msg1",
+                connection_id="conn1",
+            )
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             # Thread should be created through Gateway
             mock_client.threads.create.assert_called_once()
+            assert mock_client.threads.create.call_args.kwargs["metadata"] == {
+                "channel_source": {
+                    "type": "im_channel",
+                    "provider": "test",
+                    "chat_id": "chat1",
+                    "topic_id": "topic1",
+                    "thread_ts": "msg1",
+                    "connection_id": "conn1",
+                }
+            }
 
             # Thread ID should be stored
-            thread_id = store.get_thread_id("test", "chat1")
+            thread_id = store.get_thread_id("test", "chat1", topic_id="topic1")
             assert thread_id == "test-thread-123"
 
             # runs.wait should be called with the thread_id
@@ -2003,6 +2022,17 @@ class TestChannelManager:
 
             # threads.create should be called only ONCE (second message reuses the thread)
             mock_client.threads.create.assert_called_once()
+            mock_client.threads.update.assert_called_once_with(
+                "topic-thread-1",
+                metadata={
+                    "channel_source": {
+                        "type": "im_channel",
+                        "provider": "test",
+                        "chat_id": "chat1",
+                        "topic_id": "topic-root-123",
+                    }
+                },
+            )
 
             # Both runs.wait calls should use the same thread_id
             assert mock_client.runs.wait.call_count == 2

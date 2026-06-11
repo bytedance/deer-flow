@@ -25,6 +25,7 @@ export type MockThread = {
   title?: string;
   updated_at?: string;
   agent_name?: string;
+  metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
 };
@@ -90,7 +91,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       thread_id: t.thread_id,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
-      metadata: t.agent_name ? { agent_name: t.agent_name } : {},
+      metadata: {
+        ...(t.metadata ?? {}),
+        ...(t.agent_name ? { agent_name: t.agent_name } : {}),
+      },
       status: "idle",
       values: { title: t.title ?? "Untitled" },
     }));
