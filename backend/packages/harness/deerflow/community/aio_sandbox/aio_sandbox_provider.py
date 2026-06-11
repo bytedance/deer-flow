@@ -459,35 +459,87 @@ class AioSandboxProvider(SandboxProvider):
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
         return self._deterministic_sandbox_id(thread_id) if thread_id else str(uuid.uuid4())[:8]
 
+    def _probe_sandbox(self, sandbox_id: str, *, info: "SandboxInfo | None" = None) -> bool:
+        """Quick health check: is the sandbox container still alive?
+
+        Uses the backend's ``is_alive`` for a lightweight check
+        (container inspect, not HTTP health poll).  Returns False
+        when the sandbox is unknown or the backend raises.
+        """
+        if info is None:
+            info = self._sandbox_infos.get(sandbox_id)
+        if info is None:
+            return False
+        try:
+            return self._backend.is_alive(info)
+        except Exception:
+            return False
+
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
             return None
 
+        # Under lock: find cached sandbox and snapshot info
         with self._lock:
             if thread_id not in self._thread_sandboxes:
                 return None
 
             existing_id = self._thread_sandboxes[thread_id]
-            if existing_id in self._sandboxes:
-                suffix = " (post-lock check)" if post_lock else ""
-                logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id}{suffix}")
-                self._last_activity[existing_id] = time.time()
-                return existing_id
+            if existing_id not in self._sandboxes:
+                del self._thread_sandboxes[thread_id]
+                return None
+            info = self._sandbox_infos.get(existing_id)
 
-            del self._thread_sandboxes[thread_id]
+        # Outside lock: health check (Docker inspect — avoids blocking other threads)
+        if not self._probe_sandbox(existing_id, info=info):
+            logger.warning("In-process sandbox %s failed health check, evicting stale reference", existing_id)
+            with self._lock:
+                # Re-verify: idle checker or another path may have already cleaned up
+                if self._thread_sandboxes.get(thread_id) != existing_id:
+                    return None
+                del self._sandboxes[existing_id]
+                self._sandbox_infos.pop(existing_id, None)
+                self._last_activity.pop(existing_id, None)
+                del self._thread_sandboxes[thread_id]
             return None
+
+        # Under lock: update activity and return
+        with self._lock:
+            if self._thread_sandboxes.get(thread_id) != existing_id:
+                return None
+            suffix = " (post-lock check)" if post_lock else ""
+            logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id}{suffix}")
+            self._last_activity[existing_id] = time.time()
+            return existing_id
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str | None, sandbox_id: str, *, post_lock: bool = False) -> str | None:
         """Promote a warm-pool sandbox back to active tracking if available."""
         if thread_id is None:
             return None
 
+        # Under lock: pop from warm pool and snapshot info
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
 
             info, _ = self._warm_pool.pop(sandbox_id)
+
+        # Outside lock: health check (Docker inspect — avoids blocking other threads)
+        if not self._probe_sandbox(sandbox_id, info=info):
+            logger.warning("Warm-pool sandbox %s failed health check, evicting stale entry", sandbox_id)
+            try:
+                self._backend.destroy(info)
+            except Exception:
+                pass
+            return None
+
+        # Under lock: register as active
+        with self._lock:
+            # If another path already assigned a sandbox for this thread, put ours back
+            if thread_id in self._thread_sandboxes:
+                self._warm_pool[sandbox_id] = (info, time.time())
+                return None
             sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info

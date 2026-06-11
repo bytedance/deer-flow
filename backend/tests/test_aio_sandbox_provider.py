@@ -434,3 +434,116 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
 
     assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
     provider._backend.destroy.assert_called_once()
+
+
+# ── Stale sandbox detection (testOnBorrow, #3474) ─────────────────────────────
+
+
+def _make_provider_for_reuse(tmp_path, sandbox_id: str):
+    """Build a provider with one in-process sandbox ready for reuse tests."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._sandbox_infos = {
+        sandbox_id: aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
+    }
+    provider._thread_sandboxes = {"thread-stale": sandbox_id}
+    provider._last_activity = {sandbox_id: 0.0}
+    provider._backend = SimpleNamespace(is_alive=MagicMock(return_value=True), destroy=MagicMock())
+
+    sandbox = MagicMock()
+    sandbox.id = sandbox_id
+    provider._sandboxes = {sandbox_id: sandbox}
+    return provider, aio_mod
+
+
+def test_reuse_destroys_stale_in_process_sandbox(tmp_path, caplog):
+    """Stale in-process sandbox must be evicted when backend.is_alive returns False (#3474)."""
+    provider, _ = _make_provider_for_reuse(tmp_path, "sandbox-stale")
+    provider._backend.is_alive.return_value = False
+
+    with caplog.at_level("WARNING"):
+        result = provider._reuse_in_process_sandbox("thread-stale")
+
+    assert result is None
+    assert "stale" in caplog.text.lower()
+    # Tracking must be fully cleaned up
+    assert "sandbox-stale" not in provider._sandboxes
+    assert "sandbox-stale" not in provider._sandbox_infos
+    assert "sandbox-stale" not in provider._last_activity
+    assert "thread-stale" not in provider._thread_sandboxes
+
+
+def test_reuse_keeps_healthy_in_process_sandbox(tmp_path):
+    """Healthy sandbox should be returned normally when is_alive returns True."""
+    provider, _ = _make_provider_for_reuse(tmp_path, "sandbox-healthy")
+
+    result = provider._reuse_in_process_sandbox("thread-stale")
+
+    assert result == "sandbox-healthy"
+    assert provider._backend.is_alive.call_count == 1
+
+
+def test_reclaim_destroys_stale_warm_pool_sandbox(tmp_path, caplog):
+    """Stale warm-pool sandbox must be evicted when backend.is_alive returns False (#3474)."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandbox_infos = {}
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-warm-stale", sandbox_url="http://sandbox-host")
+    provider._warm_pool = {"sandbox-warm-stale": (info, 0.0)}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._sandboxes = {}
+    provider._backend = SimpleNamespace(is_alive=MagicMock(return_value=False), destroy=MagicMock())
+
+    with caplog.at_level("WARNING"):
+        result = provider._reclaim_warm_pool_sandbox("thread-warm", "sandbox-warm-stale")
+
+    assert result is None
+    assert "stale" in caplog.text.lower()
+    # Warm pool entry must be removed
+    assert "sandbox-warm-stale" not in provider._warm_pool
+    # Backend destroy should be called to clean up the dead container
+    provider._backend.destroy.assert_called_once_with(info)
+
+
+def test_reclaim_keeps_healthy_warm_pool_sandbox(tmp_path):
+    """Healthy warm-pool sandbox should be reclaimed normally when is_alive returns True."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandbox_infos = {}
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-warm-ok", sandbox_url="http://sandbox-host")
+    provider._warm_pool = {"sandbox-warm-ok": (info, 0.0)}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._sandboxes = {}
+    provider._backend = SimpleNamespace(is_alive=MagicMock(return_value=True), destroy=MagicMock())
+
+    result = provider._reclaim_warm_pool_sandbox("thread-warm", "sandbox-warm-ok")
+
+    assert result == "sandbox-warm-ok"
+    assert "sandbox-warm-ok" not in provider._warm_pool
+    assert "thread-warm" in provider._thread_sandboxes
+
+
+def test_probe_sandbox_returns_false_on_exception(tmp_path):
+    """_probe_sandbox must return False when backend.is_alive raises."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._sandbox_infos = {
+        "sandbox-err": aio_mod.SandboxInfo(sandbox_id="sandbox-err", sandbox_url="http://sandbox-host"),
+    }
+    provider._backend = SimpleNamespace(is_alive=MagicMock(side_effect=RuntimeError("inspect failed")))
+
+    assert provider._probe_sandbox("sandbox-err") is False
+
+
+def test_probe_sandbox_returns_false_for_unknown_id(tmp_path):
+    """_probe_sandbox must return False when sandbox_id has no SandboxInfo."""
+    provider = _make_provider(tmp_path)
+    provider._sandbox_infos = {}
+
+    assert provider._probe_sandbox("nonexistent") is False
