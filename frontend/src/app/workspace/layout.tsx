@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { AuthProvider } from "@/core/auth/AuthProvider";
@@ -29,30 +28,9 @@ export default async function WorkspaceLayout({
       redirect("/login");
     case "gateway_unavailable":
       return (
-        <div className="flex h-screen flex-col items-center justify-center gap-4">
-          <p className="text-muted-foreground">
-            Service temporarily unavailable.
-          </p>
-          <p className="text-muted-foreground text-xs">
-            The backend may be restarting. Please wait a moment and try again.
-          </p>
-          <div className="flex gap-3">
-            <Link
-              href="/workspace"
-              className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-4 py-2 text-sm"
-            >
-              Retry
-            </Link>
-            <form action="/api/v1/auth/logout" method="post">
-              <button
-                type="submit"
-                className="text-muted-foreground hover:bg-muted rounded-md border px-4 py-2 text-sm"
-              >
-                Logout &amp; Reset
-              </button>
-            </form>
-          </div>
-        </div>
+        <AuthProvider initialUser={null}>
+          <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+        </AuthProvider>
       );
     case "config_error":
       throw new Error(result.message);

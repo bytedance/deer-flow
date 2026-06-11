@@ -171,6 +171,8 @@ export interface Translations {
     contactUs: string;
     about: string;
     logout: string;
+    gatewayUnavailable: string;
+    gatewayUnavailableRetrying: string;
   };
 
   // Conversation
