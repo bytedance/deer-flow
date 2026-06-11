@@ -109,10 +109,10 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     assert fake_agent.captured_config is not None, "astream was not invoked"
     metadata = fake_agent.captured_config.get("metadata") or {}
     assert metadata.get("langfuse_session_id") == "thread-xyz"
-    # conftest.py autouse fixture injects ``test-user-autouse`` into the
-    # contextvar — the worker should read it via ``get_effective_user_id``.
+    # conftest.py autouse fixture injects a user with email ``test@local``
+    # into the contextvar — the worker now prefers email over UUID.
     user_id = metadata.get("langfuse_user_id")
-    assert user_id == "test-user-autouse", f"expected test-user-autouse, got {user_id}"
+    assert user_id == "test@local", f"expected test@local, got {user_id}"
     assert metadata.get("langfuse_trace_name") == "lead-agent"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
@@ -136,6 +136,7 @@ async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
 
     reset_tracing_config()
     monkeypatch.setattr(worker_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
+    monkeypatch.setattr(worker_module, "get_effective_user_email", lambda: None)
 
     fake_agent = _FakeAgent()
 
@@ -213,6 +214,48 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     assert metadata["langfuse_user_id"] == "explicit-user"
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_uses_custom_agent_name_from_context(monkeypatch):
+    """When config['context']['agent_name'] is set (custom Soul), it appears in tags."""
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-soul",
+        thread_id="thread-soul",
+        assistant_id="lead_agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="qwen-plus",
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    await run_agent(
+        _FakeBridge(),
+        _FakeRunManager(),
+        record,
+        ctx=ctx,
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"context": {"thread_id": "thread-soul", "agent_name": "project-inspector"}},
+    )
+
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    assert metadata.get("langfuse_trace_name") == "project-inspector"
+    tags = metadata.get("langfuse_tags") or []
+    assert "agent:project-inspector" in tags
 
 
 @pytest.mark.asyncio
