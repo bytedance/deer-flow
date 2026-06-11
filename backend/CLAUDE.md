@@ -247,6 +247,22 @@ Configuration priority:
 3. `extensions_config.json` in current directory (backend/)
 4. `extensions_config.json` in parent directory (project root - **recommended location**)
 
+**Plugin HTTP Middlewares** (`httpMiddlewares`):
+
+Custom HTTP middlewares can be registered via `extensions_config.json` without modifying Gateway source:
+
+```json
+{
+  "httpMiddlewares": ["my_package.middleware:build_metadata_middleware"]
+}
+```
+
+Each entry is a `module.path:builder_function` reference resolved at startup. The builder is called with no arguments and must return a Starlette middleware class (e.g., a `BaseHTTPMiddleware` subclass). Plugin middlewares execute before built-in middlewares (Auth/CSRF/CORS) due to LIFO ordering.
+
+**Run Metadata Forwarding** (`request.state.run_metadata`):
+
+HTTP middlewares can stamp `request.state.run_metadata` (a dict) with key/value pairs. These are automatically merged into `config["metadata"]` when a run starts, making them accessible to MCP tool interceptors at execution time via `get_config()["metadata"]`. This decouples per-request context injection from the run lifecycle layer.
+
 ### Gateway API (`app/gateway/`)
 
 FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).

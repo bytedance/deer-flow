@@ -339,6 +339,18 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+#### HTTP Middleware Plugins
+
+Custom HTTP middlewares can be registered via `extensions_config.json` without modifying Gateway code:
+
+```json
+{
+  "httpMiddlewares": ["my_package.middleware:build_metadata_middleware"]
+}
+```
+
+Each entry is a `module:builder` path. The builder returns a Starlette middleware class that is registered on the FastAPI app at startup. Middlewares can stamp `request.state.run_metadata` (a dict) with per-request context; these values are automatically forwarded into `config["metadata"]` for each run and become accessible to MCP tool interceptors via `get_config()["metadata"]`.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.

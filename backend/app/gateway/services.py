@@ -184,6 +184,21 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
         runtime_context["user_id"] = str(user_id)
 
 
+def inject_run_metadata(config: dict[str, Any], request: Request) -> None:
+    """Forward request.state.run_metadata into config["metadata"].
+
+    HTTP middlewares can stamp ``request.state.run_metadata`` with key/value
+    pairs that should be visible to MCP tool interceptors at execution time
+    via ``get_config()["metadata"]``.  This decouples per-request metadata
+    injection (e.g. auth tokens, project identifiers) from the run lifecycle
+    layer — middlewares handle extraction, and tools consume the result
+    without knowing where the values came from.
+    """
+    run_metadata = getattr(request.state, "run_metadata", None)
+    if run_metadata and isinstance(run_metadata, dict):
+        config.setdefault("metadata", {}).update(run_metadata)
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -371,6 +386,7 @@ async def start_run(
     # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
     merge_run_context_overrides(config, getattr(body, "context", None))
     inject_authenticated_user_context(config, request)
+    inject_run_metadata(config, request)
 
     stream_modes = normalize_stream_modes(body.stream_mode)
 

@@ -2,6 +2,9 @@
   "mcpInterceptors": [
     "my_package.mcp.auth:build_auth_interceptor"
   ],
+  "httpMiddlewares": [
+    "my_package.middleware:build_metadata_middleware"
+  ],
   "mcpServers": {
     "github": {
       "enabled": false,
