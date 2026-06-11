@@ -162,7 +162,13 @@ class JsonlRunEventStore(RunEventStore):
             results.append(record)
         return results
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
+        if user_id is not None:
+            logger.warning(
+                "user_id=%r passed to JsonlRunEventStore.list_messages; "
+                "this backend relies on thread-scoped isolation and does not enforce per-user filtering.",
+                user_id,
+            )
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
