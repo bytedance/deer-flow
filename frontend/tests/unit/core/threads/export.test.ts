@@ -260,6 +260,22 @@ describe("formatThreadAsJSON", () => {
     expect(raw).toContain("real user text");
   });
 
+  it("strips <slash_skill_activation> as defence in depth", () => {
+    // Slash activation normally rides in a hidden HumanMessage. If a replay
+    // or state merge loses the flag, export must still not leak full SKILL.md
+    // content into a user-visible transcript.
+    const leaky = human("real user task", {
+      id: "leak-slash-skill",
+      content:
+        "<slash_skill_activation>\n<skill_content># Secret SKILL.md\nUse internal source.</skill_content>\n</slash_skill_activation>\nreal user task",
+    } as unknown as Partial<Message>);
+    const raw = formatThreadAsJSON(makeThread(), [leaky]);
+    expect(raw).not.toContain("<slash_skill_activation>");
+    expect(raw).not.toContain("Secret SKILL.md");
+    expect(raw).not.toContain("internal source");
+    expect(raw).toContain("real user task");
+  });
+
   it("sanitises tool message content when includeToolMessages is true", () => {
     const message = {
       id: "t-leak",

@@ -37,6 +37,17 @@ if [ -f "$REPO_ROOT/.env" ]; then
     set +a
 fi
 
+_pick_python() {
+    local candidate
+    for candidate in python3 python py; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info.major >= 3 else 1)' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 DEV_MODE=true
@@ -274,11 +285,7 @@ fi
 if $DEV_MODE; then
     FRONTEND_CMD="pnpm run dev"
 else
-    if command -v python3 >/dev/null 2>&1; then
-        PYTHON_BIN="python3"
-    elif command -v python >/dev/null 2>&1; then
-        PYTHON_BIN="python"
-    else
+    if ! PYTHON_BIN="$(_pick_python)"; then
         echo "Python is required to generate BETTER_AUTH_SECRET."
         exit 1
     fi
@@ -297,7 +304,12 @@ if [ -z "$DEER_FLOW_HOME" ]; then
     export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
 fi
 
-mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME"
+# `backend/sandbox` is excluded from uvicorn's reload watcher below. uvicorn only
+# excludes an absolute path directly when it already exists as a directory;
+# otherwise it globs the pattern, and Python 3.12's pathlib rejects absolute glob
+# patterns with NotImplementedError, crashing `make dev` on a fresh checkout
+# (#3459 / #3454). Creating it here keeps every absolute exclude on the is_dir path.
+mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"
 DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
 BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
 export DEER_FLOW_HOME
@@ -332,15 +344,10 @@ fi
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
-# Pick a Python for the extras detector. Falls back to plain `python` for
-# Windows/Git Bash where only `python` is on PATH.
-if command -v python3 >/dev/null 2>&1; then
-    DETECT_PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-    DETECT_PYTHON="python"
-else
-    DETECT_PYTHON=""
-fi
+# Pick a runnable Python for the extras detector. On Windows/Git Bash,
+# `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
+# present on PATH but not executable from Bash.
+DETECT_PYTHON="$(_pick_python || true)"
 
 # Resolve uv extras (postgres, etc.) from UV_EXTRAS or config.yaml so that
 # `uv sync` does not wipe out optional dependencies on every restart. See

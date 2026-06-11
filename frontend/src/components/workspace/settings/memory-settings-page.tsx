@@ -10,8 +10,8 @@ import {
 import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
 
+import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -639,12 +639,12 @@ export function MemorySettingsPage() {
                 <div className="text-muted-foreground mb-4 text-sm">
                   {summaryReadOnly}
                 </div>
-                <Streamdown
+                <ClipboardSafeStreamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
                 >
                   {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </Streamdown>
+                </ClipboardSafeStreamdown>
               </div>
             ) : null}
 

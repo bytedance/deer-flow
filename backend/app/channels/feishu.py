@@ -11,7 +11,7 @@ import time
 from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
@@ -30,9 +30,7 @@ PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 
 
 def _is_feishu_command(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+    return is_known_channel_command(text)
 
 
 class FeishuChannel(Channel):

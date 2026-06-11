@@ -192,7 +192,7 @@ def test_build_acp_section_uses_explicit_app_config_without_global_config(monkey
 
 def test_get_memory_context_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(
-        memory=SimpleNamespace(enabled=True, injection_enabled=True, max_injection_tokens=1234),
+        memory=SimpleNamespace(enabled=True, injection_enabled=True, max_injection_tokens=1234, token_counting="tiktoken"),
     )
     captured: dict[str, object] = {}
 
@@ -204,9 +204,10 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         captured["user_id"] = user_id
         return {"facts": []}
 
-    def fake_format_memory_for_injection(memory_data, *, max_tokens):
+    def fake_format_memory_for_injection(memory_data, *, max_tokens, use_tiktoken=True):
         captured["memory_data"] = memory_data
         captured["max_tokens"] = max_tokens
+        captured["use_tiktoken"] = use_tiktoken
         return "remember this"
 
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
@@ -223,6 +224,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         "user_id": "user-1",
         "memory_data": {"facts": []},
         "max_tokens": 1234,
+        "use_tiktoken": True,
     }
 
 
