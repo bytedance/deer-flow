@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import logging
@@ -107,49 +108,67 @@ class LocalSkillStorage(SkillStorage):
 
         logger.info("Installing skill from %s", archive_path)
         path = Path(archive_path)
-        if not path.is_file():
-            if not path.exists():
-                raise FileNotFoundError(f"Skill file not found: {archive_path}")
-            raise ValueError(f"Path is not a file: {archive_path}")
-        if path.suffix != ".skill":
-            raise ValueError("File must have .skill extension")
-
         custom_dir = self._host_root / "custom"
-        custom_dir.mkdir(parents=True, exist_ok=True)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        def _extract_and_validate() -> tuple[str, Path, str]:
+            # Worker thread: path probing, mkdir, tempdir creation, zip
+            # extraction, and frontmatter reads are all blocking filesystem IO
+            # that must stay off the event loop. The extraction tempdir is
+            # returned (not auto-cleaned) so it survives the ``await`` below; the
+            # caller's ``finally`` removes it.
+            if not path.is_file():
+                if not path.exists():
+                    raise FileNotFoundError(f"Skill file not found: {archive_path}")
+                raise ValueError(f"Path is not a file: {archive_path}")
+            if path.suffix != ".skill":
+                raise ValueError("File must have .skill extension")
 
+            custom_dir.mkdir(parents=True, exist_ok=True)
+            tmp = tempfile.mkdtemp()
             try:
-                zf = zipfile.ZipFile(path, "r")
-            except FileNotFoundError:
-                raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
-            except (zipfile.BadZipFile, IsADirectoryError):
-                raise ValueError("File is not a valid ZIP archive") from None
+                tmp_path = Path(tmp)
+                try:
+                    zf = zipfile.ZipFile(path, "r")
+                except FileNotFoundError:
+                    raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
+                except (zipfile.BadZipFile, IsADirectoryError):
+                    raise ValueError("File is not a valid ZIP archive") from None
+                with zf:
+                    safe_extract_skill_archive(zf, tmp_path)
 
-            with zf:
-                safe_extract_skill_archive(zf, tmp_path)
+                skill_dir = resolve_skill_dir_from_archive(tmp_path)
 
-            skill_dir = resolve_skill_dir_from_archive(tmp_path)
+                is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
+                if not is_valid:
+                    raise ValueError(f"Invalid skill: {message}")
+                if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+                    raise ValueError(f"Invalid skill name: {skill_name}")
 
-            is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-            if not is_valid:
-                raise ValueError(f"Invalid skill: {message}")
-            if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
-                raise ValueError(f"Invalid skill name: {skill_name}")
+                if (custom_dir / skill_name).exists():
+                    raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
+                return tmp, skill_dir, skill_name
+            except BaseException:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise
+
+        def _stage_and_commit(skill_dir: Path, skill_name: str) -> Path:
+            # Worker thread: copytree + atomic move are blocking filesystem IO.
             target = custom_dir / skill_name
-            if target.exists():
-                raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
-
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
-
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
                 shutil.copytree(skill_dir, staging_target)
                 _move_staged_skill_into_reserved_target(staging_target, target)
-            logger.info("Skill %r installed to %s", skill_name, target)
+            return target
 
+        tmp, skill_dir, skill_name = await asyncio.to_thread(_extract_and_validate)
+        try:
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            target = await asyncio.to_thread(_stage_and_commit, skill_dir, skill_name)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True)
+
+        logger.info("Skill %r installed to %s", skill_name, target)
         return {
             "success": True,
             "skill_name": skill_name,
