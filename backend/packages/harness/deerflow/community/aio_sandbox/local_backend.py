@@ -340,11 +340,21 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_id: The deterministic sandbox ID (determines container name).
 
         Returns:
-            SandboxInfo if container found and healthy, None otherwise.
+            SandboxInfo if container found and healthy, None otherwise. A
+            failed runtime check (e.g. transient daemon error) also returns
+            None — discovery must not adopt a container it cannot verify, and
+            falling through to create keeps acquire recoverable instead of
+            hard-failing on a hiccup.
         """
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
-        if not self._is_container_running(container_name):
+        try:
+            running = self._is_container_running(container_name)
+        except RuntimeError as e:
+            logger.warning(f"Could not verify container {container_name} during discovery; not adopting it: {e}")
+            return None
+
+        if not running:
             return None
 
         port = self._get_container_port(container_name)

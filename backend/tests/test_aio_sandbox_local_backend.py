@@ -284,3 +284,27 @@ def test_is_container_running_raises_on_timeout(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Timed out checking container sandbox-timeout"):
         backend._is_container_running("sandbox-timeout")
+
+
+def test_discover_returns_none_when_runtime_check_fails(monkeypatch):
+    """A transient daemon error during discovery must fall through to create, not fail acquire."""
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", stderr="Cannot connect to the Docker daemon", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend.discover("sandbox-blip") is None
+
+
+def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
+    """An inspect timeout during discovery must not propagate out of discover()."""
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend.discover("sandbox-timeout") is None
