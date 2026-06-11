@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -295,21 +296,12 @@ class TelegramChannel(Channel):
         return True
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
-        if self._connection_repo is None:
-            return inbound
-
-        connection = await self._connection_repo.find_connection_by_external_identity(
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
             provider="telegram",
-            external_account_id=inbound.user_id,
             workspace_id=inbound.chat_id,
         )
-        if connection is None:
-            return inbound
-
-        inbound.connection_id = connection["id"]
-        inbound.owner_user_id = connection["owner_user_id"]
-        inbound.workspace_id = connection.get("workspace_id")
-        return inbound
 
     def _get_bot_username(self, context) -> str | None:
         bot = getattr(context, "bot", None)

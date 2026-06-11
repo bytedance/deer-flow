@@ -9,7 +9,8 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -45,16 +46,6 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     if mentioned_user_id != bot_user_id:
         return text
     return text[end + 1 :].lstrip()
-
-
-def _extract_connect_code(text: str) -> str | None:
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return None
-    command = parts[0].lower()
-    if command in {"/connect", "connect"}:
-        return parts[1]
-    return None
 
 
 class SlackChannel(Channel):
@@ -325,7 +316,7 @@ class SlackChannel(Channel):
         if not text:
             return
 
-        connect_code = _extract_connect_code(text)
+        connect_code = extract_connect_code(text)
         if connect_code:
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -373,25 +364,13 @@ class SlackChannel(Channel):
         await self.bus.publish_inbound(inbound)
 
     async def _attach_connection_identity(self, inbound, *, team_id: str | None = None):
-        if self._connection_repo is None:
-            return inbound
-
         workspace_id = str(team_id or inbound.metadata.get("team_id") or "")
-        if not workspace_id:
-            return inbound
-
-        connection = await self._connection_repo.find_connection_by_external_identity(
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
             provider="slack",
-            external_account_id=inbound.user_id,
             workspace_id=workspace_id,
         )
-        if connection is None:
-            return inbound
-
-        inbound.connection_id = connection["id"]
-        inbound.owner_user_id = connection["owner_user_id"]
-        inbound.workspace_id = connection.get("workspace_id")
-        return inbound
 
     async def _bind_connection_from_connect_code(self, *, event: dict, team_id: str, code: str) -> bool:
         if self._connection_repo is None or not code:

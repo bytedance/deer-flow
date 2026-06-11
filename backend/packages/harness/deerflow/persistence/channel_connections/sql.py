@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.fernet import Fernet
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.channel_connections.model import (
@@ -257,11 +257,14 @@ class ChannelConnectionRepository:
     ) -> dict[str, Any] | None:
         current_time = now or datetime.now(UTC)
         async with self.session_factory() as session:
+            await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
             row = await session.get(ChannelOAuthStateRow, self.hash_state(state))
             if row is None or row.provider != provider or row.consumed_at is not None:
+                await session.commit()
                 return None
             expires_at = self._coerce_datetime(row.expires_at)
             if expires_at is not None and expires_at < current_time:
+                await session.commit()
                 return None
 
             row.consumed_at = current_time

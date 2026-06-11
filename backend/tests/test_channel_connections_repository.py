@@ -12,6 +12,7 @@ from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelCredentialCipher,
     ChannelCredentialRow,
+    ChannelOAuthStateRow,
 )
 
 
@@ -200,3 +201,26 @@ class TestChannelConnectionRepository:
 
         assert disconnected is False
         assert (await repo.list_connections("alice"))[0]["status"] == "connected"
+
+    @pytest.mark.anyio
+    async def test_consume_oauth_state_deletes_expired_states(self, repo):
+        now = datetime.now(UTC)
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="expired-state",
+            expires_at=now - timedelta(minutes=1),
+        )
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="active-state",
+            expires_at=now + timedelta(minutes=5),
+        )
+
+        consumed = await repo.consume_oauth_state(provider="slack", state="expired-state", now=now)
+
+        assert consumed is None
+        async with repo.session_factory() as session:
+            states = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
+        assert [state.state_hash for state in states] == [repo.hash_state("active-state")]

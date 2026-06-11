@@ -203,6 +203,27 @@ def _connect_url(config: ChannelConnectionsConfig, provider: str, code: str) -> 
     raise HTTPException(status_code=404, detail="Unknown channel provider")
 
 
+def _connection_updated_at(connection: dict[str, Any]) -> datetime:
+    value = connection.get("updated_at")
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.min.replace(tzinfo=UTC)
+
+
+def _newest_connection_by_provider(connections: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_provider: dict[str, dict[str, Any]] = {}
+    for item in connections:
+        existing = by_provider.get(item["provider"])
+        if existing is None or _connection_updated_at(item) > _connection_updated_at(existing):
+            by_provider[item["provider"]] = item
+    return by_provider
+
+
 @router.get("/providers", response_model=ChannelProvidersResponse)
 async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
     config = _get_channel_connections_config(request)
@@ -216,9 +237,7 @@ async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
                 raise
     owner_user_id = _get_user_id(request)
     connections = await repo.list_connections(owner_user_id) if repo is not None else []
-    by_provider: dict[str, dict[str, Any]] = {}
-    for item in connections:
-        by_provider.setdefault(item["provider"], item)
+    by_provider = _newest_connection_by_provider(connections)
 
     providers: list[ChannelProviderResponse] = []
     for provider, meta in _PROVIDER_META.items():

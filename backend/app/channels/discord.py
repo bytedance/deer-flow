@@ -10,22 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
-
-
-def _extract_connect_code(text: str) -> str | None:
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return None
-    command = parts[0].lower()
-    if command in {"/connect", "connect"}:
-        return parts[1]
-    return None
 
 
 class DiscordChannel(Channel):
@@ -298,7 +289,7 @@ class DiscordChannel(Channel):
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
 
-        connect_code = _extract_connect_code(text)
+        connect_code = extract_connect_code(text)
         if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
             return
 
@@ -454,29 +445,13 @@ class DiscordChannel(Channel):
             future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
-        if self._connection_repo is None:
-            return inbound
-
-        connection = None
-        if guild_id:
-            connection = await self._connection_repo.find_connection_by_external_identity(
-                provider="discord",
-                external_account_id=inbound.user_id,
-                workspace_id=guild_id,
-            )
-        if connection is None:
-            connection = await self._connection_repo.find_connection_by_external_identity(
-                provider="discord",
-                external_account_id=inbound.user_id,
-                workspace_id=None,
-            )
-        if connection is None:
-            return inbound
-
-        inbound.connection_id = connection["id"]
-        inbound.owner_user_id = connection["owner_user_id"]
-        inbound.workspace_id = connection.get("workspace_id")
-        return inbound
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="discord",
+            workspace_id=guild_id,
+            fallback_without_workspace=True,
+        )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
         if self._connection_repo is None or not code:
