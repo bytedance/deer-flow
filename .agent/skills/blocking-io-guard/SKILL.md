@@ -44,8 +44,14 @@ uv run --project backend python scripts/detect_blocking_io_static.py --format js
 
 Produces the complete structured finding list. Work HIGH priority first; do
 not start MEDIUM until every HIGH is dispositioned (fixed, guarded, or
-recorded NO-ACTION). Batch a round to a handful of findings so each lands
-reviewable.
+recorded NO-ACTION).
+
+**Batching policy (PR sizing).** One **fix unit** per PR while any HIGH
+remains: a fix unit is one root cause — usually a single HIGH, but two HIGHs
+resolved by the same one-place fix belong together. Once no HIGH remains,
+MEDIUM/LOW may be batched (about five per round, grouped by module or by
+disposition) so each PR stays reviewable. A new Blockbuster rule is never
+batched with anything — it always ships alone (see Step 4).
 
 Both modes emit the same JSON shape per finding: `priority`, `location`
 (path/line/function), `blocking_call` (category/operation/symbol),
@@ -83,6 +89,22 @@ Follow `references/good-anchor-rules.md`. Drive the *specific* branch (e.g. forc
 the create failure that hits the cleanup `shutil.rmtree`). Never bypass the
 blocking surface with a test-only `asyncio.to_thread` wrapper.
 
+### Step 3.5 — Re-scan after fixing (FIX+ANCHOR only; fast feedback)
+
+After applying a fix, re-run the Step 0 scanner and confirm the candidate no
+longer appears. Match by the stable key **(path, function, symbol)** — line
+numbers shift after edits, so never compare by line.
+
+- **FIX+ANCHOR**: the finding must disappear. If it still shows, the fix did
+  not remove the blocking pattern (e.g. the call is still a direct call, not
+  offloaded) — go back before writing the anchor.
+- **GUARD / NO-ACTION**: a residual finding is *expected* (the raw call still
+  exists inside a sync helper; the offload lives at the caller, or the
+  exposure was judged acceptable). Do not chase disappearance here.
+
+This is pattern-level feedback in seconds; it complements but never replaces
+Step 4 — only the runtime gate proves the event loop is actually protected.
+
 ### Step 4 — Verify teeth (mandatory; also the anchor-vs-rule discriminator)
 
 1. Reintroduce the block (GUARD: temporarily revert the offload; FIX+ANCHOR: run
@@ -100,6 +122,6 @@ a path is untested (that case needs an anchor, not a rule).
 ### Step 5 — Deliver
 
 Commit the anchor(s) with your change; `make test-blocking-io` green. In the PR,
-note: candidates found, each disposition, and the teeth evidence (red→green).
-Include the reason for any NO-ACTION. A new Blockbuster rule, if any, goes in
-its own commit with the evidence from Step 4.
+note: candidates found, each disposition, the re-scan result (Step 3.5), and
+the teeth evidence (red→green). Include the reason for any NO-ACTION. A new
+Blockbuster rule, if any, goes in its own commit with the evidence from Step 4.
