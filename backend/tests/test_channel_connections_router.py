@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -54,8 +55,11 @@ def _make_app(
     app.state.channel_connection_repo = repo
     if set_channels_config_state:
         app.state.channels_config = channels_config or {}
-    if runtime_config_store is not None:
-        app.state.channel_runtime_config_store = runtime_config_store
+    if runtime_config_store is None:
+        runtime_config_dir = TemporaryDirectory()
+        app.state.channel_runtime_config_tmpdir = runtime_config_dir
+        runtime_config_store = ChannelRuntimeConfigStore(f"{runtime_config_dir.name}/runtime-config.json")
+    app.state.channel_runtime_config_store = runtime_config_store
     app.include_router(channel_connections.router)
     return app
 
