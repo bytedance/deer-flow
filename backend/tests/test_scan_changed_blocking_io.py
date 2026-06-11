@@ -70,9 +70,7 @@ def test_select_findings_keeps_only_touched_candidates(tmp_path: Path) -> None:
 def test_find_changed_blocking_io_surfaces_only_changed_candidate(tmp_path: Path, monkeypatch) -> None:
     src = _write_python(tmp_path / "agents.py", _CLEANUP_BRANCH_SOURCE)
     all_findings = [f.to_dict() for f in static.scan_file(src, repo_root=tmp_path)]
-    rmtree_line = next(
-        f["location"]["line"] for f in all_findings if f["blocking_call"]["symbol"] == "shutil.rmtree"
-    )
+    rmtree_line = next(f["location"]["line"] for f in all_findings if f["blocking_call"]["symbol"] == "shutil.rmtree")
 
     # Stub only the git boundary; the static scan runs for real against tmp_path.
     monkeypatch.setattr(
