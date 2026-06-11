@@ -25,7 +25,7 @@ operational steps below are the blocking-IO instance.
 
 ## SOP (router)
 
-### Step 0 — Scope (deterministic, L1)
+### Step 0 — Scope (deterministic)
 
 **Mode A — your own diff** (default, pre-PR). From repo root:
 
@@ -34,28 +34,32 @@ uv run --project backend python scripts/scan_changed_blocking_io.py --base origi
 ```
 
 Lists blocking-IO candidates that fall on lines your change added/modified.
-If empty, stop: this change has no blocking-IO surface.
+The diff is `<base>...HEAD`, so **commit your work first** — uncommitted lines
+are not selected. If the list is empty, stop: this change has no blocking-IO
+surface.
 
 **Mode B — full-repo triage round.** From repo root:
 
 ```bash
-uv run --project backend python scripts/detect_blocking_io_static.py --format json
+make detect-blocking-io
 ```
 
-Produces the complete structured finding list. Work HIGH priority first; do
-not start MEDIUM until every HIGH is dispositioned (fixed, guarded, or
-recorded NO-ACTION).
+Prints a summary and writes the complete structured finding list to
+`.deer-flow/blocking-io-findings.json`. Work HIGH priority first; do not start
+MEDIUM until every HIGH is dispositioned (fixed, guarded, or recorded
+NO-ACTION).
 
 **Batching policy (PR sizing).** One **fix unit** per PR while any HIGH
 remains: a fix unit is one root cause — usually a single HIGH, but two HIGHs
 resolved by the same one-place fix belong together. Once no HIGH remains,
 MEDIUM/LOW may be batched (about five per round, grouped by module or by
 disposition) so each PR stays reviewable. A new Blockbuster rule is never
-batched with anything — it always ships alone (see Step 4).
+batched with anything — it always ships alone (see Step 5).
 
 Both modes emit the same JSON shape per finding: `priority`, `location`
 (path/line/function), `blocking_call` (category/operation/symbol),
-`event_loop_exposure`, `reason`, `code`.
+`event_loop_exposure`, `reason`, `code`. Priority is a deterministic review
+ordering, not proof of a bug — Step 1 makes the actual call.
 
 ### Step 1 — Judge each candidate (router)
 
@@ -66,46 +70,47 @@ Read the code around each candidate and route it:
   move it back onto the loop.
 - **On the loop, not offloaded** → **FIX+ANCHOR**: offload the production code
   (your fix), then add an anchor that guards it.
-- **Not actually exposed / acceptable** (rare: L1 false positive, startup-only
-  code) → **NO-ACTION**: record one line of why.
-- **Cross-file caveat**: static reachability is same-file only
+- **Not actually exposed / acceptable** (rare: scanner false positive,
+  startup-only code) → **NO-ACTION**: record one line of why.
+- **Cross-file caveat**: the scanner's async reachability is same-file only
   (`ASYNC_REACHABLE_SAME_FILE`). If the candidate is a *sync helper*, check for
   async callers in other files (codegraph or `git grep`) before deciding
   NO-ACTION.
 
-### Step 2 — Check existing anchors
+### Step 2 — Apply the fix, then re-scan (FIX+ANCHOR only)
+
+Offload the blocking call in production code, then re-run the Step 0 scan and
+confirm the candidate no longer appears. Match by the stable key
+**(path, function, symbol)** — line numbers shift after edits, so never
+compare by line.
+
+- The finding must disappear. If it still shows, the fix did not remove the
+  blocking pattern (e.g. the call is still a direct call, not offloaded) —
+  go back before touching any test.
+- GUARD / NO-ACTION routes skip this step: a residual finding there is
+  *expected* (the raw call still exists inside a sync helper with the offload
+  at the caller, or the exposure was judged acceptable).
+
+This is pattern-level feedback in seconds; it complements but never replaces
+Step 5 — only the runtime gate proves the event loop is actually protected.
+
+### Step 3 — Check existing anchors
 
 Look in `backend/tests/blocking_io/` for a test that drives the production async
 entry point reaching this candidate's branch.
 
-- Covers this branch already → go to Step 4 (re-verify teeth).
+- Covers this branch already → go to Step 5 (re-verify teeth).
 - Covers the entry point but not this branch (e.g. happy path covered,
   cleanup/404/409 not) → **extend** that anchor.
 - None → create one from `templates/anchor.template.py`.
 
-### Step 3 — Generate / extend the anchor
+### Step 4 — Generate / extend the anchor
 
 Follow `references/good-anchor-rules.md`. Drive the *specific* branch (e.g. force
 the create failure that hits the cleanup `shutil.rmtree`). Never bypass the
 blocking surface with a test-only `asyncio.to_thread` wrapper.
 
-### Step 3.5 — Re-scan after fixing (FIX+ANCHOR only; fast feedback)
-
-After applying a fix, re-run the Step 0 scanner and confirm the candidate no
-longer appears. Match by the stable key **(path, function, symbol)** — line
-numbers shift after edits, so never compare by line.
-
-- **FIX+ANCHOR**: the finding must disappear. If it still shows, the fix did
-  not remove the blocking pattern (e.g. the call is still a direct call, not
-  offloaded) — go back before writing the anchor.
-- **GUARD / NO-ACTION**: a residual finding is *expected* (the raw call still
-  exists inside a sync helper; the offload lives at the caller, or the
-  exposure was judged acceptable). Do not chase disappearance here.
-
-This is pattern-level feedback in seconds; it complements but never replaces
-Step 4 — only the runtime gate proves the event loop is actually protected.
-
-### Step 4 — Verify teeth (mandatory; also the anchor-vs-rule discriminator)
+### Step 5 — Verify teeth (mandatory; also the anchor-vs-rule discriminator)
 
 1. Reintroduce the block (GUARD: temporarily revert the offload; FIX+ANCHOR: run
    against the pre-fix code).
@@ -113,15 +118,13 @@ Step 4 — only the runtime gate proves the event loop is actually protected.
    go RED**.
 3. Restore the fix. It **must go GREEN**.
 
-If you reintroduced a real block and the gate stayed **GREEN**, Blockbuster has
-no rule for that primitive. That is the **RULE** route — see
-`references/good-anchor-rules.md` for the admission criteria. Never add a rule
-without the fails-to-fail anchor as evidence, and never add one merely because
-a path is untested (that case needs an anchor, not a rule).
+A real block that stays GREEN means Blockbuster has no rule for that
+primitive — that is the **RULE** route; see `references/good-anchor-rules.md`
+for the admission criteria before adding one.
 
-### Step 5 — Deliver
+### Step 6 — Deliver
 
 Commit the anchor(s) with your change; `make test-blocking-io` green. In the PR,
-note: candidates found, each disposition, the re-scan result (Step 3.5), and
+note: candidates found, each disposition, the re-scan result (Step 2), and
 the teeth evidence (red→green). Include the reason for any NO-ACTION. A new
-Blockbuster rule, if any, goes in its own commit with the evidence from Step 4.
+Blockbuster rule, if any, goes in its own commit with the evidence from Step 5.

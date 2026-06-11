@@ -113,8 +113,8 @@ conservatively over-report async reachability. It is intentionally
 informational and is not run from CI in this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
-(repo root) intersects `git diff --base <ref>` added lines with the static
-detector output — used by the `blocking-io-guard` skill
+(repo root) intersects the added lines of `git diff <base>...HEAD` with the
+static detector output — used by the `blocking-io-guard` skill
 (`.agent/skills/blocking-io-guard/`) as the deterministic scope step before
 routing each candidate to a fix and/or a `tests/blocking_io/` runtime anchor.
 

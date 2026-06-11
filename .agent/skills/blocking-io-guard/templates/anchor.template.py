@@ -17,8 +17,9 @@ import pytest
 
 # from app.<module> import <real_async_entry_point>
 
+pytestmark = pytest.mark.asyncio
 
-@pytest.mark.asyncio
+
 async def test_<entry_point>_offloads_blocking_io_on_<branch>(tmp_path: Path) -> None:
     # Arrange: real local FS inputs; mock ONLY the external boundary.
     #   e.g. monkeypatch a network saver, but never the offload under test.

@@ -18,15 +18,16 @@ Steps:
    triage mode, take the full finding list ordered by priority.)
 2. **Judge (router):** per candidate — guard existing fix / fix + guard /
    no-action / rule (the gate cannot see the primitive).
-3. **Generate:** draft or extend a guard test per the good-test rules, driving
+3. **Fix + re-scope (fixes only):** apply the fix, re-run the detector; the
+   fixed candidate must vanish from the findings (match by a stable key, not
+   line numbers). Pattern-level feedback in seconds — complements, never
+   replaces, step 5.
+4. **Generate:** draft or extend a guard test per the good-test rules, driving
    the specific branch.
-3.5. **Re-scope (fixes only):** re-run the detector; a fixed candidate must
-   vanish from the findings (match by a stable key, not line numbers).
-   Pattern-level feedback in seconds — complements, never replaces, step 4.
-4. **Verify teeth:** make the bad pattern happen → gate must fail; restore →
+5. **Verify teeth:** make the bad pattern happen → gate must fail; restore →
    gate must pass. A pattern that stays green while genuinely bad is the
    "rule" signal, not a coverage success.
-5. **Deliver:** commit the verified guard test; any gate-rule change ships in
+6. **Deliver:** commit the verified guard test; any gate-rule change ships in
    its own commit with the fails-to-fail evidence attached.
 
 To add a domain: supply a new fill doc (like `good-anchor-rules.md`) + detector,
