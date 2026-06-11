@@ -42,6 +42,26 @@ def test_parse_changed_lines_records_added_lines_only() -> None:
     assert changed.parse_changed_lines(diff) == {"backend/app/x.py": {11, 12}}
 
 
+def test_parse_changed_lines_handles_context_diffs() -> None:
+    diff = textwrap.dedent(
+        """\
+        diff --git a/backend/app/x.py b/backend/app/x.py
+        --- a/backend/app/x.py
+        +++ b/backend/app/x.py
+        @@ -8,7 +8,8 @@ def f():
+             ctx1
+             ctx2
+        -    removed
+        +    added_one
+             ctx3
+        +    added_two
+             ctx4
+        \\ No newline at end of file
+        """
+    )
+    assert changed.parse_changed_lines(diff) == {"backend/app/x.py": {10, 12}}
+
+
 def test_parse_changed_lines_ignores_deleted_files() -> None:
     diff = textwrap.dedent(
         """\
@@ -147,3 +167,9 @@ def test_select_findings_new_vs_base_matches_by_stable_key(tmp_path: Path) -> No
 
     # Same content at base and head -> nothing is new, regardless of line drift.
     assert changed.select_findings_new_vs_base(head_findings, head_findings) == []
+
+
+def test_format_report_empty_warns_about_cross_file_blind_spot() -> None:
+    report = changed.format_report([], base="origin/main")
+    assert "No blocking-IO candidates" in report
+    assert "defined in another file" in report

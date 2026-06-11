@@ -16,7 +16,6 @@ import json
 import re
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -36,10 +35,11 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
     """Map repo-relative path -> set of added line numbers in the new file.
 
-    Expects `git diff --unified=0` output. Records only added lines (`+`, not
-    the `+++` header), numbered from each hunk's new-file start line. Deletions
-    (`-`) do not advance the new-file counter; deleted files (`+++ /dev/null`)
-    are skipped.
+    Accepts any unified diff (with or without `--unified=0`): context lines
+    advance the new-file counter, deletions (`-`) and `\\ No newline` markers
+    do not. Records only added lines (`+`, not the `+++` header), numbered
+    from each hunk's new-file start line; deleted files (`+++ /dev/null`) are
+    skipped.
     """
     changed: dict[str, set[int]] = defaultdict(set)
     current_path: str | None = None
@@ -51,13 +51,18 @@ def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
                 current_path = None
             else:
                 current_path = target[2:] if target.startswith("b/") else target
+            next_line = 0
             continue
         match = _HUNK_RE.match(raw)
         if match:
             next_line = int(match.group(1))
             continue
-        if current_path and raw.startswith("+") and not raw.startswith("+++"):
+        if not current_path:
+            continue
+        if raw.startswith("+"):
             changed[current_path].add(next_line)
+            next_line += 1
+        elif raw.startswith(" ") or raw == "":
             next_line += 1
     return dict(changed)
 
@@ -120,17 +125,10 @@ def base_python_contents(base: str, paths: Sequence[str], repo_root: Path = REPO
 
 def scan_python_contents(contents: dict[str, str]) -> list[dict[str, object]]:
     """Run the static detector over in-memory sources (repo-relative path -> code)."""
-    if not contents:
-        return []
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        files = []
-        for rel_path, source in contents.items():
-            target = root / rel_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(source, encoding="utf-8")
-            files.append(target)
-        return [finding.to_dict() for finding in static.scan_paths(files, repo_root=root)]
+    findings: list[dict[str, object]] = []
+    for rel_path in sorted(contents):
+        findings.extend(finding.to_dict() for finding in static.scan_source(contents[rel_path], rel_path))
+    return findings
 
 
 def _stable_key(finding: dict[str, object]) -> tuple[str, str, str]:
@@ -170,13 +168,18 @@ def find_changed_blocking_io(base: str, repo_root: Path = REPO_ROOT) -> list[dic
     on_changed_lines = select_findings_on_changed_lines(head_findings, changed_lines)
     base_findings = scan_python_contents(base_python_contents(base, sorted(changed_lines), repo_root))
     new_vs_base = select_findings_new_vs_base(head_findings, base_findings)
-    selected = {id(finding) for finding in on_changed_lines} | {id(finding) for finding in new_vs_base}
-    return [finding for finding in head_findings if id(finding) in selected]
+    selected_keys = {_stable_key(finding) for finding in (*on_changed_lines, *new_vs_base)}
+    return [finding for finding in head_findings if _stable_key(finding) in selected_keys]
 
 
 def format_report(findings: Sequence[dict[str, object]], base: str) -> str:
     if not findings:
-        return f"No blocking-IO candidates introduced by this change (base: {base})."
+        return (
+            f"No blocking-IO candidates introduced by this change (base: {base}).\n"
+            "Note: async reachability is resolved within each file only. If this change\n"
+            "adds an async call into a sync helper defined in another file, check that\n"
+            "helper manually (codegraph or git grep) before relying on this empty result."
+        )
     lines = [
         f"Blocking-IO candidates introduced/touched by this change (base: {base}): {len(findings)}",
         "",
