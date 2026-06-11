@@ -241,6 +241,8 @@ export const enUS: Translations = {
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",
+    gatewayUnavailable: "Gateway is temporarily unavailable.",
+    gatewayUnavailableRetrying: "Retrying in the background…",
   },
 
   // Conversation
