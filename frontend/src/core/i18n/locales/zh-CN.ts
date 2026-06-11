@@ -229,6 +229,8 @@ export const zhCN: Translations = {
     contactUs: "联系我们",
     about: "关于 DeerFlow",
     logout: "退出登录",
+    gatewayUnavailable: "网关暂时不可用。",
+    gatewayUnavailableRetrying: "正在后台重试…",
   },
 
   // Conversation

@@ -75,6 +75,7 @@ export default function ChatPage() {
     loadMoreHistory,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
+    displayThreadId: threadId,
     context: settings.context,
     isMock,
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
@@ -84,10 +85,10 @@ export default function ChatPage() {
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
-      setThreadId(createdThreadId);
-      setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
+      setThreadId(createdThreadId);
+      setIsNewThread(false);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
