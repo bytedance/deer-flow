@@ -190,6 +190,7 @@ export interface Translations {
   channels: {
     title: string;
     connect: string;
+    modify: string;
     reconnect: string;
     disconnect: string;
     connected: string;
@@ -201,8 +202,10 @@ export interface Translations {
     unavailable: string;
     unavailableShort: string;
     setupTitle: (name: string) => string;
+    setupEditTitle: (name: string) => string;
     setupDescription: string;
     saveAndConnect: string;
+    saveChanges: string;
     descriptions: Record<string, string>;
     connectedAs: (name: string) => string;
   };

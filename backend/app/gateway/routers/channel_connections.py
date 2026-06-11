@@ -284,6 +284,12 @@ def _provider_response(
     connection: dict[str, Any] | None = None,
 ) -> ChannelProviderResponse:
     status, unavailable_reason = _provider_status(config, channels_config, provider)
+    if connection:
+        connection_status = connection["status"]
+    elif status["configured"] and unavailable_reason is None:
+        connection_status = "connected"
+    else:
+        connection_status = "not_connected"
     return ChannelProviderResponse(
         provider=provider,
         display_name=meta["display_name"],
@@ -292,7 +298,7 @@ def _provider_response(
         connectable=status["enabled"] and status["configured"] and unavailable_reason is None,
         unavailable_reason=unavailable_reason,
         auth_mode=meta["auth_mode"],
-        connection_status=connection["status"] if connection else "not_connected",
+        connection_status=connection_status,
         credential_fields=_credential_fields(provider),
     )
 

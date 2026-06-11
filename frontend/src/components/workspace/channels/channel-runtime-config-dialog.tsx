@@ -60,6 +60,8 @@ export function ChannelRuntimeConfigDialog({
     return null;
   }
 
+  const isEditing = provider.configured;
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     onSubmit(provider, values);
@@ -71,7 +73,9 @@ export function ChannelRuntimeConfigDialog({
         <form onSubmit={handleSubmit} className="space-y-4">
           <DialogHeader>
             <DialogTitle>
-              {t.channels.setupTitle(provider.display_name)}
+              {isEditing
+                ? t.channels.setupEditTitle(provider.display_name)
+                : t.channels.setupTitle(provider.display_name)}
             </DialogTitle>
             <DialogDescription>{t.channels.setupDescription}</DialogDescription>
           </DialogHeader>
@@ -118,7 +122,7 @@ export function ChannelRuntimeConfigDialog({
               {submitting ? (
                 <LoaderCircleIcon className="animate-spin" />
               ) : null}
-              {t.channels.saveAndConnect}
+              {isEditing ? t.channels.saveChanges : t.channels.saveAndConnect}
             </Button>
           </DialogFooter>
         </form>

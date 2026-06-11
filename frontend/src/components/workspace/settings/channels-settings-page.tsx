@@ -108,6 +108,10 @@ function providerNeedsRuntimeConfig(provider: ChannelProvider): boolean {
   );
 }
 
+function providerCanEditRuntimeConfig(provider: ChannelProvider): boolean {
+  return provider.enabled && (provider.credential_fields?.length ?? 0) > 0;
+}
+
 function ChannelProviderItem({
   provider,
   connection,
@@ -120,7 +124,10 @@ function ChannelProviderItem({
   const configureMutation = useConfigureChannelProvider();
   const disconnectMutation = useDisconnectChannelConnection();
   const [setupOpen, setSetupOpen] = useState(false);
-  const isConnected = connection?.status === "connected";
+  const isConnected =
+    connection?.status === "connected" ||
+    provider.connection_status === "connected";
+  const canEditRuntimeConfig = providerCanEditRuntimeConfig(provider);
   const canConnect =
     (provider.connectable ?? (provider.enabled && provider.configured)) &&
     !isConnected;
@@ -195,21 +202,41 @@ function ChannelProviderItem({
           </ItemDescription>
         </ItemContent>
         <ItemActions className="ml-auto">
-          {isConnected && connection ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={isDisconnecting}
-              onClick={() => disconnectMutation.mutate(connection.id)}
-            >
-              {isDisconnecting ? (
-                <LoaderCircleIcon className="animate-spin" />
-              ) : (
-                <UnplugIcon />
-              )}
-              {t.channels.disconnect}
-            </Button>
+          {isConnected ? (
+            <>
+              {canEditRuntimeConfig ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isConnecting}
+                  onClick={() => setSetupOpen(true)}
+                >
+                  {isConnecting ? (
+                    <LoaderCircleIcon className="animate-spin" />
+                  ) : (
+                    <PlugIcon />
+                  )}
+                  {t.channels.modify}
+                </Button>
+              ) : null}
+              {connection ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isDisconnecting}
+                  onClick={() => disconnectMutation.mutate(connection.id)}
+                >
+                  {isDisconnecting ? (
+                    <LoaderCircleIcon className="animate-spin" />
+                  ) : (
+                    <UnplugIcon />
+                  )}
+                  {t.channels.disconnect}
+                </Button>
+              ) : null}
+            </>
           ) : (
             <Button
               type="button"
@@ -217,7 +244,10 @@ function ChannelProviderItem({
               disabled={isConnecting}
               title={unavailableReason}
               onClick={() => {
-                if (providerNeedsRuntimeConfig(provider)) {
+                if (
+                  providerNeedsRuntimeConfig(provider) ||
+                  canEditRuntimeConfig
+                ) {
                   setSetupOpen(true);
                   return;
                 }
@@ -248,18 +278,13 @@ function ChannelProviderItem({
         submitting={configureMutation.isPending}
         onOpenChange={setSetupOpen}
         onSubmit={(submitProvider, values) => {
-          const connectWindow =
-            submitProvider.auth_mode === "deep_link"
-              ? prepareConnectWindow()
-              : null;
           void configureMutation
             .mutateAsync({ provider: submitProvider.provider, values })
-            .then((configuredProvider) => {
+            .then(() => {
               setSetupOpen(false);
-              startConnect(configuredProvider, connectWindow);
+              toast.success(t.channels.connected);
             })
             .catch((error) => {
-              closeConnectWindow(connectWindow);
               toast.error(
                 error instanceof Error ? error.message : t.channels.unavailable,
               );

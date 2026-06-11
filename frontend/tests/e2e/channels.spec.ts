@@ -37,8 +37,15 @@ function defaultProviders(): MockChannelProvider[] {
     configured: true,
     connectable: true,
     auth_mode: authMode,
-    connection_status: "not_connected",
-    credential_fields: [],
+    connection_status: "connected",
+    credential_fields: [
+      {
+        name: "token",
+        label: "Token",
+        type: "password",
+        required: true,
+      },
+    ],
   }));
 }
 
@@ -101,9 +108,9 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("DingTalk")).toBeVisible();
     await expect(sidebar.getByText("WeChat")).toBeVisible();
     await expect(sidebar.getByText("WeCom")).toBeVisible();
-    await expect(sidebar.getByRole("button", { name: "Connect" })).toHaveCount(
-      7,
-    );
+    await expect(
+      sidebar.getByRole("button", { name: "Connected" }),
+    ).toHaveCount(7);
 
     await sidebar.getByRole("button", { name: /Settings and more/ }).click();
     await page.getByRole("menuitem", { name: "Settings" }).click();
@@ -118,22 +125,14 @@ test.describe("IM channels", () => {
     await expect(page.getByText("WeCom messages")).toBeVisible();
 
     const dialog = page.getByRole("dialog", { name: "Settings" });
-    const connectButtons = dialog.getByRole("button", { name: "Connect" });
-    await expect(connectButtons).toHaveCount(7);
-
-    await connectButtons.nth(1).click();
-    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
-    await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
-    ).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Modify" })).toHaveCount(7);
   });
 
-  test("only enabled providers are shown and setup runs before connect", async ({
+  test("only enabled providers are shown and runtime setup stays editable", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
     let slackConfigured = false;
-    let connectRequests = 0;
     let submittedValues: Record<string, string> | undefined;
 
     void page.route("**/api/channels/providers", (route) => {
@@ -150,7 +149,9 @@ test.describe("IM channels", () => {
               configured: slackConfigured,
               connectable: slackConfigured,
               auth_mode: "binding_code",
-              connection_status: "not_connected",
+              connection_status: slackConfigured
+                ? "connected"
+                : "not_connected",
               credential_fields: [
                 {
                   name: "bot_token",
@@ -205,27 +206,13 @@ test.describe("IM channels", () => {
           configured: true,
           connectable: true,
           auth_mode: "binding_code",
-          connection_status: "not_connected",
+          connection_status: "connected",
           credential_fields: [],
         }),
       });
     });
 
-    void page.route("**/api/channels/slack/connect", (route) => {
-      connectRequests += 1;
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          provider: "slack",
-          mode: "binding_code",
-          url: null,
-          code: "abc123",
-          instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
-          expires_in: 600,
-        }),
-      });
-    });
+    void page.route("**/api/channels/slack/connect", (route) => route.abort());
 
     await page.goto("/workspace/chats/new");
 
@@ -245,12 +232,15 @@ test.describe("IM channels", () => {
 
     await expect(setupDialog).toBeHidden();
     await expect(
-      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+      sidebar.getByRole("button", { name: "Connected" }),
+    ).toBeVisible();
+    await sidebar.getByRole("button", { name: "Connected" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Modify Slack" }),
     ).toBeVisible();
     expect(submittedValues).toEqual({
       bot_token: "xoxb-ui",
       app_token: "xapp-ui",
     });
-    expect(connectRequests).toBe(1);
   });
 });

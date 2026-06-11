@@ -259,6 +259,7 @@ export const enUS: Translations = {
   channels: {
     title: "Channels",
     connect: "Connect",
+    modify: "Modify",
     reconnect: "Reconnect",
     disconnect: "Disconnect",
     connected: "Connected",
@@ -270,9 +271,11 @@ export const enUS: Translations = {
     unavailable: "Channel connections are unavailable right now.",
     unavailableShort: "Unavailable",
     setupTitle: (name: string) => `Connect ${name}`,
+    setupEditTitle: (name: string) => `Modify ${name}`,
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
+    saveChanges: "Save changes",
     descriptions: {
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",

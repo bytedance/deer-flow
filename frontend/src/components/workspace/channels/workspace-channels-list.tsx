@@ -37,6 +37,10 @@ function providerCanConnect(provider: ChannelProvider): boolean {
   );
 }
 
+function providerCanEditRuntimeConfig(provider: ChannelProvider): boolean {
+  return provider.enabled && (provider.credential_fields?.length ?? 0) > 0;
+}
+
 function getProviderUnavailableReason(
   provider: ChannelProvider,
   t: ReturnType<typeof useI18n>["t"],
@@ -126,6 +130,7 @@ export function WorkspaceChannelsList() {
       <SidebarGroupLabel>{t.sidebar.channels}</SidebarGroupLabel>
       <SidebarMenu>
         {visibleProviders.map((provider) => {
+          const canEditRuntimeConfig = providerCanEditRuntimeConfig(provider);
           const isConnected = provider.connection_status === "connected";
           const isPending =
             (connectMutation.isPending &&
@@ -153,10 +158,13 @@ export function WorkspaceChannelsList() {
                     "h-8 w-24 px-2 text-xs",
                     isConnected && "gap-1",
                   )}
-                  disabled={isConnected || isPending}
+                  disabled={isPending}
                   title={unavailableReason}
                   onClick={() => {
-                    if (providerNeedsRuntimeConfig(provider)) {
+                    if (
+                      providerNeedsRuntimeConfig(provider) ||
+                      canEditRuntimeConfig
+                    ) {
                       setSetupProvider(provider);
                       return;
                     }
@@ -193,16 +201,13 @@ export function WorkspaceChannelsList() {
           }
         }}
         onSubmit={(provider, values) => {
-          const connectWindow =
-            provider.auth_mode === "deep_link" ? prepareConnectWindow() : null;
           void configureMutation
             .mutateAsync({ provider: provider.provider, values })
-            .then((configuredProvider) => {
+            .then(() => {
               setSetupProvider(null);
-              startConnect(configuredProvider, connectWindow);
+              toast.success(t.channels.connected);
             })
             .catch((error) => {
-              closeConnectWindow(connectWindow);
               toast.error(
                 error instanceof Error ? error.message : t.channels.unavailable,
               );

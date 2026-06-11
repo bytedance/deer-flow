@@ -123,10 +123,12 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     assert by_provider["telegram"]["auth_mode"] == "deep_link"
     assert by_provider["slack"]["configured"] is True
     assert by_provider["slack"]["auth_mode"] == "binding_code"
+    assert by_provider["slack"]["connection_status"] == "connected"
     assert by_provider["discord"]["configured"] is True
     assert by_provider["discord"]["auth_mode"] == "binding_code"
     assert by_provider["feishu"]["configured"] is True
     assert by_provider["feishu"]["auth_mode"] == "binding_code"
+    assert by_provider["feishu"]["connection_status"] == "connected"
     assert by_provider["dingtalk"]["configured"] is True
     assert by_provider["dingtalk"]["auth_mode"] == "binding_code"
     assert by_provider["wechat"]["configured"] is True
@@ -384,6 +386,7 @@ def test_configure_provider_runtime_credentials_enables_connect_without_file_edi
     assert configured["provider"] == "slack"
     assert configured["configured"] is True
     assert configured["connectable"] is True
+    assert configured["connection_status"] == "connected"
     assert app.state.channels_config["slack"] == {
         "enabled": True,
         "bot_token": "xoxb-ui",
