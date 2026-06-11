@@ -7,6 +7,7 @@ from uuid import UUID
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
+from app.channels.runtime_config_store import ChannelRuntimeConfigStore
 from app.gateway.auth.models import User
 from app.gateway.routers import channel_connections
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
@@ -29,11 +30,21 @@ async def _make_repo(tmp_path):
     return ChannelConnectionRepository(get_session_factory())
 
 
-def _make_app(config: ChannelConnectionsConfig, repo, channels_config: dict | None = None):
+def _make_app(
+    config: ChannelConnectionsConfig,
+    repo,
+    channels_config: dict | None = None,
+    *,
+    runtime_config_store: ChannelRuntimeConfigStore | None = None,
+    set_channels_config_state: bool = True,
+):
     app = make_authed_test_app(user_factory=_user)
     app.state.channel_connections_config = config
     app.state.channel_connection_repo = repo
-    app.state.channels_config = channels_config or {}
+    if set_channels_config_state:
+        app.state.channels_config = channels_config or {}
+    if runtime_config_store is not None:
+        app.state.channel_runtime_config_store = runtime_config_store
     app.include_router(channel_connections.router)
     return app
 
@@ -394,6 +405,56 @@ def test_configure_provider_runtime_credentials_enables_connect_without_file_edi
     }
     assert connect_response.status_code == 200
     assert connect_response.json()["provider"] == "slack"
+
+    anyio.run(repo.close)
+
+
+def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    runtime_config_path = tmp_path / "channels" / "runtime-config.json"
+    first_app = _make_app(
+        config,
+        repo,
+        {},
+        runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path),
+    )
+
+    with TestClient(first_app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+
+    assert configure_response.status_code == 200
+
+    restarted_app = _make_app(
+        config,
+        repo,
+        runtime_config_store=ChannelRuntimeConfigStore(runtime_config_path),
+        set_channels_config_state=False,
+    )
+
+    with TestClient(restarted_app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["slack"]["configured"] is True
+    assert by_provider["slack"]["connectable"] is True
+    assert by_provider["slack"]["connection_status"] == "connected"
+    assert restarted_app.state.channels_config["slack"] == {
+        "enabled": True,
+        "bot_token": "xoxb-ui",
+        "app_token": "xapp-ui",
+    }
 
     anyio.run(repo.close)
 

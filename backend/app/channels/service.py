@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from app.channels.base import Channel
 from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import MessageBus
+from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
@@ -54,8 +55,7 @@ def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, 
 
 def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], app_config: AppConfig) -> None:
     connection_config = getattr(app_config, "channel_connections", None)
-    if connection_config is None or not getattr(connection_config, "enabled", False):
-        return
+    merge_runtime_channel_configs(channels_config, connection_config)
 
 
 def _make_connection_repo(app_config: AppConfig):

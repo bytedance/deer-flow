@@ -3287,10 +3287,17 @@ class TestChannelService:
 
         assert service._config == {"telegram": {"enabled": False}}
 
-    def test_from_app_config_does_not_create_runtime_channels_from_channel_connections(self):
+    def test_from_app_config_does_not_create_runtime_channels_from_channel_connections(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
         app_config = SimpleNamespace(
             model_extra={},
             channel_connections=ChannelConnectionsConfig.model_validate(
@@ -3307,10 +3314,26 @@ class TestChannelService:
 
         assert service._config == {}
 
-    def test_from_app_config_preserves_existing_runtime_channels_with_channel_connections_enabled(self):
+    def test_from_app_config_preserves_existing_runtime_channels_with_channel_connections_enabled(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
         from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
         from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
         app_config = SimpleNamespace(
             model_extra={
                 "channels": {
@@ -3334,6 +3357,40 @@ class TestChannelService:
         assert service._config["telegram"]["bot_token"] == "telegram-token"
         assert service._config["slack"]["app_token"] == "xapp"
         assert service._config["discord"]["bot_token"] == "discord-bot-token"
+
+    def test_from_app_config_loads_persisted_runtime_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "slack": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["slack"] == {
+            "enabled": True,
+            "bot_token": "xoxb-ui",
+            "app_token": "xapp-ui",
+        }
 
     def test_connection_repo_is_forwarded_to_manager(self):
         from app.channels.service import ChannelService
