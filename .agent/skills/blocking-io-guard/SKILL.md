@@ -88,7 +88,10 @@ Read the code around each candidate and route it:
 ### Step 2 — Apply the fix, then re-scan (FIX+ANCHOR only)
 
 Offload the blocking call in production code, then re-run the Step 0 scan and
-confirm the candidate no longer appears. Match by the stable key
+confirm the candidate no longer appears. If the offloaded call sits in a
+`finally` / cleanup path, keep it best-effort and bounded (swallow-and-log,
+`asyncio.wait_for`) so a failing or hung cleanup cannot mask the primary
+exception. Match by the stable key
 **(path, function, symbol)** — line numbers shift after edits, so never
 compare by line.
 
