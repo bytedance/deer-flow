@@ -404,11 +404,11 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 **User-owned channel connections** (`config.yaml` -> `channel_connections`):
 - Disabled by default. It is a user-binding layer on top of the existing `channels.*` runtime config, not a replacement for provider bot credentials.
 - No public IP, OAuth callback URL, or provider webhook route is required by the current implementation.
-- Telegram uses a deep-link `/start <code>` flow over the existing long-polling worker. Slack uses `/connect <code>` over the existing Socket Mode worker. Discord uses `/connect <code>` over the existing Gateway worker.
+- Telegram uses a deep-link `/start <code>` flow over the existing long-polling worker. Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom use `/connect <code>` over their existing outbound channel workers.
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
 - Browser APIs remain protected by normal Gateway auth/CSRF. Provider messages arrive through the already-configured channel workers.
 - Slack replies use the configured operator bot token from `channels.slack` unless a future provider-token flow stores per-connection credentials.
-- Telegram, Slack, and Discord workers resolve incoming platform identities to connection records before reaching `ChannelManager`.
+- Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom workers resolve incoming platform identities to connection records before reaching `ChannelManager`.
 - See `backend/docs/IM_CHANNEL_CONNECTIONS.md` for provider setup and operational notes.
 
 

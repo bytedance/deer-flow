@@ -2,6 +2,16 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
+const channelProviders = [
+  ["telegram", "Telegram", "deep_link"],
+  ["slack", "Slack", "binding_code"],
+  ["discord", "Discord", "binding_code"],
+  ["feishu", "Feishu", "binding_code"],
+  ["dingtalk", "DingTalk", "binding_code"],
+  ["wechat", "WeChat", "binding_code"],
+  ["wecom", "WeCom", "binding_code"],
+] as const;
+
 function mockChannelsAPI(page: Page) {
   void page.route("**/api/channels/providers", (route) => {
     return route.fulfill({
@@ -9,32 +19,17 @@ function mockChannelsAPI(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         enabled: true,
-        providers: [
-          {
-            provider: "telegram",
-            display_name: "Telegram",
+        providers: channelProviders.map(
+          ([provider, displayName, authMode]) => ({
+            provider,
+            display_name: displayName,
             enabled: true,
             configured: true,
-            auth_mode: "deep_link",
+            connectable: true,
+            auth_mode: authMode,
             connection_status: "not_connected",
-          },
-          {
-            provider: "slack",
-            display_name: "Slack",
-            enabled: true,
-            configured: true,
-            auth_mode: "binding_code",
-            connection_status: "not_connected",
-          },
-          {
-            provider: "discord",
-            display_name: "Discord",
-            enabled: true,
-            configured: true,
-            auth_mode: "binding_code",
-            connection_status: "not_connected",
-          },
-        ],
+          }),
+        ),
       }),
     });
   });
@@ -77,8 +72,12 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("Telegram")).toBeVisible();
     await expect(sidebar.getByText("Slack")).toBeVisible();
     await expect(sidebar.getByText("Discord")).toBeVisible();
+    await expect(sidebar.getByText("Feishu")).toBeVisible();
+    await expect(sidebar.getByText("DingTalk")).toBeVisible();
+    await expect(sidebar.getByText("WeChat")).toBeVisible();
+    await expect(sidebar.getByText("WeCom")).toBeVisible();
     await expect(sidebar.getByRole("button", { name: "Connect" })).toHaveCount(
-      3,
+      7,
     );
 
     await sidebar.getByRole("button", { name: /Settings and more/ }).click();
@@ -88,10 +87,14 @@ test.describe("IM channels", () => {
     await expect(page.getByText("Telegram direct messages")).toBeVisible();
     await expect(page.getByText("Slack workspace messages")).toBeVisible();
     await expect(page.getByText("Discord server messages")).toBeVisible();
+    await expect(page.getByText("Feishu and Lark messages")).toBeVisible();
+    await expect(page.getByText("DingTalk Stream Push messages")).toBeVisible();
+    await expect(page.getByText("WeChat iLink messages")).toBeVisible();
+    await expect(page.getByText("WeCom messages")).toBeVisible();
 
     const dialog = page.getByRole("dialog", { name: "Settings" });
     const connectButtons = dialog.getByRole("button", { name: "Connect" });
-    await expect(connectButtons).toHaveCount(3);
+    await expect(connectButtons).toHaveCount(7);
 
     await connectButtons.nth(1).click();
     await expect(page).toHaveURL(/\/workspace\/chats\/new/);

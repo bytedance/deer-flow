@@ -1134,16 +1134,16 @@ run_events:
 # ============================================================================
 # User-Owned IM Channel Connections
 # ============================================================================
-# Lets logged-in users connect their own Telegram, Slack, and Discord accounts
-# from the DeerFlow frontend while reusing the existing `channels` runtime
-# configuration below.
+# Lets logged-in users connect their own IM accounts from the DeerFlow frontend
+# while reusing the existing `channels` runtime configuration below.
 #
 # Security notes:
 # - No public IP, OAuth callback URL, or provider webhook is required.
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack and Discord use `/connect <code>` through the already-running bot.
+# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+#   through the already-running bot/app.
 #
 # channel_connections:
 #   enabled: false
@@ -1156,6 +1156,18 @@ run_events:
 #     enabled: false
 #
 #   discord:
+#     enabled: false
+#
+#   feishu:
+#     enabled: false
+#
+#   dingtalk:
+#     enabled: false
+#
+#   wechat:
+#     enabled: false
+#
+#   wecom:
 #     enabled: false
 
 # ============================================================================

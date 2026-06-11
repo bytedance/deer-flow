@@ -45,6 +45,10 @@ def _enabled_connections_config() -> ChannelConnectionsConfig:
             "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
             "slack": {"enabled": True},
             "discord": {"enabled": True},
+            "feishu": {"enabled": True},
+            "dingtalk": {"enabled": True},
+            "wechat": {"enabled": True},
+            "wecom": {"enabled": True},
         }
     )
 
@@ -54,6 +58,10 @@ def _channels_config() -> dict:
         "telegram": {"enabled": True, "bot_token": "telegram-token"},
         "slack": {"enabled": True, "bot_token": "xoxb-operator", "app_token": "xapp-operator"},
         "discord": {"enabled": True, "bot_token": "discord-bot"},
+        "feishu": {"enabled": True, "app_id": "feishu-app", "app_secret": "feishu-secret"},
+        "dingtalk": {"enabled": True, "client_id": "dingtalk-client", "client_secret": "dingtalk-secret"},
+        "wechat": {"enabled": True, "bot_token": "wechat-token"},
+        "wecom": {"enabled": True, "bot_id": "wecom-bot", "bot_secret": "wecom-secret"},
     }
 
 
@@ -70,12 +78,21 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     body = response.json()
     assert body["enabled"] is True
     by_provider = {item["provider"]: item for item in body["providers"]}
+    assert set(by_provider) == {"telegram", "slack", "discord", "feishu", "dingtalk", "wechat", "wecom"}
     assert by_provider["telegram"]["configured"] is True
     assert by_provider["telegram"]["auth_mode"] == "deep_link"
     assert by_provider["slack"]["configured"] is True
     assert by_provider["slack"]["auth_mode"] == "binding_code"
     assert by_provider["discord"]["configured"] is True
     assert by_provider["discord"]["auth_mode"] == "binding_code"
+    assert by_provider["feishu"]["configured"] is True
+    assert by_provider["feishu"]["auth_mode"] == "binding_code"
+    assert by_provider["dingtalk"]["configured"] is True
+    assert by_provider["dingtalk"]["auth_mode"] == "binding_code"
+    assert by_provider["wechat"]["configured"] is True
+    assert by_provider["wechat"]["auth_mode"] == "binding_code"
+    assert by_provider["wecom"]["configured"] is True
+    assert by_provider["wecom"]["auth_mode"] == "binding_code"
 
     anyio.run(repo.close)
 
@@ -97,6 +114,14 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     assert "channels.slack" in by_provider["slack"]["unavailable_reason"]
     assert by_provider["discord"]["configured"] is False
     assert "channels.discord" in by_provider["discord"]["unavailable_reason"]
+    assert by_provider["feishu"]["configured"] is False
+    assert "channels.feishu" in by_provider["feishu"]["unavailable_reason"]
+    assert by_provider["dingtalk"]["configured"] is False
+    assert "channels.dingtalk" in by_provider["dingtalk"]["unavailable_reason"]
+    assert by_provider["wechat"]["configured"] is False
+    assert "channels.wechat" in by_provider["wechat"]["unavailable_reason"]
+    assert by_provider["wecom"]["configured"] is False
+    assert "channels.wecom" in by_provider["wecom"]["unavailable_reason"]
 
     anyio.run(repo.close)
 
@@ -243,6 +268,39 @@ def test_connect_discord_returns_binding_command_and_persists_state(tmp_path):
         return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="discord")
 
     assert anyio.run(count_states) == 1
+
+    anyio.run(repo.close)
+
+
+def test_connect_existing_binding_code_channels_return_command_and_persist_state(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(_enabled_connections_config(), repo, _channels_config())
+
+    providers = ["feishu", "dingtalk", "wechat", "wecom"]
+    with TestClient(app) as client:
+        responses = {provider: client.post(f"/api/channels/{provider}/connect") for provider in providers}
+
+    for provider, response in responses.items():
+        expected_display_name = {
+            "feishu": "Feishu",
+            "dingtalk": "DingTalk",
+            "wechat": "WeChat",
+            "wecom": "WeCom",
+        }[provider]
+        assert response.status_code == 200
+        body = response.json()
+        assert body["provider"] == provider
+        assert body["mode"] == "binding_code"
+        assert body["url"] is None
+        assert len(body["code"]) >= 22
+        assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow {expected_display_name} bot."
+
+        async def count_states(provider=provider):
+            return await repo.count_oauth_states(owner_user_id=str(_user().id), provider=provider)
+
+        assert anyio.run(count_states) == 1
 
     anyio.run(repo.close)
 

@@ -1,6 +1,6 @@
 # IM Channel Connections
 
-DeerFlow supports user-owned IM channel bindings for Telegram, Slack, and Discord. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
+DeerFlow supports user-owned IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
 
 No public IP, OAuth callback URL, or provider webhook is required in this implementation.
 
@@ -22,6 +22,25 @@ channels:
   discord:
     enabled: true
     bot_token: $DISCORD_BOT_TOKEN
+
+  feishu:
+    enabled: true
+    app_id: $FEISHU_APP_ID
+    app_secret: $FEISHU_APP_SECRET
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID
+    client_secret: $DINGTALK_CLIENT_SECRET
+
+  wechat:
+    enabled: true
+    bot_token: $WECHAT_BOT_TOKEN
+
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
 ```
 
 Then enable user bindings in `channel_connections`:
@@ -38,6 +57,18 @@ channel_connections:
     enabled: true
 
   discord:
+    enabled: true
+
+  feishu:
+    enabled: true
+
+  dingtalk:
+    enabled: true
+
+  wechat:
+    enabled: true
+
+  wecom:
     enabled: true
 ```
 
@@ -62,6 +93,12 @@ Discord:
 - The frontend creates a short one-time code.
 - The UI shows `Send /connect <code> to the DeerFlow Discord bot.`
 - The existing Discord Gateway worker receives the message and binds the Discord user/guild to the current DeerFlow user.
+
+Feishu/Lark, DingTalk, WeChat, and WeCom:
+
+- The frontend creates a short one-time code.
+- The UI shows `Send /connect <code> to the DeerFlow <Provider> bot.`
+- The already-running long-connection or polling worker receives the message and binds the platform user/workspace identity to the current DeerFlow user.
 
 Codes expire after 10 minutes and are single-use.
 

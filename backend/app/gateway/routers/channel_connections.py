@@ -63,12 +63,20 @@ _PROVIDER_META: dict[str, dict[str, str]] = {
     "telegram": {"display_name": "Telegram", "auth_mode": "deep_link"},
     "slack": {"display_name": "Slack", "auth_mode": "binding_code"},
     "discord": {"display_name": "Discord", "auth_mode": "binding_code"},
+    "feishu": {"display_name": "Feishu", "auth_mode": "binding_code"},
+    "dingtalk": {"display_name": "DingTalk", "auth_mode": "binding_code"},
+    "wechat": {"display_name": "WeChat", "auth_mode": "binding_code"},
+    "wecom": {"display_name": "WeCom", "auth_mode": "binding_code"},
 }
 
 _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "telegram": ("bot_token",),
     "slack": ("bot_token", "app_token"),
     "discord": ("bot_token",),
+    "feishu": ("app_id", "app_secret"),
+    "dingtalk": ("client_id", "client_secret"),
+    "wechat": ("bot_token",),
+    "wecom": ("bot_id", "bot_secret"),
 }
 
 
@@ -187,18 +195,17 @@ async def _create_state(
 def _connect_instruction(provider: str, code: str) -> str:
     if provider == "telegram":
         return f"Send /start {code} to the DeerFlow Telegram bot."
-    if provider == "slack":
-        return f"Send /connect {code} to the DeerFlow Slack bot."
-    if provider == "discord":
-        return f"Send /connect {code} to the DeerFlow Discord bot."
-    raise HTTPException(status_code=404, detail="Unknown channel provider")
+    meta = _PROVIDER_META.get(provider)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown channel provider")
+    return f"Send /connect {code} to the DeerFlow {meta['display_name']} bot."
 
 
 def _connect_url(config: ChannelConnectionsConfig, provider: str, code: str) -> str | None:
     if provider == "telegram":
         provider_config = _provider_config(config, provider)
         return f"https://t.me/{provider_config.bot_username}?start={code}"
-    if provider in {"slack", "discord"}:
+    if _PROVIDER_META.get(provider, {}).get("auth_mode") == "binding_code":
         return None
     raise HTTPException(status_code=404, detail="Unknown channel provider")
 
