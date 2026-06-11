@@ -7,7 +7,9 @@ import { useI18n } from "@/core/i18n/hooks";
 
 import {
   OFFLINE_BANNER_RETRY_INTERVAL_MS,
+  decideProbeAction,
   shouldShowOfflineBanner,
+  type ProbeOutcome,
 } from "./gateway-offline-banner-helpers";
 
 interface GatewayOfflineBannerProps {
@@ -24,58 +26,67 @@ export function GatewayOfflineBanner({
 }: GatewayOfflineBannerProps) {
   const { t } = useI18n();
   const { user, refreshUser, logout } = useAuth();
-  // Guard against piling up probe calls while the gateway is still slow:
-  // each interval tick must wait for the previous probe to settle before
-  // issuing a new one.
+  // Guard against piling up probe calls while the gateway is still slow.
   const inFlightRef = useRef(false);
+  // Count consecutive 401s so we can distinguish "transient warm-up 401"
+  // from "session actually expired" and avoid lying with the banner.
+  const authFailuresRef = useRef(0);
 
   useEffect(() => {
     if (!gatewayUnavailable) return;
+    // Once AuthProvider has a user again the banner has served its
+    // purpose; tear down the polling so we don't keep probing every 10s
+    // for the entire lifetime of the page (gatewayUnavailable is a
+    // server-rendered prop and stays true until a full reload).
+    if (user !== null) return;
 
-    // We intentionally do NOT call `refreshUser()` directly here.
-    // `AuthProvider.refreshUser()` treats any 401 from `/api/v1/auth/me`
-    // as "session expired" and force-redirects to `/login`. During gateway
-    // recovery, the first few requests may transiently return 401 before
-    // the gateway is fully ready, which would incorrectly kick the user
-    // out — defeating the purpose of this offline banner.
-    //
-    // Instead, we silently probe `/api/v1/auth/me` ourselves and only
-    // delegate to `refreshUser()` once we confirm the gateway is healthy
-    // (200 OK). Non-200 responses are swallowed; we just wait for the
-    // next interval tick.
+    const classify = (res: Response | null, errored: boolean): ProbeOutcome => {
+      if (errored || res === null) return { kind: "transient" };
+      if (res.ok) return { kind: "ok" };
+      if (res.status === 401) return { kind: "unauthorized" };
+      return { kind: "transient" };
+    };
+
     const probe = async () => {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
+      let res: Response | null = null;
+      let errored = false;
       try {
-        const res = await fetch("/api/v1/auth/me", {
+        res = await fetch("/api/v1/auth/me", {
           credentials: "include",
           cache: "no-store",
         });
-        if (res.ok) {
-          // Gateway is healthy again — hand off to AuthProvider so
-          // `user` is populated and the banner unmounts itself.
-          await refreshUser();
-        }
-        // 401 / 5xx / network: stay silent and retry on the next tick.
       } catch {
-        // Network error during recovery is expected; stay silent.
+        errored = true;
       } finally {
         inFlightRef.current = false;
       }
+
+      const action = decideProbeAction(
+        authFailuresRef.current,
+        classify(res, errored),
+      );
+
+      if (action.type === "delegate-refresh") {
+        // Reset counter and hand off to AuthProvider. On "recovered" it
+        // will populate `user` (banner unmounts on next render). On
+        // "session-expired" it will /login-redirect from its 401 branch.
+        authFailuresRef.current = 0;
+        await refreshUser();
+        return;
+      }
+      authFailuresRef.current = action.nextFailureCount;
     };
 
-    // Kick off an immediate probe so the banner can disappear as soon
-    // as the gateway is back, without waiting for the first interval.
     void probe();
-
     const handle = window.setInterval(() => {
       void probe();
     }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
-
     return () => {
       window.clearInterval(handle);
     };
-  }, [gatewayUnavailable, refreshUser]);
+  }, [gatewayUnavailable, user, refreshUser]);
 
   if (!shouldShowOfflineBanner(user, gatewayUnavailable)) {
     return null;
