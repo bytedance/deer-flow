@@ -236,12 +236,15 @@ def test_additional_channels_attach_owner_identity(tmp_path):
             attached = await channel._attach_connection_identity(inbound)
             assert attached.owner_user_id == "deerflow-user-1"
             assert attached.connection_id
-            assert attached.workspace_id == {
-                "feishu": "oc-chat-1",
-                "dingtalk": "cid-group-1",
-                "wechat": "wx-user-1",
-                "wecom": "bot-1",
-            }[channel.name]
+            assert (
+                attached.workspace_id
+                == {
+                    "feishu": "oc-chat-1",
+                    "dingtalk": "cid-group-1",
+                    "wechat": "wx-user-1",
+                    "wecom": "bot-1",
+                }[channel.name]
+            )
 
         await repo.close()
 
