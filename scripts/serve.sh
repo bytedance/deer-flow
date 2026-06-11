@@ -29,6 +29,14 @@ set -e
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
+# ── Load .env ────────────────────────────────────────────────────────────────
+
+if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
 _pick_python() {
     local candidate
     for candidate in python3 python py; do
@@ -39,61 +47,6 @@ _pick_python() {
     done
     return 1
 }
-
-_load_dotenv_file() {
-    local env_file=$1
-    local python_bin
-
-    [ -f "$env_file" ] || return 0
-
-    if ! python_bin="$(_pick_python)"; then
-        echo "Python is required to load $env_file safely."
-        exit 1
-    fi
-
-    eval "$("$python_bin" - "$env_file" <<'PY'
-import re
-import shlex
-import sys
-from pathlib import Path
-
-env_path = Path(sys.argv[1])
-assign_re = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
-
-
-def strip_unquoted_comment(value: str) -> str:
-    for index, char in enumerate(value):
-        if char == "#" and (index == 0 or value[index - 1].isspace()):
-            return value[:index].rstrip()
-    return value
-
-
-for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-        continue
-
-    match = assign_re.match(line)
-    if not match:
-        continue
-
-    key, value = match.groups()
-    value = value.strip()
-    try:
-        parsed = shlex.split(value, comments=True, posix=True)
-    except ValueError:
-        value = strip_unquoted_comment(value)
-    else:
-        value = parsed[0] if parsed else ""
-
-    print(f"export {key}={shlex.quote(value)}")
-PY
-)"
-}
-
-# ── Load .env ────────────────────────────────────────────────────────────────
-
-_load_dotenv_file "$REPO_ROOT/.env"
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -226,30 +179,12 @@ _is_port_listening() {
     fi
 
     if command -v netstat >/dev/null 2>&1; then
-        if netstat -ltn 2>/dev/null | awk -v port="$port" '
-            toupper($NF) == "LISTEN" && $4 ~ "(^|[.:])" port "$" { found = 1 }
-            END { exit found ? 0 : 1 }
-        '; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
             return 0
         fi
     fi
 
     return 1
-}
-
-_wait_for_port_free() {
-    local port=$1
-    local timeout=${2:-10}
-    local elapsed=0
-
-    while _is_port_listening "$port"; do
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo "  ⚠ Port $port is still in use after ${timeout}s"
-            return 1
-        fi
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
 }
 
 _is_repo_nginx_pid() {
@@ -304,12 +239,9 @@ stop_all() {
     echo "Stopping all services..."
     _report_reclaimed_ports
     _kill_repo_processes "uvicorn app.gateway.app:app"
-    _kill_repo_processes "pnpm .*run dev"
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    _kill_repo_processes "next/dist"
-    _kill_repo_processes "turbopack"
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     _kill_repo_nginx
@@ -320,9 +252,6 @@ stop_all() {
     _kill_repo_port 8001
     _kill_repo_port 3000
     _kill_repo_port 2026
-    _wait_for_port_free 8001 30 || true
-    _wait_for_port_free 3000 30 || true
-    _wait_for_port_free 2026 30 || true
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -485,7 +414,6 @@ trap 'cleanup 143' TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
-    local service_pid
 
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
@@ -495,13 +423,9 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        nohup sh -c "$cmd" < /dev/null > /dev/null 2>&1 &
+        nohup sh -c "$cmd" > /dev/null 2>&1 &
     else
         sh -c "$cmd" &
-    fi
-    service_pid=$!
-    if $DAEMON_MODE; then
-        disown "$service_pid" 2>/dev/null || true
     fi
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
@@ -510,12 +434,6 @@ run_service() {
         [ -f "$logfile" ] && tail -20 "$logfile"
         cleanup 1
     }
-    if ! kill -0 "$service_pid" 2>/dev/null; then
-        local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
-        echo "✗ $name process exited after port $port became available."
-        [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup 1
-    fi
     echo "✓ $name started on localhost:$port"
 }
 
@@ -526,17 +444,17 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && exec env PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
 # 2. Frontend
 run_service "Frontend" \
-    "cd frontend && exec $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
+    "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
 # 3. Nginx
 run_service "Nginx" \
-    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────

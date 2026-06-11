@@ -44,6 +44,7 @@ class TestMakeSafeUserId:
         # Sanitized prefix plus a stable digest of the original.
         assert result.startswith("user-example-com-")
         assert len(result.rsplit("-", 1)[1]) == 16
+        assert result == "user-example-com-63a710569261a24b"
         assert make_safe_user_id("user@example.com") == result
 
     def test_sanitized_id_passes_validation(self, paths: Paths):

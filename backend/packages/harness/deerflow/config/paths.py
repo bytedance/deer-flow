@@ -47,7 +47,7 @@ def make_safe_user_id(raw: str) -> str:
     sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw)
     if sanitized == raw:
         return raw
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
     return f"{sanitized}-{digest}"
 
 

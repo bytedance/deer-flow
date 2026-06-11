@@ -136,27 +136,25 @@ class ChannelService:
                 has_creds = any(not isinstance(channel_config.get(k), bool) and channel_config.get(k) is not None and str(channel_config[k]).strip() for k in cred_keys)
                 if has_creds:
                     logger.warning(
-                        "Channel '%s' has credentials configured but is disabled. Set enabled: true under channels.%s in config.yaml to activate it.",
-                        name,
-                        name,
+                        "A configured channel has credentials configured but is disabled. Set enabled: true under its channels entry in config.yaml to activate it.",
                     )
                 else:
-                    logger.info("Channel %s is disabled, skipping", name)
+                    logger.info("A configured channel is disabled, skipping")
                 continue
 
             await self._start_channel(name, channel_config)
 
         self._running = True
-        logger.info("ChannelService started with channels: %s", list(self._channels.keys()))
+        logger.info("ChannelService started with %d channels", len(self._channels))
 
     async def stop(self) -> None:
         """Stop all channels and the manager."""
         for name, channel in list(self._channels.items()):
             try:
                 await channel.stop()
-                logger.info("Channel %s stopped", name)
+                logger.info("Channel stopped")
             except Exception:
-                logger.exception("Error stopping channel %s", name)
+                logger.exception("Error stopping channel")
         self._channels.clear()
 
         await self.manager.stop()
@@ -169,12 +167,12 @@ class ChannelService:
             try:
                 await self._channels[name].stop()
             except Exception:
-                logger.exception("Error stopping channel %s for restart", name)
+                logger.exception("Error stopping channel for restart")
             del self._channels[name]
 
         config = self._config.get(name)
         if not config or not isinstance(config, dict):
-            logger.warning("No config for channel %s", name)
+            logger.warning("No config for requested channel")
             return False
 
         return await self._start_channel(name, config)
@@ -194,17 +192,17 @@ class ChannelService:
             return True
         try:
             await channel.stop()
-            logger.info("Channel %s stopped and removed", name)
+            logger.info("Channel stopped and removed")
             return True
         except Exception:
-            logger.exception("Error stopping channel %s for removal", name)
+            logger.exception("Error stopping channel for removal")
             return False
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
-            logger.warning("Unknown channel type: %s", name)
+            logger.warning("Unknown channel type")
             return False
 
         try:
@@ -212,7 +210,7 @@ class ChannelService:
 
             channel_cls = resolve_class(import_path, base_class=None)
         except Exception:
-            logger.exception("Failed to import channel class for %s", name)
+            logger.exception("Failed to import channel class")
             return False
 
         try:
@@ -225,13 +223,13 @@ class ChannelService:
             await channel.start()
             if not channel.is_running:
                 self._channels.pop(name, None)
-                logger.error("Channel %s did not enter a running state after start()", name)
+                logger.error("Channel did not enter a running state after start()")
                 return False
-            logger.info("Channel %s started", name)
+            logger.info("Channel started")
             return True
         except Exception:
             self._channels.pop(name, None)
-            logger.exception("Failed to start channel %s", name)
+            logger.exception("Failed to start channel")
             return False
 
     def get_status(self) -> dict[str, Any]:

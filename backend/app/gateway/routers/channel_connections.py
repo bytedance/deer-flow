@@ -414,7 +414,7 @@ async def _restart_runtime_channel_if_available(provider: str, runtime_config: d
     try:
         from app.channels.service import get_channel_service
     except Exception:
-        logger.exception("Failed to import channel service while configuring %s", provider)
+        logger.exception("Failed to import channel service while configuring a runtime channel")
         return None
 
     service = get_channel_service()
@@ -427,7 +427,7 @@ async def _sync_runtime_channel_after_removal(provider: str, channels_config: di
     try:
         from app.channels.service import get_channel_service
     except Exception:
-        logger.exception("Failed to import channel service while disconnecting %s", provider)
+        logger.exception("Failed to import channel service while disconnecting a runtime channel")
         return None
 
     service = get_channel_service()
