@@ -217,7 +217,7 @@ def _runtime_unavailable_reason(provider: str) -> str:
 def _runtime_not_running_reason(provider: str) -> str:
     meta = _PROVIDER_META.get(provider)
     display_name = meta["display_name"] if meta else provider
-    return f"{display_name} channel is configured but is not running. Check the credentials and save this channel again."
+    return f"{display_name} channel is configured but is not running. Check the credentials and service logs."
 
 
 def _runtime_channel_running(provider: str) -> bool | None:
@@ -242,6 +242,35 @@ def _runtime_channel_running(provider: str) -> bool | None:
     if not isinstance(channel_status, dict):
         return None
     return bool(channel_status.get("running"))
+
+
+async def _ensure_runtime_channel_ready_if_available(
+    provider: str,
+    channels_config: dict[str, Any],
+) -> bool | None:
+    runtime_config = channels_config.get(provider)
+    if not isinstance(runtime_config, dict) or not runtime_config.get("enabled", False):
+        return None
+
+    try:
+        from app.channels.service import get_channel_service
+    except Exception:
+        logger.debug("Unable to import channel service for readiness reconciliation", exc_info=True)
+        return None
+
+    service = get_channel_service()
+    if service is None:
+        return None
+
+    ensure_channel_ready = getattr(service, "ensure_channel_ready", None)
+    if ensure_channel_ready is None:
+        return None
+
+    try:
+        return await ensure_channel_ready(provider, runtime_config)
+    except Exception:
+        logger.exception("Failed to reconcile runtime channel readiness")
+        return False
 
 
 def _provider_unavailable_reason(
@@ -459,6 +488,8 @@ async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
     for provider, meta in _PROVIDER_META.items():
         if not config.provider_status(provider)["enabled"]:
             continue
+        if _runtime_channel_configured(provider, channels_config):
+            await _ensure_runtime_channel_ready_if_available(provider, channels_config)
         connection = by_provider.get(provider)
         providers.append(_provider_response(config, channels_config, provider, meta, connection))
     return ChannelProvidersResponse(enabled=config.enabled, providers=providers)
@@ -534,6 +565,10 @@ async def connect_channel_provider(provider: str, request: Request) -> ChannelCo
     channels_config = _get_channels_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
+
+    provider_config = _provider_config(config, provider)
+    if provider_config.enabled and _runtime_channel_configured(provider, channels_config):
+        await _ensure_runtime_channel_ready_if_available(provider, channels_config)
 
     status, unavailable_reason = _provider_status(config, channels_config, provider)
     if not status["enabled"]:

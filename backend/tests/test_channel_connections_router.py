@@ -247,6 +247,60 @@ def test_get_providers_reports_configured_channel_not_running(tmp_path, monkeypa
     anyio.run(repo.close)
 
 
+def test_get_providers_restarts_configured_channel_when_service_can_reconcile(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "feishu": {"enabled": True},
+        }
+    )
+    channels_config = {
+        "feishu": {
+            "enabled": True,
+            "app_id": "feishu-app",
+            "app_secret": "feishu-secret",
+        }
+    }
+    app = _make_app(config, repo, channels_config)
+    status = {
+        "service_running": True,
+        "channels": {
+            "feishu": {
+                "enabled": True,
+                "running": False,
+            }
+        },
+    }
+    reconciled: list[tuple[str, dict]] = []
+
+    async def ensure_channel_ready(provider, runtime_config):
+        reconciled.append((provider, dict(runtime_config)))
+        status["channels"][provider]["running"] = True
+        return True
+
+    service = SimpleNamespace(
+        get_status=lambda: status,
+        ensure_channel_ready=ensure_channel_ready,
+    )
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["feishu"]["configured"] is True
+    assert by_provider["feishu"]["connectable"] is True
+    assert by_provider["feishu"]["connection_status"] == "connected"
+    assert by_provider["feishu"]["unavailable_reason"] is None
+    assert reconciled == [("feishu", channels_config["feishu"])]
+
+    anyio.run(repo.close)
+
+
 def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
     import anyio
 

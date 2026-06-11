@@ -43,6 +43,11 @@ _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
 
 
+def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
+    cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
+    return any(not isinstance(channel_config.get(key), bool) and channel_config.get(key) is not None and str(channel_config[key]).strip() for key in cred_keys)
+
+
 def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
     value = config.pop(config_key, None)
     if isinstance(value, str) and value.strip():
@@ -127,14 +132,20 @@ class ChannelService:
             return
 
         await self.manager.start()
+        self._running = True
 
+        ready_status = await self.ensure_ready_channels(attempts=2)
+        ready_count = sum(1 for ready in ready_status.values() if ready)
+        logger.info("ChannelService started with %d/%d ready channels", ready_count, len(ready_status))
+
+    async def ensure_ready_channels(self, *, attempts: int = 1) -> dict[str, bool]:
+        """Start or restart enabled configured channels that are not ready."""
+        ready_status: dict[str, bool] = {}
         for name, channel_config in self._config.items():
             if not isinstance(channel_config, dict):
                 continue
             if not channel_config.get("enabled", False):
-                cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
-                has_creds = any(not isinstance(channel_config.get(k), bool) and channel_config.get(k) is not None and str(channel_config[k]).strip() for k in cred_keys)
-                if has_creds:
+                if _channel_has_credentials(name, channel_config):
                     logger.warning(
                         "A configured channel has credentials configured but is disabled. Set enabled: true under its channels entry in config.yaml to activate it.",
                     )
@@ -142,10 +153,49 @@ class ChannelService:
                     logger.info("A configured channel is disabled, skipping")
                 continue
 
-            await self._start_channel(name, channel_config)
+            ready_status[name] = await self.ensure_channel_ready(name, attempts=attempts)
+        return ready_status
 
-        self._running = True
-        logger.info("ChannelService started with %d channels", len(self._channels))
+    async def ensure_channel_ready(
+        self,
+        name: str,
+        config: dict[str, Any] | None = None,
+        *,
+        attempts: int = 1,
+    ) -> bool:
+        """Ensure a single enabled channel is running using its current config."""
+        if not self._running:
+            logger.warning("ChannelService is not running; cannot ensure channel readiness")
+            return False
+
+        if config is not None:
+            self._config[name] = dict(config)
+
+        channel_config = self._config.get(name)
+        if not channel_config or not isinstance(channel_config, dict):
+            logger.warning("No config for requested channel")
+            return False
+        if not channel_config.get("enabled", False):
+            return False
+
+        channel = self._channels.get(name)
+        if channel is not None and channel.is_running:
+            return True
+
+        if channel is not None:
+            try:
+                await channel.stop()
+            except Exception:
+                logger.exception("Error stopping non-running channel before readiness retry")
+            self._channels.pop(name, None)
+
+        max_attempts = max(1, attempts)
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                logger.info("Retrying channel startup after readiness check")
+            if await self._start_channel(name, channel_config):
+                return True
+        return False
 
     async def stop(self) -> None:
         """Stop all channels and the manager."""
