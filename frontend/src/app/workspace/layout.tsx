@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -13,6 +14,25 @@ export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   const result = await getServerSideUser();
+
+  // Allow public mock/demo routes (e.g. case-study links with ?mock=true)
+  // through without authentication.  Next.js App Router layouts do not
+  // receive searchParams directly, so middleware.ts injects x-invoke-url.
+  const headersList = await headers();
+  const invokeUrl = headersList.get("x-invoke-url") ?? "";
+  const isMockRequest =
+    invokeUrl !== "" &&
+    new URL(invokeUrl).searchParams.get("mock") === "true";
+  if (
+    isMockRequest &&
+    (result.tag === "unauthenticated" || result.tag === "system_setup_required")
+  ) {
+    return (
+      <AuthProvider initialUser={null}>
+        <WorkspaceContent>{children}</WorkspaceContent>
+      </AuthProvider>
+    );
+  }
 
   switch (result.tag) {
     case "authenticated":
