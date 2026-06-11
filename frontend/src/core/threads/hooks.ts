@@ -53,6 +53,8 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+type PartialAiOverlapPredicate = (message: Message, index: number) => boolean;
+
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -106,6 +108,108 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     }
     return lastIndexByIdentity.get(identity) === index;
   });
+}
+
+function messageTextContent(message: Message): string | undefined {
+  if (typeof message.content === "string") {
+    return message.content;
+  }
+  if (!Array.isArray(message.content)) {
+    return undefined;
+  }
+  const textPart = message.content.find((part) => part.type === "text");
+  return textPart?.text;
+}
+
+function withMessageTextContent(message: Message, text: string): Message {
+  if (typeof message.content === "string") {
+    return { ...message, content: text };
+  }
+  if (!Array.isArray(message.content)) {
+    return message;
+  }
+  let replaced = false;
+  const content = message.content.map((part) => {
+    if (!replaced && part.type === "text") {
+      replaced = true;
+      return { ...part, text };
+    }
+    return part;
+  });
+  return { ...message, content };
+}
+
+const MAX_TEXT_OVERLAP_SCAN = 4096;
+
+function longestTextOverlap(left: string, right: string): number {
+  const maxLength = Math.min(left.length, right.length, MAX_TEXT_OVERLAP_SCAN);
+  const leftTail =
+    left.length > maxLength ? left.slice(left.length - maxLength) : left;
+  const rightHead =
+    right.length > maxLength ? right.slice(0, maxLength) : right;
+  for (let length = maxLength; length > 0; length--) {
+    if (leftTail.endsWith(rightHead.slice(0, length))) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+function shouldJoinPartialAiText(
+  historyText: string,
+  threadText: string,
+  allowDisjointText: boolean,
+) {
+  if (!historyText || !threadText) {
+    return false;
+  }
+  if (threadText.startsWith(historyText)) {
+    return false;
+  }
+  if (historyText.endsWith(threadText)) {
+    return true;
+  }
+  const overlap = longestTextOverlap(historyText, threadText);
+  if (overlap > 0) {
+    return true;
+  }
+  if (allowDisjointText) {
+    return true;
+  }
+  return /\s$/.test(historyText) || /^\s/.test(threadText);
+}
+
+function mergeOverlappingMessage(
+  historyMessage: Message,
+  threadMessage: Message,
+  allowDisjointText: boolean,
+): Message {
+  if (
+    historyMessage.type !== "ai" ||
+    threadMessage.type !== "ai" ||
+    isHiddenFromUIMessage(historyMessage) ||
+    isHiddenFromUIMessage(threadMessage)
+  ) {
+    return threadMessage;
+  }
+
+  const historyText = messageTextContent(historyMessage);
+  const threadText = messageTextContent(threadMessage);
+  if (!historyText || !threadText) {
+    return threadMessage;
+  }
+  if (threadText.startsWith(historyText)) {
+    return threadMessage;
+  }
+  if (!shouldJoinPartialAiText(historyText, threadText, allowDisjointText)) {
+    return threadMessage;
+  }
+
+  const overlap = longestTextOverlap(historyText, threadText);
+  return withMessageTextContent(
+    threadMessage,
+    `${historyText}${threadText.slice(overlap)}`,
+  );
 }
 
 export function findLatestUnloadedRunIndex(
@@ -187,13 +291,46 @@ export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  preservePartialAiOverlap: boolean | PartialAiOverlapPredicate = false,
 ): Message[] {
+  const historyByIdentity = new Map<string, Message>();
+  for (const message of historyMessages) {
+    const identity = messageIdentity(message);
+    if (identity) {
+      historyByIdentity.set(identity, message);
+    }
+  }
+  const shouldPreservePartialAiOverlap =
+    typeof preservePartialAiOverlap === "function"
+      ? preservePartialAiOverlap
+      : preservePartialAiOverlap
+        ? () => true
+        : null;
+  const mergedThreadMessages = shouldPreservePartialAiOverlap
+    ? threadMessages.map((message, index) => {
+        if (!shouldPreservePartialAiOverlap(message, index)) {
+          return message;
+        }
+        const identity = messageIdentity(message);
+        const historyMessage = identity
+          ? historyByIdentity.get(identity)
+          : null;
+        return historyMessage
+          ? mergeOverlappingMessage(
+              historyMessage,
+              message,
+              typeof preservePartialAiOverlap === "function",
+            )
+          : message;
+      })
+    : threadMessages;
+
   // Only visible live messages should trim overlapping history. Hidden messages
   // are UI control messages in this path, not observability records; any hidden
   // message that must survive as task/tracing data should use custom events or a
   // separate state channel instead of participating in this overlap heuristic.
   const threadMessageIds = new Set(
-    threadMessages
+    mergedThreadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
       .map(messageIdentity)
       .filter(isNonEmptyString),
@@ -218,7 +355,7 @@ export function mergeMessages(
 
   return dedupeMessagesByIdentity([
     ...historyMessages.slice(0, cutoff),
-    ...threadMessages,
+    ...mergedThreadMessages,
     ...optimisticMessages,
   ]);
 }
@@ -920,6 +1057,10 @@ export function useThreadStream({
     history,
     thread.messages,
     visibleOptimisticMessages,
+    thread.isLoading
+      ? (message, index) =>
+          Boolean(thread.getMessagesMetadata(message, index)?.streamMetadata)
+      : false,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
