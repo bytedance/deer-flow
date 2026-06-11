@@ -169,9 +169,22 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     return "0.0.0.0"
 
 
-def _is_no_such_container_error(stderr: str) -> bool:
+def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
+    """Return True only when stderr definitively says the container does not exist.
+
+    Docker reports "No such object" / "No such container". Apple Container
+    reports a generic "not found", so that phrase is only trusted when the
+    message also names the inspected container (or refers to a
+    container/object); transient failures whose text happens to contain
+    "not found" (e.g. "command not found", "context not found") must stay on
+    the raise path instead of being misread as a dead container.
+    """
     message = stderr.lower()
-    return "no such object" in message or "no such container" in message or "not found" in message
+    if "no such object" in message or "no such container" in message:
+        return True
+    if "not found" not in message:
+        return False
+    return container_name.lower() in message or "container" in message or "object" in message
 
 
 class LocalContainerBackend(SandboxBackend):
@@ -617,7 +630,7 @@ class LocalContainerBackend(SandboxBackend):
 
         if result.returncode == 0:
             return result.stdout.strip().lower() == "true"
-        if _is_no_such_container_error(result.stderr):
+        if _is_no_such_container_error(result.stderr, container_name):
             return False
         raise RuntimeError(f"Failed to inspect container {container_name}: {result.stderr.strip()}")
 

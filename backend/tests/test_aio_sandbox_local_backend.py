@@ -308,3 +308,28 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert backend.discover("sandbox-timeout") is None
+
+
+def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
+    """Apple Container's generic "not found" is trusted when it names the container."""
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", stderr='Error: not found: "sandbox-apple"', returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend._is_container_running("sandbox-apple") is False
+
+
+def test_is_container_running_raises_on_unrelated_not_found_error(monkeypatch):
+    """Transient errors whose text contains "not found" must not be misread as a dead container."""
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", stderr="Error: credential helper not found in $PATH", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to inspect container sandbox-busy"):
+        backend._is_container_running("sandbox-busy")
