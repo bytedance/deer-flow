@@ -12,16 +12,30 @@ const DEEP_BLOCKQUOTE_HINT_RE = new RegExp(
   `^(?:[ \\t]*>){${MAX_BLOCKQUOTE_DEPTH + 1}}`,
   "m",
 );
-const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]*>)+/;
+// Only up to 3 leading spaces can start a blockquote; 4+ (or a tab) is an
+// indented code block, where ">" runs are literal content.
+const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:[ \t]*>)+/;
+const CODE_FENCE_RE = /^ {0,3}(?:```|~~~)/;
+const INDENTED_CODE_RE = /^(?: {4}|\t)/;
 
 export function capBlockquoteNesting(markdown: string): string {
   if (!DEEP_BLOCKQUOTE_HINT_RE.test(markdown)) {
     return markdown;
   }
 
+  let insideFence = false;
   return markdown
     .split("\n")
     .map((line) => {
+      if (CODE_FENCE_RE.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      // ">" runs inside fenced or indented code blocks are literal text, not
+      // nesting — rewriting them would silently corrupt code content.
+      if (insideFence || INDENTED_CODE_RE.test(line)) {
+        return line;
+      }
       const match = BLOCKQUOTE_PREFIX_RE.exec(line);
       if (!match) {
         return line;

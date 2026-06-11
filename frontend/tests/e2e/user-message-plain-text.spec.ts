@@ -115,4 +115,23 @@ test.describe("User message plain-text rendering", () => {
     // visibility).
     await expect(page.getByText("deep")).toBeAttached();
   });
+
+  test("list-prefixed deep nesting in an AI message falls back to plain text instead of crashing", async ({
+    page,
+  }) => {
+    // marked's list and blockquote tokenizers are mutually recursive, so a
+    // list marker in front of the quote chain bypasses the nesting cap; the
+    // render error boundary must absorb it.
+    const pageErrors = collectPageErrors(page);
+    mockLangGraphAPI(
+      page,
+      threadWithMessages("hello", "- " + "> ".repeat(3000) + "deep-list"),
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("hello")).toBeVisible({ timeout: 15_000 });
+
+    expect(pageErrors).toEqual([]);
+    await expect(page.getByText("deep-list")).toBeAttached();
+  });
 });
