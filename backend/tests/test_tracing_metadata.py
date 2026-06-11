@@ -109,18 +109,36 @@ def test_tags_include_env_and_model(monkeypatch):
         model_name="gpt-4o",
     )
 
-    assert result["langfuse_tags"] == ["env:production", "model:gpt-4o"]
+    tags = result["langfuse_tags"]
+    assert "env:production" in tags
+    assert "model:gpt-4o" in tags
+    assert "agent:lead-agent" in tags
 
 
-def test_tags_omitted_when_no_tag_inputs(monkeypatch):
+def test_tags_include_agent_and_user(monkeypatch):
     _enable_langfuse(monkeypatch)
 
     result = tracing_metadata.build_langfuse_trace_metadata(
         thread_id="t",
-        user_id="u",
+        user_id="alice@example.com",
+        assistant_id="project-inspector",
     )
 
-    assert "langfuse_tags" not in result
+    tags = result["langfuse_tags"]
+    assert "agent:project-inspector" in tags
+    assert "user:alice@example.com" in tags
+
+
+def test_tags_omit_user_when_default(monkeypatch):
+    _enable_langfuse(monkeypatch)
+
+    result = tracing_metadata.build_langfuse_trace_metadata(
+        thread_id="t",
+        user_id=None,
+    )
+
+    tags = result.get("langfuse_tags", [])
+    assert not any(t.startswith("user:") for t in tags)
 
 
 def test_thread_id_none_still_produces_metadata(monkeypatch):

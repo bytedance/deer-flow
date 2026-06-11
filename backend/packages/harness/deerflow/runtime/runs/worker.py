@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_email, get_effective_user_id
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
@@ -241,7 +241,7 @@ async def run_agent(
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
-            user_id=get_effective_user_id(),
+            user_id=get_effective_user_email() or get_effective_user_id(),
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),

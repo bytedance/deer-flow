@@ -109,6 +109,18 @@ def get_effective_user_id() -> str:
     return str(user.id)
 
 
+def get_effective_user_email() -> str | None:
+    """Return the current user's email if available, else None.
+
+    Used by tracing to emit a human-readable identifier (e.g. Langfuse user_id).
+    Falls back gracefully when the CurrentUser object lacks an email attribute.
+    """
+    user = _current_user.get()
+    if user is None:
+        return None
+    return getattr(user, "email", None)
+
+
 def resolve_runtime_user_id(runtime: object | None) -> str:
     """Single source of truth for a tool/middleware's effective user_id.
 
