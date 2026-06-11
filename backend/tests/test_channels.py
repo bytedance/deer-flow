@@ -1986,9 +1986,11 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_same_topic_reuses_thread(self):
+    def test_same_topic_reuses_thread(self, monkeypatch):
         """Messages with the same topic_id should reuse the same DeerFlow thread."""
         from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
