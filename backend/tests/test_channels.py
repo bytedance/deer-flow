@@ -80,6 +80,51 @@ async def _wait_for(condition, *, timeout=5.0, interval=0.05):
     raise TimeoutError(f"Condition not met within {timeout}s")
 
 
+def test_default_run_config_uses_standard_recursion_limit():
+    from app.channels.manager import DEFAULT_RUN_CONFIG
+
+    assert DEFAULT_RUN_CONFIG["recursion_limit"] == 100
+
+
+def test_resolve_run_params_subagent_context_uses_deep_default():
+    from app.channels.manager import ChannelManager
+
+    bus = MessageBus()
+    store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+    manager = ChannelManager(
+        bus=bus,
+        store=store,
+        default_session={"context": {"subagent_enabled": True}},
+    )
+    msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="u", text="hi")
+
+    _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+
+    assert run_context["subagent_enabled"] is True
+    assert run_config["recursion_limit"] == 1000
+
+
+def test_resolve_run_params_explicit_recursion_limit_precedence_for_subagents():
+    from app.channels.manager import ChannelManager
+
+    bus = MessageBus()
+    store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+    manager = ChannelManager(
+        bus=bus,
+        store=store,
+        default_session={
+            "config": {"recursion_limit": 77},
+            "context": {"subagent_enabled": True},
+        },
+    )
+    msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="u", text="hi")
+
+    _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+
+    assert run_context["subagent_enabled"] is True
+    assert run_config["recursion_limit"] == 77
+
+
 # ---------------------------------------------------------------------------
 # MessageBus tests
 # ---------------------------------------------------------------------------

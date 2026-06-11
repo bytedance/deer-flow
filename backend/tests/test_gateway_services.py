@@ -177,6 +177,89 @@ def test_build_run_config_basic():
     assert config["recursion_limit"] == 100
 
 
+def test_build_run_config_subagent_context_uses_deep_default():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"subagent_enabled": True}},
+        None,
+        assistant_id="lead_agent",
+    )
+
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_explicit_recursion_limit_precedence_for_subagents():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"recursion_limit": 55, "context": {"subagent_enabled": True}},
+        None,
+        assistant_id="lead_agent",
+    )
+
+    assert config["recursion_limit"] == 55
+
+
+def test_reconcile_recursion_limit_lifts_for_top_level_context_subagent():
+    """Regression: ``subagent_enabled`` sent via the documented top-level
+    ``body.context`` must lift the run's recursion limit to the deep-agent default.
+
+    ``build_run_config`` derives the limit from ``body.config`` alone, *before*
+    ``merge_run_context_overrides`` folds ``body.context`` into the run config. Without
+    reconciliation the deep agent keeps the shallow 100 limit and is force-stopped far
+    below its turn budget even though subagents are enabled.
+    """
+    from app.gateway.services import (
+        _reconcile_recursion_limit,
+        build_run_config,
+        merge_run_context_overrides,
+    )
+
+    # body.config carries no subagent flag; subagent_enabled arrives via body.context.
+    config = build_run_config("thread-1", None, None)
+    assert config["recursion_limit"] == 100  # shallow before context merge
+
+    merge_run_context_overrides(config, {"subagent_enabled": True})
+    _reconcile_recursion_limit(config, None)
+
+    assert config["recursion_limit"] == 1000
+
+
+def test_reconcile_recursion_limit_explicit_client_value_wins():
+    """An explicit client ``recursion_limit`` in ``body.config`` is authoritative and
+    must survive reconciliation even when subagents are enabled via context."""
+    from app.gateway.services import (
+        _reconcile_recursion_limit,
+        build_run_config,
+        merge_run_context_overrides,
+    )
+
+    request_config = {"recursion_limit": 55}
+    config = build_run_config("thread-1", request_config, None)
+    merge_run_context_overrides(config, {"subagent_enabled": True})
+    _reconcile_recursion_limit(config, request_config)
+
+    assert config["recursion_limit"] == 55
+
+
+def test_reconcile_recursion_limit_no_subagent_stays_shallow():
+    """Without subagents anywhere, the shallow default is preserved."""
+    from app.gateway.services import (
+        _reconcile_recursion_limit,
+        build_run_config,
+        merge_run_context_overrides,
+    )
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"model_name": "deepseek-v3"})
+    _reconcile_recursion_limit(config, None)
+
+    assert config["recursion_limit"] == 100
+
+
 def test_build_run_config_with_overrides():
     from app.gateway.services import build_run_config
 

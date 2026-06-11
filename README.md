@@ -644,6 +644,8 @@ Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step.
 
+When sub-agents are enabled, DeerFlow uses a higher default LangGraph recursion limit so deep delegated tasks can complete. This is a graph super-step budget, not a guarantee that an agent will keep calling tools indefinitely. Repetitive tool-call loops are handled by loop detection, and task progress events include lightweight diagnostics such as subagent name, recursion budget, tool-call count, and recent tool names.
+
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
 
 ### Sandbox & File System

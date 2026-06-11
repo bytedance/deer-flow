@@ -5,6 +5,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
@@ -12,6 +13,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
+from deerflow.config.loop_detection_config import LoopDetectionConfig, ToolFreqOverride
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -134,16 +136,98 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 7 baseline (ToolOutputBudget, ThreadData, Sandbox, DanglingToolCall,
-    # LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    # Assert membership and the meaningful relative ordering rather than brittle
+    # absolute positions/counts: LoopDetection and SafetyFinishReason are both
+    # enabled by default, loop detection runs before the safety guard, and the
+    # safety guard is last.
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 8
     assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
-    assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+    loop_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, LoopDetectionMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert loop_idx < safety_idx
+    assert safety_idx == len(middlewares) - 1
+
+
+def test_build_subagent_runtime_middlewares_includes_loop_detection_when_enabled(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(enabled=True, warn_threshold=7, hard_limit=9)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    assert loop.warn_threshold == 7
+    assert loop.hard_limit == 9
+
+
+def test_build_subagent_runtime_middlewares_omits_loop_detection_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(enabled=False)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False)
+
+    assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_subagent_runtime_middlewares_scales_tool_freq_with_max_turns(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(enabled=True, tool_freq_warn=30, tool_freq_hard_limit=50)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    # The per-tool frequency guard scales with the budget so legitimate
+    # high-volume single-tool work is not force-stopped at 50 long before
+    # max_turns. The identical-call detector is untouched — true loops still
+    # stop early.
+    assert loop.tool_freq_hard_limit == 1000
+    assert loop.tool_freq_warn == 500
+    assert loop.warn_threshold == 3
+    assert loop.hard_limit == 5
+
+
+def test_build_subagent_runtime_middlewares_does_not_lower_tool_freq(monkeypatch: pytest.MonkeyPatch):
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    # An operator who configured a higher cap than the budget must not be lowered.
+    app_config.loop_detection = LoopDetectionConfig(enabled=True, tool_freq_warn=200, tool_freq_hard_limit=5000)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    assert loop.tool_freq_hard_limit == 5000
+    assert loop.tool_freq_warn == 200
+
+
+def test_build_subagent_runtime_middlewares_lifts_low_global_cap_preserving_overrides(monkeypatch: pytest.MonkeyPatch):
+    """A deliberately-low *global* tool_freq cap is intentionally lifted to the budget
+    for deep subagents — the global per-tool-type guard is relaxed so legitimate
+    high-volume single-tool work is not force-stopped far below ``max_turns``. This is
+    a documented relaxation: per-tool ``tool_freq_overrides`` remain the supported way
+    to cap a specific tool and are left untouched.
+    """
+    _stub_runtime_middleware_imports(monkeypatch)
+    app_config = _make_app_config()
+    app_config.loop_detection = LoopDetectionConfig(
+        enabled=True,
+        tool_freq_warn=10,
+        tool_freq_hard_limit=20,
+        tool_freq_overrides={"bash": ToolFreqOverride(warn=5, hard_limit=8)},
+    )
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model", lazy_init=False, max_turns=1000)
+
+    loop = next(m for m in middlewares if isinstance(m, LoopDetectionMiddleware))
+    # Low global cap is raised to the budget (relaxed, never made stricter).
+    assert loop.tool_freq_hard_limit == 1000
+    assert loop.tool_freq_warn == 500
+    # The per-tool override is the supported cap and is preserved verbatim.
+    assert loop._tool_freq_overrides["bash"] == (5, 8)
 
 
 def test_wrap_tool_call_passthrough_on_success():

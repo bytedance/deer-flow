@@ -41,6 +41,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.limits import default_recursion_limit
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
@@ -206,16 +207,20 @@ class DeerFlowClient:
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
         """Build a RunnableConfig for agent invocation."""
+        subagent_enabled = overrides.get("subagent_enabled", self._subagent_enabled)
         configurable = {
             "thread_id": thread_id,
             "model_name": overrides.get("model_name", self._model_name),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
-            "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
+            "subagent_enabled": subagent_enabled,
         }
         return RunnableConfig(
             configurable=configurable,
-            recursion_limit=overrides.get("recursion_limit", 100),
+            recursion_limit=overrides.get(
+                "recursion_limit",
+                default_recursion_limit(subagent_enabled=subagent_enabled),
+            ),
         )
 
     def _ensure_agent(self, config: RunnableConfig):

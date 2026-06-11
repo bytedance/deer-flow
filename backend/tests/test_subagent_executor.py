@@ -312,6 +312,7 @@ class TestAgentConstruction:
             "app_config": app_config,
             "model_name": "parent-model",
             "lazy_init": True,
+            "max_turns": 10,
             "deferred_setup": None,
         }
         assert captured["agent"]["model"] is model
@@ -702,6 +703,31 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_sets_subagent_run_id(self, classes, base_config, mock_agent, msg):
+        """Subagent loop-detection state should be isolated per delegated task."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured: dict[str, dict] = {}
+
+        async def fake_astream(*args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            yield {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+
+        mock_agent.astream = fake_astream
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="thread-1",
+            trace_id="trace-1",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            await executor._aexecute("Task")
+
+        assert captured["context"]["thread_id"] == "thread-1"
+        assert captured["context"]["run_id"].startswith("subagent:")
+        assert captured["context"]["subagent_name"] == base_config.name
+
+    @pytest.mark.anyio
     async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -728,6 +754,32 @@ class TestAsyncExecutionPath:
         assert len(result.ai_messages) == 2
         assert result.ai_messages[0]["id"] == "msg-1"
         assert result.ai_messages[1]["id"] == "msg-2"
+
+    @pytest.mark.anyio
+    async def test_aexecute_collects_tool_diagnostics(self, classes, base_config, mock_agent, msg):
+        """Subagent diagnostics should count tool calls without storing arguments."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        ai_with_tools = msg.ai("using tool", "msg-1")
+        ai_with_tools.tool_calls = [
+            {"name": "read_file", "args": {"path": "secret.py"}, "id": "call-1"},
+        ]
+        final = msg.ai("done", "msg-2")
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(
+            [
+                {"messages": [msg.human("Task"), ai_with_tools]},
+                {"messages": [msg.human("Task"), ai_with_tools, final]},
+            ]
+        )
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="thread-1")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.diagnostics["subagent_name"] == base_config.name
+        assert result.diagnostics["recursion_limit"] == base_config.max_turns
+        assert result.diagnostics["tool_call_count"] == 1
+        assert result.diagnostics["recent_tools"] == ["read_file"]
 
     @pytest.mark.anyio
     async def test_aexecute_handles_duplicate_messages(self, classes, base_config, mock_agent, msg):

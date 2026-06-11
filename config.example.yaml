@@ -680,6 +680,9 @@ tool_output:
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
 # Frequency thresholds are safety limits for repeated use of the same tool type.
+# When subagents are enabled, DeerFlow uses a higher default graph recursion
+# budget for deep delegated work; repetitive tool-call loops are still stopped
+# here rather than by waiting for the graph recursion limit.
 
 loop_detection:
   enabled: true
@@ -840,25 +843,28 @@ sandbox:
 # ============================================================================
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
+# Built-in subagents default to a deep-agent budget of 1000 max turns.
+# Leave max_turns unset/null to use built-in defaults; set it only when you
+# need a global override for cost/runtime control.
 
 # subagents:
 #   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
 #   timeout_seconds: 900
-#   # Optional global max-turn override for all subagents
-#   # max_turns: 120
+#   # Optional global max-turn override for all subagents (null = builtin defaults)
+#   max_turns: null
 #
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
-#       max_turns: 160
+#       # max_turns: 120      # Optional per-agent override
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search
 #       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
-#       max_turns: 80
+#       # max_turns: 80       # Optional per-agent override
 #       # skills: []            # No skills for bash agent
 #
 #   # Custom subagent types: define specialized agents with their own prompts,

@@ -29,6 +29,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime.limits import DEFAULT_RECURSION_LIMIT, default_recursion_limit
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -42,7 +43,7 @@ DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
-DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": DEFAULT_RECURSION_LIMIT}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -710,6 +711,14 @@ class ChannelManager:
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
+        explicit_recursion_limit = any(
+            isinstance(layer, Mapping) and "recursion_limit" in layer
+            for layer in (
+                self._default_session.get("config"),
+                channel_layer.get("config"),
+                user_layer.get("config"),
+            )
+        )
         run_config = _merge_dicts(
             DEFAULT_RUN_CONFIG,
             self._default_session.get("config"),
@@ -743,6 +752,10 @@ class ChannelManager:
             user_layer.get("context"),
             run_context_identity,
         )
+        if not explicit_recursion_limit:
+            run_config["recursion_limit"] = default_recursion_limit(
+                subagent_enabled=bool(run_context.get("subagent_enabled")),
+            )
 
         # Custom agents are implemented as lead_agent + agent_name context.
         # Keep backward compatibility for channel configs that set

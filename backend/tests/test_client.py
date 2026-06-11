@@ -114,6 +114,24 @@ class TestClientInit:
         assert c._checkpointer is cp
 
 
+class TestRunnableConfig:
+    def test_subagent_override_uses_deep_recursion_limit(self, client):
+        config = client._get_runnable_config("thread-1", subagent_enabled=True)
+
+        assert config["configurable"]["subagent_enabled"] is True
+        assert config["recursion_limit"] == 1000
+
+    def test_explicit_recursion_limit_precedence_for_subagents(self, client):
+        config = client._get_runnable_config(
+            "thread-1",
+            subagent_enabled=True,
+            recursion_limit=77,
+        )
+
+        assert config["configurable"]["subagent_enabled"] is True
+        assert config["recursion_limit"] == 77
+
+
 # ---------------------------------------------------------------------------
 # list_models / list_skills / get_memory
 # ---------------------------------------------------------------------------

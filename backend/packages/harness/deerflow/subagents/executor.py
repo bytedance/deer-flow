@@ -77,6 +77,7 @@ class SubagentResult:
         started_at: When execution started.
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
+        diagnostics: Lightweight progress diagnostics safe to expose in events.
     """
 
     task_id: str
@@ -87,6 +88,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -340,8 +342,16 @@ class SubagentExecutor:
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
+        # Reuse shared middleware composition with lead agent. Pass the subagent
+        # turn budget so loop detection's per-tool frequency guard scales with it
+        # instead of force-stopping high-volume single-tool work at the default.
+        middlewares = build_subagent_runtime_middlewares(
+            app_config=app_config,
+            model_name=self.model_name,
+            lazy_init=True,
+            max_turns=self.config.max_turns,
+            deferred_setup=deferred_setup,
+        )
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -505,6 +515,14 @@ class SubagentExecutor:
         if ai_messages is None:
             ai_messages = []
             result.ai_messages = ai_messages
+        result.diagnostics.update(
+            {
+                "subagent_name": self.config.name,
+                "recursion_limit": self.config.max_turns,
+                "tool_call_count": result.diagnostics.get("tool_call_count", 0),
+                "recent_tools": list(result.diagnostics.get("recent_tools", [])),
+            }
+        )
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -527,6 +545,8 @@ class SubagentExecutor:
                 context["thread_id"] = self.thread_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            context["run_id"] = f"subagent:{result.task_id}"
+            context["subagent_name"] = self.config.name
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -579,6 +599,16 @@ class SubagentExecutor:
 
                         if not is_duplicate:
                             ai_messages.append(message_dict)
+                            tool_calls = message_dict.get("tool_calls") or []
+                            for call in tool_calls:
+                                if not isinstance(call, dict):
+                                    continue
+                                tool_name = call.get("name")
+                                if tool_name:
+                                    result.diagnostics["tool_call_count"] += 1
+                                    recent_tools = result.diagnostics.setdefault("recent_tools", [])
+                                    recent_tools.append(tool_name)
+                                    del recent_tools[:-10]
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
