@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 
 import {
   mockLangGraphAPI,
@@ -19,6 +19,9 @@ const THREADS = [
   },
 ];
 const DEMO_THREAD_ID = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
+const SVG_PROMPT_THREAD_ID = "00000000-0000-0000-0000-000000000777";
+const SVG_PROMPT_MARKER = "LEAK-STRICT-SVG-PROMPT-SHOULD-DISAPPEAR";
+const OPTIMISTIC_PROMPT_MARKER = "LEAK-OPTIMISTIC-SVG-PROMPT-SHOULD-DISAPPEAR";
 
 test.describe("Thread history", () => {
   test("sidebar shows existing threads", async ({ page }) => {
@@ -60,6 +63,109 @@ test.describe("Thread history", () => {
     await expect(
       page.getByText("Response in thread First conversation"),
     ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("new chat does not show previous thread messages after client-side navigation", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SVG_PROMPT_THREAD_ID,
+          title: "SVG artifact prompt",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-svg-prompt",
+              content: [
+                {
+                  type: "text",
+                  text: `请严格执行：\n1. 使用 write_file 创建 /mnt/user-data/outputs/shared.svg，内容包含 ${SVG_PROMPT_MARKER}\n2. 最终回复只输出 Markdown 图片。`,
+                },
+              ],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-svg-prompt",
+              content: "![shared artifact](/mnt/user-data/outputs/shared.svg)",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${SVG_PROMPT_THREAD_ID}`);
+    await expect(page.getByText(SVG_PROMPT_MARKER)).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await page.getByRole("link", { name: /new chat/i }).click();
+    await page.waitForURL("**/workspace/chats/new");
+
+    await expect(page.getByText(SVG_PROMPT_MARKER)).toBeHidden();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  });
+
+  test("new chat does not show previous optimistic user message after client-side navigation", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Destination conversation",
+          updated_at: "2025-06-04T12:00:00Z",
+        },
+      ],
+    });
+
+    const metadataOnlyStream = async (route: Route) => {
+      const body = [
+        {
+          event: "metadata",
+          data: {
+            run_id: "00000000-0000-0000-0000-000000000778",
+            thread_id: MOCK_THREAD_ID,
+          },
+        },
+        { event: "end", data: {} },
+      ]
+        .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+        .join("");
+
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body,
+      });
+    };
+
+    await page.route("**/api/langgraph/runs/stream", metadataOnlyStream);
+    await page.route(
+      "**/api/langgraph/threads/*/runs/stream",
+      metadataOnlyStream,
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill(
+      `请严格执行：使用 write_file 创建 shared.svg，内容包含 ${OPTIMISTIC_PROMPT_MARKER}。`,
+    );
+    await textarea.press("Enter");
+
+    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toBeVisible();
+
+    await page.getByText("Destination conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toHaveCount(0);
+
+    await page.getByRole("link", { name: /new chat/i }).click();
+    await page.waitForURL("**/workspace/chats/new");
+
+    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toHaveCount(0);
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });
 
   test("mock thread does not load real backend run history", async ({
