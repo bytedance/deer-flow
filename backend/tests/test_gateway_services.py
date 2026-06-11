@@ -4,6 +4,18 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+
+@pytest.fixture
+def _stub_app_config():
+    """Keep run-context tests independent from a developer-local config.yaml."""
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    yield
+    reset_app_config()
+
 
 def test_format_sse_basic():
     from app.gateway.services import format_sse
@@ -474,7 +486,7 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
-def test_start_run_uses_internal_owner_header_for_persistence():
+def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch

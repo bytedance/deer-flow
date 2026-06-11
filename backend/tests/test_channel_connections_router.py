@@ -5,13 +5,23 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.channels.runtime_config_store import ChannelRuntimeConfigStore
 from app.gateway.auth.models import User
 from app.gateway.routers import channel_connections
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+
+@pytest.fixture(autouse=True)
+def _stub_app_config():
+    """Keep router tests independent from a developer-local config.yaml."""
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    yield
+    reset_app_config()
 
 
 def _user() -> User:
