@@ -11,7 +11,7 @@ from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.tools import ls_tool
+from deerflow.sandbox.tools import ensure_sandbox_initialized_async, ls_tool
 
 
 class _SyncProvider(SandboxProvider):
@@ -172,6 +172,36 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     assert provider.thread_ids == ["thread-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
+
+
+@pytest.mark.anyio
+async def test_async_sandbox_initialization_offloads_provider_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _AsyncOnlyProvider()
+    to_thread_calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(func, /, *args):
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    set_sandbox_provider(provider)
+    try:
+        runtime = ToolRuntime(
+            state={},
+            context={"thread_id": "thread-offload-get"},
+            config={"configurable": {}},
+            stream_writer=lambda _: None,
+            tools=[],
+            tool_call_id="call-offload-get",
+            store=None,
+        )
+
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert sandbox is provider.sandbox
+    assert to_thread_calls == [(provider.get, ("async-sandbox",))]
 
 
 @pytest.mark.anyio
