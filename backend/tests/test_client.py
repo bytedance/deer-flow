@@ -2472,6 +2472,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.token_counting = "tiktoken"
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -2479,6 +2480,7 @@ class TestGatewayConformance:
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
         assert parsed.max_facts == 100
+        assert parsed.token_counting == "tiktoken"
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
@@ -2489,6 +2491,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.token_counting = "tiktoken"
 
         memory_data = {
             "version": "1.0",
@@ -2514,6 +2517,7 @@ class TestGatewayConformance:
 
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
+        assert parsed.config.token_counting == "tiktoken"
         assert parsed.data.version == "1.0"
 
 

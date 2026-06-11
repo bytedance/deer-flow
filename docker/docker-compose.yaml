@@ -72,7 +72,13 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
+    # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
+    # singletons -- run state lives in this worker's memory. Default to a single
+    # worker: with >1 worker and no nginx sticky sessions, run cancel, SSE
+    # reconnect, request dedup, and per-worker IM channel services all break
+    # across workers until a shared (e.g. redis) stream bridge lands, which is
+    # not yet implemented. Override GATEWAY_WORKERS only once that is in place.
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro

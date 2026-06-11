@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  lint-backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
