@@ -255,7 +255,7 @@ async def test_run_agent_uses_custom_agent_name_from_context(monkeypatch):
     metadata = fake_agent.captured_config.get("metadata") or {}
     assert metadata.get("langfuse_trace_name") == "project-inspector"
     tags = metadata.get("langfuse_tags") or []
-    assert "agent:project-inspector" in tags
+    assert "role:project-inspector" in tags
 
 
 @pytest.mark.asyncio

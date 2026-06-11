@@ -112,7 +112,7 @@ def test_tags_include_env_and_model(monkeypatch):
     tags = result["langfuse_tags"]
     assert "env:production" in tags
     assert "model:gpt-4o" in tags
-    assert "agent:lead-agent" in tags
+    assert "role:lead-agent" in tags
 
 
 def test_tags_include_agent_and_user(monkeypatch):
@@ -125,7 +125,7 @@ def test_tags_include_agent_and_user(monkeypatch):
     )
 
     tags = result["langfuse_tags"]
-    assert "agent:project-inspector" in tags
+    assert "role:project-inspector" in tags
     assert "user:alice@example.com" in tags
 
 

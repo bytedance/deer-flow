@@ -63,7 +63,7 @@ def build_langfuse_trace_metadata(
 
     tags: list[str] = []
     if effective_agent:
-        tags.append(f"agent:{effective_agent}")
+        tags.append(f"role:{effective_agent}")
     if user_id and user_id != DEFAULT_USER_ID:
         tags.append(f"user:{user_id}")
     if environment:
