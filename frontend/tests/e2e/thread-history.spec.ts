@@ -110,7 +110,15 @@ test.describe("Thread history", () => {
   test("new chat does not show previous optimistic user message after client-side navigation", async ({
     page,
   }) => {
-    mockLangGraphAPI(page);
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Destination conversation",
+          updated_at: "2025-06-04T12:00:00Z",
+        },
+      ],
+    });
 
     const metadataOnlyStream = async (route: Route) => {
       const body = [
@@ -147,8 +155,11 @@ test.describe("Thread history", () => {
     );
     await textarea.press("Enter");
 
-    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
     await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toBeVisible();
+
+    await page.getByText("Destination conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toHaveCount(0);
 
     await page.getByRole("link", { name: /new chat/i }).click();
     await page.waitForURL("**/workspace/chats/new");

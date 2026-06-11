@@ -406,6 +406,9 @@ export function useThreadStream({
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
     null,
   );
+  const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
+    string | null
+  >(null);
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
@@ -458,6 +461,17 @@ export function useThreadStream({
         return _threadId;
       }
       return currentOptimisticThreadId;
+    });
+    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+      const currentView = currentViewThreadIdRef.current;
+      if (
+        currentLiveMessagesThreadId &&
+        (currentLiveMessagesThreadId === currentView ||
+          currentLiveMessagesThreadId === _threadId)
+      ) {
+        return _threadId;
+      }
+      return currentLiveMessagesThreadId;
     });
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
@@ -631,6 +645,7 @@ export function useThreadStream({
     onError(error) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
+      setLiveMessagesThreadId(null);
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -662,9 +677,11 @@ export function useThreadStream({
     },
   });
 
+  const hasVisibleStreamState =
+    Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
   const persistedMessages = useMemo(
-    () => (threadId ? thread.messages : []),
-    [thread.messages, threadId],
+    () => (hasVisibleStreamState ? thread.messages : []),
+    [hasVisibleStreamState, thread.messages],
   );
   const visibleHistory = useMemo(
     () => (threadId ? history : []),
@@ -705,7 +722,10 @@ export function useThreadStream({
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [currentViewThreadId, optimisticThreadId]);
+    if (liveMessagesThreadId && liveMessagesThreadId !== currentViewThreadId) {
+      setLiveMessagesThreadId(null);
+    }
+  }, [currentViewThreadId, liveMessagesThreadId, optimisticThreadId]);
 
   // When streaming starts without a baseline (e.g. reconnection, run started
   // from another client, or page reload mid-stream), snapshot the current
@@ -799,6 +819,7 @@ export function useThreadStream({
         });
       }
       setOptimisticThreadId(threadId);
+      setLiveMessagesThreadId(threadId);
       setOptimisticMessages(newOptimistic);
 
       listeners.current.onSend?.(threadId);
@@ -865,6 +886,7 @@ export function useThreadStream({
             toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
+            setLiveMessagesThreadId(null);
             throw error;
           } finally {
             setIsUploading(false);
@@ -934,6 +956,7 @@ export function useThreadStream({
       } catch (error) {
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
         setIsUploading(false);
         throw error;
       } finally {
@@ -978,7 +1001,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
-    values: threadId
+    values: hasVisibleStreamState
       ? thread.values
       : {
           ...thread.values,
