@@ -446,19 +446,84 @@ def test_release_swallows_close_errors(tmp_path, caplog):
     assert "sandbox-rel-err" in provider._warm_pool
 
 
-def test_get_drops_dead_cached_sandbox(tmp_path):
-    """get() must not return a stale in-process sandbox after its container dies."""
+def test_get_uses_in_memory_registry_only(tmp_path):
+    """get() must stay event-loop safe by avoiding backend health checks."""
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
+    provider._backend.is_alive = MagicMock(side_effect=AssertionError("get must not call backend health checks"))
+
+    assert provider.get("sandbox-dead") is sandbox
+
+
+def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
+    """acquire() must replace a stale active cache entry after its container dies."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
+    provider._thread_locks = {}
     provider._thread_sandboxes = {"thread-dead": "sandbox-dead"}
+    provider._config = {"replicas": 3}
     provider._backend.is_alive = MagicMock(return_value=False)
+    provider._backend.discover = MagicMock(return_value=None)
+    provider._backend.create = MagicMock(
+        return_value=aio_mod.SandboxInfo(
+            sandbox_id="sandbox-dead",
+            sandbox_url="http://fresh-sandbox",
+            container_name="deer-flow-sandbox-sandbox-dead",
+        )
+    )
 
-    assert provider.get("sandbox-dead") is None
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_sandbox_id_for_thread", lambda _self, _thread_id: "sandbox-dead")
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id: [])
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, timeout=60: True)
 
+    sandbox_id = provider.acquire("thread-dead")
+
+    assert sandbox_id == "sandbox-dead"
     sandbox.close.assert_called_once_with()
-    assert "sandbox-dead" not in provider._sandboxes
-    assert "sandbox-dead" not in provider._sandbox_infos
-    assert "sandbox-dead" not in provider._last_activity
-    assert provider._thread_sandboxes == {}
+    provider._backend.destroy.assert_called_once()
+    provider._backend.create.assert_called_once()
+    assert provider._thread_sandboxes["thread-dead"] == "sandbox-dead"
+    assert provider._sandboxes["sandbox-dead"].base_url == "http://fresh-sandbox"
+
+
+def test_acquire_keeps_cached_sandbox_when_health_check_errors(tmp_path):
+    """Transient backend health-check errors must not destroy a tracked sandbox."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-transient")
+    provider._thread_locks = {}
+    provider._thread_sandboxes = {"thread-transient": "sandbox-transient"}
+    provider._backend.is_alive = MagicMock(side_effect=OSError("docker daemon busy"))
+
+    sandbox_id = provider.acquire("thread-transient")
+
+    assert sandbox_id == "sandbox-transient"
+    sandbox.close.assert_not_called()
+    provider._backend.destroy.assert_not_called()
+    assert provider._sandboxes["sandbox-transient"] is sandbox
+
+
+def test_drop_unhealthy_sandbox_skips_recreated_entry(tmp_path):
+    """A stale health-check result must not delete a newly registered sandbox."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._last_activity = {"sandbox-toctou": 1.0}
+    provider._thread_sandboxes = {"thread-toctou": "sandbox-toctou"}
+    old_info = aio_mod.SandboxInfo(sandbox_id="sandbox-toctou", sandbox_url="http://old-sandbox")
+    new_info = aio_mod.SandboxInfo(sandbox_id="sandbox-toctou", sandbox_url="http://new-sandbox")
+    new_sandbox = MagicMock()
+    provider._sandbox_infos = {"sandbox-toctou": new_info}
+    provider._sandboxes = {"sandbox-toctou": new_sandbox}
+    provider._backend = SimpleNamespace(destroy=MagicMock())
+
+    provider._drop_unhealthy_sandbox("sandbox-toctou", "stale health check", expected_info=old_info)
+
+    new_sandbox.close.assert_not_called()
+    provider._backend.destroy.assert_not_called()
+    assert provider._sandbox_infos["sandbox-toctou"] is new_info
+    assert provider._sandboxes["sandbox-toctou"] is new_sandbox
+    assert provider._thread_sandboxes == {"thread-toctou": "sandbox-toctou"}
 
 
 def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):

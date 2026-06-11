@@ -1178,8 +1178,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            provider = get_sandbox_provider()
-            sandbox = await asyncio.to_thread(provider.get, sandbox_id)
+            sandbox = get_sandbox_provider().get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
@@ -1196,7 +1195,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
-    sandbox = await asyncio.to_thread(provider.get, sandbox_id)
+    sandbox = provider.get(sandbox_id)
     if sandbox is None:
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
