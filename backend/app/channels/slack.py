@@ -99,6 +99,10 @@ class SlackChannel(Channel):
         app_token = self.config.get("app_token", "")
 
         if self._connection_repo is not None and self.config.get("event_delivery") == "http":
+            if not bot_token:
+                logger.error("Slack HTTP Events mode requires bot_token")
+                return
+            await self._initialize_operator_web_client(str(bot_token))
             self._loop = asyncio.get_event_loop()
             self._running = True
             self.bus.subscribe_outbound(self._on_outbound)
@@ -109,18 +113,7 @@ class SlackChannel(Channel):
             logger.error("Slack channel requires bot_token and app_token")
             return
 
-        self._web_client = self._web_client_factory(token=bot_token)
-        if self._bot_user_id is None:
-            try:
-                auth_info = await asyncio.to_thread(self._web_client.auth_test)
-                user_id = auth_info.get("user_id") if isinstance(auth_info, dict) else None
-                if user_id is None:
-                    auth_get = getattr(auth_info, "get", None)
-                    user_id = auth_get("user_id") if callable(auth_get) else None
-                if isinstance(user_id, str) and user_id:
-                    self._bot_user_id = user_id
-            except Exception:
-                logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
+        await self._initialize_operator_web_client(str(bot_token))
         self._socket_client = SocketModeClient(
             app_token=app_token,
             web_client=self._web_client,
@@ -223,6 +216,21 @@ class SlackChannel(Channel):
             return False
 
     # -- internal ----------------------------------------------------------
+
+    async def _initialize_operator_web_client(self, bot_token: str) -> None:
+        self._web_client = self._web_client_factory(token=bot_token)
+        if self._bot_user_id is not None:
+            return
+        try:
+            auth_info = await asyncio.to_thread(self._web_client.auth_test)
+            user_id = auth_info.get("user_id") if isinstance(auth_info, dict) else None
+            if user_id is None:
+                auth_get = getattr(auth_info, "get", None)
+                user_id = auth_get("user_id") if callable(auth_get) else None
+            if isinstance(user_id, str) and user_id:
+                self._bot_user_id = user_id
+        except Exception:
+            logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
 
     async def _get_web_client_for_message(self, msg: OutboundMessage):
         if msg.connection_id and self._connection_repo is not None:

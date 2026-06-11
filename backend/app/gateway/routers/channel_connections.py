@@ -165,7 +165,7 @@ def _provider_status(
 
 
 def _new_binding_code() -> str:
-    return secrets.token_hex(4)
+    return secrets.token_urlsafe(16)
 
 
 async def _create_state(
@@ -216,7 +216,9 @@ async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
                 raise
     owner_user_id = _get_user_id(request)
     connections = await repo.list_connections(owner_user_id) if repo is not None else []
-    by_provider = {item["provider"]: item for item in connections}
+    by_provider: dict[str, dict[str, Any]] = {}
+    for item in connections:
+        by_provider.setdefault(item["provider"], item)
 
     providers: list[ChannelProviderResponse] = []
     for provider, meta in _PROVIDER_META.items():

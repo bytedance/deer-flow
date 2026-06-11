@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
 from app.channels.message_bus import MessageBus, OutboundMessage
@@ -92,5 +94,61 @@ def test_slack_send_uses_connection_bot_token_when_connection_id_is_present():
         repo.get_credentials.assert_awaited_once_with("connection-1")
         web_client_factory.assert_called_once_with(token="xoxb-connection-token")
         web_client.chat_postMessage.assert_called_once()
+
+    anyio.run(go)
+
+
+def test_slack_http_events_mode_initializes_operator_web_client(monkeypatch):
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    class FakeWebClient:
+        def __init__(self, token: str) -> None:
+            self.token = token
+            self.messages: list[dict] = []
+
+        def auth_test(self):
+            return {"user_id": "B-http"}
+
+        def chat_postMessage(self, **kwargs):
+            self.messages.append(kwargs)
+
+    slack_sdk = ModuleType("slack_sdk")
+    slack_sdk.WebClient = FakeWebClient
+    socket_mode = ModuleType("slack_sdk.socket_mode")
+    socket_mode.SocketModeClient = object
+    response = ModuleType("slack_sdk.socket_mode.response")
+    response.SocketModeResponse = object
+    monkeypatch.setitem(sys.modules, "slack_sdk", slack_sdk)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", socket_mode)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode.response", response)
+
+    async def go():
+        channel = SlackChannel(
+            bus=MessageBus(),
+            config={
+                "bot_token": "xoxb-operator",
+                "event_delivery": "http",
+                "connection_repo": MagicMock(),
+            },
+        )
+
+        await channel.start()
+        assert channel._running is True
+        assert channel._web_client is not None
+        assert channel._web_client.token == "xoxb-operator"
+        assert channel._bot_user_id == "B-http"
+
+        channel._post_connection_reply("C123", "Slack connected to DeerFlow.", "1710000000.000100")
+
+        assert channel._web_client.messages == [
+            {
+                "channel": "C123",
+                "text": "Slack connected to DeerFlow.",
+                "thread_ts": "1710000000.000100",
+            }
+        ]
+        await channel.stop()
 
     anyio.run(go)

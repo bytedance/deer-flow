@@ -101,6 +101,41 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     anyio.run(repo.close)
 
 
+def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+
+    async def seed_connections():
+        await repo.upsert_connection(
+            owner_user_id=str(_user().id),
+            provider="slack",
+            external_account_id="U-old",
+            workspace_id="T-old",
+            status="revoked",
+        )
+        await anyio.sleep(0.01)
+        await repo.upsert_connection(
+            owner_user_id=str(_user().id),
+            provider="slack",
+            external_account_id="U-new",
+            workspace_id="T-new",
+            status="connected",
+        )
+
+    anyio.run(seed_connections)
+    app = _make_app(_enabled_connections_config(), repo, _channels_config())
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["slack"]["connection_status"] == "connected"
+
+    anyio.run(repo.close)
+
+
 def test_get_connections_returns_current_user_connections_only(tmp_path):
     import anyio
 
@@ -176,7 +211,7 @@ def test_connect_slack_returns_binding_command_and_persists_state(tmp_path):
     assert body["provider"] == "slack"
     assert body["mode"] == "binding_code"
     assert body["url"] is None
-    assert body["code"]
+    assert len(body["code"]) >= 22
     assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow Slack bot."
 
     async def count_states():
