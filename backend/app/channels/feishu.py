@@ -94,6 +94,14 @@ class FeishuChannel(Channel):
             return False
         return self._thread is not None and self._thread.is_alive()
 
+    def _build_event_handler(self, lark):
+        return (
+            lark.EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(self._on_message)
+            .register_p2_im_message_message_read_v1(self._on_message_read)
+            .build()
+        )
+
     async def start(self) -> None:
         if self._running:
             return
@@ -187,7 +195,7 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            event_handler = self._build_event_handler(lark)
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -200,6 +208,9 @@ class FeishuChannel(Channel):
             if self._running:
                 logger.exception("Feishu WebSocket error")
             self._running = False
+
+    def _on_message_read(self, event) -> None:
+        logger.debug("[Feishu] ignoring message read event: %s", type(event).__name__)
 
     async def stop(self) -> None:
         self._running = False
