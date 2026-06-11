@@ -28,6 +28,11 @@ set -e
 
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
+PID_DIR="$REPO_ROOT/logs/pids"
+STOP_TIMEOUT_SECONDS="${DEERFLOW_STOP_TIMEOUT_SECONDS:-10}"
+case "$STOP_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) STOP_TIMEOUT_SECONDS=10 ;;
+esac
 
 # ── Load .env ────────────────────────────────────────────────────────────────
 
@@ -95,6 +100,12 @@ DEERFLOW_ROOTS="$(
 # the ".../deer-flow" root.
 _is_deerflow_pid() {
     local pid=$1 files root
+
+    if [ -r "/proc/$pid/environ" ] &&
+        tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fxq "DEERFLOW_DAEMON_ROOT=$REPO_ROOT"; then
+        return 0
+    fi
+
     files=$(lsof -p "$pid" 2>/dev/null) || return 1
     while IFS= read -r root; do
         [ -n "$root" ] || continue
@@ -235,9 +246,124 @@ _kill_repo_nginx() {
     fi
 }
 
+_is_live_pid() {
+    local pid=$1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+_read_service_pgid() {
+    local pid=$1 pgid
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$pgid" in
+        ''|*[!0-9]*) return 1 ;;
+        *) printf '%s\n' "$pgid" ;;
+    esac
+}
+
+_pgid_has_deerflow_pid() {
+    local pgid=$1 pid row_pid row_pgid
+    case "$pgid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    while read -r row_pid row_pgid; do
+        [ -n "$row_pid" ] || continue
+        [ "$row_pgid" = "$pgid" ] || continue
+        if _is_deerflow_pid "$row_pid"; then
+            return 0
+        fi
+    done < <(ps -eo pid=,pgid= 2>/dev/null || true)
+
+    return 1
+}
+
+_signal_recorded_process() {
+    local pid=$1 pgid=$2 signal=$3 current_pgid
+
+    current_pgid=$(_read_service_pgid "$$" || true)
+    if [ -n "$pgid" ] && [ "$pgid" != "$current_pgid" ] && _pgid_has_deerflow_pid "$pgid"; then
+        kill "-$signal" -- "-$pgid" 2>/dev/null || true
+        return 0
+    fi
+
+    if _is_live_pid "$pid" && _is_deerflow_pid "$pid"; then
+        kill "-$signal" "$pid" 2>/dev/null || true
+    fi
+}
+
+_recorded_process_alive() {
+    local pid=$1 pgid=$2
+
+    if _is_live_pid "$pid" && _is_deerflow_pid "$pid"; then
+        return 0
+    fi
+    if [ -n "$pgid" ] && _pgid_has_deerflow_pid "$pgid"; then
+        return 0
+    fi
+    return 1
+}
+
+_kill_recorded_daemons() {
+    local pid_file service pid pgid pgid_file waited any_alive
+
+    [ -d "$PID_DIR" ] || return 0
+
+    for pid_file in "$PID_DIR"/*.pid; do
+        [ -f "$pid_file" ] || continue
+        service=${pid_file##*/}
+        service=${service%.pid}
+        read -r pid < "$pid_file" || true
+        pgid_file="$PID_DIR/$service.pgid"
+        pgid=""
+        [ -f "$pgid_file" ] && read -r pgid < "$pgid_file" || true
+
+        if [ -z "$pgid" ] && _is_live_pid "$pid"; then
+            pgid=$(_read_service_pgid "$pid" || true)
+            # Persist a recovered PGID because the wait and KILL phases reread
+            # it from disk; otherwise children can escape if the leader exits.
+            [ -n "$pgid" ] && echo "$pgid" > "$pgid_file"
+        fi
+        _signal_recorded_process "$pid" "$pgid" TERM
+    done
+
+    waited=0
+    while [ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]; do
+        any_alive=false
+        for pid_file in "$PID_DIR"/*.pid; do
+            [ -f "$pid_file" ] || continue
+            service=${pid_file##*/}
+            service=${service%.pid}
+            read -r pid < "$pid_file" || true
+            pgid=""
+            [ -f "$PID_DIR/$service.pgid" ] && read -r pgid < "$PID_DIR/$service.pgid" || true
+            if _recorded_process_alive "$pid" "$pgid"; then
+                any_alive=true
+                break
+            fi
+        done
+        ! $any_alive && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    for pid_file in "$PID_DIR"/*.pid; do
+        [ -f "$pid_file" ] || continue
+        service=${pid_file##*/}
+        service=${service%.pid}
+        read -r pid < "$pid_file" || true
+        pgid=""
+        [ -f "$PID_DIR/$service.pgid" ] && read -r pgid < "$PID_DIR/$service.pgid" || true
+        if _recorded_process_alive "$pid" "$pgid"; then
+            _signal_recorded_process "$pid" "$pgid" KILL
+        fi
+        rm -f "$pid_file" "$PID_DIR/$service.pgid"
+    done
+}
+
 stop_all() {
     echo "Stopping all services..."
     _report_reclaimed_ports
+    _kill_recorded_daemons
     _kill_repo_processes "uvicorn app.gateway.app:app"
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
@@ -414,6 +540,7 @@ trap 'cleanup 143' TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+    local service_slug pid_file pgid_file pid pgid
 
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
@@ -423,7 +550,30 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        nohup sh -c "$cmd" > /dev/null 2>&1 &
+        service_slug=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_')
+        pid_file="$PID_DIR/$service_slug.pid"
+        pgid_file="$PID_DIR/$service_slug.pgid"
+        mkdir -p "$PID_DIR"
+        rm -f "$pid_file" "$pgid_file"
+
+        if command -v setsid >/dev/null 2>&1; then
+            nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" DEERFLOW_DAEMON_SERVICE="$service_slug" \
+                setsid bash -c 'echo "$$" > "$1"; shift; exec sh -c "$1"' bash "$pid_file" "$cmd" > /dev/null 2>&1 &
+        else
+            nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" DEERFLOW_DAEMON_SERVICE="$service_slug" \
+                bash -c 'echo "$$" > "$1"; shift; exec sh -c "$1"' bash "$pid_file" "$cmd" > /dev/null 2>&1 &
+        fi
+
+        for _ in 1 2 3 4 5; do
+            [ -s "$pid_file" ] && break
+            sleep 0.1
+        done
+        if [ ! -s "$pid_file" ]; then
+            echo "$!" > "$pid_file"
+        fi
+        read -r pid < "$pid_file" || true
+        pgid=$(_read_service_pgid "$pid" || true)
+        [ -n "$pgid" ] && echo "$pgid" > "$pgid_file"
     else
         sh -c "$cmd" &
     fi
