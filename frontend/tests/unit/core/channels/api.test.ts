@@ -10,6 +10,7 @@ vi.mock("@/core/config", () => ({
 
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
+  configureChannelProvider,
   connectChannelProvider,
   disconnectChannelConnection,
   listChannelConnections,
@@ -120,6 +121,41 @@ describe("channels api", () => {
       code: "abc123",
       instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
     });
+  });
+
+  test("submits runtime provider configuration", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        provider: "slack",
+        display_name: "Slack",
+        enabled: true,
+        configured: true,
+        connectable: true,
+        auth_mode: "binding_code",
+        connection_status: "not_connected",
+      }),
+    );
+
+    await expect(
+      configureChannelProvider("slack", {
+        bot_token: "xoxb-ui",
+        app_token: "xapp-ui",
+      }),
+    ).resolves.toMatchObject({
+      provider: "slack",
+      configured: true,
+      connectable: true,
+    });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/channels/slack/runtime-config",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          values: { bot_token: "xoxb-ui", app_token: "xapp-ui" },
+        }),
+      },
+    );
   });
 
   test("disconnects a channel connection", async () => {

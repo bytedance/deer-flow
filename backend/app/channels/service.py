@@ -179,6 +179,13 @@ class ChannelService:
 
         return await self._start_channel(name, config)
 
+    async def configure_channel(self, name: str, config: dict[str, Any]) -> bool:
+        """Apply runtime config for a channel and restart it if the service is running."""
+        self._config[name] = dict(config)
+        if not self._running:
+            return True
+        return await self.restart_channel(name)
+
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)

@@ -65,6 +65,46 @@ def _channels_config() -> dict:
     }
 
 
+def test_get_providers_only_returns_enabled_channels_and_setup_fields(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+            "discord": {"enabled": False},
+        }
+    )
+    app = _make_app(config, repo, {})
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert [provider["provider"] for provider in body["providers"]] == ["slack"]
+    assert body["providers"][0]["configured"] is False
+    assert body["providers"][0]["connectable"] is False
+    assert body["providers"][0]["credential_fields"] == [
+        {
+            "name": "bot_token",
+            "label": "Bot token",
+            "type": "password",
+            "required": True,
+        },
+        {
+            "name": "app_token",
+            "label": "App token",
+            "type": "password",
+            "required": True,
+        },
+    ]
+
+    anyio.run(repo.close)
+
+
 def test_get_providers_uses_existing_channels_config(tmp_path):
     import anyio
 
@@ -111,17 +151,17 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     assert by_provider["telegram"]["configured"] is True
     assert by_provider["slack"]["configured"] is False
     assert by_provider["slack"]["connectable"] is False
-    assert "channels.slack" in by_provider["slack"]["unavailable_reason"]
+    assert "Slack credentials" in by_provider["slack"]["unavailable_reason"]
     assert by_provider["discord"]["configured"] is False
-    assert "channels.discord" in by_provider["discord"]["unavailable_reason"]
+    assert "Discord credentials" in by_provider["discord"]["unavailable_reason"]
     assert by_provider["feishu"]["configured"] is False
-    assert "channels.feishu" in by_provider["feishu"]["unavailable_reason"]
+    assert "Feishu credentials" in by_provider["feishu"]["unavailable_reason"]
     assert by_provider["dingtalk"]["configured"] is False
-    assert "channels.dingtalk" in by_provider["dingtalk"]["unavailable_reason"]
+    assert "DingTalk credentials" in by_provider["dingtalk"]["unavailable_reason"]
     assert by_provider["wechat"]["configured"] is False
-    assert "channels.wechat" in by_provider["wechat"]["unavailable_reason"]
+    assert "WeChat credentials" in by_provider["wechat"]["unavailable_reason"]
     assert by_provider["wecom"]["configured"] is False
-    assert "channels.wecom" in by_provider["wecom"]["unavailable_reason"]
+    assert "WeCom credentials" in by_provider["wecom"]["unavailable_reason"]
 
     anyio.run(repo.close)
 
@@ -315,7 +355,42 @@ def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
         response = client.post("/api/channels/slack/connect")
 
     assert response.status_code == 400
-    assert "channels.slack" in response.json()["detail"]
+    assert "Slack credentials" in response.json()["detail"]
+
+    anyio.run(repo.close)
+
+
+def test_configure_provider_runtime_credentials_enables_connect_without_file_edits(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    app = _make_app(config, repo, {})
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+        connect_response = client.post("/api/channels/slack/connect")
+
+    assert configure_response.status_code == 200
+    configured = configure_response.json()
+    assert configured["provider"] == "slack"
+    assert configured["configured"] is True
+    assert configured["connectable"] is True
+    assert app.state.channels_config["slack"] == {
+        "enabled": True,
+        "bot_token": "xoxb-ui",
+        "app_token": "xapp-ui",
+    }
+    assert connect_response.status_code == 200
+    assert connect_response.json()["provider"] == "slack"
 
     anyio.run(repo.close)
 

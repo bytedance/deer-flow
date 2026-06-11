@@ -200,6 +200,9 @@ export interface Translations {
     unconfigured: string;
     unavailable: string;
     unavailableShort: string;
+    setupTitle: (name: string) => string;
+    setupDescription: string;
+    saveAndConnect: string;
     descriptions: Record<string, string>;
     connectedAs: (name: string) => string;
   };

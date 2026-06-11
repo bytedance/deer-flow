@@ -269,6 +269,10 @@ export const enUS: Translations = {
     unconfigured: "Not configured",
     unavailable: "Channel connections are unavailable right now.",
     unavailableShort: "Unavailable",
+    setupTitle: (name: string) => `Connect ${name}`,
+    setupDescription:
+      "Enter the values needed by this server process. They are not written to config.yaml.",
+    saveAndConnect: "Save and connect",
     descriptions: {
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",

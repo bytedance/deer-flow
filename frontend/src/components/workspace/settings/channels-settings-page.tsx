@@ -7,6 +7,7 @@ import {
   PlugIcon,
   UnplugIcon,
 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +21,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import {
+  useConfigureChannelProvider,
   useChannelConnections,
   useChannelProviders,
   useConnectChannelProvider,
@@ -35,6 +37,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { ChannelProviderIcon } from "../channels/channel-provider-icon";
+import { ChannelRuntimeConfigDialog } from "../channels/channel-runtime-config-dialog";
 
 import { SettingsSection } from "./settings-section";
 
@@ -97,6 +100,14 @@ function getProviderUnavailableReason(
   return provider.unavailable_reason ?? undefined;
 }
 
+function providerNeedsRuntimeConfig(provider: ChannelProvider): boolean {
+  return (
+    provider.enabled &&
+    !provider.configured &&
+    (provider.credential_fields?.length ?? 0) > 0
+  );
+}
+
 function ChannelProviderItem({
   provider,
   connection,
@@ -106,14 +117,18 @@ function ChannelProviderItem({
 }) {
   const { t } = useI18n();
   const connectMutation = useConnectChannelProvider();
+  const configureMutation = useConfigureChannelProvider();
   const disconnectMutation = useDisconnectChannelConnection();
+  const [setupOpen, setSetupOpen] = useState(false);
   const isConnected = connection?.status === "connected";
   const canConnect =
     (provider.connectable ?? (provider.enabled && provider.configured)) &&
     !isConnected;
   const isConnecting =
-    connectMutation.isPending &&
-    connectMutation.variables === provider.provider;
+    (connectMutation.isPending &&
+      connectMutation.variables === provider.provider) ||
+    (configureMutation.isPending &&
+      configureMutation.variables?.provider === provider.provider);
   const isDisconnecting =
     disconnectMutation.isPending &&
     disconnectMutation.variables === connection?.id;
@@ -121,94 +136,137 @@ function ChannelProviderItem({
   const statusLabel = getStatusLabel(provider, connection, t);
   const unavailableReason = getProviderUnavailableReason(provider, t);
 
-  return (
-    <Item variant="outline" className="w-full items-start">
-      <ItemMedia variant="icon" className="bg-background">
-        <ChannelProviderIcon provider={provider.provider} className="size-5" />
-      </ItemMedia>
-      <ItemContent className="min-w-0">
-        <ItemTitle className="w-full">
-          <span className="truncate">{provider.display_name}</span>
-          <Badge
-            variant={isConnected ? "default" : "outline"}
-            className={cn(!isConnected && "text-muted-foreground")}
-          >
-            {isConnected ? <CheckCircle2Icon /> : <AlertCircleIcon />}
-            {statusLabel}
-          </Badge>
-        </ItemTitle>
-        <ItemDescription className="line-clamp-none">
-          {getProviderDescription(provider, t.channels.descriptions)}
-          {connectionLabel ? ` ${t.channels.connectedAs(connectionLabel)}` : ""}
-          {!isConnected && provider.unavailable_reason
-            ? ` ${provider.unavailable_reason}`
-            : ""}
-        </ItemDescription>
-      </ItemContent>
-      <ItemActions className="ml-auto">
-        {isConnected && connection ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={isDisconnecting}
-            onClick={() => disconnectMutation.mutate(connection.id)}
-          >
-            {isDisconnecting ? (
-              <LoaderCircleIcon className="animate-spin" />
-            ) : (
-              <UnplugIcon />
-            )}
-            {t.channels.disconnect}
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="sm"
-            disabled={isConnecting}
-            title={unavailableReason}
-            onClick={() => {
-              if (!canConnect) {
-                toast.error(unavailableReason ?? t.channels.unavailable);
-                return;
-              }
+  const startConnect = (
+    connectProvider: ChannelProvider,
+    preparedWindow?: Window | null,
+  ) => {
+    const connectWindow =
+      preparedWindow !== undefined
+        ? preparedWindow
+        : connectProvider.auth_mode === "deep_link"
+          ? prepareConnectWindow()
+          : null;
+    void connectMutation
+      .mutateAsync(connectProvider.provider)
+      .then((result) => {
+        if (result.url) {
+          openConnectUrl(result.url, connectWindow);
+          return;
+        }
+        closeConnectWindow(connectWindow);
+        toast.success(result.instruction);
+      })
+      .catch((error) => {
+        closeConnectWindow(connectWindow);
+        toast.error(
+          error instanceof Error ? error.message : t.channels.unavailable,
+        );
+      });
+  };
 
-              const connectWindow =
-                provider.auth_mode === "deep_link"
-                  ? prepareConnectWindow()
-                  : null;
-              void connectMutation
-                .mutateAsync(provider.provider)
-                .then((result) => {
-                  if (result.url) {
-                    openConnectUrl(result.url, connectWindow);
-                    return;
-                  }
-                  closeConnectWindow(connectWindow);
-                  toast.success(result.instruction);
-                })
-                .catch((error) => {
-                  closeConnectWindow(connectWindow);
-                  toast.error(
-                    error instanceof Error
-                      ? error.message
-                      : t.channels.unavailable,
-                  );
-                });
-            }}
-          >
-            {isConnecting ? (
-              <LoaderCircleIcon className="animate-spin" />
-            ) : (
-              <PlugIcon />
-            )}
-            {connection?.status === "revoked"
-              ? t.channels.reconnect
-              : t.channels.connect}
-          </Button>
-        )}
-      </ItemActions>
-    </Item>
+  return (
+    <>
+      <Item variant="outline" className="w-full items-start">
+        <ItemMedia variant="icon" className="bg-background">
+          <ChannelProviderIcon
+            provider={provider.provider}
+            className="size-5"
+          />
+        </ItemMedia>
+        <ItemContent className="min-w-0">
+          <ItemTitle className="w-full">
+            <span className="truncate">{provider.display_name}</span>
+            <Badge
+              variant={isConnected ? "default" : "outline"}
+              className={cn(!isConnected && "text-muted-foreground")}
+            >
+              {isConnected ? <CheckCircle2Icon /> : <AlertCircleIcon />}
+              {statusLabel}
+            </Badge>
+          </ItemTitle>
+          <ItemDescription className="line-clamp-none">
+            {getProviderDescription(provider, t.channels.descriptions)}
+            {connectionLabel
+              ? ` ${t.channels.connectedAs(connectionLabel)}`
+              : ""}
+            {!isConnected && provider.unavailable_reason
+              ? ` ${provider.unavailable_reason}`
+              : ""}
+          </ItemDescription>
+        </ItemContent>
+        <ItemActions className="ml-auto">
+          {isConnected && connection ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isDisconnecting}
+              onClick={() => disconnectMutation.mutate(connection.id)}
+            >
+              {isDisconnecting ? (
+                <LoaderCircleIcon className="animate-spin" />
+              ) : (
+                <UnplugIcon />
+              )}
+              {t.channels.disconnect}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              disabled={isConnecting}
+              title={unavailableReason}
+              onClick={() => {
+                if (providerNeedsRuntimeConfig(provider)) {
+                  setSetupOpen(true);
+                  return;
+                }
+
+                if (!canConnect) {
+                  toast.error(unavailableReason ?? t.channels.unavailable);
+                  return;
+                }
+
+                startConnect(provider);
+              }}
+            >
+              {isConnecting ? (
+                <LoaderCircleIcon className="animate-spin" />
+              ) : (
+                <PlugIcon />
+              )}
+              {connection?.status === "revoked"
+                ? t.channels.reconnect
+                : t.channels.connect}
+            </Button>
+          )}
+        </ItemActions>
+      </Item>
+      <ChannelRuntimeConfigDialog
+        provider={provider}
+        open={setupOpen}
+        submitting={configureMutation.isPending}
+        onOpenChange={setSetupOpen}
+        onSubmit={(submitProvider, values) => {
+          const connectWindow =
+            submitProvider.auth_mode === "deep_link"
+              ? prepareConnectWindow()
+              : null;
+          void configureMutation
+            .mutateAsync({ provider: submitProvider.provider, values })
+            .then((configuredProvider) => {
+              setSetupOpen(false);
+              startConnect(configuredProvider, connectWindow);
+            })
+            .catch((error) => {
+              closeConnectWindow(connectWindow);
+              toast.error(
+                error instanceof Error ? error.message : t.channels.unavailable,
+              );
+            });
+        }}
+      />
+    </>
   );
 }
 
@@ -227,6 +285,7 @@ export function ChannelsSettingsPage() {
   } = useChannelConnections();
   const isLoading = providersLoading || connectionsLoading;
   const error = providersError ?? connectionsError;
+  const visibleProviders = providers.filter((provider) => provider.enabled);
 
   const connectionByProvider = new Map<string, ChannelConnection>();
   for (const connection of connections) {
@@ -249,9 +308,13 @@ export function ChannelsSettingsPage() {
         <div className="text-muted-foreground text-sm">
           {t.settings.channels.disabled}
         </div>
+      ) : visibleProviders.length === 0 ? (
+        <div className="text-muted-foreground text-sm">
+          {t.settings.channels.disabled}
+        </div>
       ) : (
         <div className="flex w-full flex-col gap-4">
-          {providers.map((provider) => (
+          {visibleProviders.map((provider) => (
             <ChannelProviderItem
               key={provider.provider}
               provider={provider}

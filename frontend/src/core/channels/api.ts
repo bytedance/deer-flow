@@ -6,7 +6,9 @@ import type {
   ChannelConnection,
   ChannelConnectionsResponse,
   ChannelProviderId,
+  ChannelProvider,
   ChannelProvidersResponse,
+  ChannelRuntimeConfigValues,
 } from "./types";
 
 function channelsUrl(path: string): string {
@@ -60,6 +62,27 @@ export async function connectChannelProvider(
     );
   }
   return response.json() as Promise<ChannelConnectResponse>;
+}
+
+export async function configureChannelProvider(
+  provider: ChannelProviderId,
+  values: ChannelRuntimeConfigValues,
+): Promise<ChannelProvider> {
+  const response = await fetch(
+    channelsUrl(`/${encodeURIComponent(provider)}/runtime-config`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    },
+  );
+  if (!response.ok) {
+    await throwChannelApiError(
+      response,
+      `Failed to configure ${provider}: ${response.statusText}`,
+    );
+  }
+  return response.json() as Promise<ChannelProvider>;
 }
 
 export async function disconnectChannelConnection(

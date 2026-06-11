@@ -1,6 +1,7 @@
 "use client";
 
 import { CheckIcon, LoaderCircleIcon } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  useConfigureChannelProvider,
   useChannelProviders,
   useConnectChannelProvider,
 } from "@/core/channels/hooks";
@@ -26,6 +28,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { ChannelProviderIcon } from "./channel-provider-icon";
+import { ChannelRuntimeConfigDialog } from "./channel-runtime-config-dialog";
 
 function providerCanConnect(provider: ChannelProvider): boolean {
   return (
@@ -50,11 +53,52 @@ function getProviderUnavailableReason(
   return provider.unavailable_reason ?? undefined;
 }
 
+function providerNeedsRuntimeConfig(provider: ChannelProvider): boolean {
+  return (
+    provider.enabled &&
+    !provider.configured &&
+    (provider.credential_fields?.length ?? 0) > 0
+  );
+}
+
 export function WorkspaceChannelsList() {
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   const { enabled, providers, isLoading, error } = useChannelProviders();
   const connectMutation = useConnectChannelProvider();
+  const configureMutation = useConfigureChannelProvider();
+  const [setupProvider, setSetupProvider] = useState<ChannelProvider | null>(
+    null,
+  );
+  const visibleProviders = providers.filter((provider) => provider.enabled);
+
+  const startConnect = (
+    provider: ChannelProvider,
+    preparedWindow?: Window | null,
+  ) => {
+    const connectWindow =
+      preparedWindow !== undefined
+        ? preparedWindow
+        : provider.auth_mode === "deep_link"
+          ? prepareConnectWindow()
+          : null;
+    void connectMutation
+      .mutateAsync(provider.provider)
+      .then((result) => {
+        if (result.url) {
+          openConnectUrl(result.url, connectWindow);
+          return;
+        }
+        closeConnectWindow(connectWindow);
+        toast.success(result.instruction);
+      })
+      .catch((error) => {
+        closeConnectWindow(connectWindow);
+        toast.error(
+          error instanceof Error ? error.message : t.channels.unavailable,
+        );
+      });
+  };
 
   if (!isSidebarOpen) {
     return null;
@@ -73,7 +117,7 @@ export function WorkspaceChannelsList() {
     );
   }
 
-  if (error || !enabled || providers.length === 0) {
+  if (error || !enabled || visibleProviders.length === 0) {
     return null;
   }
 
@@ -81,11 +125,13 @@ export function WorkspaceChannelsList() {
     <SidebarGroup className="pt-0">
       <SidebarGroupLabel>{t.sidebar.channels}</SidebarGroupLabel>
       <SidebarMenu>
-        {providers.map((provider) => {
+        {visibleProviders.map((provider) => {
           const isConnected = provider.connection_status === "connected";
           const isPending =
-            connectMutation.isPending &&
-            connectMutation.variables === provider.provider;
+            (connectMutation.isPending &&
+              connectMutation.variables === provider.provider) ||
+            (configureMutation.isPending &&
+              configureMutation.variables?.provider === provider.provider);
           const canConnect = providerCanConnect(provider);
           const unavailableReason = getProviderUnavailableReason(provider, t);
 
@@ -110,33 +156,17 @@ export function WorkspaceChannelsList() {
                   disabled={isConnected || isPending}
                   title={unavailableReason}
                   onClick={() => {
+                    if (providerNeedsRuntimeConfig(provider)) {
+                      setSetupProvider(provider);
+                      return;
+                    }
+
                     if (!canConnect) {
                       toast.error(unavailableReason ?? t.channels.unavailable);
                       return;
                     }
 
-                    const connectWindow =
-                      provider.auth_mode === "deep_link"
-                        ? prepareConnectWindow()
-                        : null;
-                    void connectMutation
-                      .mutateAsync(provider.provider)
-                      .then((result) => {
-                        if (result.url) {
-                          openConnectUrl(result.url, connectWindow);
-                          return;
-                        }
-                        closeConnectWindow(connectWindow);
-                        toast.success(result.instruction);
-                      })
-                      .catch((error) => {
-                        closeConnectWindow(connectWindow);
-                        toast.error(
-                          error instanceof Error
-                            ? error.message
-                            : t.channels.unavailable,
-                        );
-                      });
+                    startConnect(provider);
                   }}
                 >
                   {isPending ? (
@@ -153,6 +183,32 @@ export function WorkspaceChannelsList() {
           );
         })}
       </SidebarMenu>
+      <ChannelRuntimeConfigDialog
+        provider={setupProvider}
+        open={setupProvider !== null}
+        submitting={configureMutation.isPending}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSetupProvider(null);
+          }
+        }}
+        onSubmit={(provider, values) => {
+          const connectWindow =
+            provider.auth_mode === "deep_link" ? prepareConnectWindow() : null;
+          void configureMutation
+            .mutateAsync({ provider: provider.provider, values })
+            .then((configuredProvider) => {
+              setSetupProvider(null);
+              startConnect(configuredProvider, connectWindow);
+            })
+            .catch((error) => {
+              closeConnectWindow(connectWindow);
+              toast.error(
+                error instanceof Error ? error.message : t.channels.unavailable,
+              );
+            });
+        }}
+      />
     </SidebarGroup>
   );
 }

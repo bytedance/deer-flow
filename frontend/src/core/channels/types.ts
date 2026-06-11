@@ -1,5 +1,12 @@
 export type ChannelProviderId = "telegram" | "slack" | "discord" | string;
 
+export interface ChannelCredentialField {
+  name: string;
+  label: string;
+  type: string;
+  required: boolean;
+}
+
 export interface ChannelProvider {
   provider: ChannelProviderId;
   display_name: string;
@@ -9,6 +16,7 @@ export interface ChannelProvider {
   unavailable_reason?: string | null;
   auth_mode: string;
   connection_status: string;
+  credential_fields: ChannelCredentialField[];
 }
 
 export interface ChannelProvidersResponse {
@@ -40,3 +48,5 @@ export interface ChannelConnectResponse {
   instruction: string;
   expires_in: number;
 }
+
+export type ChannelRuntimeConfigValues = Record<string, string>;

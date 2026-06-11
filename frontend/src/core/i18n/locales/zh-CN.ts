@@ -257,6 +257,10 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
+    setupTitle: (name: string) => `连接 ${name}`,
+    setupDescription:
+      "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
+    saveAndConnect: "保存并连接",
     descriptions: {
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",

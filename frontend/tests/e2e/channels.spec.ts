@@ -21,6 +21,12 @@ type MockChannelProvider = {
   auth_mode: string;
   connection_status: string;
   unavailable_reason?: string | null;
+  credential_fields?: Array<{
+    name: string;
+    label: string;
+    type: string;
+    required: boolean;
+  }>;
 };
 
 function defaultProviders(): MockChannelProvider[] {
@@ -32,6 +38,7 @@ function defaultProviders(): MockChannelProvider[] {
     connectable: true,
     auth_mode: authMode,
     connection_status: "not_connected",
+    credential_fields: [],
   }));
 }
 
@@ -121,41 +128,129 @@ test.describe("IM channels", () => {
     ).toBeVisible();
   });
 
-  test("unavailable providers stay clickable and explain what is missing", async ({
+  test("only enabled providers are shown and setup runs before connect", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
-    const unavailableReason =
-      "Enable and configure channels.slack with channels.slack.bot_token and channels.slack.app_token.";
+    let slackConfigured = false;
     let connectRequests = 0;
-    mockChannelsAPI(
-      page,
-      [
-        {
+    let submittedValues: Record<string, string> | undefined;
+
+    void page.route("**/api/channels/providers", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          enabled: true,
+          providers: [
+            {
+              provider: "slack",
+              display_name: "Slack",
+              enabled: true,
+              configured: slackConfigured,
+              connectable: slackConfigured,
+              auth_mode: "binding_code",
+              connection_status: "not_connected",
+              credential_fields: [
+                {
+                  name: "bot_token",
+                  label: "Bot token",
+                  type: "password",
+                  required: true,
+                },
+                {
+                  name: "app_token",
+                  label: "App token",
+                  type: "password",
+                  required: true,
+                },
+              ],
+            },
+            {
+              provider: "discord",
+              display_name: "Discord",
+              enabled: false,
+              configured: false,
+              connectable: false,
+              auth_mode: "binding_code",
+              connection_status: "not_connected",
+              credential_fields: [],
+            },
+          ],
+        }),
+      });
+    });
+
+    void page.route("**/api/channels/connections", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ connections: [] }),
+      });
+    });
+
+    void page.route("**/api/channels/slack/runtime-config", async (route) => {
+      const body = route.request().postDataJSON() as {
+        values: Record<string, string>;
+      };
+      submittedValues = body.values;
+      slackConfigured = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
           provider: "slack",
           display_name: "Slack",
           enabled: true,
-          configured: false,
-          connectable: false,
-          unavailable_reason: unavailableReason,
+          configured: true,
+          connectable: true,
           auth_mode: "binding_code",
           connection_status: "not_connected",
-        },
-      ],
-      () => {
-        connectRequests += 1;
-      },
-    );
+          credential_fields: [],
+        }),
+      });
+    });
+
+    void page.route("**/api/channels/slack/connect", (route) => {
+      connectRequests += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider: "slack",
+          mode: "binding_code",
+          url: null,
+          code: "abc123",
+          instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+          expires_in: 600,
+        }),
+      });
+    });
 
     await page.goto("/workspace/chats/new");
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
+    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
+    await expect(sidebar.getByText("Discord")).toBeHidden();
     const connectButton = sidebar.getByRole("button", { name: "Connect" });
-    await expect(connectButton).toBeEnabled({ timeout: 15_000 });
+    await expect(connectButton).toBeEnabled();
 
     await connectButton.click();
 
-    await expect(page.getByText(unavailableReason)).toBeVisible();
-    expect(connectRequests).toBe(0);
+    const setupDialog = page.getByRole("dialog", { name: "Connect Slack" });
+    await expect(setupDialog).toBeVisible();
+    await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
+    await setupDialog.getByLabel("App token").fill("xapp-ui");
+    await setupDialog.getByRole("button", { name: "Save and connect" }).click();
+
+    await expect(setupDialog).toBeHidden();
+    await expect(
+      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+    ).toBeVisible();
+    expect(submittedValues).toEqual({
+      bot_token: "xoxb-ui",
+      app_token: "xapp-ui",
+    });
+    expect(connectRequests).toBe(1);
   });
 });

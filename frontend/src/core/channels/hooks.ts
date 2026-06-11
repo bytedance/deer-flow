@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  configureChannelProvider,
   connectChannelProvider,
   disconnectChannelConnection,
   listChannelConnections,
   listChannelProviders,
 } from "./api";
-import type { ChannelProviderId } from "./types";
+import type { ChannelProviderId, ChannelRuntimeConfigValues } from "./types";
 
 export const channelProviderQueryKey = ["channelProviders"] as const;
 export const channelConnectionsQueryKey = ["channelConnections"] as const;
@@ -37,6 +38,25 @@ export function useConnectChannelProvider() {
   return useMutation({
     mutationFn: (provider: ChannelProviderId) =>
       connectChannelProvider(provider),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: channelProviderQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: channelConnectionsQueryKey,
+      });
+    },
+  });
+}
+
+export function useConfigureChannelProvider() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      provider,
+      values,
+    }: {
+      provider: ChannelProviderId;
+      values: ChannelRuntimeConfigValues;
+    }) => configureChannelProvider(provider, values),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: channelProviderQueryKey });
       void queryClient.invalidateQueries({
