@@ -34,10 +34,13 @@ function providerCanConnect(provider: ChannelProvider): boolean {
   );
 }
 
-function getProviderDisabledReason(
+function getProviderUnavailableReason(
   provider: ChannelProvider,
   t: ReturnType<typeof useI18n>["t"],
 ): string | undefined {
+  if (provider.unavailable_reason) {
+    return provider.unavailable_reason;
+  }
   if (!provider.enabled) {
     return t.channels.disabled;
   }
@@ -84,6 +87,7 @@ export function WorkspaceChannelsList() {
             connectMutation.isPending &&
             connectMutation.variables === provider.provider;
           const canConnect = providerCanConnect(provider);
+          const unavailableReason = getProviderUnavailableReason(provider, t);
 
           return (
             <SidebarMenuItem key={provider.provider}>
@@ -103,9 +107,14 @@ export function WorkspaceChannelsList() {
                     "h-8 w-24 px-2 text-xs",
                     isConnected && "gap-1",
                   )}
-                  disabled={!canConnect || isPending}
-                  title={getProviderDisabledReason(provider, t)}
+                  disabled={isConnected || isPending}
+                  title={unavailableReason}
                   onClick={() => {
+                    if (!canConnect) {
+                      toast.error(unavailableReason ?? t.channels.unavailable);
+                      return;
+                    }
+
                     const connectWindow =
                       provider.auth_mode === "deep_link"
                         ? prepareConnectWindow()

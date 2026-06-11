@@ -81,10 +81,13 @@ function getStatusLabel(
   return t.channels.notConnected;
 }
 
-function getProviderDisabledReason(
+function getProviderUnavailableReason(
   provider: ChannelProvider,
   t: ReturnType<typeof useI18n>["t"],
 ): string | undefined {
+  if (provider.unavailable_reason) {
+    return provider.unavailable_reason;
+  }
   if (!provider.enabled) {
     return t.channels.disabled;
   }
@@ -116,7 +119,7 @@ function ChannelProviderItem({
     disconnectMutation.variables === connection?.id;
   const connectionLabel = connection ? getConnectionLabel(connection) : null;
   const statusLabel = getStatusLabel(provider, connection, t);
-  const unavailableReason = getProviderDisabledReason(provider, t);
+  const unavailableReason = getProviderUnavailableReason(provider, t);
 
   return (
     <Item variant="outline" className="w-full items-start">
@@ -162,9 +165,14 @@ function ChannelProviderItem({
           <Button
             type="button"
             size="sm"
-            disabled={!canConnect || isConnecting}
+            disabled={isConnecting}
             title={unavailableReason}
             onClick={() => {
+              if (!canConnect) {
+                toast.error(unavailableReason ?? t.channels.unavailable);
+                return;
+              }
+
               const connectWindow =
                 provider.auth_mode === "deep_link"
                   ? prepareConnectWindow()

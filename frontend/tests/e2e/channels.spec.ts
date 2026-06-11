@@ -12,24 +12,41 @@ const channelProviders = [
   ["wecom", "WeCom", "binding_code"],
 ] as const;
 
-function mockChannelsAPI(page: Page) {
+type MockChannelProvider = {
+  provider: string;
+  display_name: string;
+  enabled: boolean;
+  configured: boolean;
+  connectable: boolean;
+  auth_mode: string;
+  connection_status: string;
+  unavailable_reason?: string | null;
+};
+
+function defaultProviders(): MockChannelProvider[] {
+  return channelProviders.map(([provider, displayName, authMode]) => ({
+    provider,
+    display_name: displayName,
+    enabled: true,
+    configured: true,
+    connectable: true,
+    auth_mode: authMode,
+    connection_status: "not_connected",
+  }));
+}
+
+function mockChannelsAPI(
+  page: Page,
+  providers: MockChannelProvider[] = defaultProviders(),
+  onSlackConnect?: () => void,
+) {
   void page.route("**/api/channels/providers", (route) => {
     return route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         enabled: true,
-        providers: channelProviders.map(
-          ([provider, displayName, authMode]) => ({
-            provider,
-            display_name: displayName,
-            enabled: true,
-            configured: true,
-            connectable: true,
-            auth_mode: authMode,
-            connection_status: "not_connected",
-          }),
-        ),
+        providers,
       }),
     });
   });
@@ -43,6 +60,7 @@ function mockChannelsAPI(page: Page) {
   });
 
   void page.route("**/api/channels/slack/connect", (route) => {
+    onSlackConnect?.();
     return route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -101,5 +119,43 @@ test.describe("IM channels", () => {
     await expect(
       page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
     ).toBeVisible();
+  });
+
+  test("unavailable providers stay clickable and explain what is missing", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    const unavailableReason =
+      "Enable and configure channels.slack with channels.slack.bot_token and channels.slack.app_token.";
+    let connectRequests = 0;
+    mockChannelsAPI(
+      page,
+      [
+        {
+          provider: "slack",
+          display_name: "Slack",
+          enabled: true,
+          configured: false,
+          connectable: false,
+          unavailable_reason: unavailableReason,
+          auth_mode: "binding_code",
+          connection_status: "not_connected",
+        },
+      ],
+      () => {
+        connectRequests += 1;
+      },
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const connectButton = sidebar.getByRole("button", { name: "Connect" });
+    await expect(connectButton).toBeEnabled({ timeout: 15_000 });
+
+    await connectButton.click();
+
+    await expect(page.getByText(unavailableReason)).toBeVisible();
+    expect(connectRequests).toBe(0);
   });
 });
