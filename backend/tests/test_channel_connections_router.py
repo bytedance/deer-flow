@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID
 
 from _router_auth_helpers import make_authed_test_app
@@ -197,6 +198,37 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     assert "WeChat credentials" in by_provider["wechat"]["unavailable_reason"]
     assert by_provider["wecom"]["configured"] is False
     assert "WeCom credentials" in by_provider["wecom"]["unavailable_reason"]
+
+    anyio.run(repo.close)
+
+
+def test_get_providers_reports_configured_channel_not_running(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(_enabled_connections_config(), repo, _channels_config())
+    service = SimpleNamespace(
+        get_status=lambda: {
+            "service_running": True,
+            "channels": {
+                "feishu": {
+                    "enabled": True,
+                    "running": False,
+                }
+            },
+        }
+    )
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["feishu"]["configured"] is True
+    assert by_provider["feishu"]["connectable"] is False
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
+    assert "configured but is not running" in by_provider["feishu"]["unavailable_reason"]
 
     anyio.run(repo.close)
 

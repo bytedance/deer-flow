@@ -88,6 +88,12 @@ class FeishuChannel(Channel):
     def supports_streaming(self) -> bool:
         return True
 
+    @property
+    def is_running(self) -> bool:
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
     async def start(self) -> None:
         if self._running:
             return
@@ -193,6 +199,7 @@ class FeishuChannel(Channel):
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            self._running = False
 
     async def stop(self) -> None:
         self._running = False

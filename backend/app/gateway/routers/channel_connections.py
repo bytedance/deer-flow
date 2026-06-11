@@ -214,6 +214,36 @@ def _runtime_unavailable_reason(provider: str) -> str:
     return f"Enter the required {display_name} credentials to connect this channel."
 
 
+def _runtime_not_running_reason(provider: str) -> str:
+    meta = _PROVIDER_META.get(provider)
+    display_name = meta["display_name"] if meta else provider
+    return f"{display_name} channel is configured but is not running. Check the credentials and save this channel again."
+
+
+def _runtime_channel_running(provider: str) -> bool | None:
+    try:
+        from app.channels.service import get_channel_service
+    except Exception:
+        logger.debug("Unable to inspect channel service status", exc_info=True)
+        return None
+
+    service = get_channel_service()
+    if service is None:
+        return None
+    try:
+        status = service.get_status()
+    except Exception:
+        logger.debug("Unable to read channel service status", exc_info=True)
+        return None
+
+    if not status.get("service_running"):
+        return False
+    channel_status = status.get("channels", {}).get(provider)
+    if not isinstance(channel_status, dict):
+        return None
+    return bool(channel_status.get("running"))
+
+
 def _provider_unavailable_reason(
     config: ChannelConnectionsConfig,
     channels_config: dict[str, Any],
@@ -226,6 +256,8 @@ def _provider_unavailable_reason(
         return _runtime_unavailable_reason(provider)
     if not _runtime_channel_configured(provider, channels_config):
         return _runtime_unavailable_reason(provider)
+    if _runtime_channel_running(provider) is False:
+        return _runtime_not_running_reason(provider)
     return None
 
 
