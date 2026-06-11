@@ -276,6 +276,11 @@ def require_permission(
             # strict-deny rather than strict-allow — only an *existing*
             # row with a *different* user_id triggers 404.
             if owner_check:
+                from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+                if getattr(auth.user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+                    return await func(*args, **kwargs)
+
                 thread_id = kwargs.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")

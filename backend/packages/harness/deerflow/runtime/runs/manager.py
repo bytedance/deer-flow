@@ -83,6 +83,7 @@ class RunRecord:
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
+    user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -124,7 +125,7 @@ class RunManager:
 
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
-        return {
+        payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
             "status": record.status.value,
@@ -135,6 +136,9 @@ class RunManager:
             "created_at": record.created_at,
             "model_name": record.model_name,
         }
+        if record.user_id is not None:
+            payload["user_id"] = record.user_id
+        return payload
 
     async def _call_store_with_retry(
         self,
@@ -241,6 +245,7 @@ class RunManager:
             kwargs=row.get("kwargs") or {},
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
+            user_id=row.get("user_id"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -320,6 +325,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        user_id: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -333,6 +339,7 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
+            user_id=user_id,
             created_at=now,
             updated_at=now,
         )
@@ -504,6 +511,7 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
         model_name: str | None = None,
+        user_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -546,6 +554,7 @@ class RunManager:
                 multitask_strategy=multitask_strategy,
                 metadata=metadata or {},
                 kwargs=kwargs or {},
+                user_id=user_id,
                 created_at=now,
                 updated_at=now,
                 model_name=model_name,

@@ -474,6 +474,83 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+def test_start_run_uses_internal_owner_header_for_persistence():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    async def _scenario():
+        run_store = MemoryRunStore()
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("channel-thread", user_id="default", metadata={"legacy": True})
+        run_manager = RunManager(store=run_store)
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        task_context: dict[str, str] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            task_context["user_id"] = get_effective_user_id()
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "channel-thread", request)
+            await record.task
+
+        owner_run = await run_store.get(record.run_id, user_id="owner-1")
+        default_run = await run_store.get(record.run_id, user_id="default")
+        owner_thread = await thread_store.get("channel-thread", user_id="owner-1")
+        default_thread = await thread_store.get("channel-thread", user_id="default")
+        return owner_run, default_run, owner_thread, default_thread, task_context
+
+    owner_run, default_run, owner_thread, default_thread, task_context = asyncio.run(_scenario())
+
+    assert owner_run is not None
+    assert owner_run["user_id"] == "owner-1"
+    assert default_run is None
+    assert owner_thread is not None
+    assert owner_thread["user_id"] == "owner-1"
+    assert owner_thread["metadata"] == {"legacy": True}
+    assert default_thread is None
+    assert task_context["user_id"] == "owner-1"
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

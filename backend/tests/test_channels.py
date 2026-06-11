@@ -2388,6 +2388,7 @@ class TestResolveRunParamsUserId:
 class TestChannelManagerConnectionRouting:
     def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path):
         from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
         from deerflow.persistence.engine import close_engine
 
         async def go():
@@ -2452,6 +2453,16 @@ class TestChannelManagerConnectionRouting:
             assert first_context["channel_user_id"] == "U-alice"
             assert second_context["user_id"] == "bob"
             assert second_context["channel_user_id"] == "U-bob"
+
+            first_create_headers = mock_client.threads.create.call_args_list[0].kwargs["headers"]
+            second_create_headers = mock_client.threads.create.call_args_list[1].kwargs["headers"]
+            assert first_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
+
+            first_run_headers = mock_client.runs.wait.call_args_list[0].kwargs["headers"]
+            second_run_headers = mock_client.runs.wait.call_args_list[1].kwargs["headers"]
+            assert first_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
 
         try:
             _run(go())

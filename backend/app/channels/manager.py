@@ -440,6 +440,12 @@ def _human_input_message(content: str, *, original_content: str | None = None) -
     return message
 
 
+def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
+    if not msg.owner_user_id:
+        return None
+    return create_internal_auth_headers(owner_user_id=msg.owner_user_id)
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
@@ -914,7 +920,11 @@ class ChannelManager:
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
         """Create a new thread through Gateway and store the mapping."""
-        thread = await client.threads.create()
+        owner_headers = _owner_headers(msg)
+        if owner_headers:
+            thread = await client.threads.create(headers=owner_headers)
+        else:
+            thread = await client.threads.create()
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
@@ -969,14 +979,19 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        run_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            run_kwargs["headers"] = owner_headers
         try:
             result = await client.runs.wait(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message]},
-                config=run_config,
-                context=run_context,
-                multitask_strategy="reject",
+                **run_kwargs,
             )
         except Exception as exc:
             if _is_thread_busy_error(exc):
@@ -1039,16 +1054,21 @@ class ChannelManager:
         last_published_text = ""
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        stream_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "stream_mode": ["messages-tuple", "values"],
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            stream_kwargs["headers"] = owner_headers
 
         try:
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-                multitask_strategy="reject",
+                **stream_kwargs,
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
