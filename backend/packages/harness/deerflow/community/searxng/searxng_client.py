@@ -63,26 +63,3 @@ class SearxngClient:
         except Exception as e:
             logger.error(f"An unexpected error occurred during SearXNG search: {e}")
             raise
-
-    async def fetch(self, url: str) -> str:
-        """Fetch the HTML content of a URL directly via HTTP GET.
-
-        Args:
-            url: The URL to fetch.
-
-        Returns:
-            HTML content as string, or an error string prefixed with "Error:".
-        """
-        try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(
-                    url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; DeerFlow/1.0)",
-                    },
-                )
-                resp.raise_for_status()
-                return resp.text
-        except Exception as e:
-            logger.error(f"SearXNG fetch failed: {e}")
-            return f"Error: {e!s}"

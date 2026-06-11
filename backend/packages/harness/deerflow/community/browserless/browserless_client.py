@@ -77,15 +77,10 @@ class BrowserlessClient:
                 target_code = resp.headers.get("X-Response-Code", "")
                 target_status = resp.headers.get("X-Response-Status", "")
 
-                logger.debug(
-                    f"Browserless response: code={code}, "
-                    f"target_code={target_code}, target_status={target_status}"
-                )
+                logger.debug(f"Browserless response: code={code}, target_code={target_code}, target_status={target_status}")
 
                 if code != 200:
-                    return (
-                        f"Error: Browserless HTTP {code}: {resp.text[:200]}"
-                    )
+                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
 
                 html = resp.text
                 if not html or not html.strip():

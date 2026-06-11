@@ -4,12 +4,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deerflow.community.browserless.browserless_client import BrowserlessClient
 from deerflow.community.browserless import tools
+from deerflow.community.browserless.browserless_client import BrowserlessClient
 
 
 class AsyncMock(MagicMock):
     """Mock that supports async call."""
+
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
 
@@ -78,6 +79,7 @@ class TestBrowserlessClient:
             mock_ctx = MagicMock()
             mock_cls.return_value.__aenter__.return_value = mock_ctx
             import httpx
+
             mock_ctx.post = AsyncMock(side_effect=httpx.TimeoutException("Timed out"))
 
             client = BrowserlessClient(base_url="http://browserless:3000", timeout_s=10)
