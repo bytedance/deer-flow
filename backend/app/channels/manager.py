@@ -440,10 +440,31 @@ def _human_input_message(content: str, *, original_content: str | None = None) -
     return message
 
 
-def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
-    if not msg.owner_user_id:
+def _auth_disabled_owner_user_id() -> str | None:
+    try:
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
+    except Exception:
+        logger.debug("Unable to inspect auth-disabled mode for channel owner fallback", exc_info=True)
         return None
-    return create_internal_auth_headers(owner_user_id=msg.owner_user_id)
+    return AUTH_DISABLED_USER_ID if is_auth_disabled() else None
+
+
+def _effective_owner_user_id(msg: InboundMessage) -> str | None:
+    return _auth_disabled_owner_user_id() or msg.owner_user_id
+
+
+def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
+    owner_user_id = _effective_owner_user_id(msg)
+    if owner_user_id:
+        msg.owner_user_id = owner_user_id
+    return msg
+
+
+def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
+    owner_user_id = _effective_owner_user_id(msg)
+    if not owner_user_id:
+        return None
+    return create_internal_auth_headers(owner_user_id=owner_user_id)
 
 
 def _resolve_slash_skill_command(
@@ -741,8 +762,9 @@ class ChannelManager:
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
-        if msg.owner_user_id:
-            run_context_identity["user_id"] = make_safe_user_id(msg.owner_user_id)
+        owner_user_id = _effective_owner_user_id(msg)
+        if owner_user_id:
+            run_context_identity["user_id"] = make_safe_user_id(owner_user_id)
         elif msg.user_id:
             run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
         if msg.user_id:
@@ -857,6 +879,7 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
+        msg = _apply_effective_owner(msg)
         async with self._semaphore:
             try:
                 if msg.msg_type == InboundMessageType.COMMAND:
