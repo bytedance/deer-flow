@@ -169,6 +169,11 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     return "0.0.0.0"
 
 
+def _is_no_such_container_error(stderr: str) -> bool:
+    message = stderr.lower()
+    return "no such object" in message or "no such container" in message or "not found" in message
+
+
 class LocalContainerBackend(SandboxBackend):
     """Backend that manages sandbox containers locally using Docker or Apple Container.
 
@@ -582,6 +587,13 @@ class LocalContainerBackend(SandboxBackend):
 
         This enables cross-process container discovery — any process can detect
         containers started by another process via the deterministic container name.
+
+        Raises:
+            RuntimeError: If the container runtime cannot answer the inspect
+                query. A failed check is intentionally distinct from a
+                definitive "container does not exist" result so callers do not
+                destroy healthy containers during transient Docker/Container
+                daemon failures.
         """
         try:
             result = subprocess.run(
@@ -590,9 +602,14 @@ class LocalContainerBackend(SandboxBackend):
                 text=True,
                 timeout=5,
             )
-            return result.returncode == 0 and result.stdout.strip().lower() == "true"
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Timed out checking container {container_name}") from exc
+
+        if result.returncode == 0:
+            return result.stdout.strip().lower() == "true"
+        if _is_no_such_container_error(result.stderr):
             return False
+        raise RuntimeError(f"Failed to inspect container {container_name}: {result.stderr.strip()}")
 
     def _get_container_port(self, container_name: str) -> int | None:
         """Get the host port of a running container.

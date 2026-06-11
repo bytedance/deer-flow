@@ -1,6 +1,9 @@
 import logging
 import os
+import subprocess
 from types import SimpleNamespace
+
+import pytest
 
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
@@ -234,3 +237,50 @@ def test_start_container_keeps_apple_container_port_format(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "18080:8080"
+
+
+def _backend_for_inspect_tests() -> LocalContainerBackend:
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._runtime = "docker"
+    return backend
+
+
+def test_is_container_running_false_when_container_missing(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", stderr="Error: No such object: sandbox-missing", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend._is_container_running("sandbox-missing") is False
+
+
+def test_is_container_running_raises_on_runtime_error(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", stderr="Cannot connect to the Docker daemon", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Failed to inspect container sandbox-busy"):
+        backend._is_container_running("sandbox-busy")
+
+
+def test_is_container_running_raises_on_timeout(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Timed out checking container sandbox-timeout"):
+        backend._is_container_running("sandbox-timeout")
