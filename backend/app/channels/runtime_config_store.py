@@ -75,6 +75,14 @@ class ChannelRuntimeConfigStore:
             self._data[provider] = dict(config)
             self._save()
 
+    def remove_provider_config(self, provider: str) -> bool:
+        with self._lock:
+            if provider not in self._data:
+                return False
+            del self._data[provider]
+            self._save()
+            return True
+
 
 def _provider_enabled(channel_connections_config: Any, provider: str) -> bool:
     provider_config = getattr(channel_connections_config, provider, None)

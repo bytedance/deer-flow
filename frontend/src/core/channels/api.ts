@@ -99,3 +99,19 @@ export async function disconnectChannelConnection(
     );
   }
 }
+
+export async function disconnectChannelProvider(
+  provider: ChannelProviderId,
+): Promise<ChannelProvider> {
+  const response = await fetch(
+    channelsUrl(`/${encodeURIComponent(provider)}/runtime-config`),
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await throwChannelApiError(
+      response,
+      `Failed to disconnect ${provider}: ${response.statusText}`,
+    );
+  }
+  return response.json() as Promise<ChannelProvider>;
+}

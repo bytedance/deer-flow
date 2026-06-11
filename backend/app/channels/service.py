@@ -186,6 +186,20 @@ class ChannelService:
             return True
         return await self.restart_channel(name)
 
+    async def remove_channel(self, name: str) -> bool:
+        """Remove runtime config for a channel and stop it if currently running."""
+        self._config.pop(name, None)
+        channel = self._channels.pop(name, None)
+        if channel is None:
+            return True
+        try:
+            await channel.stop()
+            logger.info("Channel %s stopped and removed", name)
+            return True
+        except Exception:
+            logger.exception("Error stopping channel %s for removal", name)
+            return False
+
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)

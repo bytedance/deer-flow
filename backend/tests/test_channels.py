@@ -3400,6 +3400,31 @@ class TestChannelService:
 
         assert service.manager._connection_repo is repo
 
+    def test_remove_channel_stops_running_channel_and_forgets_config(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "slack": {
+                        "enabled": True,
+                        "bot_token": "xoxb-ui",
+                        "app_token": "xapp-ui",
+                    },
+                }
+            )
+            channel = AsyncMock()
+            service._channels["slack"] = channel
+            service._running = True
+
+            assert await service.remove_channel("slack") is True
+
+            channel.stop.assert_awaited_once()
+            assert "slack" not in service._channels
+            assert "slack" not in service._config
+
+        _run(go())
+
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""
         import logging

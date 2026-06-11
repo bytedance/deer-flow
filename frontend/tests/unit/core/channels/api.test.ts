@@ -13,6 +13,7 @@ import {
   configureChannelProvider,
   connectChannelProvider,
   disconnectChannelConnection,
+  disconnectChannelProvider,
   listChannelConnections,
   listChannelProviders,
 } from "@/core/channels/api";
@@ -166,6 +167,30 @@ describe("channels api", () => {
     ).resolves.toBeUndefined();
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/channels/connections/connection-1",
+      { method: "DELETE" },
+    );
+  });
+
+  test("disconnects provider runtime configuration", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        provider: "slack",
+        display_name: "Slack",
+        enabled: true,
+        configured: false,
+        connectable: false,
+        auth_mode: "binding_code",
+        connection_status: "not_connected",
+      }),
+    );
+
+    await expect(disconnectChannelProvider("slack")).resolves.toMatchObject({
+      provider: "slack",
+      configured: false,
+      connection_status: "not_connected",
+    });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/channels/slack/runtime-config",
       { method: "DELETE" },
     );
   });

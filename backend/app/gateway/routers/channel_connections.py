@@ -160,16 +160,21 @@ def _get_channels_config(request: Request) -> dict[str, Any]:
     if isinstance(state_config, dict):
         return state_config
 
+    result = _load_channels_config(request, _get_channel_connections_config(request))
+    request.app.state.channels_config = result
+    return result
+
+
+def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
     app_config = _get_app_config()
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
     result = dict(channels_config) if isinstance(channels_config, dict) else {}
     merge_runtime_channel_configs(
         result,
-        _get_channel_connections_config(request),
+        config,
         store=_get_runtime_config_store(request),
     )
-    request.app.state.channels_config = result
     return result
 
 
@@ -354,6 +359,23 @@ async def _restart_runtime_channel_if_available(provider: str, runtime_config: d
     return await service.configure_channel(provider, runtime_config)
 
 
+async def _sync_runtime_channel_after_removal(provider: str, channels_config: dict[str, Any]) -> bool | None:
+    try:
+        from app.channels.service import get_channel_service
+    except Exception:
+        logger.exception("Failed to import channel service while disconnecting %s", provider)
+        return None
+
+    service = get_channel_service()
+    if service is None:
+        return None
+
+    runtime_config = channels_config.get(provider)
+    if isinstance(runtime_config, dict) and runtime_config.get("enabled", False):
+        return await service.configure_channel(provider, runtime_config)
+    return await service.remove_channel(provider)
+
+
 @router.get("/providers", response_model=ChannelProvidersResponse)
 async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
     config = _get_channel_connections_config(request)
@@ -402,6 +424,44 @@ async def disconnect_channel_connection(connection_id: str, request: Request) ->
     if not disconnected:
         raise HTTPException(status_code=404, detail="Channel connection not found")
     return Response(status_code=204)
+
+
+@router.delete("/{provider}/runtime-config", response_model=ChannelProviderResponse)
+async def disconnect_channel_provider_runtime(provider: str, request: Request) -> ChannelProviderResponse:
+    config = _get_channel_connections_config(request)
+    if not config.enabled:
+        raise HTTPException(status_code=400, detail="Channel connections are disabled")
+
+    provider_config = _provider_config(config, provider)
+    if not provider_config.enabled:
+        raise HTTPException(status_code=400, detail="Channel provider is not enabled")
+
+    owner_user_id = _get_user_id(request)
+    try:
+        repo = _get_repository(request, config)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        repo = None
+
+    if repo is not None:
+        for connection in await repo.list_connections(owner_user_id):
+            if connection["provider"] == provider and connection["status"] != "revoked":
+                await repo.disconnect_connection(
+                    connection_id=connection["id"],
+                    owner_user_id=owner_user_id,
+                )
+
+    _get_runtime_config_store(request).remove_provider_config(provider)
+    channels_config = _load_channels_config(request, config)
+    request.app.state.channels_config = channels_config
+
+    stopped = await _sync_runtime_channel_after_removal(provider, channels_config)
+    if stopped is False:
+        display_name = _PROVIDER_META[provider]["display_name"]
+        raise HTTPException(status_code=400, detail=f"Failed to stop {display_name} channel. Try again.")
+
+    return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)

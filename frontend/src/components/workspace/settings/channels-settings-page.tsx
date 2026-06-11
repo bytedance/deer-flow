@@ -25,7 +25,7 @@ import {
   useChannelConnections,
   useChannelProviders,
   useConnectChannelProvider,
-  useDisconnectChannelConnection,
+  useDisconnectChannelProvider,
 } from "@/core/channels/hooks";
 import {
   closeConnectWindow,
@@ -122,7 +122,7 @@ function ChannelProviderItem({
   const { t } = useI18n();
   const connectMutation = useConnectChannelProvider();
   const configureMutation = useConfigureChannelProvider();
-  const disconnectMutation = useDisconnectChannelConnection();
+  const disconnectProviderMutation = useDisconnectChannelProvider();
   const [setupOpen, setSetupOpen] = useState(false);
   const isConnected =
     connection?.status === "connected" ||
@@ -137,8 +137,8 @@ function ChannelProviderItem({
     (configureMutation.isPending &&
       configureMutation.variables?.provider === provider.provider);
   const isDisconnecting =
-    disconnectMutation.isPending &&
-    disconnectMutation.variables === connection?.id;
+    disconnectProviderMutation.isPending &&
+    disconnectProviderMutation.variables === provider.provider;
   const connectionLabel = connection ? getConnectionLabel(connection) : null;
   const statusLabel = getStatusLabel(provider, connection, t);
   const unavailableReason = getProviderUnavailableReason(provider, t);
@@ -209,7 +209,7 @@ function ChannelProviderItem({
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={isConnecting}
+                  disabled={isConnecting || isDisconnecting}
                   onClick={() => setSetupOpen(true)}
                 >
                   {isConnecting ? (
@@ -220,22 +220,33 @@ function ChannelProviderItem({
                   {t.channels.modify}
                 </Button>
               ) : null}
-              {connection ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={isDisconnecting}
-                  onClick={() => disconnectMutation.mutate(connection.id)}
-                >
-                  {isDisconnecting ? (
-                    <LoaderCircleIcon className="animate-spin" />
-                  ) : (
-                    <UnplugIcon />
-                  )}
-                  {t.channels.disconnect}
-                </Button>
-              ) : null}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isDisconnecting}
+                onClick={() => {
+                  void disconnectProviderMutation
+                    .mutateAsync(provider.provider)
+                    .then(() => {
+                      toast.success(t.channels.revoked);
+                    })
+                    .catch((error) => {
+                      toast.error(
+                        error instanceof Error
+                          ? error.message
+                          : t.channels.unavailable,
+                      );
+                    });
+                }}
+              >
+                {isDisconnecting ? (
+                  <LoaderCircleIcon className="animate-spin" />
+                ) : (
+                  <UnplugIcon />
+                )}
+                {t.channels.disconnect}
+              </Button>
             </>
           ) : (
             <Button

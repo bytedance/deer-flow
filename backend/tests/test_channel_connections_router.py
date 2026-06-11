@@ -459,6 +459,84 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
     anyio.run(repo.close)
 
 
+def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(config, repo, {}, runtime_config_store=runtime_config_store)
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        providers_response = client.get("/api/channels/providers")
+
+    assert configure_response.status_code == 200
+    assert disconnect_response.status_code == 200
+    disconnected = disconnect_response.json()
+    assert disconnected["provider"] == "slack"
+    assert disconnected["configured"] is False
+    assert disconnected["connectable"] is False
+    assert disconnected["connection_status"] == "not_connected"
+    assert runtime_config_store.get_provider_config("slack") is None
+
+    assert providers_response.status_code == 200
+    by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
+    assert by_provider["slack"]["connection_status"] == "not_connected"
+
+    anyio.run(repo.close)
+
+
+def test_disconnect_provider_runtime_config_revokes_current_user_provider_connections(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+
+    async def seed_connection():
+        await repo.upsert_connection(
+            owner_user_id=str(_user().id),
+            provider="slack",
+            external_account_id="U123",
+            status="connected",
+        )
+
+    anyio.run(seed_connection)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(config, repo, {}, runtime_config_store=runtime_config_store)
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+
+    assert configure_response.status_code == 200
+    assert disconnect_response.status_code == 200
+
+    async def get_connection_status():
+        return (await repo.list_connections(str(_user().id)))[0]["status"]
+
+    assert anyio.run(get_connection_status) == "revoked"
+
+    anyio.run(repo.close)
+
+
 def test_disconnect_connection_revokes_current_user_connection(tmp_path):
     import anyio
 

@@ -4,6 +4,7 @@ import {
   configureChannelProvider,
   connectChannelProvider,
   disconnectChannelConnection,
+  disconnectChannelProvider,
   listChannelConnections,
   listChannelProviders,
 } from "./api";
@@ -71,6 +72,20 @@ export function useDisconnectChannelConnection() {
   return useMutation({
     mutationFn: (connectionId: string) =>
       disconnectChannelConnection(connectionId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: channelProviderQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: channelConnectionsQueryKey,
+      });
+    },
+  });
+}
+
+export function useDisconnectChannelProvider() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (provider: ChannelProviderId) =>
+      disconnectChannelProvider(provider),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: channelProviderQueryKey });
       void queryClient.invalidateQueries({
