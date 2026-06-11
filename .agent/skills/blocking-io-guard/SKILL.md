@@ -11,8 +11,8 @@ detector only catches blocking IO on paths a test executes — this skill closes
 that gap, either for your own diff or for a repo-wide triage round.
 
 Read `references/good-anchor-rules.md` before writing any anchor.
-`references/sop-skeleton.md` documents the generic shape (for future reuse); the
-operational steps below are the blocking-IO instance.
+Only read `references/sop-skeleton.md` when generalizing this SOP to another
+detector domain — it is not needed to execute the steps below.
 
 ## When to use
 
@@ -33,10 +33,18 @@ operational steps below are the blocking-IO instance.
 uv run --project backend python scripts/scan_changed_blocking_io.py --base origin/main
 ```
 
-Lists blocking-IO candidates that fall on lines your change added/modified.
-The diff is `<base>...HEAD`, so **commit your work first** — uncommitted lines
-are not selected. If the list is empty, stop: this change has no blocking-IO
-surface.
+Lists blocking-IO candidates your change introduces: findings on lines the
+diff added, **plus** findings that are new versus the merge base — the latter
+catches a new async caller exposing an old sync helper whose blocking line is
+not in the diff. The diff is `<base>...HEAD`, so **commit your work first** —
+uncommitted lines are not selected.
+
+If the list is empty, this change introduces no blocking-IO surface *that the
+static detector can see in the changed files*. One residual blind spot
+remains: reachability is same-file only, so a new async caller of a sync
+helper **defined in another file** is invisible to both selections. If your
+diff adds an async call into a helper that lives elsewhere, check that helper
+manually (codegraph or `git grep`) before stopping.
 
 **Mode B — full-repo triage round.** From repo root:
 

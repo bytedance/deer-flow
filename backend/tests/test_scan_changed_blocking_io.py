@@ -78,7 +78,72 @@ def test_find_changed_blocking_io_surfaces_only_changed_candidate(tmp_path: Path
         "changed_python_lines",
         lambda base, repo_root: {"agents.py": {rmtree_line}},
     )
+    # Base content identical to head: every finding already existed, so only
+    # the changed-line selection contributes (and the union must not double).
+    monkeypatch.setattr(
+        changed,
+        "base_python_contents",
+        lambda base, paths, repo_root: {"agents.py": src.read_text(encoding="utf-8")},
+    )
 
     result = changed.find_changed_blocking_io("origin/main", repo_root=tmp_path)
 
     assert [f["blocking_call"]["symbol"] for f in result] == ["shutil.rmtree"]
+
+
+_SYNC_HELPER_BASE = """
+    from pathlib import Path
+
+    def load(path: Path) -> str:
+        return path.read_text()
+"""
+
+_SYNC_HELPER_HEAD = """
+    from pathlib import Path
+
+    def load(path: Path) -> str:
+        return path.read_text()
+
+    async def route(path: Path) -> str:
+        return load(path)
+"""
+
+
+def test_new_async_caller_exposing_old_sync_helper_is_reported(tmp_path: Path, monkeypatch) -> None:
+    """The blocking line is NOT in the diff — only the new async caller is.
+
+    The finding sits on the untouched `read_text` line, so changed-line
+    selection alone would return empty; the new-vs-base comparison must
+    surface it.
+    """
+    src = _write_python(tmp_path / "mod.py", _SYNC_HELPER_HEAD)
+    head_findings = [f.to_dict() for f in static.scan_file(src, repo_root=tmp_path)]
+    read_text_line = next(f["location"]["line"] for f in head_findings if f["blocking_call"]["symbol"] == "path.read_text")
+    added_lines = {line for line in range(1, len(src.read_text().splitlines()) + 1) if line > read_text_line}
+
+    monkeypatch.setattr(changed, "changed_python_lines", lambda base, repo_root: {"mod.py": added_lines})
+    monkeypatch.setattr(
+        changed,
+        "base_python_contents",
+        lambda base, paths, repo_root: {"mod.py": textwrap.dedent(_SYNC_HELPER_BASE).strip() + "\n"},
+    )
+
+    result = changed.find_changed_blocking_io("origin/main", repo_root=tmp_path)
+
+    assert len(result) == 1
+    assert result[0]["blocking_call"]["symbol"] == "path.read_text"
+    assert result[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+
+
+def test_select_findings_new_vs_base_matches_by_stable_key(tmp_path: Path) -> None:
+    head = _write_python(tmp_path / "mod.py", _SYNC_HELPER_HEAD)
+    head_findings = [f.to_dict() for f in static.scan_file(head, repo_root=tmp_path)]
+
+    base_findings = changed.scan_python_contents({"mod.py": textwrap.dedent(_SYNC_HELPER_BASE).strip() + "\n"})
+    assert base_findings == []  # no async exposure at base -> detector is silent
+
+    new = changed.select_findings_new_vs_base(head_findings, base_findings)
+    assert [f["blocking_call"]["symbol"] for f in new] == ["path.read_text"]
+
+    # Same content at base and head -> nothing is new, regardless of line drift.
+    assert changed.select_findings_new_vs_base(head_findings, head_findings) == []

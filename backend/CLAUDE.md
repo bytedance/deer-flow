@@ -113,10 +113,12 @@ conservatively over-report async reachability. It is intentionally
 informational and is not run from CI in this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
-(repo root) intersects the added lines of `git diff <base>...HEAD` with the
-static detector output — used by the `blocking-io-guard` skill
-(`.agent/skills/blocking-io-guard/`) as the deterministic scope step before
-routing each candidate to a fix and/or a `tests/blocking_io/` runtime anchor.
+(repo root) reports findings on the added lines of `git diff <base>...HEAD`
+plus findings new versus the merge base (so a new async caller exposing an
+untouched sync helper in the same file is still reported) — used by the
+`blocking-io-guard` skill (`.agent/skills/blocking-io-guard/`) as the
+deterministic scope step before routing each candidate to a fix and/or a
+`tests/blocking_io/` runtime anchor.
 
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)

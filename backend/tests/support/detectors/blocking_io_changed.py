@@ -1,8 +1,12 @@
 """Intersect a git diff with static blocking-IO findings.
 
 Wraps the static detector (`blocking_io_static`) to answer a narrower question:
-which blocking-IO candidates does THIS change introduce or touch on its added
-lines? Used by the `blocking-io-guard` skill as the deterministic L1 scope step.
+which blocking-IO candidates does THIS change introduce? A candidate qualifies
+when its blocking line is on an added line of the diff, or when the finding is
+new versus the merge base — the latter catches exposure created without
+touching the blocking line itself (a new async caller making an old sync
+helper async-reachable). Used by the `blocking-io-guard` skill as the
+deterministic scope step.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -89,19 +94,89 @@ def select_findings_on_changed_lines(
     return selected
 
 
+def base_python_contents(base: str, paths: Sequence[str], repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    """Return each path's content at the merge base of `base` and HEAD.
+
+    Files absent at the merge base (newly added) are omitted, so every head
+    finding in them counts as new.
+    """
+    merge_base = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", base, "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    contents: dict[str, str] = {}
+    for path in paths:
+        shown = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f"{merge_base}:{path}"],
+            capture_output=True,
+            text=True,
+        )
+        if shown.returncode == 0:
+            contents[path] = shown.stdout
+    return contents
+
+
+def scan_python_contents(contents: dict[str, str]) -> list[dict[str, object]]:
+    """Run the static detector over in-memory sources (repo-relative path -> code)."""
+    if not contents:
+        return []
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        files = []
+        for rel_path, source in contents.items():
+            target = root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source, encoding="utf-8")
+            files.append(target)
+        return [finding.to_dict() for finding in static.scan_paths(files, repo_root=root)]
+
+
+def _stable_key(finding: dict[str, object]) -> tuple[str, str, str]:
+    location = finding["location"]  # type: ignore[index]
+    call = finding["blocking_call"]  # type: ignore[index]
+    return (location["path"], location["function"], call["symbol"])  # type: ignore[index]
+
+
+def select_findings_new_vs_base(
+    head_findings: Sequence[dict[str, object]],
+    base_findings: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep head findings whose stable key (path, function, symbol) is absent at base.
+
+    Line numbers shift between revisions, so matching is by stable key only.
+    A second identical symbol added inside a function that already had a
+    finding collides on the key and is NOT reported here — that case is
+    covered by the changed-line selection instead.
+    """
+    base_keys = {_stable_key(finding) for finding in base_findings}
+    return [finding for finding in head_findings if _stable_key(finding) not in base_keys]
+
+
 def find_changed_blocking_io(base: str, repo_root: Path = REPO_ROOT) -> list[dict[str, object]]:
-    """Return static findings that land on lines this change added/modified."""
+    """Return static findings this change introduces or touches.
+
+    Union over the changed files of:
+    - findings whose blocking line is on an added line of the diff;
+    - findings new versus the merge base (a new async caller can expose an
+      untouched sync helper — the blocking line itself is not in the diff).
+    """
     changed_lines = changed_python_lines(base, repo_root)
     if not changed_lines:
         return []
     files = [repo_root / path for path in changed_lines]
-    findings = [finding.to_dict() for finding in static.scan_paths(files, repo_root=repo_root)]
-    return select_findings_on_changed_lines(findings, changed_lines)
+    head_findings = [finding.to_dict() for finding in static.scan_paths(files, repo_root=repo_root)]
+    on_changed_lines = select_findings_on_changed_lines(head_findings, changed_lines)
+    base_findings = scan_python_contents(base_python_contents(base, sorted(changed_lines), repo_root))
+    new_vs_base = select_findings_new_vs_base(head_findings, base_findings)
+    selected = {id(finding) for finding in on_changed_lines} | {id(finding) for finding in new_vs_base}
+    return [finding for finding in head_findings if id(finding) in selected]
 
 
 def format_report(findings: Sequence[dict[str, object]], base: str) -> str:
     if not findings:
-        return f"No blocking-IO candidates on changed lines (base: {base})."
+        return f"No blocking-IO candidates introduced by this change (base: {base})."
     lines = [
         f"Blocking-IO candidates introduced/touched by this change (base: {base}): {len(findings)}",
         "",
@@ -118,7 +193,7 @@ def format_report(findings: Sequence[dict[str, object]], base: str) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="List blocking-IO candidates on this change's added lines (diff against --base).")
+    parser = argparse.ArgumentParser(description="List blocking-IO candidates this change introduces: findings on added lines plus findings new versus the merge base (diff against --base).")
     parser.add_argument("--base", default="origin/main", help="Base ref to diff against (default: origin/main).")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
     args = parser.parse_args(argv)
