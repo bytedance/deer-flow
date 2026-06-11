@@ -112,13 +112,21 @@ class LocalSkillStorage(SkillStorage):
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s", skill_name, target)
         finally:
-            await asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True)
+            await asyncio.to_thread(self._cleanup_install_tmp, tmp)
 
         return {
             "success": True,
             "skill_name": skill_name,
             "message": f"Skill '{skill_name}' installed successfully",
         }
+
+    @staticmethod
+    def _cleanup_install_tmp(tmp: str) -> None:
+        """Best-effort removal that never masks the install outcome, but leaves a trace."""
+        try:
+            shutil.rmtree(tmp)
+        except OSError:
+            logger.warning("Failed to clean up skill install temp dir %s", tmp, exc_info=True)
 
     def _prepare_skill_archive(self, path: Path, tmp_path: Path, custom_dir: Path, archive_path: str | Path) -> tuple[Path, str, Path]:
         """Extract and validate the archive (blocking; runs off the event loop)."""
