@@ -31,7 +31,8 @@ Current injection format:
 
 Token counting:
 - Uses `tiktoken` (`cl100k_base`) when available
-- Falls back to `len(text) // 4` if tokenizer import fails
+- Falls back to a network-free CJK-aware character estimate if tokenizer import or encoding load fails
+  (CJK characters count as ~2 chars/token, other characters as ~4 chars/token)
 
 ## Known Gap
 
