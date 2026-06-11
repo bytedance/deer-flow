@@ -1,6 +1,7 @@
 """The host owns recovery even when every extension is disabled."""
 
 import asyncio
+import os
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -68,6 +69,7 @@ async def test_default_has_no_mutation_runtime_or_worker_pool(durable, tmp_path)
         await host.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Skill publication requires POSIX local storage")
 @pytest.mark.asyncio
 async def test_disabled_plugin_still_recovers_enrolled_owners(durable, tmp_path):
     from deerflow.extensions.host_capabilities import HostCapabilities
@@ -99,6 +101,7 @@ async def test_disabled_plugin_still_recovers_enrolled_owners(durable, tmp_path)
     assert host.workers._closed
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Skill publication requires POSIX local storage")
 @pytest.mark.asyncio
 async def test_source_binding_and_independent_evidence_scope(durable, tmp_path):
     from deerflow.extensions.host_capabilities import HostCapabilities
@@ -149,6 +152,7 @@ async def test_missing_topology_refuses_mutation_startup(durable, tmp_path):
         await host.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Skill publication requires POSIX local storage")
 @pytest.mark.asyncio
 async def test_cancelled_startup_drains_worker_before_releasing_topology(durable, tmp_path):
     from deerflow.extensions.host_capabilities import HostCapabilities
@@ -224,6 +228,7 @@ async def test_mutation_owner_without_evidence_grant_is_rejected(durable, tmp_pa
         await host.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Skill publication requires POSIX local storage")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["startup", "maintenance"])
 @pytest.mark.parametrize("failure", ["lock-directory", "lock-timeout"])
