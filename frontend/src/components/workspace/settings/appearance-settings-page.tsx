@@ -11,12 +11,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import { enUS, isLocale, zhCN, type Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-import { SettingsSection } from "./settings-section";
+import { SettingsCard, SettingsRow, SettingsSection } from "./settings-section";
 
 const languageOptions: { value: Locale; label: string }[] = [
   { value: "en-US", label: enUS.locale.localName },
@@ -60,7 +59,7 @@ export function AppearanceSettingsPage() {
   );
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       <SettingsSection
         title={t.settings.appearance.themeTitle}
         description={t.settings.appearance.themeDescription}
@@ -81,31 +80,34 @@ export function AppearanceSettingsPage() {
         </div>
       </SettingsSection>
 
-      <Separator />
-
-      <SettingsSection
-        title={t.settings.appearance.languageTitle}
-        description={t.settings.appearance.languageDescription}
-      >
-        <Select
-          value={locale}
-          onValueChange={(value) => {
-            if (isLocale(value)) {
-              changeLocale(value);
+      <SettingsSection title={t.settings.appearance.languageTitle}>
+        <SettingsCard>
+          <SettingsRow
+            label={t.settings.appearance.languageTitle}
+            description={t.settings.appearance.languageDescription}
+            control={
+              <Select
+                value={locale}
+                onValueChange={(value) => {
+                  if (isLocale(value)) {
+                    changeLocale(value);
+                  }
+                }}
+              >
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {languageOptions.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             }
-          }}
-        >
-          <SelectTrigger className="w-[220px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {languageOptions.map((item) => (
-              <SelectItem key={item.value} value={item.value}>
-                {item.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          />
+        </SettingsCard>
       </SettingsSection>
     </div>
   );

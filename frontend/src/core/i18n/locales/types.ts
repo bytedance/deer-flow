@@ -282,6 +282,7 @@ export interface Translations {
     title: string;
     description: string;
     sections: {
+      general: string;
       account: string;
       appearance: string;
       memory: string;
@@ -413,7 +414,9 @@ export interface Translations {
       networkError: string;
       updating: string;
       updatePassword: string;
+      sessionTitle: string;
       signOut: string;
+      signOutDescription: string;
     };
     acknowledge: {
       emptyTitle: string;
