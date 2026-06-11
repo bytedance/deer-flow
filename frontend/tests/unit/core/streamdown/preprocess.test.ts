@@ -27,6 +27,20 @@ test("capBlockquoteNesting handles markers without spaces", () => {
   expect(result.endsWith("hi")).toBe(true);
 });
 
+test("capBlockquoteNesting leaves fenced code content untouched", () => {
+  const literal = ">".repeat(150);
+  const input = `${"> ".repeat(3000)}hi\n\`\`\`text\n${literal}\n\`\`\``;
+  const result = capBlockquoteNesting(input);
+  expect(result.split("\n")[2]).toBe(literal);
+});
+
+test("capBlockquoteNesting leaves indented code blocks untouched", () => {
+  const literal = "    " + ">".repeat(150);
+  const input = `${"> ".repeat(3000)}hi\n\n${literal}`;
+  const result = capBlockquoteNesting(input);
+  expect(result.split("\n")[2]).toBe(literal);
+});
+
 test("capBlockquoteNesting only rewrites pathological lines", () => {
   const normal = "> normal quote";
   const deep = "> ".repeat(3000) + "deep";
