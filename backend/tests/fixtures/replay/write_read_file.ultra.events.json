@@ -69,6 +69,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
@@ -79,6 +80,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
@@ -89,6 +91,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
@@ -99,6 +102,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
@@ -109,6 +113,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
@@ -119,6 +124,7 @@
       "keys": [
         "artifacts",
         "messages",
+        "sandbox",
         "thread_data",
         "title",
         "viewed_images"
