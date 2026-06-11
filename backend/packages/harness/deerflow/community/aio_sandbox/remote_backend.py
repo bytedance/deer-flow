@@ -176,12 +176,16 @@ class RemoteSandboxBackend(SandboxBackend):
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
                 timeout=10,
             )
-            if resp.ok:
-                data = resp.json()
-                return data.get("status") == "Running"
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: {exc}") from exc
+
+        if resp.status_code == 404:
             return False
-        except requests.RequestException:
-            return False
+        if not resp.ok:
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        return data.get("status") == "Running"
 
     def _provisioner_discover(self, sandbox_id: str) -> SandboxInfo | None:
         """GET /api/sandboxes/{sandbox_id} → discover existing sandbox."""
