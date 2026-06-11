@@ -21,8 +21,9 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_<entry_point>_offloads_blocking_io_on_<branch>(tmp_path: Path) -> None:
-    # Arrange: real local FS inputs; mock ONLY the external boundary.
-    #   e.g. monkeypatch a network saver, but never the offload under test.
+    # Arrange: real inputs at the boundary the code blocks on (FS -> tmp_path;
+    #   HTTP/subprocess -> stub the external service). Mock ONLY the external
+    #   boundary, never the offload under test.
 
     # Act + Assert: call the REAL production async entry point and drive the
     # specific branch you are guarding (e.g. force a failure to hit the cleanup
