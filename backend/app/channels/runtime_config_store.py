@@ -11,6 +11,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
+
 
 class ChannelRuntimeConfigStore:
     """JSON-backed store for channel credentials entered from the UI.
@@ -75,6 +77,14 @@ class ChannelRuntimeConfigStore:
             self._data[provider] = dict(config)
             self._save()
 
+    def set_provider_disconnected(self, provider: str) -> None:
+        with self._lock:
+            self._data[provider] = {
+                "enabled": False,
+                RUNTIME_CHANNEL_DISABLED_FLAG: True,
+            }
+            self._save()
+
     def remove_provider_config(self, provider: str) -> bool:
         with self._lock:
             if provider not in self._data:
@@ -87,6 +97,10 @@ class ChannelRuntimeConfigStore:
 def _provider_enabled(channel_connections_config: Any, provider: str) -> bool:
     provider_config = getattr(channel_connections_config, provider, None)
     return bool(getattr(provider_config, "enabled", False))
+
+
+def _runtime_channel_disconnected(runtime_config: dict[str, Any]) -> bool:
+    return runtime_config.get(RUNTIME_CHANNEL_DISABLED_FLAG) is True and runtime_config.get("enabled") is False
 
 
 def merge_runtime_channel_configs(
@@ -102,6 +116,9 @@ def merge_runtime_channel_configs(
     runtime_store = store or ChannelRuntimeConfigStore()
     for provider, runtime_config in runtime_store.load_all().items():
         if not _provider_enabled(channel_connections_config, provider):
+            continue
+        if _runtime_channel_disconnected(runtime_config):
+            channels_config.pop(provider, None)
             continue
         existing = channels_config.get(provider)
         merged = dict(runtime_config)

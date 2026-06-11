@@ -547,7 +547,7 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
                     owner_user_id=owner_user_id,
                 )
 
-    _get_runtime_config_store(request).remove_provider_config(provider)
+    _get_runtime_config_store(request).set_provider_disconnected(provider)
     channels_config = _load_channels_config(request, config)
     request.app.state.channels_config = channels_config
 

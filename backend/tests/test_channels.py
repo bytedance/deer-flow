@@ -3504,6 +3504,43 @@ class TestChannelService:
             "app_token": "xapp-ui",
         }
 
+    def test_from_app_config_runtime_disconnect_suppresses_file_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "feishu",
+            {
+                "enabled": False,
+                "_runtime_disabled": True,
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "feishu": {
+                        "enabled": True,
+                        "app_id": "file-app-id",
+                        "app_secret": "file-secret",
+                    }
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "feishu": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert "feishu" not in service._config
+
     def test_start_retries_configured_channel_until_ready(self, monkeypatch):
         from app.channels.service import ChannelService
 

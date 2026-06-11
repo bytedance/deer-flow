@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -665,11 +666,87 @@ def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
     assert disconnected["configured"] is False
     assert disconnected["connectable"] is False
     assert disconnected["connection_status"] == "not_connected"
-    assert runtime_config_store.get_provider_config("slack") is None
+    assert runtime_config_store.get_provider_config("slack") == {
+        "enabled": False,
+        "_runtime_disabled": True,
+    }
 
     assert providers_response.status_code == 200
     by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
     assert by_provider["slack"]["connection_status"] == "not_connected"
+
+    anyio.run(repo.close)
+
+
+def test_disconnect_provider_runtime_config_suppresses_file_config_and_stops_channel(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "feishu": {"enabled": True},
+        }
+    )
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "channels": {
+                    "feishu": {
+                        "enabled": True,
+                        "app_id": "file-app-id",
+                        "app_secret": "file-secret",
+                    }
+                },
+            }
+        )
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    runtime_config_store.set_provider_config(
+        "feishu",
+        {
+            "enabled": True,
+            "app_id": "runtime-app-id",
+            "app_secret": "runtime-secret",
+        },
+    )
+    service = SimpleNamespace(
+        configure_channel=AsyncMock(return_value=True),
+        remove_channel=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+    app = _make_app(
+        config,
+        repo,
+        {
+            "feishu": {
+                "enabled": True,
+                "app_id": "runtime-app-id",
+                "app_secret": "runtime-secret",
+            }
+        },
+        runtime_config_store=runtime_config_store,
+    )
+
+    with TestClient(app) as client:
+        disconnect_response = client.delete("/api/channels/feishu/runtime-config")
+        providers_response = client.get("/api/channels/providers")
+
+    assert disconnect_response.status_code == 200
+    disconnected = disconnect_response.json()
+    assert disconnected["provider"] == "feishu"
+    assert disconnected["configured"] is False
+    assert disconnected["connectable"] is False
+    assert disconnected["connection_status"] == "not_connected"
+    assert "feishu" not in app.state.channels_config
+    service.remove_channel.assert_awaited_once_with("feishu")
+    service.configure_channel.assert_not_awaited()
+
+    assert providers_response.status_code == 200
+    by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
+    assert by_provider["feishu"]["configured"] is False
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
 
     anyio.run(repo.close)
 
