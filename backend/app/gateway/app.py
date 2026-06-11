@@ -226,6 +226,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         yield
 
+        try:
+            await auth.close_oidc_service()
+        except Exception:
+            logger.exception("Failed to close OIDC service")
+
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
             from app.channels.service import stop_channel_service

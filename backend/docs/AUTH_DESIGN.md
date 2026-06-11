@@ -16,7 +16,6 @@
 
 非目标：
 
-- 当前 OAuth 端点只是占位，尚未实现第三方登录。
 - 当前用户角色只有 `admin` 和 `user`，尚未实现细粒度 RBAC。
 - 当前登录限速是进程内字典，多 worker 下不是全局精确限速。
 
@@ -155,6 +154,9 @@ enum UserScope:
 - `/api/v1/auth/logout`
 - `/api/v1/auth/setup-status`
 - `/api/v1/auth/initialize`
+- `/api/v1/auth/providers`
+- `/api/v1/auth/oauth/` (所有子路径)
+- `/api/v1/auth/callback/` (所有子路径)
 
 其余路径都要求有效 `access_token` cookie。存在 cookie 但 JWT 无效、过期、用户不存在或 `token_version` 不匹配时，直接返回 401，而不是让请求穿透到业务路由。
 
@@ -303,7 +305,7 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 |---|---|---|
 | 无 admin 时注册普通用户 | 允许注册普通 `user` | 如产品要求先初始化 admin，给 `/register` 加 gate |
 | 登录限速 | 进程内 dict，单 worker 精确，多 worker 近似 | Redis / DB-backed rate limiter |
-| OAuth | 端点占位，未实现 | 接入 provider 并统一 `token_version` / role 语义 |
+| OAuth / OIDC | 已实现通用 OIDC SSO（Keycloak, Google, Azure AD, Okta 等），支持 PKCE + nonce、auto-provisioning、email domain 限制（详见 [SSO.md](SSO.md)） | 支持 RP-initiated logout、自定义 scope 映射 |
 | IM 用户隔离 | channel 使用 `default` 内部用户 | 建立外部用户到 DeerFlow user 的映射 |
 | 绝对 memory path | 显式共享 memory | UI / docs 明确提示 opt-out 风险 |
 
@@ -313,8 +315,13 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 |---|---|
 | `app/gateway/auth_middleware.py` | 全局认证门、JWT 严格验证、写入 user context |
 | `app/gateway/csrf_middleware.py` | CSRF double-submit 和 auth Origin 校验 |
-| `app/gateway/routers/auth.py` | initialize/login/register/logout/me/change-password |
+| `app/gateway/routers/auth.py` | initialize/login/register/logout/me/change-password + SSO OIDC 端点（providers/oauth/callback） |
 | `app/gateway/auth/jwt.py` | JWT 创建与解析 |
+| `app/gateway/auth/oidc.py` | OIDC 核心服务：discovery、token exchange、ID token 验证、userinfo |
+| `app/gateway/auth/oidc_state.py` | OIDC state 管理：signed cookie 存储 state/nonce/code_verifier |
+| `app/gateway/auth/user_provisioning.py` | OIDC 用户自动创建、email linking、domain 限制 |
+| `app/gateway/auth/models.py` | 用户数据模型（含 `oauth_provider` / `oauth_id`） |
+| `packages/harness/deerflow/config/auth_config.py` | OIDC 配置模型（OIDCProviderConfig / OIDCAuthConfig） |
 | `app/gateway/auth/reset_admin.py` | 密码 reset CLI |
 | `app/gateway/auth/credential_file.py` | 0600 凭据文件写入 |
 | `app/gateway/authz.py` | 路由权限与 owner check |
