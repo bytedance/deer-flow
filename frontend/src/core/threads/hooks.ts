@@ -54,6 +54,13 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+const EMPTY_THREAD_VALUES: AgentThreadState = {
+  title: "",
+  messages: [],
+  artifacts: [],
+  todos: [],
+};
+
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -708,11 +715,9 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
-    pendingUsageBaselineMessageIdsRef.current = new Set(
-      messagesRef.current
-        .map(messageIdentity)
-        .filter((id): id is string => Boolean(id)),
-    );
+    messagesRef.current = [];
+    summarizedRef.current = new Set<string>();
+    pendingUsageBaselineMessageIdsRef.current = new Set();
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
@@ -1001,15 +1006,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
-    values: hasVisibleStreamState
-      ? thread.values
-      : {
-          ...thread.values,
-          title: undefined,
-          messages: [],
-          artifacts: [],
-          todos: [],
-        },
+    values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;
 
