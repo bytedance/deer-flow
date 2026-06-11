@@ -2,7 +2,8 @@
 
 The system prompt is kept fully static for maximum prefix-cache reuse across users
 and sessions.  The current date is always injected.  Per-user memory is also injected
-when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
+when ``memory.injection_enabled`` is True in the app config and the run context does
+not explicitly set ``memory_enabled=False``.  Both are delivered once
 per conversation as a dedicated <system-reminder> HumanMessage inserted before the
 first user message (frozen-snapshot pattern).
 
@@ -29,9 +30,11 @@ Date-update format:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
@@ -64,6 +67,17 @@ def _extract_date(content: str) -> str | None:
 def is_dynamic_context_reminder(message: object) -> bool:
     """Return whether *message* is a hidden dynamic-context reminder."""
     return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
+
+
+def _accepts_positional_args(func, count: int) -> bool:
+    signature = inspect.signature(func)
+    positional_count = 0
+    for param in signature.parameters.values():
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            return True
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            positional_count += 1
+    return positional_count >= count
 
 
 def _last_injected_date(messages: list) -> str | None:
@@ -108,12 +122,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> str:
+    def _build_full_reminder(self, runtime: Runtime | None = None) -> str:
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        # Memory injection is gated by injection_enabled; date is always included.
+        # Memory injection requires app-level permission and allows per-run opt-out.
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        context = getattr(runtime, "context", None)
+        runtime_allows_memory = not (isinstance(context, Mapping) and context.get("memory_enabled") is False)
+        memory_context = ""
+        if injection_enabled and runtime_allows_memory:
+            memory_context = _get_memory_context(self._agent_name, app_config=self._app_config)
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         lines: list[str] = ["<system-reminder>"]
@@ -160,7 +178,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return reminder_msg, user_msg
 
-    def _inject(self, state) -> dict | None:
+    def _inject(self, state, runtime: Runtime) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -179,7 +197,10 @@ class DynamicContextMiddleware(AgentMiddleware):
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            full_reminder = self._build_full_reminder()
+            if _accepts_positional_args(self._build_full_reminder, 1):
+                full_reminder = self._build_full_reminder(runtime)
+            else:
+                full_reminder = self._build_full_reminder()
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s) into first HumanMessage id=%r",
                 len(full_reminder),
@@ -204,7 +225,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+        return self._inject(state, runtime)
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
@@ -220,8 +241,12 @@ class DynamicContextMiddleware(AgentMiddleware):
         # the request degrades gracefully (no memory context) rather than
         # hanging.
         try:
+            if _accepts_positional_args(self._inject, 2):
+                inject_call = asyncio.to_thread(self._inject, state, runtime)
+            else:
+                inject_call = asyncio.to_thread(self._inject, state)
             return await asyncio.wait_for(
-                asyncio.to_thread(self._inject, state),
+                inject_call,
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
         except TimeoutError:

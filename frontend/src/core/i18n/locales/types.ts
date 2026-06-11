@@ -293,6 +293,8 @@ export interface Translations {
     memory: {
       title: string;
       description: string;
+      contextToggleTitle: string;
+      contextToggleDescription: string;
       empty: string;
       rawJson: string;
       exportButton: string;

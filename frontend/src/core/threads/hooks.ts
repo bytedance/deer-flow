@@ -28,6 +28,7 @@ import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { fetchThreadTokenUsage } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
+  AgentThreadContext,
   AgentThread,
   AgentThreadState,
   RunMessage,
@@ -52,6 +53,31 @@ export type ThreadStreamOptions = {
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
+
+export function buildThreadStreamContext(
+  context: LocalSettings["context"],
+  extraContext: Record<string, unknown> | undefined,
+  threadId: string,
+): AgentThreadContext {
+  return {
+    ...extraContext,
+    ...context,
+    model_name: context.model_name,
+    thinking_enabled: context.mode !== "flash",
+    is_plan_mode: context.mode === "pro" || context.mode === "ultra",
+    subagent_enabled: context.mode === "ultra",
+    reasoning_effort:
+      context.reasoning_effort ??
+      (context.mode === "ultra"
+        ? "high"
+        : context.mode === "pro"
+          ? "medium"
+          : context.mode === "thinking"
+            ? "low"
+            : undefined),
+    thread_id: threadId,
+  };
+}
 
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
@@ -870,23 +896,7 @@ export function useThreadStream({
             config: {
               recursion_limit: 1000,
             },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            context: buildThreadStreamContext(context, extraContext, threadId),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });

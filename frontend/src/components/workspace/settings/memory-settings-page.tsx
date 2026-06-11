@@ -22,6 +22,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemTitle,
+} from "@/components/ui/item";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/core/i18n/hooks";
@@ -39,6 +47,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import { useLocalSettings } from "@/core/settings";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -276,6 +285,7 @@ function upperFirst(str: string) {
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
+  const [settings, setSettings] = useLocalSettings();
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
@@ -343,6 +353,11 @@ export function MemorySettingsPage() {
   const filterFacts = t.settings.memory.filterFacts ?? "Facts";
   const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
+  const contextToggleTitle =
+    t.settings.memory.contextToggleTitle ?? "Use memory in chats";
+  const contextToggleDescription =
+    t.settings.memory.contextToggleDescription ??
+    "Allow DeerFlow to read saved memory in chats.";
   const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
@@ -537,6 +552,22 @@ export function MemorySettingsPage() {
         title={t.settings.memory.title}
         description={t.settings.memory.description}
       >
+        <Item className="mb-4 w-full" variant="outline">
+          <ItemContent>
+            <ItemTitle>{contextToggleTitle}</ItemTitle>
+            <ItemDescription>{contextToggleDescription}</ItemDescription>
+          </ItemContent>
+          <ItemActions>
+            <Switch
+              aria-label={contextToggleTitle}
+              checked={settings.context.memory_enabled === true}
+              onCheckedChange={(memory_enabled) =>
+                setSettings("context", { memory_enabled })
+              }
+            />
+          </ItemActions>
+        </Item>
+
         {isLoading ? (
           <div className="text-muted-foreground text-sm">
             {t.common.loading}

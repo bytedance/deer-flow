@@ -3,6 +3,7 @@ import { expect, test } from "vitest";
 
 import {
   buildRunMessagesUrl,
+  buildThreadStreamContext,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
@@ -271,6 +272,30 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
     optimisticHuman,
   ]);
+});
+
+test("buildThreadStreamContext preserves memory toggle in stream context", () => {
+  expect(
+    buildThreadStreamContext(
+      {
+        memory_enabled: false,
+        mode: "ultra",
+        model_name: "deepseek-v3",
+        reasoning_effort: undefined,
+      },
+      { agent_name: "researcher", memory_enabled: true },
+      "thread-1",
+    ),
+  ).toMatchObject({
+    agent_name: "researcher",
+    is_plan_mode: true,
+    memory_enabled: false,
+    model_name: "deepseek-v3",
+    reasoning_effort: "high",
+    subagent_enabled: true,
+    thinking_enabled: true,
+    thread_id: "thread-1",
+  });
 });
 
 test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
