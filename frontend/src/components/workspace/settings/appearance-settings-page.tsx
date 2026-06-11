@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Code2Icon,
   FactoryIcon,
   GaugeIcon,
   PaletteIcon,
@@ -27,12 +28,16 @@ const languageOptions: { value: Locale; label: string }[] = [
   { value: "zh-CN", label: zhCN.locale.localName },
 ];
 
-type ThemeId = "industrial-light" | "industrial-dark" | "industrial-blue";
+type ThemeId =
+  | "industrial-light"
+  | "industrial-dark"
+  | "industrial-blue"
+  | "minimal-modern";
 
 export function AppearanceSettingsPage() {
   const { t, locale, changeLocale } = useI18n();
   const { theme, setTheme } = useTheme();
-  const currentTheme = (theme ?? "industrial-dark") as ThemeId;
+  const currentTheme = (theme ?? "minimal-modern") as ThemeId;
 
   const themeOptions = useMemo(
     () => [
@@ -54,12 +59,20 @@ export function AppearanceSettingsPage() {
         description: t.settings.appearance.industrialLightDescription,
         icon: GaugeIcon,
       },
+      {
+        id: "minimal-modern" as const,
+        label: t.settings.appearance.minimalModern,
+        description: t.settings.appearance.minimalModernDescription,
+        icon: Code2Icon,
+      },
     ],
     [
       t.settings.appearance.industrialDark,
       t.settings.appearance.industrialDarkDescription,
       t.settings.appearance.industrialLight,
       t.settings.appearance.industrialLightDescription,
+      t.settings.appearance.minimalModern,
+      t.settings.appearance.minimalModernDescription,
     ],
   );
 
@@ -69,7 +82,7 @@ export function AppearanceSettingsPage() {
         title={t.settings.appearance.themeTitle}
         description={t.settings.appearance.themeDescription}
       >
-        <div className="grid gap-3 lg:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {themeOptions.map((option) => (
             <ThemePreviewCard
               key={option.id}
@@ -131,12 +144,17 @@ function ThemePreviewCard({
 }) {
   const isDarkPreview = mode === "industrial-dark" || mode === "industrial-blue";
   const isBlue = mode === "industrial-blue";
+  const isMinimalModern = mode === "minimal-modern";
   const previewBg = isBlue
     ? "border-blue-900/50 bg-blue-950/60 text-blue-100"
     : isDarkPreview
       ? "border-neutral-700 bg-neutral-800 text-neutral-100"
-      : "border-neutral-300 bg-neutral-100 text-neutral-900";
-  const previewAccent = isBlue ? "bg-blue-500" : "bg-sky-500";
+      : "border-neutral-200 bg-white text-neutral-800";
+  const previewAccent = isBlue
+    ? "bg-blue-500"
+    : isMinimalModern
+      ? "bg-[#087CFA]"
+      : "bg-sky-500";
   return (
     <button
       type="button"

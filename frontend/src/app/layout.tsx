@@ -39,8 +39,8 @@ export default async function RootLayout({
         </a>
         <ThemeProvider
           attribute="class"
-          defaultTheme="industrial-dark"
-          themes={["industrial-dark", "industrial-light", "industrial-blue"]}
+          defaultTheme="minimal-modern"
+          themes={["industrial-dark", "industrial-light", "industrial-blue", "minimal-modern"]}
           disableTransitionOnChange
         >
           <I18nProvider initialLocale={locale}>{children}</I18nProvider>

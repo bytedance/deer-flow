@@ -716,6 +716,7 @@ export const enUS: Translations = {
       dark: "Dark",
       industrialLight: "Industrial Light",
       industrialDark: "Industrial Dark",
+      minimalModern: "Modern Minimal",
       systemDescription: "Match the operating system preference automatically.",
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
@@ -723,6 +724,8 @@ export const enUS: Translations = {
         "ISA-101 neutral gray on light background with industrial blue accent — for office use.",
       industrialDarkDescription:
         "ISA-101 neutral gray on dark background with industrial blue accent — preferred for control rooms.",
+      minimalModernDescription:
+        "Clean white background with blue accent — a modern minimal light theme.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
     },

@@ -615,11 +615,13 @@ export interface Translations {
       dark: string;
       industrialLight: string;
       industrialDark: string;
+      minimalModern: string;
       systemDescription: string;
       lightDescription: string;
       darkDescription: string;
       industrialLightDescription: string;
       industrialDarkDescription: string;
+      minimalModernDescription: string;
       languageTitle: string;
       languageDescription: string;
     };

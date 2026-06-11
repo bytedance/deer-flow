@@ -680,6 +680,7 @@ export const zhCN: Translations = {
       dark: "深色",
       industrialLight: "工业浅色",
       industrialDark: "工业深色",
+      minimalModern: "现代简约",
       systemDescription: "自动跟随系统主题。",
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
@@ -687,6 +688,8 @@ export const zhCN: Translations = {
         "ISA-101 中性灰浅底 + 工业蓝主色，适合办公场景。",
       industrialDarkDescription:
         "ISA-101 中性灰深底 + 工业蓝主色，控制室长时间使用首选。",
+      minimalModernDescription:
+        "清爽白底 + 蓝色点缀，现代简约的浅色主题。",
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
     },
