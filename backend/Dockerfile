@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     jq \
     yq \
     wget \
+    curl \
     unzip \
     zip \
     xz-utils \
@@ -191,6 +192,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     jq \
     yq \
     wget \
+    curl \
     unzip \
     zip \
     xz-utils \
