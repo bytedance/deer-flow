@@ -399,6 +399,34 @@ function getStreamErrorMessage(error: unknown): string {
   return "Request failed.";
 }
 
+function getHttpStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+
+  const status = Reflect.get(error, "status");
+  if (typeof status === "number") {
+    return status;
+  }
+
+  const response = Reflect.get(error, "response");
+  if (typeof response === "object" && response !== null) {
+    const responseStatus = Reflect.get(response, "status");
+    if (typeof responseStatus === "number") {
+      return responseStatus;
+    }
+  }
+
+  return undefined;
+}
+
+function isThreadMissingError(error: unknown): boolean {
+  const status = getHttpStatus(error);
+  // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
+  // exists; callers redirect stale/inaccessible URLs back to a blank chat.
+  return status === 403 || status === 404;
+}
+
 export function useThreadStream({
   threadId,
   displayThreadId,
@@ -1193,12 +1221,22 @@ export function useThreadHistory(
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
+  const hasThreadId = Boolean(threadId);
+  const hasUnloadedRuns = Boolean(
+    runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
+  );
+  const isRunsLoading =
+    enabled &&
+    hasThreadId &&
+    (runs.isLoading || (runs.isFetching && !runs.data));
+  const isRunsUnresolved =
+    enabled && hasThreadId && !runs.data && !runs.isError;
   const hasMore =
-    enabled && Boolean(threadId) && (indexRef.current >= 0 || !runs.data);
+    enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
   return {
     runs: runs.data,
     messages,
-    loading,
+    loading: loading || isRunsLoading || isRunsUnresolved,
     appendMessages,
     hasMore,
     loadMore: loadMessages,
@@ -1313,6 +1351,36 @@ export function useThreadRuns(
   });
 }
 
+export function useThreadMetadata(
+  threadId?: string | null,
+  {
+    enabled = true,
+    isMock = false,
+  }: { enabled?: boolean; isMock?: boolean } = {},
+) {
+  const apiClient = getAPIClient(isMock);
+  return useQuery<AgentThread | null>({
+    queryKey: ["thread", "metadata", threadId, isMock],
+    queryFn: async () => {
+      if (!threadId) {
+        return null;
+      }
+      try {
+        const response = await apiClient.threads.get(threadId);
+        return response as AgentThread;
+      } catch (error) {
+        if (isThreadMissingError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadTokenUsage(
   threadId?: string | null,
   { enabled = true }: { enabled?: boolean } = {},
@@ -1347,8 +1415,15 @@ export function useDeleteThread() {
   const queryClient = useQueryClient();
   const apiClient = getAPIClient();
   return useMutation({
-    mutationFn: async ({ threadId }: { threadId: string }) => {
+    mutationFn: async ({
+      threadId,
+      onRemoteDeleted,
+    }: {
+      threadId: string;
+      onRemoteDeleted?: () => void;
+    }) => {
       await apiClient.threads.delete(threadId);
+      onRemoteDeleted?.();
 
       const response = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
