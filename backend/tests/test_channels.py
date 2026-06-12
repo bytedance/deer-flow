@@ -4766,3 +4766,19 @@ class TestSlackMarkdownConversion:
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result
         assert "#" not in result
+
+
+# ---------------------------------------------------------------------------
+# Telegram streaming tests
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramStreaming:
+    def test_telegram_reports_streaming_support(self):
+        from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.telegram import TelegramChannel
+
+        bus = MessageBus()
+        ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+        assert ch.supports_streaming is True
+        assert CHANNEL_CAPABILITIES["telegram"]["supports_streaming"] is True

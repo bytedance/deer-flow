@@ -38,6 +38,10 @@ class TelegramChannel(Channel):
         self._last_bot_message: dict[str, int] = {}
         self._connection_repo = config.get("connection_repo")
 
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
     async def start(self) -> None:
         if self._running:
             return
