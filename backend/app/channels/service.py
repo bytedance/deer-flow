@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING, Any
@@ -110,6 +111,7 @@ class ChannelService:
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
+        self._readiness_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
     def from_app_config(cls, app_config: AppConfig | None = None) -> ChannelService:
@@ -171,31 +173,35 @@ class ChannelService:
         if config is not None:
             self._config[name] = dict(config)
 
-        channel_config = self._config.get(name)
-        if not channel_config or not isinstance(channel_config, dict):
-            logger.warning("No config for requested channel")
-            return False
-        if not channel_config.get("enabled", False):
-            return False
+        # Serialize per channel: readiness is polled from request handlers, so
+        # concurrent calls must not stop/start the same channel worker twice.
+        lock = self._readiness_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            channel_config = self._config.get(name)
+            if not channel_config or not isinstance(channel_config, dict):
+                logger.warning("No config for requested channel")
+                return False
+            if not channel_config.get("enabled", False):
+                return False
 
-        channel = self._channels.get(name)
-        if channel is not None and channel.is_running:
-            return True
-
-        if channel is not None:
-            try:
-                await channel.stop()
-            except Exception:
-                logger.exception("Error stopping non-running channel before readiness retry")
-            self._channels.pop(name, None)
-
-        max_attempts = max(1, attempts)
-        for attempt in range(max_attempts):
-            if attempt > 0:
-                logger.info("Retrying channel startup after readiness check")
-            if await self._start_channel(name, channel_config):
+            channel = self._channels.get(name)
+            if channel is not None and channel.is_running:
                 return True
-        return False
+
+            if channel is not None:
+                try:
+                    await channel.stop()
+                except Exception:
+                    logger.exception("Error stopping non-running channel before readiness retry")
+                self._channels.pop(name, None)
+
+            max_attempts = max(1, attempts)
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    logger.info("Retrying channel startup after readiness check")
+                if await self._start_channel(name, channel_config):
+                    return True
+            return False
 
     async def stop(self) -> None:
         """Stop all channels and the manager."""
@@ -318,7 +324,9 @@ async def start_channel_service(app_config: AppConfig | None = None) -> ChannelS
     global _channel_service
     if _channel_service is not None:
         return _channel_service
-    _channel_service = ChannelService.from_app_config(app_config)
+    # from_app_config reads the JSON channel store and runtime config files;
+    # keep that disk IO off the event loop.
+    _channel_service = await asyncio.to_thread(ChannelService.from_app_config, app_config)
     await _channel_service.start()
     return _channel_service
 

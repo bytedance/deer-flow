@@ -245,3 +245,87 @@ class TestChannelConnectionRepository:
         async with repo.session_factory() as session:
             states = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
         assert [state.state_hash for state in states] == [repo.hash_state("active-state")]
+
+    @pytest.mark.anyio
+    async def test_consume_oauth_state_is_one_time_even_under_concurrent_consumers(self, repo):
+        import anyio
+
+        now = datetime.now(UTC)
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="bind-once",
+            expires_at=now + timedelta(minutes=5),
+        )
+
+        results: list = []
+
+        async def consume():
+            results.append(await repo.consume_oauth_state(provider="slack", state="bind-once", now=now))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(consume)
+            tg.start_soon(consume)
+
+        consumed = [result for result in results if result is not None]
+        assert len(consumed) == 1
+        assert consumed[0]["owner_user_id"] == "alice"
+
+    @pytest.mark.anyio
+    async def test_upsert_connection_retries_as_update_when_concurrent_insert_wins(self, repo):
+        """A losing concurrent INSERT retries as an UPDATE instead of raising IntegrityError."""
+        first = await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-race",
+            workspace_id="T-race",
+            status="pending",
+        )
+
+        real_factory = repo.session_factory
+
+        class _EmptyResult:
+            @staticmethod
+            def scalar_one_or_none():
+                return None
+
+        class MissFirstSelectSession:
+            """Make the initial identity SELECT miss, as if a concurrent writer inserted after it."""
+
+            def __init__(self, session):
+                self._session = session
+                self._missed = False
+
+            def __getattr__(self, name):
+                return getattr(self._session, name)
+
+            async def execute(self, *args, **kwargs):
+                result = await self._session.execute(*args, **kwargs)
+                if not self._missed:
+                    self._missed = True
+                    return _EmptyResult()
+                return result
+
+            async def __aenter__(self):
+                await self._session.__aenter__()
+                return self
+
+            async def __aexit__(self, *args):
+                return await self._session.__aexit__(*args)
+
+        repo.session_factory = lambda: MissFirstSelectSession(real_factory())
+        try:
+            second = await repo.upsert_connection(
+                owner_user_id="alice",
+                provider="slack",
+                external_account_id="U-race",
+                workspace_id="T-race",
+                status="connected",
+            )
+        finally:
+            repo.session_factory = real_factory
+
+        assert second["id"] == first["id"]
+        assert second["status"] == "connected"
+        connections = await repo.list_connections("alice")
+        assert len(connections) == 1

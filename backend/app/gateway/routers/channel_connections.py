@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -139,35 +140,37 @@ def _get_app_config():
     return get_app_config()
 
 
-def _get_runtime_config_store(request: Request) -> ChannelRuntimeConfigStore:
+async def _get_runtime_config_store(request: Request) -> ChannelRuntimeConfigStore:
     store = getattr(request.app.state, "channel_runtime_config_store", None)
     if isinstance(store, ChannelRuntimeConfigStore):
         return store
-    store = ChannelRuntimeConfigStore()
+    # Constructing the store reads its JSON file from disk; keep it off the
+    # event loop.
+    store = await asyncio.to_thread(ChannelRuntimeConfigStore)
     request.app.state.channel_runtime_config_store = store
     return store
 
 
-def _get_channel_connections_config(request: Request) -> ChannelConnectionsConfig:
+async def _get_channel_connections_config(request: Request) -> ChannelConnectionsConfig:
     config = getattr(request.app.state, "channel_connections_config", None)
     if not isinstance(config, ChannelConnectionsConfig):
         config = _get_app_config().channel_connections
-    config = apply_runtime_connection_config(config, store=_get_runtime_config_store(request))
+    config = apply_runtime_connection_config(config, store=await _get_runtime_config_store(request))
     request.app.state.channel_connections_config = config
     return config
 
 
-def _get_channels_config(request: Request) -> dict[str, Any]:
+async def _get_channels_config(request: Request) -> dict[str, Any]:
     state_config = getattr(request.app.state, "channels_config", None)
     if isinstance(state_config, dict):
         return state_config
 
-    result = _load_channels_config(request, _get_channel_connections_config(request))
+    result = await _load_channels_config(request, await _get_channel_connections_config(request))
     request.app.state.channels_config = result
     return result
 
 
-def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
+async def _load_channels_config(request: Request, config: ChannelConnectionsConfig) -> dict[str, Any]:
     app_config = _get_app_config()
     extra = app_config.model_extra or {}
     channels_config = extra.get("channels")
@@ -175,7 +178,7 @@ def _load_channels_config(request: Request, config: ChannelConnectionsConfig) ->
     merge_runtime_channel_configs(
         result,
         config,
-        store=_get_runtime_config_store(request),
+        store=await _get_runtime_config_store(request),
     )
     return result
 
@@ -388,10 +391,14 @@ def _provider_response(
     meta: dict[str, str],
     connection: dict[str, Any] | None = None,
 ) -> ChannelProviderResponse:
+    from app.gateway.auth_disabled import is_auth_disabled
+
     status, unavailable_reason = _provider_status(config, channels_config, provider)
     if connection:
         connection_status = connection["status"]
-    elif status["configured"] and unavailable_reason is None:
+    elif is_auth_disabled() and status["configured"] and unavailable_reason is None:
+        # Auth-disabled local mode routes every channel message to the default
+        # user, so a configured running channel needs no per-user binding.
         connection_status = "connected"
     else:
         connection_status = "not_connected"
@@ -471,8 +478,8 @@ async def _sync_runtime_channel_after_removal(provider: str, channels_config: di
 
 @router.get("/providers", response_model=ChannelProvidersResponse)
 async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
-    config = _get_channel_connections_config(request)
-    channels_config = _get_channels_config(request)
+    config = await _get_channel_connections_config(request)
+    channels_config = await _get_channels_config(request)
     repo = None
     if config.enabled:
         try:
@@ -497,7 +504,7 @@ async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
 
 @router.get("/connections", response_model=ChannelConnectionsResponse)
 async def get_channel_connections(request: Request) -> ChannelConnectionsResponse:
-    config = _get_channel_connections_config(request)
+    config = await _get_channel_connections_config(request)
     if not config.enabled:
         return ChannelConnectionsResponse(connections=[])
     repo = _get_repository(request, config)
@@ -507,7 +514,7 @@ async def get_channel_connections(request: Request) -> ChannelConnectionsRespons
 
 @router.delete("/connections/{connection_id}", status_code=204)
 async def disconnect_channel_connection(connection_id: str, request: Request) -> Response:
-    config = _get_channel_connections_config(request)
+    config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
 
@@ -523,7 +530,7 @@ async def disconnect_channel_connection(connection_id: str, request: Request) ->
 
 @router.delete("/{provider}/runtime-config", response_model=ChannelProviderResponse)
 async def disconnect_channel_provider_runtime(provider: str, request: Request) -> ChannelProviderResponse:
-    config = _get_channel_connections_config(request)
+    config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
 
@@ -547,8 +554,9 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
                     owner_user_id=owner_user_id,
                 )
 
-    _get_runtime_config_store(request).set_provider_disconnected(provider)
-    channels_config = _load_channels_config(request, config)
+    store = await _get_runtime_config_store(request)
+    await asyncio.to_thread(store.set_provider_disconnected, provider)
+    channels_config = await _load_channels_config(request, config)
     request.app.state.channels_config = channels_config
 
     stopped = await _sync_runtime_channel_after_removal(provider, channels_config)
@@ -561,8 +569,8 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
 async def connect_channel_provider(provider: str, request: Request) -> ChannelConnectResponse:
-    config = _get_channel_connections_config(request)
-    channels_config = _get_channels_config(request)
+    config = await _get_channel_connections_config(request)
+    channels_config = await _get_channels_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
 
@@ -600,7 +608,7 @@ async def configure_channel_provider_runtime(
     body: ChannelRuntimeConfigRequest,
     request: Request,
 ) -> ChannelProviderResponse:
-    config = _get_channel_connections_config(request)
+    config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
 
@@ -608,7 +616,7 @@ async def configure_channel_provider_runtime(
     if not provider_config.enabled:
         raise HTTPException(status_code=400, detail="Channel provider is not enabled")
 
-    channels_config = _get_channels_config(request)
+    channels_config = await _get_channels_config(request)
     existing = channels_config.get(provider)
     runtime_config = dict(existing) if isinstance(existing, dict) else {}
     values = _required_runtime_values(provider, body.values, runtime_config)
@@ -618,9 +626,11 @@ async def configure_channel_provider_runtime(
         runtime_config[key] = values[key]
 
     if provider == "telegram":
+        # The deep-link username is persisted with the runtime channel config
+        # (set_provider_config below) and applied to future requests via
+        # apply_runtime_connection_config; never mutate the config instance
+        # cached by get_app_config().
         runtime_config["bot_username"] = values["bot_username"]
-        provider_config.bot_username = values["bot_username"]
-        request.app.state.channel_connections_config = config
 
     channels_config[provider] = runtime_config
     request.app.state.channels_config = channels_config
@@ -630,6 +640,7 @@ async def configure_channel_provider_runtime(
         display_name = _PROVIDER_META[provider]["display_name"]
         raise HTTPException(status_code=400, detail=f"Failed to start {display_name} channel. Check the values and try again.")
 
-    _get_runtime_config_store(request).set_provider_config(provider, runtime_config)
+    store = await _get_runtime_config_store(request)
+    await asyncio.to_thread(store.set_provider_config, provider, runtime_config)
 
     return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])

@@ -32,6 +32,11 @@ import {
   openConnectUrl,
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
+import {
+  providerCanConnect,
+  providerCanEditRuntimeConfig,
+  providerNeedsRuntimeConfig,
+} from "@/core/channels/provider-state";
 import type { ChannelConnection, ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
@@ -98,18 +103,6 @@ function getProviderUnavailableReason(
     return t.channels.unconfigured;
   }
   return provider.unavailable_reason ?? undefined;
-}
-
-function providerNeedsRuntimeConfig(provider: ChannelProvider): boolean {
-  return (
-    provider.enabled &&
-    !provider.configured &&
-    (provider.credential_fields?.length ?? 0) > 0
-  );
-}
-
-function providerCanEditRuntimeConfig(provider: ChannelProvider): boolean {
-  return provider.enabled && (provider.credential_fields?.length ?? 0) > 0;
 }
 
 function ChannelProviderItem({
@@ -249,37 +242,47 @@ function ChannelProviderItem({
               </Button>
             </>
           ) : (
-            <Button
-              type="button"
-              size="sm"
-              disabled={isConnecting}
-              title={unavailableReason}
-              onClick={() => {
-                if (
-                  providerNeedsRuntimeConfig(provider) ||
-                  canEditRuntimeConfig
-                ) {
-                  setSetupOpen(true);
-                  return;
-                }
+            <>
+              {provider.configured && canEditRuntimeConfig ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isConnecting || isDisconnecting}
+                  onClick={() => setSetupOpen(true)}
+                >
+                  {t.channels.modify}
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                disabled={isConnecting}
+                title={unavailableReason}
+                onClick={() => {
+                  if (providerNeedsRuntimeConfig(provider)) {
+                    setSetupOpen(true);
+                    return;
+                  }
 
-                if (!canConnect) {
-                  toast.error(unavailableReason ?? t.channels.unavailable);
-                  return;
-                }
+                  if (!canConnect) {
+                    toast.error(unavailableReason ?? t.channels.unavailable);
+                    return;
+                  }
 
-                startConnect(provider);
-              }}
-            >
-              {isConnecting ? (
-                <LoaderCircleIcon className="animate-spin" />
-              ) : (
-                <PlugIcon />
-              )}
-              {connection?.status === "revoked"
-                ? t.channels.reconnect
-                : t.channels.connect}
-            </Button>
+                  startConnect(provider);
+                }}
+              >
+                {isConnecting ? (
+                  <LoaderCircleIcon className="animate-spin" />
+                ) : (
+                  <PlugIcon />
+                )}
+                {connection?.status === "revoked"
+                  ? t.channels.reconnect
+                  : t.channels.connect}
+              </Button>
+            </>
           )}
         </ItemActions>
       </Item>
@@ -289,13 +292,23 @@ function ChannelProviderItem({
         submitting={configureMutation.isPending}
         onOpenChange={setSetupOpen}
         onSubmit={(submitProvider, values) => {
+          const connectWindow =
+            submitProvider.auth_mode === "deep_link"
+              ? prepareConnectWindow()
+              : null;
           void configureMutation
             .mutateAsync({ provider: submitProvider.provider, values })
-            .then(() => {
+            .then((updated) => {
               setSetupOpen(false);
+              if (providerCanConnect(updated)) {
+                startConnect(updated, connectWindow);
+                return;
+              }
+              closeConnectWindow(connectWindow);
               toast.success(t.channels.connected);
             })
             .catch((error) => {
+              closeConnectWindow(connectWindow);
               toast.error(
                 error instanceof Error ? error.message : t.channels.unavailable,
               );

@@ -14,7 +14,6 @@ _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
 _SAFE_USER_ID_DIGEST_HEX_LEN = 16
-_SAFE_USER_ID_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +54,10 @@ def make_safe_user_id(raw: str) -> str:
     return f"{sanitized}-{digest}"
 
 
-def _looks_like_digested_user_dir(name: str, prefix: str) -> bool:
-    if not name.startswith(prefix):
-        return False
-    suffix = name[len(prefix) :]
-    return bool(_SAFE_USER_ID_DIGEST_RE.match(suffix))
+def _legacy_safe_user_id(raw: str, sanitized: str) -> str:
+    """Bucket name produced by the previous (SHA-1) digest revision for ``raw``."""
+    digest = hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
+    return f"{sanitized}-{digest}"
 
 
 def _join_host_path(base: str, *parts: str) -> str:
@@ -184,12 +182,13 @@ class Paths:
         return self.base_dir / "users" / _validate_user_id(user_id)
 
     def prepare_user_dir_for_raw_id(self, raw_user_id: str) -> str:
-        """Return the safe user ID and migrate a unique legacy unsafe-id bucket.
+        """Return the safe user ID and migrate this ID's legacy unsafe-id bucket.
 
-        A previous branch revision used a weak digest for unsafe external user IDs.
-        New IDs use SHA-256, but if exactly one old-style bucket with the same
-        sanitized prefix already exists, move it to the current bucket name so
-        existing local memory/files/threads remain visible.
+        A previous branch revision used SHA-1 for unsafe external user IDs.
+        New IDs use SHA-256; the legacy bucket name is recomputed from the same
+        raw ID, so only this user's own old bucket can ever be moved — a
+        different raw ID sharing the sanitized prefix produces a different
+        legacy digest and is never touched.
         """
         safe_user_id = make_safe_user_id(raw_user_id)
         sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw_user_id)
@@ -198,25 +197,11 @@ class Paths:
 
         users_dir = self.base_dir / "users"
         target_dir = users_dir / safe_user_id
-        if target_dir.exists() or not users_dir.exists():
-            return safe_user_id
-
-        legacy_prefix = f"{sanitized}-"
+        legacy_dir = users_dir / _legacy_safe_user_id(raw_user_id, sanitized)
         try:
-            legacy_candidates = [candidate for candidate in users_dir.iterdir() if candidate.is_dir() and candidate.name != safe_user_id and _looks_like_digested_user_dir(candidate.name, legacy_prefix)]
-        except OSError:
-            logger.exception("Failed to inspect user directories for legacy unsafe-id migration")
-            return safe_user_id
-
-        if not legacy_candidates:
-            return safe_user_id
-
-        if len(legacy_candidates) > 1:
-            logger.warning("Multiple legacy unsafe-id user directories matched; skipping automatic migration")
-            return safe_user_id
-
-        try:
-            legacy_candidates[0].rename(target_dir)
+            if target_dir.exists() or not legacy_dir.is_dir():
+                return safe_user_id
+            legacy_dir.rename(target_dir)
             logger.info("Migrated legacy unsafe-id user directory to the current digest format")
         except OSError:
             logger.exception("Failed to migrate legacy unsafe-id user directory")

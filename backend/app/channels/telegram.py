@@ -178,26 +178,6 @@ class TelegramChannel(Channel):
             logger.exception("[Telegram] failed to send file: %s", attachment.filename)
             return False
 
-    async def process_webhook_update(self, payload: dict[str, Any]) -> bool:
-        if not self._application:
-            return False
-        try:
-            from telegram import Update
-        except ImportError:
-            logger.error("python-telegram-bot is not installed. Install it with: uv add python-telegram-bot")
-            return False
-
-        update = Update.de_json(payload, self._application.bot)
-        if update is None:
-            return False
-
-        if self._tg_loop and self._tg_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._application.process_update(update), self._tg_loop)
-            await asyncio.wrap_future(future)
-        else:
-            await self._application.process_update(update)
-        return True
-
     # -- helpers -----------------------------------------------------------
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:

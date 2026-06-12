@@ -23,23 +23,17 @@ import {
   openConnectUrl,
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
+import {
+  providerCanConnect,
+  providerCanEditRuntimeConfig,
+  providerNeedsRuntimeConfig,
+} from "@/core/channels/provider-state";
 import type { ChannelProvider } from "@/core/channels/types";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { ChannelProviderIcon } from "./channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "./channel-runtime-config-dialog";
-
-function providerCanConnect(provider: ChannelProvider): boolean {
-  return (
-    (provider.connectable ?? (provider.enabled && provider.configured)) &&
-    provider.connection_status !== "connected"
-  );
-}
-
-function providerCanEditRuntimeConfig(provider: ChannelProvider): boolean {
-  return provider.enabled && (provider.credential_fields?.length ?? 0) > 0;
-}
 
 function getProviderUnavailableReason(
   provider: ChannelProvider,
@@ -55,14 +49,6 @@ function getProviderUnavailableReason(
     return t.channels.unconfigured;
   }
   return provider.unavailable_reason ?? undefined;
-}
-
-function providerNeedsRuntimeConfig(provider: ChannelProvider): boolean {
-  return (
-    provider.enabled &&
-    !provider.configured &&
-    (provider.credential_fields?.length ?? 0) > 0
-  );
 }
 
 export function WorkspaceChannelsList() {
@@ -163,7 +149,7 @@ export function WorkspaceChannelsList() {
                   onClick={() => {
                     if (
                       providerNeedsRuntimeConfig(provider) ||
-                      canEditRuntimeConfig
+                      (isConnected && canEditRuntimeConfig)
                     ) {
                       setSetupProvider(provider);
                       return;
@@ -201,13 +187,21 @@ export function WorkspaceChannelsList() {
           }
         }}
         onSubmit={(provider, values) => {
+          const connectWindow =
+            provider.auth_mode === "deep_link" ? prepareConnectWindow() : null;
           void configureMutation
             .mutateAsync({ provider: provider.provider, values })
-            .then(() => {
+            .then((updated) => {
               setSetupProvider(null);
+              if (providerCanConnect(updated)) {
+                startConnect(updated, connectWindow);
+                return;
+              }
+              closeConnectWindow(connectWindow);
               toast.success(t.channels.connected);
             })
             .catch((error) => {
+              closeConnectWindow(connectWindow);
               toast.error(
                 error instanceof Error ? error.message : t.channels.unavailable,
               );

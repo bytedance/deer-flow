@@ -380,12 +380,12 @@ class SlackChannel(Channel):
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
         state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
         if state is None:
-            self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+            await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
             return True
 
         user_id = str(event.get("user") or "")
         if not user_id or not team_id:
-            self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
+            await self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
             return True
 
         await self._connection_repo.upsert_connection(
@@ -399,16 +399,16 @@ class SlackChannel(Channel):
             },
             status="connected",
         )
-        self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
+        await self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
         return True
 
-    def _post_connection_reply(self, channel_id: str, text: str, thread_ts: str | None = None) -> None:
+    async def _post_connection_reply(self, channel_id: str, text: str, thread_ts: str | None = None) -> None:
         if not self._web_client or not channel_id:
             return
         kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
         try:
-            self._web_client.chat_postMessage(**kwargs)
+            await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
         except Exception:
             logger.exception("[Slack] failed to send connection reply in channel=%s", channel_id)

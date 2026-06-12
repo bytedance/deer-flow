@@ -260,6 +260,148 @@ test.describe("IM channels", () => {
     });
   });
 
+  test("configured provider connects directly with a binding-code instruction", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    let slackConnectCalls = 0;
+    mockChannelsAPI(
+      page,
+      [
+        {
+          provider: "slack",
+          display_name: "Slack",
+          enabled: true,
+          configured: true,
+          connectable: true,
+          auth_mode: "binding_code",
+          connection_status: "not_connected",
+          credential_fields: [
+            {
+              name: "bot_token",
+              label: "Bot token",
+              type: "password",
+              required: true,
+            },
+          ],
+          credential_values: { bot_token: "********" },
+        },
+      ],
+      () => {
+        slackConnectCalls += 1;
+      },
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
+    await sidebar.getByRole("button", { name: "Connect" }).click();
+
+    await expect(
+      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+    ).toBeVisible();
+    expect(slackConnectCalls).toBe(1);
+  });
+
+  test("runtime setup continues into the connect flow when a binding is still required", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    let slackConfigured = false;
+    let slackConnectCalls = 0;
+
+    void page.route("**/api/channels/providers", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          enabled: true,
+          providers: [
+            {
+              provider: "slack",
+              display_name: "Slack",
+              enabled: true,
+              configured: slackConfigured,
+              connectable: slackConfigured,
+              auth_mode: "binding_code",
+              connection_status: "not_connected",
+              credential_fields: [
+                {
+                  name: "bot_token",
+                  label: "Bot token",
+                  type: "password",
+                  required: true,
+                },
+              ],
+              credential_values: {},
+            },
+          ],
+        }),
+      });
+    });
+
+    void page.route("**/api/channels/connections", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ connections: [] }),
+      });
+    });
+
+    void page.route("**/api/channels/slack/runtime-config", (route) => {
+      slackConfigured = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider: "slack",
+          display_name: "Slack",
+          enabled: true,
+          configured: true,
+          connectable: true,
+          auth_mode: "binding_code",
+          connection_status: "not_connected",
+          credential_fields: [],
+          credential_values: {},
+        }),
+      });
+    });
+
+    void page.route("**/api/channels/slack/connect", (route) => {
+      slackConnectCalls += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider: "slack",
+          mode: "binding_code",
+          url: null,
+          code: "abc123",
+          instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+          expires_in: 600,
+        }),
+      });
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    await expect(sidebar.getByText("Slack")).toBeVisible({ timeout: 15_000 });
+    await sidebar.getByRole("button", { name: "Connect" }).click();
+
+    const setupDialog = page.getByRole("dialog", { name: "Connect Slack" });
+    await expect(setupDialog).toBeVisible();
+    await setupDialog.getByLabel("Bot token").fill("xoxb-ui");
+    await setupDialog.getByRole("button", { name: "Save and connect" }).click();
+
+    await expect(setupDialog).toBeHidden();
+    await expect(
+      page.getByText("Send /connect abc123 to the DeerFlow Slack bot."),
+    ).toBeVisible();
+    expect(slackConnectCalls).toBe(1);
+  });
+
   test("runtime setup dialog prefills editable credential values", async ({
     page,
   }) => {

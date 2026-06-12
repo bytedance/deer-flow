@@ -3332,6 +3332,38 @@ class TestChannelService:
 
         _run(go())
 
+    def test_concurrent_ensure_channel_ready_starts_channel_once(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            await service.manager.start()
+            service._running = True
+            start_calls = []
+
+            async def fake_start_channel(name, config):
+                start_calls.append(name)
+                await asyncio.sleep(0.01)
+                service._channels[name] = SimpleNamespace(is_running=True, stop=AsyncMock())
+                return True
+
+            service._start_channel = fake_start_channel
+
+            results = await asyncio.gather(
+                service.ensure_channel_ready("telegram"),
+                service.ensure_channel_ready("telegram"),
+            )
+
+            assert results == [True, True]
+            assert start_calls == ["telegram"]
+            await service.stop()
+
+        _run(go())
+
     def test_session_config_is_forwarded_to_manager(self):
         from app.channels.service import ChannelService
 

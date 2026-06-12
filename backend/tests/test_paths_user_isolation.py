@@ -1,6 +1,5 @@
 """Tests for user-scoped path resolution in Paths."""
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -87,20 +86,23 @@ class TestUserDir:
         assert not legacy_dir.exists()
         assert (current_dir / "memory.json").read_text(encoding="utf-8") == '{"legacy": true}\n'
 
-    def test_prepare_user_dir_skips_ambiguous_legacy_unsafe_buckets(self, paths: Paths, caplog):
+    def test_prepare_user_dir_never_migrates_another_users_bucket(self, paths: Paths):
+        """A different raw ID with the same sanitized prefix has a different legacy digest."""
+        import hashlib
+
         from deerflow.config.paths import make_safe_user_id
 
         users_dir = paths.base_dir / "users"
-        (users_dir / "a-b-1111111111111111").mkdir(parents=True)
-        (users_dir / "a-b-2222222222222222").mkdir(parents=True)
+        other_legacy = users_dir / f"a-b-{hashlib.sha1(b'a/b').hexdigest()[:16]}"
+        other_legacy.mkdir(parents=True)
+        arbitrary_16_hex = users_dir / "a-b-1111111111111111"
+        arbitrary_16_hex.mkdir(parents=True)
 
-        caplog.set_level(logging.WARNING)
         assert paths.prepare_user_dir_for_raw_id("a.b") == make_safe_user_id("a.b")
 
         assert not paths.user_dir(make_safe_user_id("a.b")).exists()
-        assert (users_dir / "a-b-1111111111111111").exists()
-        assert (users_dir / "a-b-2222222222222222").exists()
-        assert any("Multiple legacy unsafe-id user directories matched" in r.message for r in caplog.records)
+        assert other_legacy.exists()
+        assert arbitrary_16_hex.exists()
 
 
 class TestUserMemoryFile:

@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.channel_connections.model import (
@@ -117,13 +118,23 @@ class ChannelConnectionRepository:
     ) -> dict[str, Any]:
         external_account_id_value = self._normalize_optional_identity(external_account_id)
         workspace_id_value = self._normalize_optional_identity(workspace_id)
+
+        def _apply(row: ChannelConnectionRow) -> None:
+            row.status = status
+            row.external_account_name = external_account_name
+            row.workspace_name = workspace_name
+            row.bot_user_id = bot_user_id
+            row.scopes_json = list(scopes or [])
+            row.capabilities_json = dict(capabilities or {})
+            row.metadata_json = dict(metadata or {})
+
+        stmt = select(ChannelConnectionRow).where(
+            ChannelConnectionRow.owner_user_id == owner_user_id,
+            ChannelConnectionRow.provider == provider,
+            ChannelConnectionRow.external_account_id == external_account_id_value,
+            ChannelConnectionRow.workspace_id == workspace_id_value,
+        )
         async with self.session_factory() as session:
-            stmt = select(ChannelConnectionRow).where(
-                ChannelConnectionRow.owner_user_id == owner_user_id,
-                ChannelConnectionRow.provider == provider,
-                ChannelConnectionRow.external_account_id == external_account_id_value,
-                ChannelConnectionRow.workspace_id == workspace_id_value,
-            )
             row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 row = ChannelConnectionRow(
@@ -135,14 +146,16 @@ class ChannelConnectionRepository:
                 )
                 session.add(row)
 
-            row.status = status
-            row.external_account_name = external_account_name
-            row.workspace_name = workspace_name
-            row.bot_user_id = bot_user_id
-            row.scopes_json = list(scopes or [])
-            row.capabilities_json = dict(capabilities or {})
-            row.metadata_json = dict(metadata or {})
-            await session.commit()
+            _apply(row)
+            try:
+                await session.commit()
+            except IntegrityError:
+                # A concurrent writer inserted the same identity first; retry as
+                # an update of that row.
+                await session.rollback()
+                row = (await session.execute(stmt)).scalar_one()
+                _apply(row)
+                await session.commit()
             await session.refresh(row)
             return self._connection_to_dict(row)
 
@@ -251,12 +264,14 @@ class ChannelConnectionRepository:
     async def count_oauth_states(self, *, owner_user_id: str, provider: str) -> int:
         async with self.session_factory() as session:
             result = await session.execute(
-                select(ChannelOAuthStateRow).where(
+                select(func.count())
+                .select_from(ChannelOAuthStateRow)
+                .where(
                     ChannelOAuthStateRow.owner_user_id == owner_user_id,
                     ChannelOAuthStateRow.provider == provider,
                 )
             )
-            return len(list(result.scalars()))
+            return int(result.scalar_one())
 
     async def consume_oauth_state(
         self,
@@ -266,9 +281,10 @@ class ChannelConnectionRepository:
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         current_time = now or datetime.now(UTC)
+        state_hash = self.hash_state(state)
         async with self.session_factory() as session:
             await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
-            row = await session.get(ChannelOAuthStateRow, self.hash_state(state))
+            row = await session.get(ChannelOAuthStateRow, state_hash)
             if row is None or row.provider != provider or row.consumed_at is not None:
                 await session.commit()
                 return None
@@ -277,8 +293,20 @@ class ChannelConnectionRepository:
                 await session.commit()
                 return None
 
-            row.consumed_at = current_time
+            # Conditional UPDATE so two concurrent workers cannot both consume
+            # the same binding code: only the writer that flips consumed_at
+            # from NULL wins.
+            result = await session.execute(
+                update(ChannelOAuthStateRow)
+                .where(
+                    ChannelOAuthStateRow.state_hash == state_hash,
+                    ChannelOAuthStateRow.consumed_at.is_(None),
+                )
+                .values(consumed_at=current_time)
+            )
             await session.commit()
+            if result.rowcount != 1:
+                return None
             return {
                 "owner_user_id": row.owner_user_id,
                 "provider": row.provider,

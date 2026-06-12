@@ -140,7 +140,7 @@ def test_slack_http_events_mode_initializes_operator_web_client(monkeypatch):
         assert channel._web_client.token == "xoxb-operator"
         assert channel._bot_user_id == "B-http"
 
-        channel._post_connection_reply("C123", "Slack connected to DeerFlow.", "1710000000.000100")
+        await channel._post_connection_reply("C123", "Slack connected to DeerFlow.", "1710000000.000100")
 
         assert channel._web_client.messages == [
             {
