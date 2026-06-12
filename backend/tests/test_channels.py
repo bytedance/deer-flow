@@ -1153,14 +1153,14 @@ class TestChannelManager:
 
             stream_events = [
                 _make_stream_part(
-                    "messages-tuple",
+                    "messages",
                     [
                         {"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"},
                         {"langgraph_node": "agent"},
                     ],
                 ),
                 _make_stream_part(
-                    "messages-tuple",
+                    "messages",
                     [
                         {"id": "ai-1", "content": " world", "type": "AIMessageChunk"},
                         {"langgraph_node": "agent"},
