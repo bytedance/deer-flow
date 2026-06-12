@@ -207,7 +207,7 @@ start() {
             exit 1
         fi
         echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
-        COMPOSE_CMD="$COMPOSE_CMD -f docker-compose.dood.yaml"
+        COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 
     echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
