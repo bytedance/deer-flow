@@ -17,7 +17,12 @@ function makeProvider(overrides: Partial<ChannelProvider>): ChannelProvider {
     auth_mode: "binding_code",
     connection_status: "not_connected",
     credential_fields: [
-      { name: "bot_token", label: "Bot token", type: "password", required: true },
+      {
+        name: "bot_token",
+        label: "Bot token",
+        type: "password",
+        required: true,
+      },
     ],
     ...overrides,
   };
@@ -41,9 +46,9 @@ describe("providerCanConnect", () => {
   });
 
   it("falls back to enabled+configured when connectable is missing", () => {
-    expect(
-      providerCanConnect(makeProvider({ connectable: undefined })),
-    ).toBe(true);
+    expect(providerCanConnect(makeProvider({ connectable: undefined }))).toBe(
+      true,
+    );
     expect(
       providerCanConnect(
         makeProvider({ connectable: undefined, configured: false }),
@@ -74,9 +79,9 @@ describe("providerNeedsRuntimeConfig", () => {
 describe("providerCanEditRuntimeConfig", () => {
   it("is editable whenever enabled with credential fields", () => {
     expect(providerCanEditRuntimeConfig(makeProvider({}))).toBe(true);
-    expect(
-      providerCanEditRuntimeConfig(makeProvider({ enabled: false })),
-    ).toBe(false);
+    expect(providerCanEditRuntimeConfig(makeProvider({ enabled: false }))).toBe(
+      false,
+    );
     expect(
       providerCanEditRuntimeConfig(makeProvider({ credential_fields: [] })),
     ).toBe(false);
