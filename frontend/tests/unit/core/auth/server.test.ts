@@ -106,3 +106,65 @@ describe("getServerSideUser", () => {
     expect(isAuthDisabledMode()).toBe(false);
   });
 });
+
+describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () => {
+  let saved: EnvSnapshot;
+
+  beforeEach(() => {
+    saved = snapshotEnv();
+    setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
+    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
+  });
+
+  afterEach(() => {
+    restoreEnv(saved);
+    vi.unstubAllGlobals();
+    vi.doUnmock("next/headers");
+  });
+
+  test("returns gateway_unavailable when /auth/me fetch rejects (e.g. AbortError)", async () => {
+    vi.doMock("next/headers", () => ({
+      cookies: vi.fn(async () => ({
+        get: (name: string) =>
+          name === "access_token" ? { value: "stub-token" } : undefined,
+      })),
+    }));
+    const abortErr = new DOMException("Aborted", "AbortError");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(abortErr)),
+    );
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "gateway_unavailable",
+    });
+  });
+
+  test("returns gateway_unavailable when /auth/me responds with a 5xx", async () => {
+    vi.doMock("next/headers", () => ({
+      cookies: vi.fn(async () => ({
+        get: (name: string) =>
+          name === "access_token" ? { value: "stub-token" } : undefined,
+      })),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response("upstream error", {
+            status: 503,
+            statusText: "Service Unavailable",
+          }),
+        ),
+      ),
+    );
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "gateway_unavailable",
+    });
+  });
+});
