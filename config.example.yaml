@@ -517,7 +517,7 @@ tools:
   # - name: web_search
   #   group: web
   #   use: deerflow.community.searxng.tools:web_search_tool
-  #   base_url: http://localhost:8080   # SearXNG instance URL (Docker: http://searxng:8080)
+  #   base_url: http://localhost:8088   # SearXNG instance URL (default: :8088; Docker: http://searxng:8080)
   #   max_results: 5                     # Maximum number of search results
 
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
@@ -569,15 +569,12 @@ tools:
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.browserless.tools:web_fetch_tool
-  #   base_url: http://localhost:3000    # Browserless instance URL (Docker: http://browserless:3000)
+  #   base_url: http://localhost:3032    # Browserless instance URL (default: :3032; Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
   #   timeout_s: 30                       # Request timeout in seconds
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
-  #   # wait_for_selector_timeout_ms: 5000  # Timeout for selector wait in milliseconds
-  #   # reject_resource_types: ["image"]    # Resource types to block for faster loads (e.g. ["image", "stylesheet"])
-  #   # reject_request_pattern: ["/\\.css$/"]  # URL patterns to block (regex strings)
 
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
