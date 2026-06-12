@@ -476,6 +476,8 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      adminRequired: "需要管理员权限才能管理 MCP 工具。",
+      empty: "暂无 MCP 工具。",
     },
     channels: {
       title: "渠道",
