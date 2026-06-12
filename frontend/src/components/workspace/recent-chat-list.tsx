@@ -55,9 +55,15 @@ import {
   useRenameThread,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
-import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import {
+  channelSourceOfThread,
+  pathOfThread,
+  titleOfThread,
+} from "@/core/threads/utils";
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
+
+import { ThreadChannelIcon } from "./thread-channel-source";
 
 export function RecentChatList() {
   const { t } = useI18n();
@@ -210,6 +216,7 @@ export function RecentChatList() {
             <div className="flex w-full flex-col gap-1">
               {threads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
+                const channelSource = channelSourceOfThread(thread);
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -218,10 +225,23 @@ export function RecentChatList() {
                     <SidebarMenuButton isActive={isActive} asChild>
                       <div>
                         <Link
-                          className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                          className="text-muted-foreground flex min-w-0 items-center gap-1.5 pr-7 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                           href={pathOfThread(thread)}
                         >
-                          {titleOfThread(thread)}
+                          <ThreadChannelIcon source={channelSource} />
+                          <span className="min-w-0 truncate">
+                            {titleOfThread(thread)}
+                          </span>
+                          {channelSource && (
+                            <span
+                              className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
+                              title={`${channelSource.label} channel`}
+                            >
+                              <span className="truncate">
+                                {channelSource.label}
+                              </span>
+                            </span>
+                          )}
                         </Link>
                         {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                           <DropdownMenu>

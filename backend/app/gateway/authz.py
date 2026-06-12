@@ -276,6 +276,8 @@ def require_permission(
             # strict-deny rather than strict-allow — only an *existing*
             # row with a *different* user_id triggers 404.
             if owner_check:
+                from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
                 thread_id = kwargs.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
@@ -288,6 +290,22 @@ def require_permission(
                     str(auth.user.id),
                     require_existing=require_existing,
                 )
+                if not allowed and getattr(auth.user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+                    # Trusted internal callers (channel workers) also act for
+                    # the connection owner carried in X-DeerFlow-Owner-User-Id.
+                    # Scope the check to that owner instead of bypassing it; a
+                    # leaked internal token must not grant cross-user thread
+                    # access. The header is honored only after ``auth`` proved
+                    # the caller holds the internal token (mirrors
+                    # get_trusted_internal_owner_user_id, which keys off the
+                    # middleware-stamped ``request.state.user``).
+                    header_owner = (request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
+                    if header_owner:
+                        allowed = await thread_store.check_access(
+                            thread_id,
+                            header_owner,
+                            require_existing=require_existing,
+                        )
                 if not allowed:
                     raise HTTPException(
                         status_code=404,

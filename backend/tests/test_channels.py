@@ -487,6 +487,7 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
 
     # threads.create() returns a Thread-like dict
     mock_client.threads.create = AsyncMock(return_value={"thread_id": thread_id})
+    mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
 
     # threads.get() returns thread info (succeeds by default)
     mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id})
@@ -502,6 +503,17 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     mock_client.runs.wait = AsyncMock(return_value=run_result)
 
     return mock_client
+
+
+async def _make_channel_connection_repo(tmp_path: Path):
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'channel-connections.db'}", sqlite_dir=str(tmp_path))
+    return ChannelConnectionRepository(
+        get_session_factory(),
+        cipher=ChannelCredentialCipher.from_key("test-channel-key"),
+    )
 
 
 def _make_stream_part(event: str, data):
@@ -656,16 +668,34 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text="hi")
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                topic_id="topic1",
+                thread_ts="msg1",
+                connection_id="conn1",
+            )
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             # Thread should be created through Gateway
             mock_client.threads.create.assert_called_once()
+            assert mock_client.threads.create.call_args.kwargs["metadata"] == {
+                "channel_source": {
+                    "type": "im_channel",
+                    "provider": "test",
+                    "chat_id": "chat1",
+                    "topic_id": "topic1",
+                    "thread_ts": "msg1",
+                    "connection_id": "conn1",
+                }
+            }
 
             # Thread ID should be stored
-            thread_id = store.get_thread_id("test", "chat1")
+            thread_id = store.get_thread_id("test", "chat1", topic_id="topic1")
             assert thread_id == "test-thread-123"
 
             # runs.wait should be called with the thread_id
@@ -883,9 +913,11 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_clarification_follow_up_preserves_history(self):
+    def test_clarification_follow_up_preserves_history(self, monkeypatch):
         """Conversation should continue after ask_clarification instead of resetting history."""
         from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
@@ -1954,9 +1986,11 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_same_topic_reuses_thread(self):
+    def test_same_topic_reuses_thread(self, monkeypatch):
         """Messages with the same topic_id should reuse the same DeerFlow thread."""
         from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
@@ -1990,6 +2024,17 @@ class TestChannelManager:
 
             # threads.create should be called only ONCE (second message reuses the thread)
             mock_client.threads.create.assert_called_once()
+            mock_client.threads.update.assert_called_once_with(
+                "topic-thread-1",
+                metadata={
+                    "channel_source": {
+                        "type": "im_channel",
+                        "provider": "test",
+                        "chat_id": "chat1",
+                        "topic_id": "topic-root-123",
+                    }
+                },
+            )
 
             # Both runs.wait calls should use the same thread_id
             assert mock_client.runs.wait.call_count == 2
@@ -2325,8 +2370,9 @@ class TestResolveRunParamsUserId:
         store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         return ChannelManager(bus=bus, store=store)
 
-    def test_safe_user_id_is_passed_through(self):
+    def test_safe_user_id_is_passed_through(self, monkeypatch):
         manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
         msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="123456", text="hi")
 
         _, _, run_context = manager._resolve_run_params(msg, "thread-1")
@@ -2334,10 +2380,78 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] == "123456"
         assert run_context["channel_user_id"] == "123456"
 
-    def test_unsafe_user_id_is_normalized_but_raw_preserved(self):
+    def test_connection_owner_user_id_takes_precedence_over_platform_user_id(self, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U-platform",
+            owner_user_id="deerflow-user-1",
+            connection_id="connection-1",
+            text="hi",
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "deerflow-user-1"
+        assert run_context["channel_user_id"] == "U-platform"
+
+    def test_auth_disabled_user_id_is_used_for_unbound_channel_messages(self, monkeypatch):
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+        manager = self._manager()
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+        msg = InboundMessage(channel_name="slack", chat_id="C123", user_id="U-platform", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+        assert run_context["channel_user_id"] == "U-platform"
+
+        from app.channels.manager import _owner_headers
+
+        headers = _owner_headers(msg)
+        assert headers is not None
+        assert headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == AUTH_DISABLED_USER_ID
+
+    def test_auth_disabled_user_id_overrides_bound_owner_for_local_visibility(self, monkeypatch):
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+
+        manager = self._manager()
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U-platform",
+            owner_user_id="real-user-from-old-binding",
+            text="hi",
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+        assert run_context["channel_user_id"] == "U-platform"
+
+    def test_unbound_channel_messages_keep_platform_user_id_when_auth_is_enabled(self, monkeypatch):
+        from app.channels.manager import _owner_headers
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="slack", chat_id="C123", user_id="U-platform", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "U-platform"
+        assert run_context["channel_user_id"] == "U-platform"
+        assert _owner_headers(msg) is None
+
+    def test_unsafe_user_id_is_normalized_but_raw_preserved(self, monkeypatch):
         from deerflow.config.paths import make_safe_user_id
 
         manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
         raw = "user@example.com"
         msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
 
@@ -2347,15 +2461,125 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] != raw
         assert run_context["channel_user_id"] == raw
 
-    @pytest.mark.parametrize("raw_user_id", ["", None])
-    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id):
+    def test_unsafe_user_id_migrates_unique_legacy_bucket(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths, make_safe_user_id
+
+        paths = Paths(tmp_path)
+        legacy_dir = paths.base_dir / "users" / "user-example-com-63a710569261a24b"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "memory.json").write_text('{"legacy": true}\n', encoding="utf-8")
+        monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
         manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        safe = make_safe_user_id(raw)
+        assert run_context["user_id"] == safe
+        assert paths.user_dir(safe).exists()
+        assert not legacy_dir.exists()
+        assert (paths.user_dir(safe) / "memory.json").read_text(encoding="utf-8") == '{"legacy": true}\n'
+
+    @pytest.mark.parametrize("raw_user_id", ["", None])
+    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
         msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw_user_id, text="hi")
 
         _, _, run_context = manager._resolve_run_params(msg, "thread-1")
 
         assert "user_id" not in run_context
         assert "channel_user_id" not in run_context
+
+
+class TestChannelManagerConnectionRouting:
+    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+        from deerflow.persistence.engine import close_engine
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            repo = await _make_channel_connection_repo(tmp_path)
+            alice = await repo.upsert_connection(
+                owner_user_id="alice",
+                provider="slack",
+                external_account_id="U-alice",
+                workspace_id="T1",
+            )
+            bob = await repo.upsert_connection(
+                owner_user_id="bob",
+                provider="slack",
+                external_account_id="U-bob",
+                workspace_id="T1",
+            )
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "legacy-store.json")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
+            mock_client = _make_mock_langgraph_client()
+            mock_client.threads.create = AsyncMock(
+                side_effect=[
+                    {"thread_id": "thread-alice"},
+                    {"thread_id": "thread-bob"},
+                ]
+            )
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-alice",
+                    owner_user_id="alice",
+                    connection_id=alice["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-bob",
+                    owner_user_id="bob",
+                    connection_id=bob["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+
+            assert await repo.get_thread_id(alice["id"], "C-shared", "1710000000.000100") == "thread-alice"
+            assert await repo.get_thread_id(bob["id"], "C-shared", "1710000000.000100") == "thread-bob"
+            assert store.list_entries() == []
+
+            first_context = mock_client.runs.wait.call_args_list[0].kwargs["context"]
+            second_context = mock_client.runs.wait.call_args_list[1].kwargs["context"]
+            assert first_context["user_id"] == "alice"
+            assert first_context["channel_user_id"] == "U-alice"
+            assert second_context["user_id"] == "bob"
+            assert second_context["channel_user_id"] == "U-bob"
+
+            first_create_headers = mock_client.threads.create.call_args_list[0].kwargs["headers"]
+            second_create_headers = mock_client.threads.create.call_args_list[1].kwargs["headers"]
+            assert first_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
+
+            first_run_headers = mock_client.runs.wait.call_args_list[0].kwargs["headers"]
+            second_run_headers = mock_client.runs.wait.call_args_list[1].kwargs["headers"]
+            assert first_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
+
+        try:
+            _run(go())
+        finally:
+            _run(close_engine())
 
 
 # ---------------------------------------------------------------------------
@@ -3108,6 +3332,38 @@ class TestChannelService:
 
         _run(go())
 
+    def test_concurrent_ensure_channel_ready_starts_channel_once(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            await service.manager.start()
+            service._running = True
+            start_calls = []
+
+            async def fake_start_channel(name, config):
+                start_calls.append(name)
+                await asyncio.sleep(0.01)
+                service._channels[name] = SimpleNamespace(is_running=True, stop=AsyncMock())
+                return True
+
+            service._start_channel = fake_start_channel
+
+            results = await asyncio.gather(
+                service.ensure_channel_ready("telegram"),
+                service.ensure_channel_ready("telegram"),
+            )
+
+            assert results == [True, True]
+            assert start_calls == ["telegram"]
+            await service.stop()
+
+        _run(go())
+
     def test_session_config_is_forwarded_to_manager(self):
         from app.channels.service import ChannelService
 
@@ -3175,6 +3431,226 @@ class TestChannelService:
 
         assert service._config == {"telegram": {"enabled": False}}
 
+    def test_from_app_config_does_not_create_runtime_channels_from_channel_connections(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config == {}
+
+    def test_from_app_config_preserves_existing_runtime_channels_with_channel_connections_enabled(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": True, "bot_token": "telegram-token"},
+                    "slack": {"enabled": True, "bot_token": "xoxb", "app_token": "xapp"},
+                    "discord": {"enabled": True, "bot_token": "discord-bot-token"},
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["telegram"]["bot_token"] == "telegram-token"
+        assert service._config["slack"]["app_token"] == "xapp"
+        assert service._config["discord"]["bot_token"] == "discord-bot-token"
+
+    def test_from_app_config_loads_persisted_runtime_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "slack": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["slack"] == {
+            "enabled": True,
+            "bot_token": "xoxb-ui",
+            "app_token": "xapp-ui",
+        }
+
+    def test_from_app_config_runtime_disconnect_suppresses_file_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "feishu",
+            {
+                "enabled": False,
+                "_runtime_disabled": True,
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "feishu": {
+                        "enabled": True,
+                        "app_id": "file-app-id",
+                        "app_secret": "file-secret",
+                    }
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "feishu": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert "feishu" not in service._config
+
+    def test_start_retries_configured_channel_until_ready(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        class FlakyReadyChannel(Channel):
+            starts = 0
+
+            def __init__(self, bus, config):
+                super().__init__(name="slack", bus=bus, config=config)
+
+            async def start(self):
+                type(self).starts += 1
+                self._running = type(self).starts >= 2
+
+            async def stop(self):
+                self._running = False
+
+            async def send(self, msg):
+                return None
+
+        monkeypatch.setattr(
+            "deerflow.reflection.resolve_class",
+            lambda import_path, base_class=None: FlakyReadyChannel,
+        )
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "slack": {
+                        "enabled": True,
+                        "bot_token": "xoxb-ui",
+                        "app_token": "xapp-ui",
+                    },
+                }
+            )
+
+            try:
+                await service.start()
+
+                assert FlakyReadyChannel.starts == 2
+                assert service.get_status()["channels"]["slack"]["running"] is True
+            finally:
+                await service.stop()
+
+        _run(go())
+
+    def test_connection_repo_is_forwarded_to_manager(self):
+        from app.channels.service import ChannelService
+
+        repo = object()
+        service = ChannelService(channels_config={}, connection_repo=repo)
+
+        assert service.manager._connection_repo is repo
+
+    def test_remove_channel_stops_running_channel_and_forgets_config(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "slack": {
+                        "enabled": True,
+                        "bot_token": "xoxb-ui",
+                        "app_token": "xapp-ui",
+                    },
+                }
+            )
+            channel = AsyncMock()
+            service._channels["slack"] = channel
+            service._running = True
+
+            assert await service.remove_channel("slack") is True
+
+            channel.stop.assert_awaited_once()
+            assert "slack" not in service._channels
+            assert "slack" not in service._config
+
+        _run(go())
+
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""
         import logging
@@ -3192,7 +3668,8 @@ class TestChannelService:
             await service.stop()
 
         _run(go())
-        assert any("wecom" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert any("credentials configured but is disabled" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert all("wecom" not in r.message for r in caplog.records)
 
     def test_disabled_channel_with_int_creds_emits_warning(self, caplog):
         """Warning is emitted even when YAML-parsed integer credentials are present."""
@@ -3212,7 +3689,8 @@ class TestChannelService:
             await service.stop()
 
         _run(go())
-        assert any("telegram" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert any("credentials configured but is disabled" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert all("telegram" not in r.message for r in caplog.records)
 
     def test_disabled_channel_without_creds_emits_info(self, caplog):
         """Only an info log (no warning) is emitted when a channel is disabled with no credentials."""
@@ -3266,6 +3744,83 @@ class TestChannelService:
         assert started_configs["feishu"]["app_id"] == "new_id"
         assert started_configs["feishu"]["app_secret"] == "new_secret"
         assert service._config["feishu"]["app_id"] == "new_id"
+
+    def test_configure_channel_keeps_explicit_config_over_stale_file_entry(self, monkeypatch):
+        """UI-entered runtime credentials must not be clobbered by a config.yaml reload.
+
+        configure_channel() receives the authoritative config (e.g. from the
+        browser Connect/Modify dialog, never written to config.yaml), so its
+        restart must skip the file reload that restart_channel() performs for
+        operator-triggered restarts.
+        """
+        from app.channels.service import ChannelService
+
+        stale_file_config = {"feishu": {"enabled": True, "app_id": "file_id", "app_secret": "file_secret"}}
+
+        def mock_get_app_config():
+            return SimpleNamespace(model_extra={"channels": stale_file_config})
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        service = ChannelService(channels_config={})
+        service._running = True
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.configure_channel("feishu", {"enabled": True, "app_id": "ui_id", "app_secret": "ui_secret"})
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "ui_id"
+        assert started_configs["feishu"]["app_secret"] == "ui_secret"
+        assert service._config["feishu"]["app_id"] == "ui_id"
+
+    def test_restart_channel_reload_applies_runtime_store_overlay(self, monkeypatch, tmp_path):
+        """An operator-triggered restart keeps UI runtime-store credentials for
+        channels that have no config.yaml entry."""
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "telegram",
+            {"enabled": True, "bot_token": "store-token"},
+        )
+
+        def mock_get_app_config():
+            return SimpleNamespace(
+                model_extra={"channels": {}},
+                channel_connections=ChannelConnectionsConfig.model_validate({"enabled": True, "telegram": {"enabled": True, "bot_username": "deerflow_bot"}}),
+            )
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        service = ChannelService(channels_config={})
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("telegram")
+
+        _run(go())
+
+        assert started_configs["telegram"]["bot_token"] == "store-token"
 
     def test_restart_channel_falls_back_to_cached_config_on_error(self, monkeypatch):
         """When get_app_config() fails, restart_channel uses cached config."""

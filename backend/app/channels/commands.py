@@ -20,6 +20,17 @@ KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
 )
 
 
+def extract_connect_code(text: str) -> str | None:
+    """Extract the one-time channel binding code from a connect command."""
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return None
+    command = parts[0].lower()
+    if command in {"/connect", "connect"}:
+        return parts[1]
+    return None
+
+
 def is_known_channel_command(text: str) -> bool:
     """Return whether text starts with a registered channel control command."""
     if not text.startswith("/"):

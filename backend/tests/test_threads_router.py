@@ -1,4 +1,5 @@
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -216,6 +217,37 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
     assert body["created_at"] == body["updated_at"]
+
+
+def test_internal_owner_header_assigns_thread_to_owner() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        response = await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="channel-thread", metadata={}),
+            request,
+        )
+        owner_row = await thread_store.get("channel-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-thread", user_id="default")
+        return response, owner_row, internal_row
+
+    response, owner_row, internal_row = asyncio.run(_scenario())
+
+    assert response.thread_id == "channel-thread"
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
 
 
 def test_get_thread_returns_iso_for_legacy_unix_record() -> None:

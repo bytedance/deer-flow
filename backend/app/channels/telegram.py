@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class TelegramChannel(Channel):
                 pass
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
+        self._connection_repo = config.get("connection_repo")
 
     async def start(self) -> None:
         if self._running:
@@ -233,6 +235,54 @@ class TelegramChannel(Channel):
             return True
         return user_id in self._allowed_users
 
+    @staticmethod
+    def _telegram_display_name(user) -> str:
+        full_name = getattr(user, "full_name", None)
+        if isinstance(full_name, str) and full_name:
+            return full_name
+        username = getattr(user, "username", None)
+        if isinstance(username, str) and username:
+            return username
+        return str(getattr(user, "id", ""))
+
+    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+        if self._connection_repo is None or not state_token:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
+        if state is None:
+            await update.message.reply_text("Telegram connection link is invalid or expired.")
+            return True
+
+        owner_user_id = state["owner_user_id"]
+        user_id = str(update.effective_user.id)
+        chat_id = str(update.effective_chat.id)
+        connection = await self._connection_repo.upsert_connection(
+            owner_user_id=owner_user_id,
+            provider="telegram",
+            external_account_id=user_id,
+            external_account_name=self._telegram_display_name(update.effective_user),
+            workspace_id=chat_id,
+            workspace_name=None,
+            metadata={
+                "chat_id": chat_id,
+                "chat_type": update.effective_chat.type,
+                "telegram_username": getattr(update.effective_user, "username", None),
+            },
+            status="connected",
+        )
+        logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
+        await update.message.reply_text("Telegram connected to DeerFlow.")
+        return True
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="telegram",
+            workspace_id=inbound.chat_id,
+        )
+
     def _get_bot_username(self, context) -> str | None:
         bot = getattr(context, "bot", None)
         username = getattr(bot, "username", None)
@@ -264,6 +314,11 @@ class TelegramChannel(Channel):
         """Handle /start command."""
         if not self._check_user(update.effective_user.id):
             return
+        args = getattr(context, "args", []) if context is not None else []
+        if args:
+            handled = await self._bind_connection_from_start_token(update, str(args[0]))
+            if handled:
+                return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
@@ -299,6 +354,7 @@ class TelegramChannel(Channel):
             thread_ts=msg_id,
         )
         inbound.topic_id = topic_id
+        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
@@ -341,6 +397,7 @@ class TelegramChannel(Channel):
             thread_ts=msg_id,
         )
         inbound.topic_id = topic_id
+        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)

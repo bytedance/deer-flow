@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values
@@ -257,11 +258,19 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_store = get_thread_store(request)
     thread_id = body.thread_id or str(uuid.uuid4())
     now = now_iso()
+    thread_owner_user_id = get_trusted_internal_owner_user_id(request)
+    thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
-    existing_record = await thread_store.get(thread_id)
+    existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if existing_record is None and thread_owner_user_id:
+        unscoped_record = await thread_store.get(thread_id, user_id=None)
+        if unscoped_record is not None:
+            if unscoped_record.get("user_id") != thread_owner_user_id:
+                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
+            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is not None:
         return ThreadResponse(
             thread_id=thread_id,
@@ -276,6 +285,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         await thread_store.create(
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
+            **thread_owner_kwargs,
             metadata=body.metadata,
         )
     except Exception:

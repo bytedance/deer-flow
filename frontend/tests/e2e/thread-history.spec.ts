@@ -258,4 +258,43 @@ test.describe("Thread history", () => {
     });
     await expect(main.getByText("Second conversation")).toBeVisible();
   });
+
+  test("IM channel threads show their source in thread lists", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Feishu conversation",
+          updated_at: "2025-06-03T12:00:00Z",
+          metadata: {
+            channel_source: {
+              type: "im_channel",
+              provider: "feishu",
+              chat_id: "oc_mock",
+            },
+          },
+        },
+      ],
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebarThread = page.locator(
+      `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
+    );
+    await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
+    await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
+
+    await page.goto("/workspace/chats");
+
+    const mainThread = page
+      .locator("main")
+      .locator(`a[href='/workspace/chats/${MOCK_THREAD_ID}']`);
+    await expect(mainThread.getByText("Feishu conversation")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(mainThread.getByText("Feishu", { exact: true })).toBeVisible();
+  });
 });
