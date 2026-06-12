@@ -26,11 +26,14 @@ with the least exposure that fits your setup:
 
 | Need | How | Exposure |
 |------|-----|----------|
-| Claude model provider | env `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` (via `.env`) | none — token only |
+| Claude model provider | env `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` (via `.env`), or `CLAUDE_CODE_CREDENTIALS_PATH` → a single mounted `.credentials.json` | none / one file |
 | Codex model provider | env `CODEX_AUTH_PATH` pointing at a single mounted `auth.json` | one file |
-| ACP agent running the CLI in-container | opt-in `docker/docker-compose.cli-auth.yaml` overlay | full dir (read-only) |
+| ACP agent | the adapter's own auth — many ACP adapters take an env API key (e.g. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and need no mount; use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only if your adapter reads the full CLI config dir | none / full dir |
 
 The Gateway credential loader checks environment variables **before** the
-default credential files, so the env-token paths need no bind mount at all. Use
-the `docker-compose.cli-auth.yaml` overlay only when the in-container CLI
-genuinely needs the full config directory (e.g. some ACP adapters).
+default credential files, so the env-token paths need no bind mount at all. ACP
+adapters authenticate independently of DeerFlow — their credential source is
+adapter-defined, and some require a standard API key via env rather than the CLI
+subscription login. Prefer the adapter's documented env auth, and reach for the
+`docker-compose.cli-auth.yaml` overlay only when an adapter genuinely needs the
+full CLI config directory.
