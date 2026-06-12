@@ -105,7 +105,13 @@ services:
       - type: bind
         source: ${HOME:?HOME must be set}/.claude
         target: /root/.claude
-        read_only: true
+        read_only: false
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude.json
+        target: /root/.claude.json
+        read_only: false
         bind:
           create_host_path: true
       - type: bind

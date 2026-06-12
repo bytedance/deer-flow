@@ -1,0 +1,28 @@
+<!--
+DEPLOYMENT ARTIFACT - 农信AI助手 config.yaml
+=============================================
+源文件：docs/superpowers/deployment/农信AI助手-config.yaml
+目标路径：{DEER_FLOW_HOME}/agents/农信AI助手/config.yaml
+        （行方部署时：./.deer-flow/agents/农信AI助手/config.yaml）
+
+修改流程：
+  1. 编辑本文件
+  2. 拷贝到目标路径（cp 覆盖）
+  3. 重启 DeerFlow 服务（agent 配置仅启动时加载）
+
+注意：
+  - skills 列表需与项目根目录 skills/public/ 下的目录名完全匹配
+  - model 字段需与 config.yaml 主配置中的 models[] 名称一致
+  - tool_groups 留空表示不开放任何外接工具
+-->
+name: 农信AI助手
+description: 陕西省农村信用社联合社内嵌 AI 办公助手
+model: gpt-4
+skills:
+  - chinese-official-writing
+  - data-analysis
+  - markitdown
+  - summarize-1.0.0
+  - deep-research
+  # 图片识别/OCR 待行方对接视觉服务后启用（TBD-OCR）
+tool_groups: []

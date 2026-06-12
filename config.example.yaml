@@ -601,6 +601,13 @@ tools:
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
 
+  - name: dify_chat
+    group: community
+    use: zens.community.dify.tools:dify_chat_tool
+    # api_key: $DIFY_API_KEY  # Required: your Dify API key
+    # app_id: app-ZzvO2ic3KveYOeQcI4xYT8Qq  # Optional: defaults to this app
+    # base_url: http://localhost:8000  # Optional: defaults to localhost:8000
+
   # File operations tools
   - name: ls
     group: file:read
@@ -895,9 +902,9 @@ sandbox:
 # acp_agents:
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
-#     # speak ACP directly. Install `claude-agent-acp` separately or use:
+#     # speak ACP directly. Install the ACP adapter separately or use:
 #     command: npx
-#     args: ["-y", "@zed-industries/claude-agent-acp"]
+#     args: ["-y", "@agentclientprotocol/claude-agent-acp"]
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
@@ -914,6 +921,18 @@ sandbox:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#   pi:
+#     # Pi is a lightweight coding agent. For offline deployments, install via
+#     # offline-claude/bundle-pi-coding-agent.sh and offline-claude/bundle-pi-acp.sh, which
+#     # vendor the binaries to /usr/local/bin. For online use, `npx -y pi-acp`
+#     # also works (requires npm registry access).
+#     command: pi-acp
+#     args: []
+#     description: Pi coding agent — light, fast for small code-generation tasks (single-file edits, bug fixes, small refactors)
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   PI_ACP_ENABLE_EMBEDDED_CONTEXT: "true"  # pi-acp-specific knob
 
 # ============================================================================
 # Skills Configuration

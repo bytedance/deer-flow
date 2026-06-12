@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "deerflow-harness",
+    "zens",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.27",
@@ -46,7 +47,8 @@ markers = [
 index-url = "https://pypi.org/simple"
 
 [tool.uv.workspace]
-members = ["packages/harness"]
+members = ["packages/harness", "packages/zens"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+zens = { workspace = true }
