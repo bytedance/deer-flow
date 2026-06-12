@@ -5,6 +5,10 @@ their sandbox and post comments themselves mid-run, so the channel does NOT
 auto-deliver the agent's final assistant message to GitHub. These tests pin
 that contract — any regression that re-introduces an HTTP call during
 ``send`` will fail the httpx tripwire.
+
+Queued and overflow acknowledgements are a separate path
+(``acknowledge_followup``). They may POST a comment reaction; ``send`` must
+not.
 """
 
 from __future__ import annotations
@@ -161,3 +165,47 @@ async def test_send_handles_non_dict_github_metadata(monkeypatch: pytest.MonkeyP
 
     tripwire.assert_not_awaited()
     assert any("a/b" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_followup_posts_eyes_and_confused(monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = GitHubChannel(bus=MessageBus(), config={})
+    calls: list[tuple[dict, str]] = []
+
+    async def capture(target, content):
+        calls.append((dict(target), content))
+        return True
+
+    monkeypatch.setattr("app.channels.github.post_comment_reaction", capture)
+    target = {"provider": "github", "repo": "octo/hello", "comment_id": 4242, "subject": "issue_comment", "installation_id": 77}
+    await channel.acknowledge_followup(target, kind="queued")
+    await channel.acknowledge_followup(target, kind="overflow")
+
+    assert calls == [(target, "eyes"), (target, "confused")]
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_followup_ignores_unknown_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = GitHubChannel(bus=MessageBus(), config={})
+
+    async def fail(*args, **kwargs):
+        raise AssertionError("reaction should not be posted")
+
+    monkeypatch.setattr("app.channels.github.post_comment_reaction", fail)
+    await channel.acknowledge_followup({"provider": "slack", "comment_id": 1}, kind="queued")
+    await channel.acknowledge_followup({"provider": "github", "comment_id": 1}, kind="working")
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_followup_swallows_poster_errors(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = GitHubChannel(bus=MessageBus(), config={})
+
+    async def explode(*args, **kwargs):
+        raise RuntimeError("token=ghs_should_not_leak")
+
+    monkeypatch.setattr("app.channels.github.post_comment_reaction", explode)
+    with caplog.at_level(logging.WARNING, logger="app.channels.github"):
+        await channel.acknowledge_followup({"provider": "github"}, kind="queued")
+
+    assert "ghs_should_not_leak" not in caplog.text
+    assert any("comment reaction failed kind=queued" in record.message for record in caplog.records)

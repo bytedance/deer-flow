@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -130,6 +130,11 @@ class Channel(ABC):
     def supports_streaming(self) -> bool:
         return False
 
+    #: True when this provider can show a queued/overflow acknowledgement.
+    #: The manager only calls :meth:`acknowledge_followup` for channels that
+    #: set this; the default method is a no-op.
+    supports_followup_ack = False
+
     # -- lifecycle ---------------------------------------------------------
 
     @abstractmethod
@@ -200,6 +205,19 @@ class Channel(ABC):
         bindings. The outbox target remains the external account identity.
         """
         await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def acknowledge_followup(self, target: Mapping[str, Any], *, kind: str) -> None:
+        """Best-effort visible acknowledgement for a buffered follow-up.
+
+        ``kind`` is ``queued`` when the manager accepted the comment into
+        the per-thread buffer, or ``overflow`` when the cap dropped it.
+        ``target`` is the opaque ``followup_ack`` mapping the provider
+        stamped on the inbound message. The default does nothing.
+
+        Implementations must not raise. A failed acknowledgement must not
+        change buffering or run admission.
+        """
+        return None
 
     async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
         """Push to an explicitly selected group binding, never a personal fallback.

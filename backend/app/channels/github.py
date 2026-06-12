@@ -31,10 +31,12 @@ Why log-only rather than auto-post:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus, OutboundMessage
+from app.gateway.github.reactions import REACTION_BY_KIND, post_comment_reaction
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,10 @@ class GitHubChannel(Channel):
     the bus. Outbound: ``send`` is log-only (see module docstring) — agents
     post to GitHub themselves via the ``gh`` CLI in their sandbox.
 
+    ``supports_followup_ack`` lets the manager ask for an ``eyes`` reaction
+    when a comment is queued behind a busy run, and ``confused`` when the
+    per-thread buffer drops it.
+
     Configuration keys (in ``config.yaml`` under ``channels.github``):
 
         - ``enabled`` (bool): set to ``true`` to activate.
@@ -53,6 +59,8 @@ class GitHubChannel(Channel):
           ``require_mention`` when the agent binding does not set one.
           Falls back to ``"deerflow-bot"``.
     """
+
+    supports_followup_ack = True
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="github", bus=bus, config=config)
@@ -113,3 +121,18 @@ class GitHubChannel(Channel):
         # spamming INFO. Truncate to keep log lines bounded.
         if body:
             logger.debug("[GitHubChannel] final body (truncated to 2000 chars): %s", body[:2000])
+
+    async def acknowledge_followup(self, target: Mapping[str, Any], *, kind: str) -> None:
+        """React on a queued or dropped comment. Never raises.
+
+        Only a GitHub ``followup_ack`` is posted. Unknown kinds and other
+        providers are ignored. HTTP and token failures are logged inside
+        :func:`post_comment_reaction` and do not propagate.
+        """
+        content = REACTION_BY_KIND.get(kind)
+        if content is None or not isinstance(target, Mapping) or target.get("provider") != "github":
+            return
+        try:
+            await post_comment_reaction(target, content)
+        except Exception:
+            logger.warning("[GitHubChannel] comment reaction failed kind=%s", kind)
