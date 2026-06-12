@@ -42,6 +42,16 @@ def _make_brave_response(results: list) -> MagicMock:
     return mock_resp
 
 
+def _count_aware_get(results: list):
+    """Mimic Brave returning at most `count` results for the request."""
+
+    def _get(url, **kwargs):
+        count = kwargs["params"]["count"]
+        return _make_brave_response(results[:count])
+
+    return _get
+
+
 class TestGetApiKey:
     def test_returns_config_key_when_present(self):
         with patch("deerflow.community.brave.tools.get_app_config") as mock:
@@ -126,10 +136,9 @@ class TestWebSearchTool:
             "max_results": 3,
         }
         results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "description": f"D{i}"} for i in range(10)]
-        mock_resp = _make_brave_response(results)
 
         with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
-            mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_resp
+            mock_client_cls.return_value.__enter__.return_value.get.side_effect = _count_aware_get(results)
 
             from deerflow.community.brave.tools import web_search_tool
 
@@ -142,11 +151,10 @@ class TestWebSearchTool:
     def test_max_results_parameter_accepted(self, mock_config_no_key):
         """Tool accepts max_results as a call parameter when config does not override it."""
         results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "description": f"D{i}"} for i in range(10)]
-        mock_resp = _make_brave_response(results)
 
         with patch.dict("os.environ", {"BRAVE_SEARCH_API_KEY": "env-key"}, clear=True):
             with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
-                mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_resp
+                mock_client_cls.return_value.__enter__.return_value.get.side_effect = _count_aware_get(results)
 
                 from deerflow.community.brave.tools import web_search_tool
 
@@ -162,10 +170,9 @@ class TestWebSearchTool:
             mock.return_value.get_tool_config.return_value = tool_config
 
             results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "description": f"D{i}"} for i in range(10)]
-            mock_resp = _make_brave_response(results)
 
             with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
-                mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_resp
+                mock_client_cls.return_value.__enter__.return_value.get.side_effect = _count_aware_get(results)
 
                 from deerflow.community.brave.tools import web_search_tool
 
@@ -182,11 +189,10 @@ class TestWebSearchTool:
             mock.return_value.get_tool_config.return_value = tool_config
 
             results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "description": f"D{i}"} for i in range(30)]
-            mock_resp = _make_brave_response(results)
 
             with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
                 mock_get = mock_client_cls.return_value.__enter__.return_value.get
-                mock_get.return_value = mock_resp
+                mock_get.side_effect = _count_aware_get(results)
 
                 from deerflow.community.brave.tools import web_search_tool
 
@@ -204,11 +210,10 @@ class TestWebSearchTool:
             mock.return_value.get_tool_config.return_value = tool_config
 
             results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "description": f"D{i}"} for i in range(10)]
-            mock_resp = _make_brave_response(results)
 
             with patch("deerflow.community.brave.tools.httpx.Client") as mock_client_cls:
                 mock_get = mock_client_cls.return_value.__enter__.return_value.get
-                mock_get.return_value = mock_resp
+                mock_get.side_effect = _count_aware_get(results)
 
                 from deerflow.community.brave.tools import web_search_tool
 

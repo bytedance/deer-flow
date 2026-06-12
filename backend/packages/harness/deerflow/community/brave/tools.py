@@ -108,7 +108,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
             "url": r.get("url", ""),
             "content": r.get("description", ""),
         }
-        for r in web_results[:count]
+        for r in web_results
     ]
 
     output = {
