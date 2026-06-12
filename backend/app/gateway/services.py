@@ -326,11 +326,19 @@ async def start_run(
     # temp threads) and NULL-owner rows (shared / pre-auth data) stay accessible
     # via check_access; only a thread already owned by another user is rejected
     # with 404, matching thread_runs.py's anti-enumeration behaviour. Internal
-    # channel runs act on behalf of IM users they do not own (see
-    # inject_authenticated_user_context), so the internal system role is exempt.
+    # channel runs act on behalf of the connection owner carried in
+    # X-DeerFlow-Owner-User-Id, so they are scoped to that owner instead of
+    # bypassing the check -- a leaked internal token must not grant cross-user
+    # thread access.
     user = getattr(request.state, "user", None)
-    if user is not None and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
-        if not await run_ctx.thread_store.check_access(thread_id, str(user.id)):
+    if user is not None:
+        allowed = await run_ctx.thread_store.check_access(thread_id, str(user.id))
+        if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+            # Channel workers may also act for the connection owner named in
+            # the trusted header (e.g. claiming a legacy default-owned channel
+            # thread for its real owner).
+            allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
+        if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None

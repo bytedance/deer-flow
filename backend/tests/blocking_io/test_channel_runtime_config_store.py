@@ -16,13 +16,13 @@ surface under test is exactly the router's own IO, mirroring
 from __future__ import annotations
 
 import asyncio
+import importlib
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from fastapi import FastAPI, Request
 
-import app.channels.service  # noqa: F401  # pre-import: handlers import it lazily; import IO must not run on the loop
 from app.channels.runtime_config_store import ChannelRuntimeConfigStore
 from app.gateway.routers.channel_connections import (
     ChannelRuntimeConfigRequest,
@@ -31,6 +31,10 @@ from app.gateway.routers.channel_connections import (
 )
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+# Pre-import: the handlers import this module lazily; the import's file IO
+# must happen at collection time, not on the event loop under the gate.
+importlib.import_module("app.channels.service")
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,7 +58,7 @@ def _make_request(tmp_path) -> Request:
     app.state.channel_connection_repo = _FakeRepo()
     store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
     app.state.channel_runtime_config_store = store
-    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"))
+    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
     return Request({"type": "http", "app": app, "headers": [], "state": {"user": user}})
 
 

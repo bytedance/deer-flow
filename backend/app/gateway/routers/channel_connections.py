@@ -134,6 +134,24 @@ def _get_user_id(request: Request) -> str:
     return str(user.id)
 
 
+async def _require_admin_user(request: Request) -> None:
+    """Require an admin caller for instance-wide channel runtime mutations.
+
+    Runtime credentials and the channel workers they start/stop are shared by
+    every user of the deployment, so only admins may change them (same model
+    as the MCP config API). Auth-disabled local mode uses a synthetic admin
+    user and is unaffected.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        from app.gateway.deps import get_current_user_from_request
+
+        user = await get_current_user_from_request(request)
+
+    if getattr(user, "system_role", None) != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required to manage channel runtime credentials.")
+
+
 def _get_app_config():
     from deerflow.config.app_config import get_app_config
 
@@ -491,14 +509,18 @@ async def get_channel_providers(request: Request) -> ChannelProvidersResponse:
     connections = await repo.list_connections(owner_user_id) if repo is not None else []
     by_provider = _newest_connection_by_provider(connections)
 
+    enabled_providers = [provider for provider in _PROVIDER_META if config.provider_status(provider)["enabled"]]
+    # Readiness reconciliation is independent per provider; run it
+    # concurrently so one slow channel restart does not serialize the
+    # whole /providers response.
+    await asyncio.gather(
+        *(_ensure_runtime_channel_ready_if_available(provider, channels_config) for provider in enabled_providers if _runtime_channel_configured(provider, channels_config)),
+    )
+
     providers: list[ChannelProviderResponse] = []
-    for provider, meta in _PROVIDER_META.items():
-        if not config.provider_status(provider)["enabled"]:
-            continue
-        if _runtime_channel_configured(provider, channels_config):
-            await _ensure_runtime_channel_ready_if_available(provider, channels_config)
+    for provider in enabled_providers:
         connection = by_provider.get(provider)
-        providers.append(_provider_response(config, channels_config, provider, meta, connection))
+        providers.append(_provider_response(config, channels_config, provider, _PROVIDER_META[provider], connection))
     return ChannelProvidersResponse(enabled=config.enabled, providers=providers)
 
 
@@ -530,6 +552,7 @@ async def disconnect_channel_connection(connection_id: str, request: Request) ->
 
 @router.delete("/{provider}/runtime-config", response_model=ChannelProviderResponse)
 async def disconnect_channel_provider_runtime(provider: str, request: Request) -> ChannelProviderResponse:
+    await _require_admin_user(request)
     config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
@@ -608,6 +631,7 @@ async def configure_channel_provider_runtime(
     body: ChannelRuntimeConfigRequest,
     request: Request,
 ) -> ChannelProviderResponse:
+    await _require_admin_user(request)
     config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")

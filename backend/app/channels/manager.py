@@ -735,6 +735,7 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._client = None  # lazy init — langgraph_sdk async client
+        self._channel_metadata_synced: set[str] = set()
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -982,6 +983,11 @@ class ChannelManager:
 
     async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
         """Best-effort source metadata backfill for existing IM-created threads."""
+        # The metadata (provider/chat/topic) is constant for a thread, so one
+        # successful backfill per manager lifetime is enough — skip the
+        # redundant PATCH on every subsequent inbound message.
+        if thread_id in self._channel_metadata_synced:
+            return
         update_kwargs: dict[str, Any] = {"metadata": _thread_channel_metadata(msg)}
         if owner_headers := _owner_headers(msg):
             update_kwargs["headers"] = owner_headers
@@ -989,6 +995,10 @@ class ChannelManager:
             await client.threads.update(thread_id, **update_kwargs)
         except Exception:
             logger.debug("[Manager] failed to update channel metadata for thread_id=%s", thread_id, exc_info=True)
+            return
+        if len(self._channel_metadata_synced) > 4096:
+            self._channel_metadata_synced.clear()
+        self._channel_metadata_synced.add(thread_id)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()

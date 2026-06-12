@@ -32,6 +32,15 @@ def _user() -> User:
         id=UUID("11111111-2222-3333-4444-555555555555"),
         email="alice@example.com",
         password_hash="x",
+        system_role="admin",
+    )
+
+
+def _non_admin_user() -> User:
+    return User(
+        id=UUID("99999999-8888-7777-6666-555555555555"),
+        email="bob@example.com",
+        password_hash="x",
         system_role="user",
     )
 
@@ -565,6 +574,42 @@ def test_configure_provider_runtime_credentials_enables_connect_without_file_edi
     }
     assert connect_response.status_code == 200
     assert connect_response.json()["provider"] == "slack"
+
+    anyio.run(repo.close)
+
+
+def test_runtime_config_endpoints_require_admin(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    app = make_authed_test_app(user_factory=_non_admin_user)
+    app.state.channel_connections_config = config
+    app.state.channel_connection_repo = repo
+    app.state.channels_config = {}
+    runtime_config_dir = TemporaryDirectory()
+    app.state.channel_runtime_config_tmpdir = runtime_config_dir
+    app.state.channel_runtime_config_store = ChannelRuntimeConfigStore(f"{runtime_config_dir.name}/runtime-config.json")
+    app.include_router(channel_connections.router)
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        providers_response = client.get("/api/channels/providers")
+
+    assert configure_response.status_code == 403
+    assert "Admin privileges" in configure_response.json()["detail"]
+    assert disconnect_response.status_code == 403
+    # Read-only provider listing stays available to regular users.
+    assert providers_response.status_code == 200
 
     anyio.run(repo.close)
 

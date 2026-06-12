@@ -67,6 +67,7 @@ class SlackChannel(Channel):
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
         self._connection_repo = config.get("connection_repo")
         self._web_client_factory = config.get("web_client_factory")
+        self._connection_web_clients: dict[str, tuple[str, Any]] = {}
         configured_bot_user_id = config.get("bot_user_id")
         self._bot_user_id = str(configured_bot_user_id).lstrip("@") if configured_bot_user_id else None
 
@@ -229,11 +230,18 @@ class SlackChannel(Channel):
             access_token = credentials.get("access_token") if credentials else None
             if not access_token:
                 return self._web_client
+            # WebClient keeps its own HTTP session and rate-limit state, so
+            # reuse one per connection until its token changes.
+            cached = self._connection_web_clients.get(msg.connection_id)
+            if cached is not None and cached[0] == access_token:
+                return cached[1]
             if self._web_client_factory is None:
                 from slack_sdk import WebClient
 
                 self._web_client_factory = WebClient
-            return self._web_client_factory(token=access_token)
+            web_client = self._web_client_factory(token=access_token)
+            self._connection_web_clients[msg.connection_id] = (access_token, web_client)
+            return web_client
         return self._web_client
 
     @staticmethod
