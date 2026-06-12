@@ -1,6 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { loadModels } from "./api";
+import {
+  createModel,
+  deleteModel,
+  detectModels,
+  loadModels,
+  updateModel,
+} from "./api";
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   const { data, isLoading, error } = useQuery({
@@ -15,4 +21,40 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     isLoading,
     error,
   };
+}
+
+export function useDetectModels() {
+  return useMutation({
+    mutationFn: detectModels,
+  });
+}
+
+export function useCreateModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: createModel,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}
+
+export function useUpdateModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateModel,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}
+
+export function useDeleteModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: deleteModel,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
 }
