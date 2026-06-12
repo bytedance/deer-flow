@@ -25,7 +25,7 @@ from app.gateway.deps import get_checkpointer
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime import serialize_channel_values
+from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -437,7 +437,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
-        values=serialize_channel_values(channel_values),
+        values=serialize_channel_values_for_api(channel_values),
     )
 
 
@@ -480,7 +480,7 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
     next_tasks = [t.name for t in tasks_raw if hasattr(t, "name")]
     tasks = [{"id": getattr(t, "id", ""), "name": getattr(t, "name", "")} for t in tasks_raw]
 
-    values = serialize_channel_values(channel_values)
+    values = serialize_channel_values_for_api(channel_values)
 
     return ThreadStateResponse(
         values=values,
@@ -588,7 +588,7 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
                 logger.debug("Failed to sync title to thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
     return ThreadStateResponse(
-        values=serialize_channel_values(channel_values),
+        values=serialize_channel_values_for_api(channel_values),
         next=[],
         metadata=metadata,
         checkpoint_id=new_checkpoint_id,
@@ -640,7 +640,7 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             if is_latest_checkpoint:
                 messages = channel_values.get("messages")
                 if messages:
-                    values["messages"] = serialize_channel_values({"messages": messages}).get("messages", [])
+                    values["messages"] = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
             is_latest_checkpoint = False
 
             # Derive next tasks
