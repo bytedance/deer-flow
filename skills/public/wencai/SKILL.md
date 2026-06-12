@@ -47,6 +47,33 @@ Guide users to obtain cookie:
 
 Store cookie securely (environment variable or config file recommended).
 
+### Auto-loading from `.env` (recommended)
+
+A pre-populated `.env` file lives at this skill's directory:
+`/mnt/skills/public/wencai/.env`, containing the line `WENCAI_COOKIE=...`.
+
+**One-time load per shell session** (paste this before running pywencai):
+
+```bash
+set -a; source /mnt/skills/public/wencai/.env; set +a
+```
+
+Or in Python (call once at the top of your script):
+
+```python
+from pathlib import Path
+import os
+for line in Path('/mnt/skills/public/wencai/.env').read_text().splitlines():
+    if line and not line.startswith('#') and '=' in line:
+        k, v = line.split('=', 1)
+        os.environ.setdefault(k, v)
+```
+
+After loading, use `cookie=os.environ['WENCAI_COOKIE']` — no need to paste the cookie again.
+
+> **Note**: This `.env` is a plaintext credential. If it ever leaks, rotate the cookie on https://www.iwencai.com/ immediately.
+
+
 ## Common Query Patterns
 
 ### Market Screening
