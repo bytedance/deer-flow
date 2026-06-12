@@ -717,12 +717,11 @@ def _finalize_findings(visitor: BlockingIOStaticVisitor) -> list[BlockingIOStati
     return findings
 
 
-def scan_file(path: Path, *, repo_root: Path = REPO_ROOT) -> list[BlockingIOStaticFinding]:
-    source = path.read_text(encoding="utf-8")
+def scan_source(source: str, relative_path: str) -> list[BlockingIOStaticFinding]:
+    """Scan one in-memory Python source; `relative_path` is reported verbatim in findings."""
     source_lines = source.splitlines()
-    relative_path = relative_to_repo(path, repo_root)
     try:
-        tree = ast.parse(source, filename=str(path))
+        tree = ast.parse(source, filename=relative_path)
     except SyntaxError as exc:
         line = exc.lineno or 0
         code = _source_snippet(source_lines, line)
@@ -744,6 +743,10 @@ def scan_file(path: Path, *, repo_root: Path = REPO_ROOT) -> list[BlockingIOStat
     visitor = BlockingIOStaticVisitor(relative_path, source_lines)
     visitor.visit(tree)
     return sorted(_finalize_findings(visitor), key=lambda finding: (finding.path, finding.line, finding.column, finding.category))
+
+
+def scan_file(path: Path, *, repo_root: Path = REPO_ROOT) -> list[BlockingIOStaticFinding]:
+    return scan_source(path.read_text(encoding="utf-8"), relative_to_repo(path, repo_root))
 
 
 def is_ignored_path(path: Path) -> bool:
