@@ -50,7 +50,10 @@ class MemoryRunStore(RunStore):
         run = self._runs.get(run_id)
         if run is None:
             return None
-        if user_id is not None and run.get("user_id") != user_id:
+        # legacy rows with empty user_id are not hard-filtered (problem H-compat):
+        # only reject when the row has a non-empty user_id that mismatches.
+        row_user_id = run.get("user_id")
+        if user_id is not None and row_user_id and row_user_id != user_id:
             return None
         return run
 

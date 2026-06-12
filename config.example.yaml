@@ -1141,6 +1141,38 @@ run_events:
   track_token_usage: true
 
 # ============================================================================
+# Stream Bridge Configuration
+# ============================================================================
+# Transport for streaming run events from the agent worker (producer) to the
+# SSE endpoint (consumer).
+#
+# type: memory  -- In-process event log (default). Single-process only; a
+#                  subscriber on another worker/replica cannot read the stream.
+# type: redis   -- Redis Streams backend for multi-worker / multi-replica
+#                  deployments. Requires the optional dependency:
+#                  pip install "deerflow-harness[redis]"
+#
+# Notes:
+# - Environment variables are resolved only when the whole value is "$VAR"
+#   (e.g. redis_url: $REDIS_URL). "${VAR}" / inline interpolation is NOT supported.
+# - redis_ttl_seconds defaults to 86400 (24h); shortening it must still satisfy
+#   long-idle runs, late joins, and reconnection windows.
+# - Command and blocking-subscribe connection pools are sized independently so
+#   a flood of SSE subscribers cannot starve publishes.
+#
+# stream_bridge:
+#   type: redis
+#   redis_url: $REDIS_URL
+#   queue_maxsize: 256
+#   redis_max_command_connections: 64
+#   redis_max_blocking_connections: 1024
+#   redis_pool_timeout: 1.0
+#   redis_ttl_seconds: 86400
+stream_bridge:
+  type: memory
+  queue_maxsize: 256
+
+# ============================================================================
 # IM Channels Configuration
 # ============================================================================
 # Connect DeerFlow to external messaging platforms.

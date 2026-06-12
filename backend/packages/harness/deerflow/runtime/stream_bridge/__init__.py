@@ -10,11 +10,13 @@ by :mod:`asyncio.Queue`.
 from .async_provider import make_stream_bridge
 from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
 from .memory import MemoryStreamBridge
+from .redis import RedisStreamBridge
 
 __all__ = [
     "END_SENTINEL",
     "HEARTBEAT_SENTINEL",
     "MemoryStreamBridge",
+    "RedisStreamBridge",
     "StreamBridge",
     "StreamEvent",
     "make_stream_bridge",

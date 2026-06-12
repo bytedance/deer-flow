@@ -2,6 +2,7 @@
 
 from .manager import ConflictError, RunManager, RunRecord, UnsupportedStrategyError
 from .schemas import DisconnectMode, RunStatus
+from .terminal import TERMINAL_STATUSES, build_end_payload
 from .worker import RunContext, run_agent
 
 __all__ = [
@@ -11,6 +12,8 @@ __all__ = [
     "RunManager",
     "RunRecord",
     "RunStatus",
+    "TERMINAL_STATUSES",
     "UnsupportedStrategyError",
+    "build_end_payload",
     "run_agent",
 ]

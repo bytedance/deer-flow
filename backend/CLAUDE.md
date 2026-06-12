@@ -477,6 +477,23 @@ LangSmith and Langfuse are both supported. The wiring lives in two layers:
 
 Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only deployments are unaffected. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment. Tests live in `tests/test_tracing_factory.py`, `tests/test_tracing_metadata.py`, `tests/test_worker_langfuse_metadata.py`, and `tests/test_client_langfuse_metadata.py`.
 
+### Stream Bridge (`packages/harness/deerflow/runtime/stream_bridge/`)
+
+Decouples agent workers (producers) from SSE endpoints (consumers), aligning with LangGraph Platform's Queue + StreamManager architecture. A run's events are published by the worker and replayed/streamed to any number of SSE subscribers (with `Last-Event-ID` reconnection support).
+
+- **Abstract protocol** (`base.py`): `StreamBridge` with `publish` / `publish_end` / `subscribe` / `cleanup` / `refresh_ttl` / `has_retained_stream` / `has_events_after` / `ping`. `subscribe()` yields `StreamEvent` plus `HEARTBEAT_SENTINEL` (idle) and `END_SENTINEL` (producer done). `supports_cross_process_subscribe` tells routers whether `store_only` runs on another worker can be joined.
+- **`MemoryStreamBridge`** (`memory.py`): in-process `asyncio.Queue`, single-process only (`supports_cross_process_subscribe=False`).
+- **`RedisStreamBridge`** (`redis.py`, extra `deerflow-harness[redis]`): Redis Streams backend for multi-worker / multi-replica deployments (`supports_cross_process_subscribe=True`). Any replica can subscribe to a run regardless of which worker produced the events. Key behaviors:
+  - Data-event `publish` is **best-effort with bounded retry**: transient `redis.ConnectionError` / `redis.TimeoutError` / `OSError` are retried with short backoff (`_PUBLISH_RETRY_BACKOFFS`), then the frame is dropped + logged rather than raised, so Redis availability does not couple to run success rate. Note redis-py's `ConnectionError` / `TimeoutError` do **not** inherit from builtin `OSError`, so all three are caught explicitly (`self._retryable_errors`).
+  - **Dual connection pools**: a command pool (`redis_max_command_connections`) for publish/cleanup/refresh_ttl/boundary probes, isolated from a blocking subscribe pool (`redis_max_blocking_connections`) so SSE subscriber floods cannot starve publishes.
+  - END is written as a normal stream entry (`event=__end__`) so ordering and late-join replay are preserved; the Redis stream entry id (`<ms>-<seq>`) is used directly as the SSE `id:`.
+  - TTL: `refresh_ttl` is sampled at most once per 60s on the publish hot path; long-idle runs are kept alive by the worker TTL keeper (`worker.py`). `redis_ttl_seconds` (default 24h, min 60s) is the fallback expiry when cleanup is missed.
+  - Oversized payloads (> `redis_max_payload_bytes`) are rejected (dropped for data events) and logged.
+- **Async factory** (`async_provider.py`): `make_stream_bridge(app_config=None)` is an async context manager; reads `app_config.stream_bridge` (or the global `get_stream_bridge_config()` when called with no args), constructs the backend, and `await bridge.ping()`s redis on startup. Falls back to memory when unconfigured.
+- **Config** (`config/stream_bridge_config.py` → `config.yaml` `stream_bridge`): `type` (`memory`|`redis`), `redis_url`, `queue_maxsize`, pool sizes/timeouts, `redis_ttl_seconds`, `redis_max_payload_bytes`, `redis_key_prefix`, `redis_require_tls`. `stream_bridge` is a **startup-only** field (see reload boundary above).
+- **Terminal helpers** (`runtime/runs/terminal.py`): single source of truth for `TERMINAL_STATUSES` and `build_end_payload()`, shared by the router-level terminal short-circuit (`thread_runs.py`) and the service-layer terminal reconciliation (`services.py`) so the real / short-circuit / synthetic `end` frames never drift.
+- **Tests**: `tests/test_redis_stream_bridge.py` (fakeredis unit tests), `tests/test_terminal_reconcile.py`, `tests/test_worker_stream_ttl.py`, `tests/test_run_store_user_scope.py`.
+
 ### Config Schema
 
 **`config.yaml`** key sections:
