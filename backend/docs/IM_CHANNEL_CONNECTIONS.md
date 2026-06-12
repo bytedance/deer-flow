@@ -100,7 +100,7 @@ Feishu/Lark, DingTalk, WeChat, and WeCom:
 - The UI shows `Send /connect <code> to the DeerFlow <Provider> bot.`
 - The already-running long-connection or polling worker receives the message and binds the platform user/workspace identity to the current DeerFlow user.
 
-Codes expire after 10 minutes and are single-use.
+Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 
 ## Runtime Model
 
@@ -116,6 +116,7 @@ Incoming messages that resolve to a connection carry `connection_id`, `owner_use
 ## Security Notes
 
 - Browser APIs remain authenticated and CSRF-protected.
-- Connect codes are random, short-lived, and single-use.
+- Connect codes are 128-bit random, short-lived, and single-use.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
+- Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
 - This implementation does not add public provider callback or webhook routes.

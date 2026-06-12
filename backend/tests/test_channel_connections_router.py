@@ -188,6 +188,20 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     anyio.run(repo.close)
 
 
+def test_get_providers_degrades_when_persistence_is_unavailable(monkeypatch):
+    monkeypatch.setattr(channel_connections, "get_session_factory", lambda: None)
+    app = _make_app(_enabled_connections_config(), None, _channels_config())
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["slack"]["configured"] is True
+    assert by_provider["slack"]["connectable"] is True
+    assert by_provider["slack"]["connection_status"] == "connected"
+
+
 def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_path):
     import anyio
 

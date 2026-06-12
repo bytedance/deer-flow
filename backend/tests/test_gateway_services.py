@@ -48,6 +48,12 @@ def test_format_sse_no_event_id():
     assert "id:" not in frame
 
 
+def test_sanitize_log_param_strips_control_characters():
+    from app.gateway.utils import sanitize_log_param
+
+    assert sanitize_log_param("thread\nid\rwith\x00controls") == "threadidwithcontrols"
+
+
 def test_normalize_stream_modes_none():
     from app.gateway.services import normalize_stream_modes
 

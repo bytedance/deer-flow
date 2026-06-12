@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -121,6 +122,26 @@ class TestChannelConnectionRepository:
         assert credentials["token_type"] == "Bearer"
         assert credentials["expires_at"] == expires_at
         assert credentials["extra"] == {"bot_user_id": "B123"}
+
+    @pytest.mark.anyio
+    async def test_get_credentials_returns_none_when_decryption_fails(self, repo, caplog):
+        connection = await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-alice",
+            workspace_id="T1",
+        )
+        await repo.store_credentials(connection["id"], access_token="xoxb-secret-access-token")
+        wrong_key_repo = ChannelConnectionRepository(
+            repo.session_factory,
+            cipher=ChannelCredentialCipher.from_key("wrong-encryption-key"),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.channel_connections.sql"):
+            credentials = await wrong_key_repo.get_credentials(connection["id"])
+
+        assert credentials is None
+        assert any("Unable to decrypt channel connection credentials" in record.message for record in caplog.records)
 
     @pytest.mark.anyio
     async def test_conversations_are_scoped_by_connection(self, repo):
