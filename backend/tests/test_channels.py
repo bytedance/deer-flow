@@ -4992,11 +4992,36 @@ class TestTelegramStreaming:
                 raise Exception("Bad Request: message is not modified")
 
             bot.edit_message_text = edit_not_modified
-            # Same text again as final — must not raise, must not send a new message
+            # Same text again as final — skipped via the equal-text guard:
+            # must not raise, must not send a new message
             await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=True, thread_ts="42"))
 
             assert len(bot.sent) == 1  # placeholder only
             assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_edit_raising_not_modified_is_swallowed(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            async def edit_not_modified(**kwargs):
+                raise Exception("Bad Request: message is not modified")
+
+            bot.edit_message_text = edit_not_modified
+            # Final text differs from last_text, so the edit IS attempted and
+            # raises not-modified — must be swallowed, no fallback send.
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=True, thread_ts="42"))
+
+            assert len(bot.sent) == 1  # placeholder only
+            assert "12345:42" not in ch._stream_messages
+            assert ch._last_bot_message["12345"] == placeholder_id
 
         _run(go())
 
