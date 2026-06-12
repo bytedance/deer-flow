@@ -7,6 +7,8 @@ overwrites the previously accumulated value.
 
 from typing import get_type_hints
 
+import pytest
+
 from deerflow.agents.thread_state import (
     ThreadState,
     merge_artifacts,
@@ -32,15 +34,22 @@ class TestMergeSandbox:
         new = {"sandbox_id": "sandbox-1"}
         assert merge_sandbox(existing, new) == existing
 
+    def test_both_none_sandbox_id_is_idempotent(self):
+        existing = {"sandbox_id": None}
+        new = {"sandbox_id": None}
+        assert merge_sandbox(existing, new) == existing
+
+    def test_omitted_sandbox_id_is_idempotent(self):
+        """An omitted sandbox_id represents uninitialized sandbox state."""
+        existing = {}
+        new = {}
+        assert merge_sandbox(existing, new) == existing
+
     def test_conflicting_sandbox_ids_raise(self):
         existing = {"sandbox_id": "sandbox-1"}
         new = {"sandbox_id": "sandbox-2"}
-        try:
+        with pytest.raises(ValueError, match="Conflicting sandbox state updates"):
             merge_sandbox(existing, new)
-        except ValueError as exc:
-            assert "Conflicting sandbox state updates" in str(exc)
-        else:
-            raise AssertionError("Expected conflicting sandbox ids to fail closed")
 
 
 class TestMergeTodos:
