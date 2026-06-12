@@ -399,7 +399,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 5. Feishu/Telegram chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
 6. Slack/Discord chat: `runs.wait()` → extract final response → publish outbound
 7. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-8. Telegram streaming: the "Working on it..." placeholder message is registered as the stream target; non-final updates `editMessageText` it in place (1s channel-side throttle, 4096-char truncation, rate-limited updates dropped); the final update performs the last edit and splits >4096 texts into follow-up messages
+8. Telegram streaming: the "Working on it..." placeholder message is registered as the stream target; non-final updates `editMessageText` it in place (channel-side throttle: 1s in private chats, 3s in groups due to Telegram's 20 msg/min group cap; 4096-char truncation; rate-limited updates dropped); the final update performs the last edit and splits >4096 texts into follow-up messages
 9. DingTalk AI Card mode (when `card_template_id` configured): `runs.stream()` → create card with initial text → stream updates via `PUT /v1.0/card/streaming` → finalize on `is_final=True`. Falls back to `sampleMarkdown` if card creation or streaming fails
 10. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
 11. Outbound → channel callbacks → platform reply

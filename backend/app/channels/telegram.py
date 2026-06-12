@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
+# Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
+# so stream edits there must pace well below the private-chat 1 msg/s guideline.
+STREAM_EDIT_GROUP_MIN_INTERVAL_SECONDS = 3.0
 
 # Indirection so tests can patch the clock without touching the global time module.
 _monotonic = time.monotonic
@@ -162,7 +165,8 @@ class TelegramChannel(Channel):
             return
 
         now = _monotonic()
-        if now - state["last_edit_at"] < STREAM_EDIT_MIN_INTERVAL_SECONDS:
+        min_interval = STREAM_EDIT_GROUP_MIN_INTERVAL_SECONDS if chat_id < 0 else STREAM_EDIT_MIN_INTERVAL_SECONDS
+        if now - state["last_edit_at"] < min_interval:
             return
         if display == state["last_text"]:
             return

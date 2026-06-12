@@ -39,7 +39,7 @@ Telegram 通道目前完全不流式：`ChannelManager._handle_chat()` 走 `clie
 ### `send()` 按 `is_final` 分流
 
 **`is_final=False`（流式更新）：**
-1. 节流：距同 key 上次成功编辑 < 1.0 秒 → 直接丢弃本次更新（安全：每条更新都是全量文本，final 必达兜底）。
+1. 节流：距同 key 上次成功编辑 < 1.0 秒（群聊 `chat_id` 为负数时为 3.0 秒，因 Telegram 群有 20 条/分钟上限）→ 直接丢弃本次更新（安全：每条更新都是全量文本，final 必达兜底）。
 2. 文本与 `last_text` 相同 → 跳过。
 3. 已登记流式消息 → `edit_message_text`；未登记（占位发送失败等）→ `send_message` 新建并登记。
 4. 文本 > 4096 字符 → 截断到 4095 并以 `…` 结尾后再编辑。

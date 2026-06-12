@@ -4918,6 +4918,28 @@ class TestTelegramStreaming:
 
         _run(go())
 
+    def test_stream_updates_in_group_chat_use_wider_throttle(self, monkeypatch):
+        """Telegram groups (negative chat_id) are capped at 20 messages/minute,
+        so group-chat stream edits throttle at 3s instead of 1s."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("-100123", 42)
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="a", is_final=False, thread_ts="42"))
+            clock["now"] += 1.2  # past the 1s private window, within the 3s group window -> dropped
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="ab", is_final=False, thread_ts="42"))
+            clock["now"] += 2.0  # 3.2s since last edit -> edited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="abc", is_final=False, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["a", "abc"]
+
+        _run(go())
+
     def test_stream_update_without_placeholder_sends_new_message(self):
         async def go():
             ch, bot = self._make_channel_with_bot()
