@@ -3234,6 +3234,151 @@ class TestChannelService:
         warning_records = [r for r in caplog.records if "telegram" in r.message and r.levelno == logging.WARNING]
         assert not warning_records
 
+    # -- restart_channel config reload tests (issue #3497) --
+
+    def test_restart_channel_reloads_config_from_disk(self, monkeypatch):
+        """restart_channel reads the latest config via get_app_config()."""
+        from app.channels.service import ChannelService
+
+        initial_config = {"feishu": {"enabled": True, "app_id": "old_id", "app_secret": "old_secret"}}
+        updated_config = {"feishu": {"enabled": True, "app_id": "new_id", "app_secret": "new_secret"}}
+
+        service = ChannelService(channels_config=initial_config)
+
+        def mock_get_app_config():
+            return SimpleNamespace(model_extra={"channels": updated_config})
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu")
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "new_id"
+        assert started_configs["feishu"]["app_secret"] == "new_secret"
+        assert service._config["feishu"]["app_id"] == "new_id"
+
+    def test_restart_channel_falls_back_to_cached_config_on_error(self, monkeypatch):
+        """When get_app_config() fails, restart_channel uses cached config."""
+        from app.channels.service import ChannelService
+
+        cached_config = {"feishu": {"enabled": True, "app_id": "cached_id", "app_secret": "cached_secret"}}
+        service = ChannelService(channels_config=cached_config)
+
+        def _raise():
+            raise RuntimeError("config missing")
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", _raise)
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu")
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "cached_id"
+
+    def test_restart_channel_returns_false_for_unknown_channel(self):
+        """restart_channel returns False when the channel has no config."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={})
+
+        async def go():
+            result = await service.restart_channel("nonexistent")
+            assert result is False
+
+        _run(go())
+
+    def test_restart_channel_stops_existing_channel_before_restart(self):
+        """restart_channel stops the running channel instance before restarting."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"feishu": {"enabled": True, "app_id": "x", "app_secret": "y"}})
+
+        stopped = []
+
+        class FakeChannel:
+            is_running = True
+
+            async def stop(self):
+                stopped.append(True)
+
+        service._channels["feishu"] = FakeChannel()
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu")
+
+        _run(go())
+
+        assert stopped
+        assert "feishu" in started_configs
+
+    def test_restart_channel_skips_disabled_channel(self, monkeypatch):
+        """restart_channel stops the channel and returns True when config has enabled: false."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"feishu": {"enabled": True, "app_id": "x", "app_secret": "y"}})
+
+        stopped = []
+
+        class FakeChannel:
+            is_running = True
+
+            async def stop(self):
+                stopped.append(True)
+
+        service._channels["feishu"] = FakeChannel()
+
+        # Simulate config.yaml updated to enabled: false
+        disabled_config = {"feishu": {"enabled": False, "app_id": "x", "app_secret": "y"}}
+
+        def mock_get_app_config():
+            return SimpleNamespace(model_extra={"channels": disabled_config})
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        started = []
+
+        async def mock_start_channel(name, config):
+            started.append(name)
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            result = await service.restart_channel("feishu")
+            assert result is True  # successfully stopped (no restart needed)
+
+        _run(go())
+
+        assert stopped  # old channel was stopped
+        assert not started  # _start_channel was NOT called
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
