@@ -4948,7 +4948,46 @@ class TestTelegramStreaming:
 
             assert len(bot.sent) == 1
             assert bot.sent[0]["text"] == "Hi"
+            # Threads under the user's message that started this turn
+            assert bot.sent[0]["reply_to_message_id"] == 42
             assert ch._stream_messages["12345:42"]["message_id"] == 100
+
+        _run(go())
+
+    def test_stream_edit_fallback_message_threads_under_user_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_gone(**kwargs):
+                raise Exception("Bad Request: message to edit not found")
+
+            bot.edit_message_text = edit_gone
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+
+            # Fallback message threads under the user's message and becomes the new stream target
+            assert bot.sent[1]["text"] == "Hi"
+            assert bot.sent[1]["reply_to_message_id"] == 42
+            assert ch._stream_messages["12345:42"]["message_id"] == 101
+
+        _run(go())
+
+    def test_stream_message_registry_is_bounded(self):
+        from app.channels.telegram import MAX_TRACKED_STREAM_MESSAGES
+
+        async def go():
+            ch, _bot = self._make_channel_with_bot()
+
+            for i in range(MAX_TRACKED_STREAM_MESSAGES + 1):
+                ch._register_stream_message(f"chat:{i}", message_id=i, last_text="x", last_edit_at=0.0)
+
+            assert len(ch._stream_messages) == MAX_TRACKED_STREAM_MESSAGES
+            assert "chat:0" not in ch._stream_messages  # oldest evicted
+            assert f"chat:{MAX_TRACKED_STREAM_MESSAGES}" in ch._stream_messages
 
         _run(go())
 

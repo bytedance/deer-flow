@@ -19,6 +19,9 @@ STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
 # Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
 # so stream edits there must pace well below the private-chat 1 msg/s guideline.
 STREAM_EDIT_GROUP_MIN_INTERVAL_SECONDS = 3.0
+# Bound on tracked in-flight streamed messages; entries normally clear on the
+# final update, this only guards against leaks when a final never arrives.
+MAX_TRACKED_STREAM_MESSAGES = 256
 
 # Indirection so tests can patch the clock without touching the global time module.
 _monotonic = time.monotonic
@@ -124,7 +127,7 @@ class TelegramChannel(Channel):
         key = self._stream_key(msg.chat_id, msg.thread_ts)
 
         if not msg.is_final:
-            await self._send_stream_update(chat_id, key, msg.text)
+            await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
             return
 
         state = self._stream_messages.pop(key, None)
@@ -134,7 +137,7 @@ class TelegramChannel(Channel):
 
         await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
 
-    async def _send_stream_update(self, chat_id: int, key: str, text: str) -> None:
+    async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
 
         Updates are best-effort: throttled, rate-limit drops are silent.  The
@@ -151,17 +154,17 @@ class TelegramChannel(Channel):
         bot = self._application.bot
         state = self._stream_messages.get(key)
 
+        send_kwargs: dict[str, Any] = {"chat_id": chat_id, "text": display}
+        if reply_to:
+            send_kwargs["reply_to_message_id"] = reply_to
+
         if state is None:
             try:
-                sent = await bot.send_message(chat_id=chat_id, text=display)
+                sent = await bot.send_message(**send_kwargs)
             except Exception:
                 logger.exception("[Telegram] failed to start stream message in chat=%s", chat_id)
                 return
-            self._stream_messages[key] = {
-                "message_id": sent.message_id,
-                "last_edit_at": _monotonic(),
-                "last_text": display,
-            }
+            self._register_stream_message(key, message_id=sent.message_id, last_text=display, last_edit_at=_monotonic())
             return
 
         now = _monotonic()
@@ -182,7 +185,7 @@ class TelegramChannel(Channel):
                 return
             logger.warning("[Telegram] stream edit failed in chat=%s, sending new message: %s", chat_id, exc)
             try:
-                sent = await bot.send_message(chat_id=chat_id, text=display)
+                sent = await bot.send_message(**send_kwargs)
             except Exception:
                 logger.exception("[Telegram] failed to send fallback stream message in chat=%s", chat_id)
                 return
@@ -309,6 +312,23 @@ class TelegramChannel(Channel):
         return f"{chat_id}:{thread_ts or ''}"
 
     @staticmethod
+    def _parse_message_id(value: str | None) -> int | None:
+        try:
+            return int(value) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    def _register_stream_message(self, key: str, *, message_id: int, last_text: str, last_edit_at: float) -> None:
+        self._stream_messages.pop(key, None)
+        while len(self._stream_messages) >= MAX_TRACKED_STREAM_MESSAGES:
+            self._stream_messages.pop(next(iter(self._stream_messages)))
+        self._stream_messages[key] = {
+            "message_id": message_id,
+            "last_edit_at": last_edit_at,
+            "last_text": last_text,
+        }
+
+    @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
         return getattr(exc, "retry_after", None) is not None
 
@@ -338,11 +358,12 @@ class TelegramChannel(Channel):
                 text="Working on it...",
                 reply_to_message_id=reply_to_message_id,
             )
-            self._stream_messages[self._stream_key(chat_id, str(reply_to_message_id))] = {
-                "message_id": sent.message_id,
-                "last_edit_at": 0.0,
-                "last_text": "Working on it...",
-            }
+            self._register_stream_message(
+                self._stream_key(chat_id, str(reply_to_message_id)),
+                message_id=sent.message_id,
+                last_text="Working on it...",
+                last_edit_at=0.0,
+            )
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
