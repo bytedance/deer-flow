@@ -41,11 +41,15 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def _make_test_app(config) -> FastAPI:
+def _make_test_app(config, storage_override=None) -> FastAPI:
+    from app.gateway.deps import get_skill_storage
+
     app = FastAPI()
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
+    if storage_override is not None:
+        app.dependency_overrides[get_skill_storage] = lambda: storage_override
     return app
 
 
@@ -92,18 +96,17 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
-    monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"})
 
     assert response.status_code == 200
     assert response.json()["skill_name"] == "archive-skill"
-    assert (skills_root / "custom" / "archive-skill" / "SKILL.md").exists()
+    assert (storage._get_custom_base() / "archive-skill" / "SKILL.md").exists()
     assert scan_calls == [
         {
             "content": _skill_content("archive-skill"),
@@ -197,24 +200,26 @@ def test_install_skill_archive_security_scan_block_returns_400(monkeypatch, tmp_
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
-    monkeypatch.setattr(skills_router, "get_or_new_skill_storage", lambda **kw: storage)
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/blocked-skill.skill"})
 
     assert response.status_code == 400
     assert "Security scan blocked skill 'blocked-skill': prompt injection" in response.json()["detail"]
-    assert not (skills_root / "custom" / "blocked-skill").exists()
+    assert not (storage._get_custom_base() / "blocked-skill").exists()
     assert refresh_calls == []
 
 
 def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
     skills_root = tmp_path / "skills"
-    custom_dir = skills_root / "custom" / "demo-skill"
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    custom_dir = storage._get_custom_base() / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
     (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
     config = SimpleNamespace(
@@ -230,7 +235,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         response = client.get("/api/skills/custom")
@@ -261,8 +266,11 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
 
 
 def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
     skills_root = tmp_path / "skills"
-    custom_dir = skills_root / "custom" / "demo-skill"
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    custom_dir = storage._get_custom_base() / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
     original_content = _skill_content("demo-skill")
     edited_content = _skill_content("demo-skill", "Edited skill")
@@ -272,7 +280,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    history_file = get_or_new_skill_storage(app_config=config).get_skill_history_file("demo-skill")
+    history_file = storage.get_skill_history_file("demo-skill")
     history_file.parent.mkdir(parents=True, exist_ok=True)
     history_file.write_text(
         '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(edited_content) + "}\n",
@@ -291,7 +299,7 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
@@ -304,8 +312,11 @@ def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
 
 
 def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
     skills_root = tmp_path / "skills"
-    custom_dir = skills_root / "custom" / "demo-skill"
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    custom_dir = storage._get_custom_base() / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
     original_content = _skill_content("demo-skill")
     (custom_dir / "SKILL.md").write_text(original_content, encoding="utf-8")
@@ -322,7 +333,7 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -341,8 +352,11 @@ def test_custom_skill_delete_preserves_history_and_allows_restore(monkeypatch, t
 
 
 def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
     skills_root = tmp_path / "skills"
-    custom_dir = skills_root / "custom" / "demo-skill"
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    custom_dir = storage._get_custom_base() / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
     (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
     config = SimpleNamespace(
@@ -356,12 +370,12 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
         refresh_calls.append("refresh")
 
     def _readonly_history(*args, **kwargs):
-        raise OSError(errno.EROFS, "Read-only file system", str(skills_root / "custom" / ".history"))
+        raise OSError(errno.EROFS, "Read-only file system", str(storage._get_custom_base() / ".history"))
 
     monkeypatch.setattr("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.append_history", _readonly_history)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")
@@ -373,8 +387,11 @@ def test_custom_skill_delete_continues_when_history_write_is_readonly(monkeypatc
 
 
 def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp_path):
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
     skills_root = tmp_path / "skills"
-    custom_dir = skills_root / "custom" / "demo-skill"
+    storage = LocalSkillStorage(host_path=str(skills_root))
+    custom_dir = storage._get_custom_base() / "demo-skill"
     custom_dir.mkdir(parents=True, exist_ok=True)
     (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
     config = SimpleNamespace(
@@ -393,7 +410,7 @@ def test_custom_skill_delete_fails_when_skill_dir_removal_fails(monkeypatch, tmp
     monkeypatch.setattr("deerflow.skills.storage.local_skill_storage.shutil.rmtree", _fail_rmtree)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = _make_test_app(config)
+    app = _make_test_app(config, storage_override=storage)
 
     with TestClient(app) as client:
         delete_response = client.delete("/api/skills/custom/demo-skill")

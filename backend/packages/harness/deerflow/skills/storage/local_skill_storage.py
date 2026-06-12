@@ -25,7 +25,13 @@ DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 class LocalSkillStorage(SkillStorage):
     """Skill storage backed by the local filesystem.
 
-    Layout::
+    Layout (per-user, when ``user_id`` is provided)::
+
+        <root>/public/<name>/SKILL.md
+        <root>/custom/<user_id>/<name>/SKILL.md
+        <root>/custom/<user_id>/.history/<name>.jsonl
+
+    Legacy layout (``user_id=None``, backward-compatible)::
 
         <root>/public/<name>/SKILL.md
         <root>/custom/<name>/SKILL.md
@@ -37,6 +43,7 @@ class LocalSkillStorage(SkillStorage):
         host_path: str | None = None,
         container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
         app_config=None,
+        user_id: str | None = None,
     ) -> None:
         super().__init__(container_path=container_path)
         if host_path is None:
@@ -46,6 +53,7 @@ class LocalSkillStorage(SkillStorage):
             self._host_root: Path = config.skills.get_skills_path()
         else:
             self._host_root = resolve_path(host_path)
+        self._user_id = user_id or None
 
     # ------------------------------------------------------------------
     # Abstract operation implementations
@@ -53,6 +61,11 @@ class LocalSkillStorage(SkillStorage):
 
     def get_skills_root_path(self) -> Path:
         return self._host_root
+
+    def _get_custom_base(self) -> Path:
+        if self._user_id:
+            return self._host_root / SkillCategory.CUSTOM.value / self._user_id
+        return self._host_root / SkillCategory.CUSTOM.value
 
     def custom_skill_exists(self, name: str) -> bool:
         return self.get_custom_skill_file(name).exists()
@@ -65,7 +78,9 @@ class LocalSkillStorage(SkillStorage):
         if not self._host_root.exists():
             return
         for category in SkillCategory:
-            category_path = self._host_root / category.value
+            # For CUSTOM, start from _get_custom_base() so that when user_id is set
+            # we only walk the current user's subdirectory and never expose other users.
+            category_path = self._get_custom_base() if category == SkillCategory.CUSTOM else self._host_root / category.value
             if not category_path.exists() or not category_path.is_dir():
                 continue
             for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
@@ -114,7 +129,7 @@ class LocalSkillStorage(SkillStorage):
         if path.suffix != ".skill":
             raise ValueError("File must have .skill extension")
 
-        custom_dir = self._host_root / "custom"
+        custom_dir = self._get_custom_base()
         custom_dir.mkdir(parents=True, exist_ok=True)
 
         with tempfile.TemporaryDirectory() as tmp:

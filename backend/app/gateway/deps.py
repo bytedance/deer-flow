@@ -23,7 +23,7 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -293,6 +293,52 @@ def get_run_context(request: Request) -> RunContext:
         thread_store=get_thread_store(request),
         app_config=get_config(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Skill storage dependencies
+# ---------------------------------------------------------------------------
+
+
+def get_skill_storage(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+):
+    """Return a per-user ``SkillStorage`` for regular routes.
+
+    Binds to the currently authenticated user so callers cannot access other
+    users' custom skills.  Unauthenticated deployments fall back to
+    ``user_id="default"``, which matches the legacy single-user layout.
+    """
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.skills.storage import get_or_new_skill_storage
+
+    user_id = get_effective_user_id()
+    return get_or_new_skill_storage(user_id=user_id, app_config=config)
+
+
+def get_admin_skill_storage(
+    request: Request,
+    target_user_id: str | None = Query(default=None),
+    config: AppConfig = Depends(get_config),
+):
+    """Return a ``SkillStorage`` for admin routes.
+
+    Admins may pass ``?target_user_id=<uuid>`` to operate on another user's
+    skills.  Non-admin callers that supply ``target_user_id`` receive 403.
+    """
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.skills.storage import get_or_new_skill_storage
+
+    user = getattr(request.state, "user", None)
+    if target_user_id is not None:
+        system_role = getattr(user, "system_role", None)
+        if system_role != "admin":
+            raise HTTPException(status_code=403, detail="Only admins can access other users' skills")
+        uid = target_user_id
+    else:
+        uid = get_effective_user_id()
+    return get_or_new_skill_storage(user_id=uid, app_config=config)
 
 
 # ---------------------------------------------------------------------------
