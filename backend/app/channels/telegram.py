@@ -118,10 +118,14 @@ class TelegramChannel(Channel):
             logger.error("Invalid Telegram chat_id: %s", msg.chat_id)
             return
 
-        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
+        await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+
+    async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
+        """Send a fresh message with retry/backoff. Returns the sent message_id."""
+        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
 
         # Reply to the last bot message in this chat for threading
-        reply_to = self._last_bot_message.get(msg.chat_id)
+        reply_to = self._last_bot_message.get(chat_key)
         if reply_to:
             kwargs["reply_to_message_id"] = reply_to
 
@@ -130,8 +134,8 @@ class TelegramChannel(Channel):
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
-                self._last_bot_message[msg.chat_id] = sent.message_id
-                return
+                self._last_bot_message[chat_key] = sent.message_id
+                return sent.message_id
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
