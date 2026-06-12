@@ -287,6 +287,21 @@ Nginx (port 2026) ← Unified entry point
    git push origin feature/your-feature-name
    ```
 
+## AI assistance disclosure
+
+DeerFlow is an AI project and we welcome AI-assisted contributions. To help
+reviewers calibrate how closely to read a change, **every pull request must
+complete the "AI assistance" section of the
+[PR template](.github/pull_request_template.md)**:
+
+- which tool(s) you used (or `none`),
+- how you used them, and
+- a confirmation that a human has read, understands, and takes responsibility
+  for the change.
+
+Please don't delete the section. PRs that ignore it may be asked to fill it in
+before review.
+
 ## Testing
 
 ```bash

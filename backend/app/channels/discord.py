@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -300,7 +301,7 @@ class DiscordChannel(Channel):
 
             # If this is a known active thread, process normally
             if thread_id in self._active_thread_ids:
-                msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+                msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
                 inbound = self._make_inbound(
                     chat_id=chat_id,
                     user_id=str(message.author.id),
@@ -407,7 +408,7 @@ class DiscordChannel(Channel):
             chat_id = channel_id
             typing_target = message.channel  # Type into the channel
 
-        msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+        msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
         inbound = self._make_inbound(
             chat_id=chat_id,
             user_id=str(message.author.id),

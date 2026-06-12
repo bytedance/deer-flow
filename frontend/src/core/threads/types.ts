@@ -25,6 +25,7 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
+  seq?: number;
   content: Message;
   metadata: {
     caller: string;

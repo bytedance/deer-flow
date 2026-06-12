@@ -257,14 +257,38 @@ def test_provisioner_is_alive_true_only_when_status_running(monkeypatch):
     assert backend._provisioner_is_alive("abc123") is False
 
 
-def test_provisioner_is_alive_returns_false_on_request_exception(monkeypatch):
+def test_provisioner_is_alive_returns_false_on_404(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        return _StubResponse(status_code=404)
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    assert backend._provisioner_is_alive("abc123") is False
+
+
+def test_provisioner_is_alive_raises_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
     def mock_get(url: str, timeout: int):
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(requests, "get", mock_get)
-    assert backend._provisioner_is_alive("abc123") is False
+    with pytest.raises(RuntimeError, match="Provisioner health check failed for abc123"):
+        backend._provisioner_is_alive("abc123")
+
+
+def test_provisioner_is_alive_raises_on_server_error(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def mock_get(url: str, timeout: int):
+        response = _StubResponse(status_code=503)
+        response.text = "unavailable"
+        return response
+
+    monkeypatch.setattr(requests, "get", mock_get)
+    with pytest.raises(RuntimeError, match="HTTP 503 unavailable"):
+        backend._provisioner_is_alive("abc123")
 
 
 def test_discover_delegates_to_provisioner_discover(monkeypatch):

@@ -10,6 +10,7 @@ class SandboxProvider(ABC):
     """Abstract base class for sandbox providers"""
 
     uses_thread_data_mounts: bool = False
+    needs_upload_permission_adjustment: bool = True
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None) -> str:

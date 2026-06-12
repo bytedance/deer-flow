@@ -60,11 +60,16 @@ class TelegramChannel(Channel):
 
         # Command handlers
         app.add_handler(CommandHandler("start", self._cmd_start))
+        app.add_handler(CommandHandler("bootstrap", self._cmd_generic))
         app.add_handler(CommandHandler("new", self._cmd_generic))
         app.add_handler(CommandHandler("status", self._cmd_generic))
         app.add_handler(CommandHandler("models", self._cmd_generic))
         app.add_handler(CommandHandler("memory", self._cmd_generic))
         app.add_handler(CommandHandler("help", self._cmd_generic))
+
+        # Slash skill commands are dynamic and cannot all be pre-registered
+        # with Telegram, so route unknown slash commands through chat handling.
+        app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, self._on_text))
 
         # General message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
@@ -228,6 +233,33 @@ class TelegramChannel(Channel):
             return True
         return user_id in self._allowed_users
 
+    def _get_bot_username(self, context) -> str | None:
+        bot = getattr(context, "bot", None)
+        username = getattr(bot, "username", None)
+        if not username and self._application is not None:
+            username = getattr(getattr(self._application, "bot", None), "username", None)
+        return str(username) if username else None
+
+    @staticmethod
+    def _strip_bot_username_from_leading_command(text: str, bot_username: str | None) -> str:
+        username = (bot_username or "").lstrip("@").lower()
+        if not username or not text.startswith("/"):
+            return text
+
+        parts = text.split(maxsplit=1)
+        command_token = parts[0]
+        if "@" not in command_token:
+            return text
+
+        command_name, addressed_username = command_token[1:].rsplit("@", 1)
+        if not command_name or addressed_username.lower() != username:
+            return text
+
+        normalized = f"/{command_name}"
+        if len(parts) > 1:
+            normalized = f"{normalized} {parts[1]}"
+        return normalized
+
     async def _cmd_start(self, update, context) -> None:
         """Handle /start command."""
         if not self._check_user(update.effective_user.id):
@@ -243,7 +275,7 @@ class TelegramChannel(Channel):
         if not self._check_user(update.effective_user.id):
             return
 
-        text = update.message.text
+        text = self._strip_bot_username_from_leading_command(update.message.text.strip(), self._get_bot_username(context))
         chat_id = str(update.effective_chat.id)
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
@@ -279,7 +311,7 @@ class TelegramChannel(Channel):
         if not self._check_user(update.effective_user.id):
             return
 
-        text = update.message.text.strip()
+        text = self._strip_bot_username_from_leading_command(update.message.text.strip(), self._get_bot_username(context))
         if not text:
             return
 

@@ -12,7 +12,7 @@ from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
@@ -27,6 +27,13 @@ from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.token_collector import SubagentTokenCollector
+
+if TYPE_CHECKING:
+    # Imported lazily at runtime inside _build_initial_state: importing
+    # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
+    # `from deerflow.subagents import SubagentExecutor`, which re-enters this
+    # still-initializing package. Type-only here keeps the annotation precise.
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -319,8 +326,13 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self, tools: list[BaseTool] | None = None):
-        """Create the agent instance."""
+    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+        """Create the agent instance.
+
+        ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
+        deferred MCP tool names + catalog hash so the subagent gets the same
+        DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+        """
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
@@ -329,7 +341,7 @@ class SubagentExecutor:
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -403,19 +415,35 @@ class SubagentExecutor:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
 
         Args:
             task: The task description.
 
         Returns:
-            Initial state dictionary and tools filtered by loaded skill metadata.
+            ``(state, final_tools, deferred_setup)``. ``final_tools`` is the
+            policy-filtered tool list with the ``tool_search`` tool appended when
+            deferral applies; ``deferred_setup`` is consumed by ``_create_agent``
+            so the agent build and the injected ``<available-deferred-tools>``
+            section share one catalog/hash.
         """
+        # Lazy import: see the TYPE_CHECKING note at the top of this module -
+        # importing tool_search runs tools/builtins/__init__, which would
+        # re-enter this package during its own initialization.
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
 
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
+        # Assemble deferred tool_search AFTER policy filtering (fail-closed),
+        # mirroring the lead path so subagents stop binding full MCP schemas.
+        # The generated tool_search helper is intentionally not subject to the
+        # subagent's name-level allow/deny (config.tools / disallowed_tools):
+        # its catalog is built from the already-filtered list, so it can never
+        # surface a tool the policy denied. This matches the lead agent.
+        enabled = (self.app_config or get_app_config()).tool_search.enabled
+        final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
         skill_messages = await self._load_skill_messages(skills)
 
         # Combine system_prompt and skills into a single SystemMessage.
@@ -426,6 +454,11 @@ class SubagentExecutor:
             system_parts.append(self.config.system_prompt)
         for skill_msg in skill_messages:
             system_parts.append(skill_msg.content)
+        # Name the deferred MCP tools in the prompt; their schemas stay withheld
+        # until tool_search promotes them. Empty set -> "" -> appends nothing.
+        deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
+        if deferred_section:
+            system_parts.append(deferred_section)
 
         messages: list[Any] = []
         if system_parts:
@@ -444,7 +477,7 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
-        return state, filtered_tools
+        return state, final_tools, deferred_setup
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -475,8 +508,8 @@ class SubagentExecutor:
 
         collector: SubagentTokenCollector | None = None
         try:
-            state, filtered_tools = await self._build_initial_state(task)
-            agent = self._create_agent(filtered_tools)
+            state, final_tools, deferred_setup = await self._build_initial_state(task)
+            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"

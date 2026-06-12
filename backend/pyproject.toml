@@ -29,6 +29,7 @@ discord = ["discord.py>=2.7.0"]
 
 [dependency-groups]
 dev = [
+    "blockbuster>=1.5.26,<1.6",
     "prompt-toolkit>=3.0.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
@@ -38,6 +39,7 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
+    "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
 ]
 
 [tool.uv]

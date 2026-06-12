@@ -23,6 +23,7 @@ export interface UploadResponse {
   success: boolean;
   files: UploadedFileInfo[];
   message: string;
+  skipped_files: string[];
 }
 
 export interface ListFilesResponse {

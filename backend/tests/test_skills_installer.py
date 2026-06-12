@@ -198,6 +198,26 @@ class TestInstallSkillFromArchive:
         assert result["skill_name"] == "test-skill"
         assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
 
+    def test_installed_skill_tree_is_readable_by_sandbox_mount(self, tmp_path):
+        zip_path = tmp_path / "test-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+            zf.writestr("test-skill/references/guide.md", "# Guide\n")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        installed_dir = skills_root / "custom" / "test-skill"
+        nested_dir = installed_dir / "references"
+        skill_file = installed_dir / "SKILL.md"
+        guide_file = nested_dir / "guide.md"
+
+        assert stat.S_IMODE(installed_dir.stat().st_mode) & 0o055 == 0o055
+        assert stat.S_IMODE(nested_dir.stat().st_mode) & 0o055 == 0o055
+        assert stat.S_IMODE(skill_file.stat().st_mode) & 0o044 == 0o044
+        assert stat.S_IMODE(guide_file.stat().st_mode) & 0o044 == 0o044
+
     def test_scans_skill_markdown_before_install(self, tmp_path, monkeypatch):
         zip_path = self._make_skill_zip(tmp_path)
         skills_root = tmp_path / "skills"

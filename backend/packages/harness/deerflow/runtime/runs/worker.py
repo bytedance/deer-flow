@@ -150,6 +150,7 @@ async def run_agent(
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
+    llm_error_fallback_message: str | None = None
 
     journal = None
 
@@ -312,6 +313,7 @@ async def run_agent(
                 if record.abort_event.is_set():
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
+                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -330,6 +332,7 @@ async def run_agent(
                 if mode is None:
                     continue
 
+                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -352,6 +355,12 @@ async def run_agent(
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
                 await run_manager.set_status(run_id, RunStatus.interrupted)
+        elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            error_msg = llm_error_fallback_message
+            if error_msg is None and journal is not None:
+                error_msg = journal.llm_error_fallback_message
+            error_msg = error_msg or "LLM provider failed after retries"
+            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
             await run_manager.set_status(run_id, RunStatus.success)
 
@@ -552,6 +561,85 @@ def _lg_mode_to_sse_event(mode: str) -> str:
     """
     # All LG modes map 1:1 to SSE event names — "messages" stays "messages"
     return mode
+
+
+def _error_fallback_message_from_metadata(metadata: dict[str, Any], content: Any) -> str:
+    detail = metadata.get("error_detail")
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    reason = metadata.get("error_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if isinstance(content, str) and content.strip():
+        return content.strip()[:2000]
+    return "LLM provider failed after retries"
+
+
+def _try_extract_from_message(obj: Any) -> str | None:
+    """Try to extract fallback marker from a single message object or dict."""
+    additional_kwargs = getattr(obj, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+        return _error_fallback_message_from_metadata(additional_kwargs, getattr(obj, "content", None))
+
+    if isinstance(obj, dict):
+        nested_kwargs = obj.get("additional_kwargs")
+        if isinstance(nested_kwargs, dict) and nested_kwargs.get("deerflow_error_fallback"):
+            return _error_fallback_message_from_metadata(nested_kwargs, obj.get("content"))
+    return None
+
+
+def _extract_llm_error_fallback_message(value: Any) -> str | None:
+    """Find LLM fallback markers in streamed LangGraph chunks.
+
+    Error fallback messages returned by model-call middleware are not guaranteed
+    to pass through LLM end callbacks, but they do appear in graph state chunks.
+    """
+    # Fast path: large state chunks produced by stream_mode="values" have a
+    # top-level "messages" list. Scanning only that list avoids expensive deep
+    # recursion into large state dicts.
+    if isinstance(value, dict):
+        messages = value.get("messages")
+        if isinstance(messages, (list, tuple)):
+            for msg in messages:
+                result = _try_extract_from_message(msg)
+                if result is not None:
+                    return result
+            # Fallback marker is attached to an AI message in the messages
+            # channel; it will never appear elsewhere in a values chunk.
+            return None
+        # No top-level "messages" — this is likely an "updates" chunk (small
+        # dict keyed by node name). Fall through to deep walk, which is cheap
+        # for these payloads.
+
+    # Deep walk for updates / messages / tuple / list modes. Payloads are
+    # small, so full recursion is acceptable here.
+    seen: set[int] = set()
+
+    def walk(obj: Any) -> str | None:
+        oid = id(obj)
+        if oid in seen:
+            return None
+        seen.add(oid)
+
+        result = _try_extract_from_message(obj)
+        if result is not None:
+            return result
+
+        if isinstance(obj, dict):
+            for item in obj.values():
+                result = walk(item)
+                if result is not None:
+                    return result
+            return None
+
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                result = walk(item)
+                if result is not None:
+                    return result
+        return None
+
+    return walk(value)
 
 
 def _extract_human_message(graph_input: dict) -> HumanMessage | None:
