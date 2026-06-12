@@ -32,8 +32,10 @@ with the least exposure that fits your setup:
 
 The Gateway credential loader checks environment variables **before** the
 default credential files, so the env-token paths need no bind mount at all. ACP
-adapters authenticate independently of DeerFlow — their credential source is
-adapter-defined, and some require a standard API key via env rather than the CLI
-subscription login. Prefer the adapter's documented env auth, and reach for the
-`docker-compose.cli-auth.yaml` overlay only when an adapter genuinely needs the
-full CLI config directory.
+adapters authenticate independently of DeerFlow via their own documented env —
+for example the common `claude-code-acp` adapter starts as
+`ANTHROPIC_API_KEY=… claude-code-acp` and honors `CLAUDE_CONFIG_DIR` to redirect
+its config directory, so it needs no `~/.claude` mount at all. Prefer the
+adapter's documented env auth, and reach for the
+`docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
+genuinely reads the full CLI config directory.
