@@ -608,8 +608,14 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
-    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+    def _prepare_uploads_dir() -> tuple[Path, set[str]]:
+        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
+        # blocking filesystem IO that must stay off the event loop.
+        target = ensure_uploads_dir(thread_id)
+        existing = {entry.name for entry in target.iterdir() if entry.is_file()}
+        return target, existing
+
+    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -657,7 +663,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
             dest = uploads_dir / safe_name
             try:
-                dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
