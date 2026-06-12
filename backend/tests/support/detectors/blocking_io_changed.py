@@ -21,8 +21,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from support.detectors import blocking_io_static as static
+from support.detectors.repo_root import resolve_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = resolve_repo_root(Path(__file__))
 SCAN_ROOTS = (
     "backend/app",
     "backend/packages/harness/deerflow",

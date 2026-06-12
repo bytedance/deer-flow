@@ -18,7 +18,9 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+from support.detectors.repo_root import resolve_repo_root
+
+REPO_ROOT = resolve_repo_root(Path(__file__))
 DEFAULT_SCAN_PATHS = (
     REPO_ROOT / "backend" / "app",
     REPO_ROOT / "backend" / "packages" / "harness" / "deerflow",
