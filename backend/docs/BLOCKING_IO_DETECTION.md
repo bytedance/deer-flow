@@ -67,6 +67,11 @@ The normal workflow is:
 3. Add or update a focused runtime anchor in `backend/tests/blocking_io/`.
 4. Let CI prevent that path from regressing.
 
+Contributors changing backend async code can run the `blocking-io-guard` skill
+(`.agent/skills/blocking-io-guard/`) to execute steps 1–3 for their own diff: it
+scans the change for blocking-IO candidates, drafts or extends a runtime anchor,
+and verifies the anchor fails when the blocking IO regresses.
+
 Runtime detection has two maintenance paths.
 
 ### Add a runtime rule
