@@ -4935,3 +4935,79 @@ class TestTelegramStreaming:
             )
 
         _run(go())
+
+    def test_final_message_edits_stream_message_and_clears_state(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="partial", is_final=False, thread_ts="42"))
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="full answer", is_final=True, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["partial", "full answer"]
+            assert len(bot.sent) == 1  # placeholder only — final edited, not re-sent
+            assert "12345:42" not in ch._stream_messages
+            assert ch._last_bot_message["12345"] == placeholder_id
+
+        _run(go())
+
+    def test_final_message_splits_long_text(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            long_text = "a" * 4096 + "b" * 100
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=True, thread_ts="42"))
+
+            assert len(bot.edited) == 1
+            assert bot.edited[0]["text"] == "a" * 4096
+            follow_ups = bot.sent[1:]  # bot.sent[0] is the placeholder
+            assert [m["text"] for m in follow_ups] == ["b" * 100]
+            # Fake bot assigns ids sequentially: placeholder=100, follow-up chunk=101
+            assert ch._last_bot_message["12345"] == 101
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_message_not_modified_error_is_ignored(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=False, thread_ts="42"))
+
+            async def edit_not_modified(**kwargs):
+                raise Exception("Bad Request: message is not modified")
+
+            bot.edit_message_text = edit_not_modified
+            # Same text again as final — must not raise, must not send a new message
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=True, thread_ts="42"))
+
+            assert len(bot.sent) == 1  # placeholder only
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_without_stream_state_sends_plain_message(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="direct", is_final=True, thread_ts=None))
+
+            assert len(bot.sent) == 1
+            assert bot.sent[0]["text"] == "direct"
+            assert len(bot.edited) == 0
+
+        _run(go())

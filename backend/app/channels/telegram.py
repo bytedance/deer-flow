@@ -124,6 +124,11 @@ class TelegramChannel(Channel):
             await self._send_stream_update(chat_id, key, msg.text)
             return
 
+        state = self._stream_messages.pop(key, None)
+        if state is not None:
+            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
+            return
+
         await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str) -> None:
@@ -181,6 +186,32 @@ class TelegramChannel(Channel):
 
         state["last_edit_at"] = _monotonic()
         state["last_text"] = display
+
+    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> None:
+        """Apply the final text: edit the streamed message, splitting overflow into follow-ups."""
+        bot = self._application.bot
+        chunks = self._split_message(text or "")
+        last_message_id = state["message_id"]
+
+        if chunks[0] != state["last_text"]:
+            try:
+                await bot.edit_message_text(chat_id=chat_id, message_id=state["message_id"], text=chunks[0])
+            except Exception as exc:
+                if self._is_not_modified(exc):
+                    pass
+                elif self._is_retry_after(exc):
+                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    await bot.edit_message_text(chat_id=chat_id, message_id=state["message_id"], text=chunks[0])
+                else:
+                    logger.warning("[Telegram] final edit failed in chat=%s, sending new message: %s", chat_id, exc)
+                    sent = await bot.send_message(chat_id=chat_id, text=chunks[0])
+                    last_message_id = sent.message_id
+
+        for chunk in chunks[1:]:
+            sent = await bot.send_message(chat_id=chat_id, text=chunk)
+            last_message_id = sent.message_id
+
+        self._last_bot_message[chat_key] = last_message_id
 
     async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
         """Send a fresh message with retry/backoff. Returns the sent message_id."""
