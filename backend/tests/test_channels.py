@@ -4782,3 +4782,31 @@ class TestTelegramStreaming:
         ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
         assert ch.supports_streaming is True
         assert CHANNEL_CAPABILITIES["telegram"]["supports_streaming"] is True
+
+    def test_running_reply_registers_stream_placeholder(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            mock_app = MagicMock()
+            mock_bot = AsyncMock()
+            sent = MagicMock()
+            sent.message_id = 777
+            mock_bot.send_message = AsyncMock(return_value=sent)
+            mock_app.bot = mock_bot
+            ch._application = mock_app
+
+            await ch._send_running_reply("12345", 42)
+
+            state = ch._stream_messages["12345:42"]
+            assert state["message_id"] == 777
+            assert state["last_text"] == "Working on it..."
+            mock_bot.send_message.assert_awaited_once_with(
+                chat_id=12345,
+                text="Working on it...",
+                reply_to_message_id=42,
+            )
+
+        _run(go())

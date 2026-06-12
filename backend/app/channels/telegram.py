@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Any
 
 from app.channels.base import Channel
@@ -12,6 +13,12 @@ from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
+
+# Indirection so tests can patch the clock without touching the global time module.
+_monotonic = time.monotonic
 
 
 class TelegramChannel(Channel):
@@ -36,6 +43,9 @@ class TelegramChannel(Channel):
                 pass
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
+        # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
+        # bot message being edited in place: {"message_id", "last_edit_at", "last_text"}
+        self._stream_messages: dict[str, dict[str, Any]] = {}
         self._connection_repo = config.get("connection_repo")
 
     @property
@@ -184,17 +194,45 @@ class TelegramChannel(Channel):
 
     # -- helpers -----------------------------------------------------------
 
+    @staticmethod
+    def _stream_key(chat_id: str, thread_ts: str | None) -> str:
+        return f"{chat_id}:{thread_ts or ''}"
+
+    @staticmethod
+    def _is_retry_after(exc: Exception) -> bool:
+        return getattr(exc, "retry_after", None) is not None
+
+    @staticmethod
+    def _retry_after_seconds(exc: Exception) -> float:
+        value = getattr(exc, "retry_after", 0)
+        if hasattr(value, "total_seconds"):
+            return float(value.total_seconds())
+        return float(value)
+
+    @staticmethod
+    def _is_not_modified(exc: Exception) -> bool:
+        return "message is not modified" in str(exc).lower()
+
+    @staticmethod
+    def _split_message(text: str) -> list[str]:
+        return [text[i : i + TELEGRAM_MAX_MESSAGE_LENGTH] for i in range(0, len(text), TELEGRAM_MAX_MESSAGE_LENGTH)] or [text]
+
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
-        """Send a 'Working on it...' reply to the user's message."""
+        """Send a 'Working on it...' reply and register it as the stream target."""
         if not self._application:
             return
         try:
             bot = self._application.bot
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=int(chat_id),
                 text="Working on it...",
                 reply_to_message_id=reply_to_message_id,
             )
+            self._stream_messages[self._stream_key(chat_id, str(reply_to_message_id))] = {
+                "message_id": sent.message_id,
+                "last_edit_at": 0.0,
+                "last_text": "Working on it...",
+            }
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
