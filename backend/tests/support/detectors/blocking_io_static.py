@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
 """Static inventory for likely backend event-loop blocking IO.
 
 This detector parses backend business source with AST so untested paths are
 still visible during review. Findings are prioritized static candidates, not
 automatic bug decisions.
+
+Not directly executable: import as `support.detectors.blocking_io_static` or
+run via the CLI shim `scripts/detect_blocking_io_static.py`.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ import argparse
 import ast
 import json
 import os
-import sys
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -891,7 +892,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(format_text(findings))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
