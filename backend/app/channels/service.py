@@ -135,6 +135,28 @@ class ChannelService:
         self._running = False
         logger.info("ChannelService stopped")
 
+    def _load_channel_config(self, name: str) -> dict[str, Any] | None:
+        """Load the latest config for a specific channel from disk.
+
+        Uses ``get_app_config()`` which detects file changes via mtime,
+        so edits to ``config.yaml`` are picked up without a process restart.
+        Falls back to the cached ``self._config`` when config loading fails.
+        """
+        try:
+            from deerflow.config.app_config import get_app_config
+
+            app_config = get_app_config()
+            extra = app_config.model_extra or {}
+            channels_config = extra.get("channels", {})
+            channel_config = channels_config.get(name)
+            if isinstance(channel_config, dict):
+                # Update the cached config so get_status() stays consistent.
+                self._config[name] = channel_config
+                return channel_config
+        except Exception:
+            logger.exception("Failed to reload config for channel %s, using cached version", name)
+        return self._config.get(name)
+
     async def restart_channel(self, name: str) -> bool:
         """Restart a specific channel. Returns True if successful."""
         if name in self._channels:
@@ -144,10 +166,14 @@ class ChannelService:
                 logger.exception("Error stopping channel %s for restart", name)
             del self._channels[name]
 
-        config = self._config.get(name)
+        config = self._load_channel_config(name)
         if not config or not isinstance(config, dict):
             logger.warning("No config for channel %s", name)
             return False
+
+        if not config.get("enabled", False):
+            logger.info("Channel %s is disabled, skipping restart", name)
+            return True
 
         return await self._start_channel(name, config)
 
