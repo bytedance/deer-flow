@@ -4774,6 +4774,130 @@ class TestSlackMarkdownConversion:
 
 
 class TestTelegramStreaming:
+    @staticmethod
+    def _make_channel_with_bot():
+        from app.channels.telegram import TelegramChannel
+
+        bus = MessageBus()
+        ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+        mock_app = MagicMock()
+        bot = SimpleNamespace()
+        bot.sent = []
+        bot.edited = []
+        bot.next_message_id = 100
+
+        async def send_message(**kwargs):
+            bot.sent.append(kwargs)
+            result = MagicMock()
+            result.message_id = bot.next_message_id
+            bot.next_message_id += 1
+            return result
+
+        async def edit_message_text(**kwargs):
+            bot.edited.append(kwargs)
+            result = MagicMock()
+            result.message_id = kwargs["message_id"]
+            return result
+
+        bot.send_message = send_message
+        bot.edit_message_text = edit_message_text
+        mock_app.bot = bot
+        ch._application = mock_app
+        return ch, bot
+
+    def test_stream_updates_edit_placeholder_in_place(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            update1 = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hello", is_final=False, thread_ts="42")
+            await ch.send(update1)
+
+            clock["now"] += 2.0
+            update2 = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hello world", is_final=False, thread_ts="42")
+            await ch.send(update2)
+
+            assert len(bot.sent) == 1  # only the placeholder
+            assert [e["message_id"] for e in bot.edited] == [placeholder_id, placeholder_id]
+            assert [e["text"] for e in bot.edited] == ["Hello", "Hello world"]
+
+        _run(go())
+
+    def test_stream_updates_throttled_within_interval(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="a", is_final=False, thread_ts="42"))
+            clock["now"] += 0.3  # within 1s window -> dropped
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="ab", is_final=False, thread_ts="42"))
+            clock["now"] += 1.0  # past window -> edited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="abc", is_final=False, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["a", "abc"]
+
+        _run(go())
+
+    def test_stream_update_without_placeholder_sends_new_message(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+
+            assert len(bot.sent) == 1
+            assert bot.sent[0]["text"] == "Hi"
+            assert ch._stream_messages["12345:42"]["message_id"] == 100
+
+        _run(go())
+
+    def test_stream_update_truncates_long_text(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            long_text = "x" * 5000
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=False, thread_ts="42"))
+
+            assert len(bot.edited) == 1
+            assert len(bot.edited[0]["text"]) == 4096
+            assert bot.edited[0]["text"].endswith("…")
+
+        _run(go())
+
+    def test_stream_update_retry_after_is_dropped(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_rate_limited(**kwargs):
+                exc = Exception("Flood control exceeded")
+                exc.retry_after = 5
+                raise exc
+
+            bot.edit_message_text = edit_rate_limited
+            # Must not raise, must not send a new message
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+            assert len(bot.sent) == 1  # placeholder only
+
+        _run(go())
+
     def test_telegram_reports_streaming_support(self):
         from app.channels.manager import CHANNEL_CAPABILITIES
         from app.channels.telegram import TelegramChannel

@@ -118,7 +118,69 @@ class TelegramChannel(Channel):
             logger.error("Invalid Telegram chat_id: %s", msg.chat_id)
             return
 
+        key = self._stream_key(msg.chat_id, msg.thread_ts)
+
+        if not msg.is_final:
+            await self._send_stream_update(chat_id, key, msg.text)
+            return
+
         await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+
+    async def _send_stream_update(self, chat_id: int, key: str, text: str) -> None:
+        """Edit the in-flight streamed message with accumulated text.
+
+        Updates are best-effort: throttled, rate-limit drops are silent.  The
+        manager always publishes a final message afterwards, which guarantees
+        delivery of the complete text.
+        """
+        if not text:
+            return
+
+        display = text
+        if len(display) > TELEGRAM_MAX_MESSAGE_LENGTH:
+            display = display[: TELEGRAM_MAX_MESSAGE_LENGTH - 1] + "…"
+
+        bot = self._application.bot
+        state = self._stream_messages.get(key)
+
+        if state is None:
+            try:
+                sent = await bot.send_message(chat_id=chat_id, text=display)
+            except Exception:
+                logger.exception("[Telegram] failed to start stream message in chat=%s", chat_id)
+                return
+            self._stream_messages[key] = {
+                "message_id": sent.message_id,
+                "last_edit_at": _monotonic(),
+                "last_text": display,
+            }
+            return
+
+        now = _monotonic()
+        if now - state["last_edit_at"] < STREAM_EDIT_MIN_INTERVAL_SECONDS:
+            return
+        if display == state["last_text"]:
+            return
+
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=state["message_id"], text=display)
+        except Exception as exc:
+            if self._is_not_modified(exc):
+                state["last_text"] = display
+                return
+            if self._is_retry_after(exc):
+                logger.debug("[Telegram] stream edit rate-limited in chat=%s, dropping update", chat_id)
+                return
+            logger.warning("[Telegram] stream edit failed in chat=%s, sending new message: %s", chat_id, exc)
+            try:
+                sent = await bot.send_message(chat_id=chat_id, text=display)
+            except Exception:
+                logger.exception("[Telegram] failed to send fallback stream message in chat=%s", chat_id)
+                return
+            state["message_id"] = sent.message_id
+
+        state["last_edit_at"] = _monotonic()
+        state["last_text"] = display
 
     async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
         """Send a fresh message with retry/backoff. Returns the sent message_id."""
