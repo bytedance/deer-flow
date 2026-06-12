@@ -4802,6 +4802,7 @@ class TestTelegramStreaming:
 
             state = ch._stream_messages["12345:42"]
             assert state["message_id"] == 777
+            assert state["last_edit_at"] == 0.0
             assert state["last_text"] == "Working on it..."
             mock_bot.send_message.assert_awaited_once_with(
                 chat_id=12345,
