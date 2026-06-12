@@ -40,7 +40,32 @@ export type MockThread = {
   messages?: unknown[];
   artifacts?: string[];
   goal?: Record<string, unknown> | null;
+  runs?: MockRun[];
 };
+
+export type MockRun = {
+  run_id: string;
+  thread_id?: string;
+  assistant_id?: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+  kwargs?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+function serializeMockRun(run: MockRun, thread: MockThread) {
+  return {
+    run_id: run.run_id,
+    thread_id: run.thread_id ?? thread.thread_id,
+    assistant_id: run.assistant_id ?? "lead_agent",
+    status: run.status ?? "success",
+    metadata: run.metadata ?? {},
+    kwargs: run.kwargs ?? {},
+    created_at: run.created_at ?? "2025-01-01T00:00:00Z",
+    updated_at: run.updated_at ?? thread.updated_at ?? "2025-01-01T00:00:00Z",
+  };
+}
 
 export type MockAgent = {
   name: string;
@@ -1060,30 +1085,65 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     if (route.request().method() === "GET") {
       const url = route.request().url();
       const matchingThread = threads.find((t) => url.includes(t.thread_id));
+      const defaultRun = matchingThread
+        ? serializeMockRun(
+            { run_id: `run-${matchingThread.thread_id}` },
+            matchingThread,
+          )
+        : null;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(
           matchingThread
-            ? [
-                {
-                  run_id: `run-${matchingThread.thread_id}`,
-                  thread_id: matchingThread.thread_id,
-                  assistant_id: "lead_agent",
-                  status: "success",
-                  metadata: {},
-                  kwargs: {},
-                  created_at: "2025-01-01T00:00:00Z",
-                  updated_at:
-                    matchingThread.updated_at ?? "2025-01-01T00:00:00Z",
-                },
-              ]
+            ? (matchingThread.runs?.map((run) =>
+                serializeMockRun(run, matchingThread),
+              ) ?? [defaultRun])
             : [],
         ),
       });
     }
     return route.fallback();
   });
+
+  // The reconnect wrapper preflights a run before joining its stream. Keep
+  // this detail response aligned with the list response above so active-run
+  // E2E tests do not leak through to a real gateway during that preflight.
+  void page.route(
+    /\/api\/langgraph\/threads\/[^/]+\/runs\/[^/?]+(?:\?|$)/,
+    (route) => {
+      if (route.request().method() !== "GET") {
+        return route.fallback();
+      }
+
+      const url = new URL(route.request().url());
+      const match = /\/api\/langgraph\/threads\/([^/]+)\/runs\/([^/]+)$/.exec(
+        url.pathname,
+      );
+      const threadId = match ? decodeURIComponent(match[1]!) : "";
+      const runId = match ? decodeURIComponent(match[2]!) : "";
+      const matchingThread = threads.find(
+        (thread) => thread.thread_id === threadId,
+      );
+      const matchingRun = matchingThread?.runs?.find(
+        (run) => run.run_id === runId,
+      );
+
+      if (!matchingThread || !matchingRun) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Run not found" }),
+        });
+      }
+
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(serializeMockRun(matchingRun, matchingThread)),
+      });
+    },
+  );
 
   void page.route(/\/api\/threads\/([^/]+)\/messages\/page/, (route) => {
     if (route.request().method() === "GET") {

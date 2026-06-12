@@ -392,6 +392,191 @@ test.describe("Thread history", () => {
     await expect(sidebar.getByText("Second conversation")).toHaveCount(0);
   });
 
+  test("existing thread joins an active run created by another client", async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const activeRunId = "active-run-1";
+    let joinStreamCalled = false;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          ...THREADS[0]!,
+          runs: [
+            {
+              run_id: activeRunId,
+              status: "running",
+              created_at: "2025-01-01T00:00:00Z",
+              updated_at: "2025-01-01T00:00:01Z",
+            },
+          ],
+        },
+        THREADS[1]!,
+      ],
+    });
+
+    await page.route(
+      new RegExp(
+        `/api/langgraph/threads/${MOCK_THREAD_ID}/runs/${activeRunId}/stream(?:\\?|$)`,
+      ),
+      (route) => {
+        joinStreamCalled = true;
+        const body = [
+          {
+            event: "metadata",
+            data: { run_id: activeRunId, thread_id: MOCK_THREAD_ID },
+          },
+          {
+            event: "values",
+            data: {
+              messages: [
+                {
+                  type: "human",
+                  id: "active-human-1",
+                  content: [{ type: "text", text: "Continue existing run" }],
+                },
+                {
+                  type: "ai",
+                  id: "active-ai-1",
+                  content: "Joined active run from another client",
+                },
+              ],
+            },
+          },
+          { event: "end", data: {} },
+        ]
+          .map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`)
+          .join("");
+
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body,
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`, {
+      waitUntil: "domcontentloaded",
+    });
+
+    await expect.poll(() => joinStreamCalled, { timeout: 30_000 }).toBeTruthy();
+    await expect(
+      page.getByText("Joined active run from another client"),
+    ).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("revisiting a thread does not join its active run twice after refetch", async ({
+    page,
+  }) => {
+    const activeRunId = "active-run-revisit";
+    let joinStreamCallCount = 0;
+    let runListRequestCount = 0;
+    let revisitRefetchFulfilled = false;
+    let releaseRevisitRefetch!: () => void;
+    let markRevisitRefetchRequested!: () => void;
+    const revisitRefetchRelease = new Promise<void>((resolve) => {
+      releaseRevisitRefetch = resolve;
+    });
+    const revisitRefetchRequested = new Promise<void>((resolve) => {
+      markRevisitRefetchRequested = resolve;
+    });
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          ...THREADS[0]!,
+          runs: [
+            {
+              run_id: activeRunId,
+              status: "running",
+              created_at: "2025-01-01T00:00:00Z",
+              updated_at: "2025-01-01T00:00:01Z",
+            },
+          ],
+        },
+        THREADS[1]!,
+      ],
+    });
+
+    await page.route(
+      new RegExp(`/api/langgraph/threads/${MOCK_THREAD_ID}/runs(?:\\?|$)`),
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          return route.fallback();
+        }
+
+        const requestNumber = ++runListRequestCount;
+        if (requestNumber === 2) {
+          markRevisitRefetchRequested();
+          await revisitRefetchRelease;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              run_id: activeRunId,
+              thread_id: MOCK_THREAD_ID,
+              assistant_id: "lead_agent",
+              status: "running",
+              metadata: {},
+              kwargs: {},
+              created_at: "2025-01-01T00:00:00Z",
+              updated_at: `2025-01-01T00:00:0${requestNumber}Z`,
+            },
+          ]),
+        });
+        if (requestNumber === 2) {
+          revisitRefetchFulfilled = true;
+        }
+      },
+    );
+    await page.route(
+      new RegExp(
+        `/api/langgraph/threads/${MOCK_THREAD_ID}/runs/${activeRunId}/stream(?:\\?|$)`,
+      ),
+      (route) => {
+        joinStreamCallCount += 1;
+        const body = [
+          {
+            event: "metadata",
+            data: { run_id: activeRunId, thread_id: MOCK_THREAD_ID },
+          },
+          { event: "end", data: {} },
+        ]
+          .map((event) => {
+            return `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
+          })
+          .join("");
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body,
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect.poll(() => joinStreamCallCount, { timeout: 30_000 }).toBe(1);
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    await sidebar.getByText("Second conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await sidebar.getByText("First conversation").click();
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
+
+    await revisitRefetchRequested;
+    await expect.poll(() => joinStreamCallCount, { timeout: 10_000 }).toBe(2);
+    releaseRevisitRefetch();
+    await expect
+      .poll(() => revisitRefetchFulfilled, { timeout: 10_000 })
+      .toBeTruthy();
+    await page.waitForTimeout(500);
+    expect(joinStreamCallCount).toBe(2);
+  });
+
   test("new chat does not show previous thread messages after client-side navigation", async ({
     page,
   }) => {

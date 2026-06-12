@@ -1,4 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
+import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, rs, test } from "@rstest/core";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
@@ -8,6 +8,7 @@ import {
   areOptimisticMessagesConfirmed,
   computeSummarizationTransientMessages,
   countHumanMessagesExcludingSuperseded,
+  findLatestActiveRun,
   flattenThreadHistoryPages,
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
@@ -22,6 +23,7 @@ import {
   removeSetItems,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
+  shouldAutoJoinActiveRun,
   type ThreadMessagesPageResponse,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -896,6 +898,94 @@ test("buildVisibleHistoryMessages attaches run_id to each content message (#3779
   const result = buildVisibleHistoryMessages(rows, new Set());
 
   expect((result[0] as { run_id?: string }).run_id).toBe("run-1");
+});
+
+test("findLatestActiveRun returns the newest pending or running run", () => {
+  const runs = [
+    {
+      run_id: "completed-newer",
+      status: "success",
+      updated_at: "2026-05-22T00:03:00Z",
+    },
+    {
+      run_id: "running-newest",
+      status: "running",
+      updated_at: "2026-05-22T00:02:00Z",
+    },
+    {
+      run_id: "pending-older",
+      status: "pending",
+      updated_at: "2026-05-22T00:01:00Z",
+    },
+  ] as unknown as Run[];
+
+  expect(findLatestActiveRun(runs)?.run_id).toBe("running-newest");
+});
+
+test("findLatestActiveRun returns undefined when no run is active", () => {
+  const runs = [
+    { run_id: "success-run", status: "success" },
+    { run_id: "error-run", status: "error" },
+    { run_id: "cancelled-run", status: "cancelled" },
+  ] as unknown as Run[];
+
+  expect(findLatestActiveRun(runs)).toBeUndefined();
+});
+
+test("shouldAutoJoinActiveRun skips a run started by the current hook", () => {
+  expect(
+    shouldAutoJoinActiveRun({
+      threadId: "thread-1",
+      activeRunId: "run-1",
+      localStream: { threadId: "thread-1", runId: "run-1" },
+      joinedRunIds: new Set(),
+      joinInFlightRunId: null,
+    }),
+  ).toBe(false);
+});
+
+test("shouldAutoJoinActiveRun accepts an external active run", () => {
+  expect(
+    shouldAutoJoinActiveRun({
+      threadId: "thread-1",
+      activeRunId: "external-run",
+      localStream: { threadId: "thread-1", runId: "local-run" },
+      joinedRunIds: new Set(),
+      joinInFlightRunId: null,
+    }),
+  ).toBe(true);
+});
+
+test("shouldAutoJoinActiveRun rejects missing, joined, and in-flight runs", () => {
+  const common = {
+    threadId: "thread-1",
+    localStream: null,
+  } as const;
+
+  expect(
+    shouldAutoJoinActiveRun({
+      ...common,
+      activeRunId: undefined,
+      joinedRunIds: new Set(),
+      joinInFlightRunId: null,
+    }),
+  ).toBe(false);
+  expect(
+    shouldAutoJoinActiveRun({
+      ...common,
+      activeRunId: "run-1",
+      joinedRunIds: new Set(["run-1"]),
+      joinInFlightRunId: null,
+    }),
+  ).toBe(false);
+  expect(
+    shouldAutoJoinActiveRun({
+      ...common,
+      activeRunId: "run-1",
+      joinedRunIds: new Set(),
+      joinInFlightRunId: "run-1",
+    }),
+  ).toBe(false);
 });
 
 // Regression coverage for #3825: after context summarization the backend emits
