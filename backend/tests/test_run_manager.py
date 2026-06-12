@@ -881,7 +881,7 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
 
 class _FailingPutRunStore(MemoryRunStore):
-    """Memory run store whose initial ``put`` always fails (non-retryably)."""
+    """Memory run store whose every ``put`` fails (non-retryably)."""
 
     async def put(self, run_id, **kwargs):
         raise ValueError("simulated persist failure")
@@ -953,5 +953,18 @@ async def test_failed_create_unindexes_run():
     with pytest.raises(ValueError):
         await manager.create("thread-a")
     # A rolled-back run must leave no trace in either _runs or the index.
+    assert manager._runs == {}
+    assert "thread-a" not in manager._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_failed_create_or_reject_unindexes_run():
+    # Symmetric to test_failed_create_unindexes_run: create_or_reject has its own
+    # insert + rollback-unindex site, so a persist failure there must also leave
+    # neither _runs nor the index holding the rolled-back run. This closes the last
+    # mutation path not exercised by an index-consistency test.
+    manager = RunManager(store=_FailingPutRunStore())
+    with pytest.raises(ValueError):
+        await manager.create_or_reject("thread-a", multitask_strategy="reject")
     assert manager._runs == {}
     assert "thread-a" not in manager._runs_by_thread

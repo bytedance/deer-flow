@@ -143,8 +143,14 @@ class RunManager:
         """Return live in-memory records for *thread_id*. Caller must hold ``self._lock``.
 
         Uses the ``_runs_by_thread`` index for O(runs-in-thread) lookup instead of
-        scanning every in-memory run. The ``self._runs.get`` guard keeps the result
-        correct even if the index and ``_runs`` momentarily disagree.
+        scanning every in-memory run. Correctness rests on the index and ``_runs``
+        being mutated in lockstep under ``self._lock`` (no ``await`` between the two
+        writes), so any holder of the lock sees them agree. The ``self._runs.get``
+        filter is defense-in-depth, not reconciliation: it drops a stale id still in
+        the index but already gone from ``_runs``, yet it cannot recover a run that is
+        in ``_runs`` but missing from the index (such a run would be silently
+        omitted). It guards only that one direction, should a future refactor ever
+        break the lockstep invariant.
         """
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
