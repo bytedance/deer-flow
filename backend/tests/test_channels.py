@@ -873,7 +873,7 @@ class TestChannelManager:
                 bus=bus,
                 store=store,
                 channel_sessions={
-                    "telegram": {
+                    "slack": {
                         "assistant_id": "mobile_agent",
                         "config": {"recursion_limit": 55},
                         "context": {
@@ -896,7 +896,7 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+            inbound = InboundMessage(channel_name="slack", chat_id="chat1", user_id="user1", text="hi")
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
@@ -1047,7 +1047,7 @@ class TestChannelManager:
                 store=store,
                 default_session={"context": {"is_plan_mode": True}},
                 channel_sessions={
-                    "telegram": {
+                    "slack": {
                         "assistant_id": "mobile_agent",
                         "config": {"recursion_limit": 55},
                         "context": {
@@ -1080,7 +1080,7 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="vip-user", text="hi")
+            inbound = InboundMessage(channel_name="slack", chat_id="chat1", user_id="vip-user", text="hi")
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
@@ -2044,7 +2044,7 @@ class TestChannelManager:
         _run(go())
 
     def test_none_topic_reuses_thread(self):
-        """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
+        """Messages with topic_id=None should reuse the same thread (e.g. a private/direct chat)."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -2063,10 +2063,10 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages with topic_id=None (simulates Telegram private chat)
+            # Send two messages with topic_id=None (simulates a private/direct chat)
             for text in ["hello", "what did I just say?"]:
                 msg = InboundMessage(
-                    channel_name="telegram",
+                    channel_name="slack",
                     chat_id="chat1",
                     user_id="user1",
                     text=text,
