@@ -5036,3 +5036,108 @@ class TestTelegramStreaming:
             assert len(bot.edited) == 0
 
         _run(go())
+
+    def test_final_edit_retries_once_after_rate_limit(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            real_edit = bot.edit_message_text
+            calls = {"n": 0}
+
+            async def edit_flaky(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    exc = Exception("Flood control exceeded")
+                    exc.retry_after = 3
+                    raise exc
+                return await real_edit(**kwargs)
+
+            bot.edit_message_text = edit_flaky
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            assert sleeps == [3.0]
+            assert [e["text"] for e in bot.edited] == ["final"]
+            assert len(bot.sent) == 1  # placeholder only
+            assert ch._last_bot_message["12345"] == placeholder_id
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_edit_double_rate_limit_falls_back_to_new_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_rate_limited(**kwargs):
+                exc = Exception("Flood control exceeded")
+                exc.retry_after = 2
+                raise exc
+
+            bot.edit_message_text = edit_rate_limited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            # Fallback delivered the final text as a new message (after the placeholder)
+            assert [m["text"] for m in bot.sent] == ["Working on it...", "final"]
+            assert ch._last_bot_message["12345"] == 101
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_overflow_chunk_send_is_retried(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+
+            real_send = bot.send_message
+            failures = {"left": 1}
+
+            async def send_flaky(**kwargs):
+                if failures["left"] > 0:
+                    failures["left"] -= 1
+                    raise ConnectionError("transient")
+                return await real_send(**kwargs)
+
+            bot.send_message = send_flaky
+            long_text = "a" * 4096 + "b" * 10
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=True, thread_ts="42"))
+
+            assert bot.edited[0]["text"] == "a" * 4096
+            assert [m["text"] for m in bot.sent] == ["Working on it...", "b" * 10]
+            assert ch._last_bot_message["12345"] == 101
+
+        _run(go())

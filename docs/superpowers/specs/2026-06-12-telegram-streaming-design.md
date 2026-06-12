@@ -48,7 +48,7 @@ Telegram 通道目前完全不流式：`ChannelManager._handle_chat()` 走 `clie
 1. 文本 ≤ 4096：对登记的流式消息做最终一次 `edit_message_text`。
 2. 文本 > 4096：第一段（4096 内）编辑流式消息，剩余按 4096 分段 `send_message` 补发。
 3. 清理该 key 的 `_stream_messages` 状态；用最后一条消息 id 更新 `_last_bot_message[chat_id]`（保持现有 threaded-reply 行为）。
-4. 无登记流式消息时退回现行 `send_message` 逻辑（兼容 `_send_error` 等直发场景，含现有 3 次重试）。
+4. 无登记流式消息时退回现行 `send_message` 逻辑（含现有 3 次重试）。注意：命令回复与 `_send_error` 错误回复带有匹配的 `thread_ts` 且占位消息已登记，因此同样走「编辑占位消息」路径（有意的 UX 改进），而非直发新消息。
 
 ### 错误处理
 
