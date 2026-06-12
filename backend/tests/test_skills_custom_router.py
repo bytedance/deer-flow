@@ -1,14 +1,18 @@
 import errno
 import json
+import stat
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
+from app.gateway.routers import uploads as uploads_router
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
 
@@ -51,6 +55,15 @@ def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr(f"{name}/SKILL.md", skill_content)
     return archive
+
+
+def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
+    buffer = BytesIO()
+    skill_content = content or _skill_content(name)
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(f"{name}/SKILL.md", skill_content)
+        zf.writestr(f"{name}/references/guide.md", "# Guide\n")
+    return buffer.getvalue()
 
 
 def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
@@ -98,6 +111,65 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
             "location": "archive-skill/SKILL.md",
         }
     ]
+    assert refresh_calls == ["refresh"]
+
+
+def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    refresh_calls = []
+
+    async def _scan(*args, **kwargs):
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    async def _refresh():
+        refresh_calls.append("refresh")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+        uploads=SimpleNamespace(auto_convert_documents=False),
+    )
+    provider = SimpleNamespace(uses_thread_data_mounts=True)
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(uploads_router, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = make_authed_test_app()
+    app.state.config = config
+    app.dependency_overrides[get_config] = lambda: config
+    app.include_router(uploads_router.router)
+    app.include_router(skills_router.router)
+
+    thread_id = "thread-uploaded-skill"
+    archive_bytes = _make_skill_archive_bytes("uploaded-skill")
+
+    with TestClient(app) as client:
+        upload_response = client.post(
+            f"/api/threads/{thread_id}/uploads",
+            files=[("files", ("uploaded-skill.skill", archive_bytes, "application/octet-stream"))],
+        )
+        assert upload_response.status_code == 200
+        uploaded_file = upload_response.json()["files"][0]
+        uploaded_path = Path(uploaded_file["path"])
+        assert uploaded_path.is_file()
+
+        install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
+
+    assert install_response.status_code == 200
+    assert install_response.json()["skill_name"] == "uploaded-skill"
+    installed_dir = skills_root / "custom" / "uploaded-skill"
+    nested_dir = installed_dir / "references"
+    assert stat.S_IMODE(installed_dir.stat().st_mode) & 0o055 == 0o055
+    assert stat.S_IMODE(nested_dir.stat().st_mode) & 0o055 == 0o055
+    assert stat.S_IMODE((installed_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
+    assert stat.S_IMODE((nested_dir / "guide.md").stat().st_mode) & 0o044 == 0o044
     assert refresh_calls == ["refresh"]
 
 
@@ -175,6 +247,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         )
         assert update_response.status_code == 200
         assert update_response.json()["description"] == "Edited skill"
+        assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
 
         history_response = client.get("/api/skills/custom/demo-skill/history")
         assert history_response.status_code == 200
@@ -183,6 +256,7 @@ def test_custom_skills_router_lifecycle(monkeypatch, tmp_path):
         rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
         assert rollback_response.status_code == 200
         assert rollback_response.json()["description"] == "Demo skill"
+        assert stat.S_IMODE((custom_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
         assert refresh_calls == ["refresh", "refresh"]
 
 

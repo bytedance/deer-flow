@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import is_known_channel_command
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -59,9 +59,7 @@ def _normalize_allowed_users(allowed_users: Any) -> set[str]:
 
 
 def _is_dingtalk_command(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+    return is_known_channel_command(text)
 
 
 def _extract_text_from_rich_text(rich_text_list: list) -> str:

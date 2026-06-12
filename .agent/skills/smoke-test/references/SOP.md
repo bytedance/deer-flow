@@ -138,7 +138,6 @@ This document describes the detailed operating steps for each phase of the DeerF
    lsof -i :2026  # Main port
    lsof -i :3000  # Frontend
    lsof -i :8001  # Gateway
-   lsof -i :2024  # LangGraph
    ```
 
 **Success Criteria**: All ports are free, or they are occupied only by DeerFlow-related processes.
@@ -258,7 +257,7 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Run `make dev-daemon` (background mode)
 
-**Description**: This command starts all services (LangGraph, Gateway, Frontend, Nginx).
+**Description**: This command starts all services (Gateway embedded runtime, Frontend, Nginx).
 
 **Notes**:
 - `make dev` runs in the foreground and stops with Ctrl+C
@@ -272,7 +271,6 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Wait 90-120 seconds for all services to start completely
 2. You can monitor startup progress by checking these log files:
-   - `logs/langgraph.log`
    - `logs/gateway.log`
    - `logs/frontend.log`
    - `logs/nginx.log`
@@ -316,11 +314,10 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Run the following command to check processes:
    ```bash
-   ps aux | grep -E "(langgraph|uvicorn|next|nginx)" | grep -v grep
+   ps aux | grep -E "(uvicorn|next|nginx)" | grep -v grep
    ```
 
 **Success Criteria**: Confirm that the following processes are running:
-- LangGraph (`langgraph dev`)
 - Gateway (`uvicorn app.gateway.app:app`)
 - Frontend (`next dev` or `next start`)
 - Nginx (`nginx`)
@@ -356,10 +353,11 @@ curl http://localhost:2026/health
 
 ---
 
-#### 5.1.4 Check LangGraph Service
+#### 5.1.4 Check LangGraph-compatible API
 
 **Steps**:
-1. Visit relevant LangGraph endpoints to verify availability
+1. Visit `http://localhost:2026/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
+2. A `401` response is acceptable when authentication is enabled and no session cookie is provided.
 
 ---
 
@@ -373,7 +371,6 @@ curl http://localhost:2026/health
    - `deer-flow-nginx`
    - `deer-flow-frontend`
    - `deer-flow-gateway`
-   - `deer-flow-langgraph` (if not in gateway mode)
 
 ---
 
@@ -406,10 +403,11 @@ curl http://localhost:2026/health
 
 ---
 
-#### 5.2.4 Check LangGraph Service
+#### 5.2.4 Check LangGraph-compatible API
 
 **Steps**:
-1. Visit relevant LangGraph endpoints to verify availability
+1. Visit `http://localhost:2026/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
+2. A `401` response is acceptable when authentication is enabled and no session cookie is provided.
 
 ---
 

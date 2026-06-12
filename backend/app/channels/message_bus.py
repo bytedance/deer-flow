@@ -13,6 +13,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
+RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
+
 
 # ---------------------------------------------------------------------------
 # Message types

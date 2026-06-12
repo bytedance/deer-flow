@@ -14,6 +14,9 @@
 
 set -e
 
+# 禁用分页器，避免交互卡住
+export GIT_PAGER=cat
+
 DRY_RUN=false
 if [[ "$1" == "--dry-run" ]]; then
   DRY_RUN=true
@@ -154,7 +157,16 @@ echo "用途: 将上游最新代码拉取到 upstream-sync 分支"
 echo "--------------------------------------------------"
 rtk git checkout upstream-sync
 rtk git fetch upstream
-rtk git merge upstream/main
+if ! rtk git merge upstream/main; then
+  log_warn "检测到合并冲突！"
+  echo ""
+  echo "冲突文件:"
+  git --no-pager diff --name-only --diff-filter=U
+  echo ""
+  log_warn "正在中止合并操作..."
+  rtk git merge --abort
+  exit 1
+fi
 rtk git push
 echo ""
 
@@ -163,7 +175,16 @@ log_step "Phase 2: 合入 main"
 echo "用途: 将 upstream-sync 合并到本地 main，作为集成分支"
 echo "--------------------------------------------------"
 rtk git checkout main
-rtk git merge upstream-sync
+if ! rtk git merge upstream-sync; then
+  log_warn "检测到合并冲突！"
+  echo ""
+  echo "冲突文件:"
+  git --no-pager diff --name-only --diff-filter=U
+  echo ""
+  log_warn "正在中止合并操作..."
+  rtk git merge --abort
+  exit 1
+fi
 rtk git push origin main
 echo ""
 

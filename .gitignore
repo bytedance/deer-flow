@@ -37,6 +37,7 @@ coverage.xml
 coverage/
 .deer-flow/
 .claude/
+.planning/
 skills/custom/*
 logs/
 log/
@@ -60,3 +61,31 @@ config.yaml.bak
 /frontend/playwright-report/
 .gstack/
 .worktrees
+# CodeGraph index
+.codegraph/
+# Cursor IDE
+.cursor/
+# npm packages
+node_modules/
+package-lock.json
+# Skills zip
+skills.zip
+# Root package.json (EARENDIL project, not DeerFlow)
+package.json
+# Local packaging & cookie artifacts (do not commit)
+backend.zip
+deer-flow.zip
+cookies.txt
+
+# Offline Claude Code bundles (build artifacts; regenerate via scripts/bundle-claude-*.sh on a Linux x86_64 host)
+offline-claude/*.tar.gz
+offline-claude/*.tgz
+offline-claude/*.zip
+
+# Docker pi-agent runtime state (sessions / installed skills; do not commit)
+docker/pi-agent/sessions/
+docker/pi-agent/skills/
+docker/pi-agent/auth.json
+
+# Claude Code local state (startup count, customApiKeyResponses, tips history)
+docker/claude/.claude.json

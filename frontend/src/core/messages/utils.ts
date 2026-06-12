@@ -170,6 +170,86 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   return usageMessagesByGroupIndex;
 }
 
+type MessageMetadataLookup = (
+  message: Message,
+  index: number,
+) => { streamMetadata?: Record<string, unknown> } | undefined;
+
+export type StreamingMessageLookup = {
+  ids: ReadonlySet<string>;
+  messages: ReadonlySet<Message>;
+};
+
+export function getStreamingMessageLookup(
+  messages: Message[],
+  isStreaming: boolean,
+  getMessagesMetadata?: MessageMetadataLookup,
+): StreamingMessageLookup {
+  const streamingMessageIds = new Set<string>();
+  const streamingMessages = new Set<Message>();
+
+  if (!isStreaming) {
+    return {
+      ids: streamingMessageIds,
+      messages: streamingMessages,
+    };
+  }
+
+  messages.forEach((message, index) => {
+    if (!getMessagesMetadata?.(message, index)?.streamMetadata) {
+      return;
+    }
+
+    if (typeof message.id === "string" && message.id.length > 0) {
+      streamingMessageIds.add(message.id);
+    }
+    streamingMessages.add(message);
+  });
+
+  return {
+    ids: streamingMessageIds,
+    messages: streamingMessages,
+  };
+}
+
+export function isAssistantMessageGroupStreaming(
+  groupMessages: Message[],
+  streamingMessages: StreamingMessageLookup,
+) {
+  return groupMessages.some((message) => {
+    if (message.type !== "ai") {
+      return false;
+    }
+
+    return (
+      (typeof message.id === "string" &&
+        message.id.length > 0 &&
+        streamingMessages.ids.has(message.id)) ||
+      streamingMessages.messages.has(message)
+    );
+  });
+}
+
+export function getAssistantTurnCopyData(
+  messages: Message[],
+  { isStreaming = false }: { isStreaming?: boolean } = {},
+) {
+  if (isStreaming) {
+    return null;
+  }
+
+  return (
+    [...messages]
+      .reverse()
+      .filter((message) => message.type === "ai")
+      .map((message) => {
+        const content = extractContentFromMessage(message);
+        return content ?? extractReasoningContentFromMessage(message) ?? "";
+      })
+      .find((content) => content.length > 0) ?? null
+  );
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (
@@ -186,22 +266,42 @@ export function extractTextFromMessage(message: Message) {
   return "";
 }
 
+const THINK_OPEN_TAG = "<think>";
 const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
 
 function splitInlineReasoning(content: string) {
   const reasoningParts: string[] = [];
-  const cleaned = content
-    .replace(THINK_TAG_RE, (_, reasoning: string) => {
-      const normalized = reasoning.trim();
-      if (normalized) {
-        reasoningParts.push(normalized);
-      }
-      return "";
-    })
-    .trim();
+
+  // First pass: strip every fully closed `<think>...</think>` pair and
+  // collect its body as reasoning.
+  let cleaned = content.replace(THINK_TAG_RE, (_, reasoning: string) => {
+    const normalized = reasoning.trim();
+    if (normalized) {
+      reasoningParts.push(normalized);
+    }
+    return "";
+  });
+
+  // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
+  // yet means the rest of the chunk is reasoning in flight. Route it into the
+  // reasoning slot instead of letting it render as message content (the
+  // raw-HTML markdown pipeline would otherwise paint the inner text on
+  // screen until the closing tag lands).
+  //
+  // Skip when the opener sits right after a backtick — that is the model
+  // talking about `<think>` literally inside markdown inline code, not
+  // actually streaming reasoning.
+  const openTagIndex = cleaned.indexOf(THINK_OPEN_TAG);
+  if (openTagIndex !== -1 && cleaned[openTagIndex - 1] !== "`") {
+    const tail = cleaned.slice(openTagIndex + THINK_OPEN_TAG.length).trim();
+    if (tail) {
+      reasoningParts.push(tail);
+    }
+    cleaned = cleaned.slice(0, openTagIndex);
+  }
 
   return {
-    content: cleaned,
+    content: cleaned.trim(),
     reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : null,
   };
 }
@@ -369,10 +469,14 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
+  const content = extractTextFromMessage(message);
   return (
     message.additional_kwargs?.hide_from_ui === true ||
     (typeof message.name === "string" &&
-      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)) ||
+    (message.type === "human" &&
+      content.includes("<slash_skill_activation>") &&
+      stripUploadedFilesTag(content).length === 0)
   );
 }
 
@@ -388,12 +492,13 @@ export interface FileInMessage {
 }
 
 /**
- * Strip <uploaded_files> tag from message content.
- * Returns the content with the tag removed.
+ * Strip backend-injected human context tags from message content.
+ * Kept under its historical name because callers use it for uploaded-file
+ * display cleanup.
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
+    .replace(/<(uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
     .trim();
 }
 
@@ -404,6 +509,7 @@ export function stripUploadedFilesTag(content: string): string {
  * These markers are *not* user copy — they come from:
  *
  * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
  * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
@@ -417,6 +523,7 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "uploaded_files",
+  "slash_skill_activation",
   "system-reminder",
   "memory",
   "current_date",

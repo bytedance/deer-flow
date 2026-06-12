@@ -15,13 +15,23 @@ import subprocess
 import sys
 import tempfile
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+LOG_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f"{LOG_DIR}/analyze.log"),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 try:
     import duckdb
 except ImportError:
-    logger.error("duckdb is not installed. Installing...")
+    logger.error("❌ duckdb 未安装，正在安装...")
     subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
     import duckdb
 
@@ -30,9 +40,53 @@ try:
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
 
+try:
+    from header_processor import flatten_excel_headers  # noqa: F401
+except ImportError:
+    # header_processor.py should be in same scripts/ directory
+    flatten_excel_headers = None
+
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
 TABLE_MAP_SUFFIX = ".table_map.json"
+
+# Flat CSV naming pattern from header_processor: {file_hash}_flat_{version}_{sheet_name}.csv
+FLATTEN_VERSION = "v1"
+
+# Standard numeric types for column type detection
+NUMERIC_TYPES = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "DOUBLE", "FLOAT", "DECIMAL", "HUGEINT", "REAL", "NUMERIC"}
+
+
+def _get_base_type(col_type: str) -> str:
+    """Extract base type from a column type string, stripping parameterized parts."""
+    return re.sub(r"\(.*\)", "", col_type.strip()).upper()
+
+
+def _is_numeric_type(col_type: str) -> bool:
+    """Check if a column type is numeric."""
+    return _get_base_type(col_type) in NUMERIC_TYPES
+
+
+def _get_numeric_columns(columns: list) -> list:
+    """Get list of numeric columns with their names and base types."""
+    return [(c[0], _get_base_type(c[1])) for c in columns if _is_numeric_type(c[1])]
+
+
+def _get_string_columns(columns: list) -> list:
+    """Get list of string/categorical columns with their names and base types."""
+    return [(c[0], _get_base_type(c[1])) for c in columns if not _is_numeric_type(c[1])]
+
+
+def _get_numeric_stats(con, table_name: str, col_name: str) -> tuple | None:
+    """Get basic stats for a numeric column. Returns (cnt, avg, min, max) or None on error."""
+    try:
+        return con.execute(f'''
+            SELECT COUNT("{col_name}"), AVG("{col_name}")::DOUBLE, MIN("{col_name}"), MAX("{col_name}")
+            FROM "{table_name}"
+        ''').fetchone()
+    except Exception as e:
+        logger.warning(f"Failed to get stats for {col_name}: {e}")
+        return None
 
 
 def compute_files_hash(files: list[str]) -> str:
@@ -79,6 +133,37 @@ def load_table_map(files_hash: str) -> dict[str, str] | None:
         return None
 
 
+def _compute_file_hash(file_path: str) -> str:
+    """Compute file SHA256 hash (first 12 hex chars) — matches header_processor logic."""
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(8192):
+            hasher.update(chunk)
+    return hasher.hexdigest()[:12]
+
+
+def find_flat_csvs(excel_path: str) -> dict[str, str]:
+    """Find pre-processed flattened CSVs for an Excel file. Returns {sheet_name: csv_path}."""
+    if not os.path.exists(excel_path):
+        return {}
+
+    file_hash = _compute_file_hash(excel_path)
+    pattern = f"{file_hash}_flat_{FLATTEN_VERSION}_"
+    results: dict[str, str] = {}
+
+    if not os.path.isdir(CACHE_DIR):
+        return results
+
+    for fname in os.listdir(CACHE_DIR):
+        if fname.startswith(pattern) and fname.endswith(".csv"):
+            # Extract sheet name: {hash}_flat_{version}_{sheet_name}.csv
+            sheet_name = fname[len(pattern):-4]  # strip pattern and .csv
+            csv_path = os.path.join(CACHE_DIR, fname)
+            results[sheet_name] = csv_path
+
+    return results
+
+
 def sanitize_table_name(name: str) -> str:
     """Sanitize a sheet/file name into a valid SQL table name."""
     sanitized = re.sub(r"[^\w]", "_", name)
@@ -87,28 +172,82 @@ def sanitize_table_name(name: str) -> str:
     return sanitized
 
 
-def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, str]:
+def load_files(con: duckdb.DuckDBPyConnection, files: list[str], use_flat_csv: bool = True) -> dict[str, str]:
     """
     Load Excel/CSV files into DuckDB tables.
 
     Returns a mapping of original_name -> sanitized_table_name.
+    use_flat_csv: If True, prefer pre-processed flattened CSVs (L1 cache) when available.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
         if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
+            logger.error(f"❌ 文件未找到: {file_path}")
             continue
 
         ext = os.path.splitext(file_path)[1].lower()
 
         if ext in (".xlsx", ".xls"):
+            # Try to use pre-processed flattened CSVs (L1 cache) first
+            if use_flat_csv:
+                flat_csvs = find_flat_csvs(file_path)
+                if flat_csvs:
+                    # Load flat CSVs as separate tables
+                    for sheet_name, csv_path in flat_csvs.items():
+                        table_name = sanitize_table_name(sheet_name)
+                        # Handle duplicate table names
+                        original_table_name = table_name
+                        counter = 1
+                        while table_name in table_map.values():
+                            table_name = f"{original_table_name}_{counter}"
+                            counter += 1
+                        try:
+                            con.execute(
+                                f'CREATE TABLE "{table_name}" AS SELECT * FROM read_csv_auto(\'{csv_path}\')'
+                            )
+                            table_map[sheet_name] = table_name
+                            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                            logger.info(
+                                f"  ✅ 已加载（展平CSV）工作表 '{sheet_name}' -> 表 '{table_name}' ({row_count} 行)"
+                            )
+                            print(f"  ✅ 已加载工作表: {sheet_name}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 加载工作表 '{sheet_name}' 失败: {e}")
+                    continue
+
+            # Fall back: try header flattening
+            if flatten_excel_headers:
+                flat_csvs = flatten_excel_headers(file_path, CACHE_DIR)
+                if flat_csvs:
+                    # Load flat CSVs as separate tables
+                    for sheet_name, csv_path in flat_csvs.items():
+                        table_name = sanitize_table_name(sheet_name)
+                        # Handle duplicate table names
+                        original_table_name = table_name
+                        counter = 1
+                        while table_name in table_map.values():
+                            table_name = f"{original_table_name}_{counter}"
+                            counter += 1
+                        try:
+                            con.execute(
+                                f'CREATE TABLE "{table_name}" AS SELECT * FROM read_csv_auto(\'{csv_path}\')'
+                            )
+                            table_map[sheet_name] = table_name
+                            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                            logger.info(
+                                f"  ✅ 已加载（展平）工作表 '{sheet_name}' -> 表 '{table_name}' ({row_count} 行)"
+                            )
+                            print(f"  ✅ 已加载工作表: {sheet_name}")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 加载工作表 '{sheet_name}' 失败: {e}")
+                    continue
+            # Fall back to GDAL方式
             _load_excel(con, file_path, table_map)
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
         else:
-            logger.warning(f"Unsupported file format: {ext} ({file_path})")
+            logger.warning(f"❌ 不支持的文件格式: {ext} ({file_path})")
 
     return table_map
 
@@ -134,25 +273,39 @@ def _load_excel(
             counter += 1
 
         try:
+            # Try DuckDB's built-in read_excel_auto (no spatial extension needed)
             con.execute(
                 f"""
                 CREATE TABLE "{table_name}" AS
-                SELECT * FROM st_read(
-                    '{file_path}',
-                    layer = '{sheet_name}',
-                    open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
-                )
+                SELECT * FROM read_excel_auto('{file_path}', sheet = '{sheet_name}')
             """
             )
             table_map[sheet_name] = table_name
-            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
-                0
-            ]
+            row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
             logger.info(
                 f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows)"
             )
         except Exception as e:
-            logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+            logger.warning(f"  Failed to load sheet '{sheet_name}' with read_excel_auto: {e}")
+            # Fallback to GDAL st_read if read_excel_auto fails (e.g., old .xls format)
+            try:
+                con.execute(
+                    f"""
+                    CREATE TABLE "{table_name}" AS
+                    SELECT * FROM st_read(
+                        '{file_path}',
+                        layer = '{sheet_name}',
+                        open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
+                    )
+                """
+                )
+                table_map[sheet_name] = table_name
+                row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                logger.info(
+                    f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows) [via st_read]"
+                )
+            except Exception as e2:
+                logger.warning(f"  Failed to load sheet '{sheet_name}' with st_read: {e2}")
 
 
 def _load_csv(
@@ -179,10 +332,11 @@ def _load_csv(
         table_map[base_name] = table_name
         row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         logger.info(
-            f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
+            f"  ✅ 已加载 CSV '{base_name}' -> 表 '{table_name}' ({row_count} 行)"
         )
+        print(f"  ✅ 已加载 CSV: {base_name}")
     except Exception as e:
-        logger.warning(f"  Failed to load CSV '{base_name}': {e}")
+        logger.warning(f"  ⚠️ 加载 CSV '{base_name}' 失败: {e}")
 
 
 def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
@@ -190,24 +344,19 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
     output_parts = []
 
     for original_name, table_name in table_map.items():
-        output_parts.append(f"\n{'=' * 60}")
-        output_parts.append(f'Table: {original_name} (SQL name: "{table_name}")')
-        output_parts.append(f"{'=' * 60}")
-
-        # Get row count
         row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        output_parts.append(f"Rows: {row_count}")
-
-        # Get column info
         columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
-        output_parts.append(f"\nColumns ({len(columns)}):")
-        output_parts.append(f"{'Name':<30} {'Type':<15} {'Nullable'}")
-        output_parts.append(f"{'-' * 30} {'-' * 15} {'-' * 8}")
+
+        output_parts.append(f"\n## 📋 Table: {original_name}")
+        output_parts.append(f"**Rows:** {row_count} | **Columns:** {len(columns)}")
+        output_parts.append(f"\n### Columns")
+        output_parts.append(f"| Name | Type | Nullable |")
+        output_parts.append(f"|------|------|----------|")
         for col in columns:
             col_name, col_type, nullable = col[0], col[1], col[2]
-            output_parts.append(f"{col_name:<30} {col_type:<15} {nullable}")
+            output_parts.append(f"| {col_name} | {col_type} | {nullable} |")
 
-        # Get non-null counts per column
+        # Non-null counts
         col_names = [col[0] for col in columns]
         non_null_parts = []
         for c in col_names:
@@ -215,23 +364,20 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         non_null_sql = f'SELECT {", ".join(non_null_parts)} FROM "{table_name}"'
         try:
             non_null_counts = con.execute(non_null_sql).fetchone()
-            output_parts.append("\nNon-null counts:")
+            output_parts.append(f"\n### Data Quality (Non-null counts)")
             for i, c in enumerate(col_names):
-                output_parts.append(f"  {c}: {non_null_counts[i]} / {row_count}")
-        except Exception:
-            pass
+                pct = (non_null_counts[i] / row_count * 100) if row_count > 0 else 0
+                output_parts.append(f"- {c}: {non_null_counts[i]}/{row_count} ({pct:.1f}%)")
+        except Exception as e:
+            logger.warning(f"Failed to get non-null counts: {e}")
 
-        # Sample data (first 5 rows)
-        output_parts.append("\nSample data (first 5 rows):")
+        # Sample data
+        output_parts.append(f"\n### Sample Data (first 3 rows)")
         try:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchdf()
+            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 3').fetchdf()
             output_parts.append(sample.to_string(index=False))
         except Exception:
-            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchall()
-            header = [col[0] for col in columns]
-            output_parts.append("  " + " | ".join(header))
-            for row in sample:
-                output_parts.append("  " + " | ".join(str(v) for v in row))
+            pass
 
     result = "\n".join(output_parts)
     print(result)
@@ -354,11 +500,11 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
                     "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
                 )
     else:
-        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
+        msg = f"❌ 不支持的输出格式: {ext}，请使用 .csv、.json 或 .md"
         print(msg)
         return msg
 
-    msg = f"Results exported to {output_file} ({len(rows)} rows)"
+    msg = f"✅ 结果已导出到 {output_file}（{len(rows)} 行）"
     print(msg)
     return msg
 
@@ -387,27 +533,11 @@ def action_summary(
     output_parts.append(f"Total rows: {row_count}")
     output_parts.append(f"{'=' * 70}")
 
-    numeric_types = {
-        "BIGINT",
-        "INTEGER",
-        "SMALLINT",
-        "TINYINT",
-        "DOUBLE",
-        "FLOAT",
-        "DECIMAL",
-        "HUGEINT",
-        "REAL",
-        "NUMERIC",
-    }
-
     for col in columns:
         col_name, col_type = col[0], col[1].upper()
         output_parts.append(f"\n--- {col_name} ({col[1]}) ---")
 
-        # Check base type (strip parameterized parts)
-        base_type = re.sub(r"\(.*\)", "", col_type).strip()
-
-        if base_type in numeric_types:
+        if _is_numeric_type(col[1]):
             try:
                 stats = con.execute(f"""
                     SELECT
@@ -477,6 +607,252 @@ def action_summary(
     return result
 
 
+def _col_quote(col_name: str) -> str:
+    """Return double-quoted column name if it contains spaces or special chars."""
+    if any(c in col_name for c in (' ', '-', '（', '）', '_', '/', '\\')):
+        return f'"{col_name}"'
+    return col_name
+
+
+def action_overview(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
+    """
+    Single-pass overview: table structure + column quick-ref + stats summary + sample rows.
+    Designed to provide everything needed to write a query in one call.
+    """
+    output_parts = []
+
+    for original_name, table_name in table_map.items():
+        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
+        col_names = [c[0] for c in columns]
+
+        output_parts.append(f"\n## 📊 Table Overview: {original_name}")
+        output_parts.append(f"**Rows:** {row_count} | **Columns:** {len(columns)}")
+
+        # Section 1: Quick column reference
+        output_parts.append(f"\n### Column Quick-Ref")
+        output_parts.append(f"| Name | Type | Nullable |")
+        output_parts.append(f"|------|------|----------|")
+        for col in columns:
+            col_name, col_type, nullable = col[0], col[1], col[2]
+            quoted = _col_quote(col_name)
+            hint = f" → use {quoted}" if quoted != col_name else ""
+            output_parts.append(f"| {col_name} | {col_type} | {nullable}{hint} |")
+
+        # Section 2: Compact stats for numeric columns
+        numeric_cols = _get_numeric_columns(columns)
+
+        if numeric_cols:
+            output_parts.append(f"\n### Numeric Columns Summary")
+            for col_name, col_type in numeric_cols:
+                stats = _get_numeric_stats(con, table_name, col_name)
+                if stats:
+                    cnt, avg, mn, mx = stats
+                    output_parts.append(f"- **{col_name}**: count={cnt:,} avg={avg:,.2f} range=[{mn}, {mx}]")
+
+        # Section 3: String column top values
+        string_cols = _get_string_columns(columns)
+        if string_cols:
+            output_parts.append(f"\n### Categorical Columns (top 3 values each)")
+            for col_name, col_type in string_cols[:5]:
+                try:
+                    top_vals = con.execute(f"""
+                        SELECT "{col_name}", COUNT(*) as freq
+                        FROM "{table_name}"
+                        WHERE "{col_name}" IS NOT NULL
+                        GROUP BY "{col_name}"
+                        ORDER BY freq DESC LIMIT 3
+                    """).fetchall()
+                    if top_vals:
+                        vals_str = " | ".join(f"{v} ({n})" for v, n in top_vals)
+                        output_parts.append(f"- **{col_name}**: {vals_str}")
+                except Exception as e:
+                    logger.warning(f"Failed to get top values for {col_name}: {e}")
+
+        # Section 4: Sample rows
+        output_parts.append(f"\n### Sample Rows (3)")
+        try:
+            sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 3').fetchdf()
+            output_parts.append(sample.to_string(index=False))
+        except Exception as e:
+            logger.warning(f"Failed to get sample rows: {e}")
+
+    result = "\n".join(output_parts)
+    print(result)
+    return result
+
+
+def action_analyze(
+    con: duckdb.DuckDBPyConnection,
+    table_map: dict[str, str],
+    mode: str = "simple",
+    file_path: str = None,
+) -> str:
+    """
+    Single-pass comprehensive analysis: inspect + summary + key insights.
+
+    Modes:
+      auto     - 自动判断复杂度（默认）
+      simple   - 结构化摘要
+      medium   - 摘要 + 关键指标
+      complex  - 完整报告（环比、同比、趋势）
+    """
+    output_parts = []
+
+    for original_name, table_name in table_map.items():
+        row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
+
+        # Auto-detect complexity based on data characteristics
+        detected_mode = mode
+        if mode == "auto":
+            detected_mode = _detect_complexity(row_count, len(columns), columns)
+
+        output_parts.append(f"\n## 📊 Table: {original_name}")
+        output_parts.append(f"**Rows:** {row_count} | **Columns:** {len(columns)} | **Mode:** {detected_mode}")
+
+        if detected_mode == "simple":
+            output_parts.append(_analyze_simple(con, table_name, row_count, columns))
+        elif detected_mode == "medium":
+            output_parts.append(_analyze_medium(con, table_name, row_count, columns))
+        else:
+            output_parts.append(_analyze_complex(con, table_name, row_count, columns))
+
+    result = "\n".join(output_parts)
+    print(result)
+    return result
+
+
+def _detect_complexity(row_count: int, col_count: int, columns: list) -> str:
+    """Auto-detect analysis complexity."""
+    # Complex: 100+ rows OR 40+ columns
+    if row_count >= 200 or col_count >= 100:
+        return "complex"
+    # Medium: 30+ rows OR 20+ columns
+    if row_count >= 30 or col_count >= 20:
+        return "medium"
+    return "simple"
+
+
+def _analyze_simple(con, table_name: str, row_count: int, columns: list) -> str:
+    """Simple mode: structured summary only."""
+    parts = []
+
+    # Column types summary
+    numeric_cols = _get_numeric_columns(columns)
+    string_cols = _get_string_columns(columns)
+
+    parts.append(f"\n### Column Types")
+    parts.append(f"- **Numeric:** {len(numeric_cols)} columns")
+    parts.append(f"- **String:** {len(string_cols)} columns")
+
+    # Sample data
+    parts.append(f"\n### Sample Data (first 3 rows)")
+    try:
+        sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 3').fetchdf()
+        parts.append(sample.to_string(index=False))
+    except Exception as e:
+        logger.warning(f"Failed to get sample data: {e}")
+
+    return "\n".join(parts)
+
+
+def _analyze_medium(con, table_name: str, row_count: int, columns: list) -> str:
+    """Medium mode: summary + key metrics."""
+    parts = []
+
+    # Numeric columns stats
+    numeric_cols = _get_numeric_columns(columns)
+
+    if numeric_cols:
+        parts.append(f"\n### Key Metrics (Numeric Columns)")
+        for col_name, col_type in numeric_cols[:10]:  # top 10 numeric cols
+            stats = _get_numeric_stats(con, table_name, col_name)
+            if stats:
+                cnt, avg, mn, mx = stats
+                if cnt > 0:
+                    parts.append(f"- **{col_name}**: count={cnt:,}, avg={avg:,.2f}, range=[{mn}, {mx}]")
+
+    # String columns top values
+    string_cols = _get_string_columns(columns)
+    if string_cols:
+        parts.append(f"\n### Categorical Columns (top 3 values each)")
+        for col_name, col_type in string_cols[:5]:  # top 5 string cols
+            try:
+                top_vals = con.execute(f'''
+                    SELECT "{col_name}", COUNT(*) as freq
+                    FROM "{table_name}"
+                    WHERE "{col_name}" IS NOT NULL
+                    GROUP BY "{col_name}"
+                    ORDER BY freq DESC LIMIT 3
+                ''').fetchall()
+                if top_vals:
+                    vals_str = " | ".join(f"{v} ({n})" for v, n in top_vals)
+                    parts.append(f"- **{col_name}**: {vals_str}")
+            except Exception as e:
+                logger.warning(f"Failed to get top values for {col_name}: {e}")
+
+    return "\n".join(parts)
+
+
+def _analyze_complex(con, table_name: str, row_count: int, columns: list) -> str:
+    """Complex mode: full report with trends."""
+    parts = []
+
+    # Full summary statistics
+    numeric_cols = _get_numeric_columns(columns)
+
+    if numeric_cols:
+        parts.append(f"\n### Full Statistics")
+        for col_name, col_type in numeric_cols:
+            try:
+                stats = con.execute(f'''
+                    SELECT
+                        COUNT("{col_name}") as count,
+                        AVG("{col_name}")::DOUBLE as mean,
+                        STDDEV("{col_name}")::DOUBLE as std,
+                        MIN("{col_name}") as min,
+                        QUANTILE_CONT("{col_name}", 0.25) as q25,
+                        MEDIAN("{col_name}") as median,
+                        QUANTILE_CONT("{col_name}", 0.75) as q75,
+                        MAX("{col_name}") as max,
+                        COUNT(*) - COUNT("{col_name}") as null_count
+                    FROM "{table_name}"
+                ''').fetchone()
+                labels = ["count", "mean", "std", "min", "25%", "50%", "75%", "max", "nulls"]
+                parts.append(f"\n**{col_name}:**")
+                for label, val in zip(labels, stats):
+                    if isinstance(val, float):
+                        parts.append(f"  - {label}: {val:,.4f}")
+                    else:
+                        parts.append(f"  - {label}: {val}")
+            except Exception as e:
+                logger.warning(f"Failed to get full stats for {col_name}: {e}")
+
+    # String columns full distribution
+    string_cols = _get_string_columns(columns)
+    if string_cols:
+        parts.append(f"\n### Categorical Distributions")
+        for col_name, col_type in string_cols[:5]:
+            try:
+                top_vals = con.execute(f'''
+                    SELECT "{col_name}", COUNT(*) as freq
+                    FROM "{table_name}"
+                    WHERE "{col_name}" IS NOT NULL
+                    GROUP BY "{col_name}"
+                    ORDER BY freq DESC LIMIT 10
+                ''').fetchall()
+                if top_vals:
+                    parts.append(f"\n**{col_name}:**")
+                    for val, freq in top_vals:
+                        pct = (freq / row_count * 100) if row_count > 0 else 0
+                        parts.append(f"  - {val}: {freq} ({pct:.1f}%)")
+            except Exception:
+                pass
+
+    return "\n".join(parts)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze Excel/CSV files using DuckDB")
     parser.add_argument(
@@ -488,8 +864,20 @@ def main():
     parser.add_argument(
         "--action",
         required=True,
-        choices=["inspect", "query", "summary"],
-        help="Action to perform: inspect, query, or summary",
+        choices=["inspect", "query", "summary", "overview", "analyze"],
+        help="Action to perform: inspect, query, summary, overview, or analyze",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="simple",
+        choices=["auto", "simple", "medium", "complex"],
+        help="Analysis complexity mode (default: simple)",
+    )
+    parser.add_argument(
+        "--no-flat-csv",
+        action="store_true",
+        help="Disable auto-use of pre-processed flattened CSVs (force re-parse Excel files)",
     )
     parser.add_argument(
         "--sql",
@@ -524,20 +912,21 @@ def main():
 
     if cached_table_map and os.path.exists(db_path):
         # Cache hit: connect to existing DB
-        logger.info(f"Cache hit! Using cached database: {db_path}")
+        print("✅ 缓存命中 — 使用已有缓存数据库")
         con = duckdb.connect(db_path, read_only=True)
         table_map = cached_table_map
-        logger.info(
-            f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
-        )
+        print(f"✅ 已加载 {len(table_map)} 个表")
     else:
         # Cache miss: load files and persist to DB
-        logger.info("Loading files (first time, will cache for future use)...")
+        logger.info("⏳ 首次加载 — 正在解析文件并建立缓存...")
+        print("⏳ 正在解析文件...")
         con = duckdb.connect(db_path)
-        table_map = load_files(con, args.files)
+        use_flat_csv = not args.no_flat_csv
+        table_map = load_files(con, args.files, use_flat_csv=use_flat_csv)
 
         if not table_map:
-            logger.error("No tables were loaded. Check file paths and formats.")
+            logger.error("❌ 未加载任何表，请检查文件路径和格式。")
+            print("❌ 文件加载失败")
             # Clean up empty DB file
             con.close()
             if os.path.exists(db_path):
@@ -546,10 +935,8 @@ def main():
 
         # Save table map for future cache lookups
         save_table_map(files_hash, table_map)
-        logger.info(
-            f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
-        )
-        logger.info(f"Cached database saved to: {db_path}")
+        print(f"✅ 数据已缓存 ({len(table_map)} 个表)")
+        print(f"✅ 缓存已保存")
 
     # Perform action
     if args.action == "inspect":
@@ -558,6 +945,10 @@ def main():
         action_query(con, args.sql, table_map, args.output_file)
     elif args.action == "summary":
         action_summary(con, args.table, table_map)
+    elif args.action == "overview":
+        action_overview(con, table_map)
+    elif args.action == "analyze":
+        action_analyze(con, table_map, args.mode, args.files[0] if args.files else None)
 
     con.close()
 

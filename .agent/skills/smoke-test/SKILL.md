@@ -59,7 +59,7 @@ smoke-test/
 2. **Check pnpm** - Package manager
 3. **Check uv** - Python package manager
 4. **Check nginx** - Reverse proxy
-5. **Check required ports** - Confirm that ports 2026, 3000, 8001, and 2024 are not occupied
+5. **Check required ports** - Confirm that ports 2026, 3000, and 8001 are not occupied
 
 **Docker mode environment check** (if Docker is selected):
 1. **Check whether Docker is installed** - Run `docker --version`
@@ -93,17 +93,17 @@ smoke-test/
 ### Phase 5: Service Health Check
 
 **Local mode health check**:
-1. **Check process status** - Confirm that LangGraph, Gateway, Frontend, and Nginx processes are all running
+1. **Check process status** - Confirm that Gateway, Frontend, and Nginx processes are all running
 2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
 3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
-4. **Check LangGraph service** - Verify the availability of relevant endpoints
+4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
 5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`
 
 **Docker mode health check** (when using Docker):
 1. **Check container status** - Run `docker ps` and confirm that all containers are running
 2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
 3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
-4. **Check LangGraph service** - Verify the availability of relevant endpoints
+4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
 5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`
 
 ### Optional Functional Verification
@@ -135,7 +135,7 @@ smoke-test/
 
 The following warnings can appear during smoke testing and do not block a successful result:
 - Feishu/Lark SSL errors in Gateway logs (certificate verification failure) can be ignored if that channel is not enabled
-- Warnings in LangGraph logs about missing methods in the custom checkpointer, such as `adelete_for_runs` or `aprune`, do not affect the core functionality
+- Warnings in Gateway logs about missing methods in the custom checkpointer, such as `adelete_for_runs` or `aprune`, do not affect the core functionality
 
 ## Key Tools
 

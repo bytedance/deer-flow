@@ -14,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from app.gateway.auth_disabled import is_auth_disabled
+
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_TOKEN_LENGTH = 64  # bytes
@@ -38,6 +40,9 @@ def should_check_csrf(request: Request) -> bool:
     if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
         return False
 
+    if is_auth_disabled():
+        return False
+
     path = request.url.path.rstrip("/")
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
@@ -48,6 +53,7 @@ def should_check_csrf(request: Request) -> bool:
 _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
     {
         "/api/v1/auth/login/local",
+        "/api/v1/auth/login/local/teller",
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
         "/api/v1/auth/initialize",
