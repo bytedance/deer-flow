@@ -149,10 +149,17 @@ async def check_agent_name(name: str) -> dict:
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
     paths = get_paths()
-    # Treat the name as taken if either the per-user path or the legacy shared
-    # path holds an agent — picking a name that collides with an unmigrated
-    # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+
+    # Existence probes against the per-user and legacy agent directories are
+    # blocking filesystem IO; run them in a worker thread.
+    def _is_available() -> bool:
+        # Treat the name as taken if either the per-user path or the legacy
+        # shared path holds an agent — picking a name that collides with an
+        # unmigrated legacy agent would shadow the legacy entry once migration
+        # runs.
+        return not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+
+    available = await asyncio.to_thread(_is_available)
     return {"available": available, "name": normalized}
 
 
@@ -294,20 +301,20 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
-    try:
-        agent_cfg = load_agent_config(name, user_id=user_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    def _update_agent_sync() -> AgentResponse | str:
+        # Worker thread: the config load, existence checks, config/SOUL.md
+        # writes, and the read-back are all blocking filesystem IO that must
+        # stay off the event loop. String returns signal HTTP error outcomes.
+        try:
+            agent_cfg = load_agent_config(name, user_id=user_id)
+        except FileNotFoundError:
+            return "not_found"  # signals 404
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, name)
-    if not agent_dir.exists() and paths.agent_dir(name).exists():
-        raise HTTPException(
-            status_code=409,
-            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
-        )
+        paths = get_paths()
+        agent_dir = paths.user_agent_dir(user_id, name)
+        if not agent_dir.exists() and paths.agent_dir(name).exists():
+            return "legacy_only"  # signals 409
 
-    try:
         # Update config if any config fields changed
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
@@ -349,11 +356,22 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         refreshed_cfg = load_agent_config(name, user_id=user_id)
         return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
 
-    except HTTPException:
-        raise
+    try:
+        result = await asyncio.to_thread(_update_agent_sync)
     except Exception as e:
         logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
+
+    if isinstance(result, str):
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        # result == "legacy_only"
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
+        )
+
+    return result
 
 
 class UserProfileResponse(BaseModel):
@@ -382,12 +400,17 @@ async def get_user_profile() -> UserProfileResponse:
     """
     _require_agents_api_enabled()
 
-    try:
+    def _read_user_profile() -> str | None:
+        # Worker thread: the existence probe and file read are blocking
+        # filesystem IO that must stay off the event loop.
         user_md_path = get_paths().user_md_file
         if not user_md_path.exists():
-            return UserProfileResponse(content=None)
-        raw = user_md_path.read_text(encoding="utf-8").strip()
-        return UserProfileResponse(content=raw or None)
+            return None
+        return user_md_path.read_text(encoding="utf-8").strip() or None
+
+    try:
+        content = await asyncio.to_thread(_read_user_profile)
+        return UserProfileResponse(content=content)
     except Exception as e:
         logger.error(f"Failed to read user profile: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read user profile: {str(e)}")
@@ -410,11 +433,16 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     """
     _require_agents_api_enabled()
 
-    try:
+    def _write_user_profile() -> None:
+        # Worker thread: directory creation and the file write are blocking
+        # filesystem IO that must stay off the event loop.
         paths = get_paths()
         paths.base_dir.mkdir(parents=True, exist_ok=True)
         paths.user_md_file.write_text(request.content, encoding="utf-8")
         logger.info(f"Updated USER.md at {paths.user_md_file}")
+
+    try:
+        await asyncio.to_thread(_write_user_profile)
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)
