@@ -313,10 +313,12 @@ For persistent system or language dependencies, extend the published image and k
 FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 
 USER root
+# Example user dependency; not required by DeerFlow itself.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ripgrep \
+    && apt-get install -y --no-install-recommends graphviz \
     && rm -rf /var/lib/apt/lists/*
 
+# Example Python dependency for work done inside the sandbox.
 RUN python -m pip install --no-cache-dir pandas
 
 # Do not override ENTRYPOINT or CMD; keep the upstream sandbox server startup.
