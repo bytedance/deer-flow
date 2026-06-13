@@ -211,11 +211,14 @@ def build_run_config(
 
     When *assistant_id* refers to a custom agent (anything other than
     ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
-    whichever runtime options container is active: ``context`` for
-    LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    both ``configurable`` and ``context`` so it is visible to legacy
+    configurable readers and to LangGraph ``ToolRuntime.context`` consumers
+    (e.g. the ``setup_agent`` tool, which since LangGraph >=1.1.9 no longer
+    falls back from ``context`` to ``configurable``).  An explicit
+    ``agent_name`` in either container takes precedence over the value
+    derived from ``assistant_id``.  ``make_lead_agent`` reads this key to
+    load the matching ``agents/<name>/SOUL.md`` and per-agent config —
+    without it the agent silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
