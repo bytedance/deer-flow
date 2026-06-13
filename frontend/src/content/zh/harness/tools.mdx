@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Exa", "Firecrawl"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -132,6 +132,17 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
+  - use: deerflow.community.brave.tools:web_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+通过官方 [Brave Search API](https://brave.com/search/api/) 返回 Brave 独立索引的结果。需要 API Key，`max_results` 上限为 20。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
   - use: deerflow.community.exa.tools:web_search_tool
     api_key: $EXA_API_KEY
 ```
@@ -139,6 +150,14 @@ tools:
 
 安装：`cd backend && uv add 'deerflow-harness[exa]'`
 
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:web_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+InfoQuest 搜索集成。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

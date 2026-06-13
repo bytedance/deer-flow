@@ -530,6 +530,16 @@ tools:
   #   max_results: 5
   #   # api_key: $SERPER_API_KEY  # Optional if SERPER_API_KEY env var is set
 
+  # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
+  # Brave Search returns results from an independent index. Sign up at
+  # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
+  # `backend: brave` option above, this calls the official Brave API directly.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.brave.tools:web_search_tool
+  #   max_results: 5                  # Capped at 20 by the Brave Search API
+  #   # api_key: $BRAVE_SEARCH_API_KEY  # Optional if the env var is set
+
   # Web search tool (requires Tavily API key)
   # - name: web_search
   #   group: web
@@ -822,6 +832,8 @@ sandbox:
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
+#   # Custom images should extend the default image or implement the same AIO
+#   # sandbox HTTP API used by agent-sandbox. See backend/docs/CONFIGURATION.md.
 #   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
@@ -860,6 +872,8 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
+#   # environment variable, not sandbox.image from this config file.
 
 # ============================================================================
 # Subagents Configuration

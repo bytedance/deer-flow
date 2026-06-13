@@ -457,8 +457,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         data = _load_yaml_file(config_path)
 
-        tool_uses = [t.get("use", "") for t in data.get("tools", []) if t.get("name") == tool_name]
-        if not tool_uses:
+        tool_entries = [t for t in data.get("tools", []) if t.get("name") == tool_name]
+        tool_uses = [t.get("use", "") for t in tool_entries]
+        if not tool_entries:
             return CheckResult(
                 label,
                 "warn",
@@ -476,6 +477,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
+                "brave": "BRAVE_SEARCH_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
@@ -484,14 +486,24 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             },
         }
 
-        for use in tool_uses:
+        for tool_entry in tool_entries:
+            use = tool_entry.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
                     return CheckResult(label, "ok", detail)
 
-        for use in tool_uses:
+        for tool_entry in tool_entries:
+            use = tool_entry.get("use", "")
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
+                    configured_key = tool_entry.get("api_key")
+                    if isinstance(configured_key, str) and configured_key.strip():
+                        if configured_key.startswith("$"):
+                            ref_var = configured_key[1:]
+                            if os.environ.get(ref_var):
+                                return CheckResult(label, "ok", f"{provider} ({ref_var} set via api_key)")
+                        else:
+                            return CheckResult(label, "ok", f"{provider} (api_key configured)")
                     val = os.environ.get(var)
                     if val:
                         return CheckResult(label, "ok", f"{provider} ({var} set)")

@@ -234,7 +234,7 @@ tools:
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Exa, InfoQuest, Firecrawl)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl)
 - `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl)
 - `ls` - List directory contents
 - `read_file` - Read file contents
@@ -303,6 +303,55 @@ When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` val
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
 
+### Building a Custom AIO Sandbox Image
+
+`AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.
+
+For persistent system or language dependencies, extend the published image and keep its startup command intact:
+
+```dockerfile
+FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+
+USER root
+# Example user dependency; not required by DeerFlow itself.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+# Example Python dependency for work done inside the sandbox.
+RUN python -m pip install --no-cache-dir pandas
+
+# Do not override ENTRYPOINT or CMD; keep the upstream sandbox server startup.
+```
+
+Use the custom image in local Docker or Apple Container mode with `sandbox.image`:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: your-registry/your-aio-sandbox:tag
+```
+
+In provisioner mode, sandbox Pods are created by the provisioner service, so configure the provisioner `SANDBOX_IMAGE` environment variable instead of `sandbox.image`. See the [Provisioner Setup Guide](../../docker/provisioner/README.md#custom-sandbox-image).
+
+If you rebuild the runtime from scratch instead of extending the published image, it must expose the same HTTP API used by `agent-sandbox`. DeerFlow currently depends on:
+
+- `sandbox.get_context()`, including `home_dir`
+- `shell.exec_command(...)`
+- `file.read_file(...)`
+- `file.write_file(...)`, including base64 writes for binary content
+- streamed `file.download_file(...)`
+- `file.find_files(...)`
+- `file.list_path(...)`
+- `file.search_in_file(...)`
+
+Custom images must also keep these compatibility constraints:
+
+- The container should listen on the configured sandbox port, `8080` by default.
+- `/mnt/user-data` must remain writable because DeerFlow mounts thread workspace, uploads, and outputs there.
+- `home_dir` comes from the sandbox context endpoint; do not assume DeerFlow hardcodes it.
+- Shell command handling must remain compatible with serialized `exec_command` calls. DeerFlow serializes shell access on the host side to avoid corrupting the sandbox's persistent shell session.
+
 ### Skills
 
 Configure the skills directory for specialized workflows:
@@ -364,6 +413,7 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
+- `BRAVE_SEARCH_API_KEY` - Brave Search API key
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path

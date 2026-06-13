@@ -82,11 +82,32 @@ class WeComChannel(Channel):
             self._ws_client.on("message.mixed", self._on_ws_mixed)
             self._ws_client.on("message.image", self._on_ws_image)
             self._ws_client.on("message.file", self._on_ws_file)
+            self._ws_client.on("error", self._on_ws_error)
+            self._ws_client.on("disconnected", self._on_ws_disconnected)
             self._ws_task = asyncio.create_task(self._ws_client.connect())
+            self._ws_task.add_done_callback(self._on_ws_task_done)
 
             self._running = True
             self.bus.subscribe_outbound(self._on_outbound)
         logger.info("WeCom channel started")
+
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.error(
+            "WeCom WebSocket connection task failed: %s. Check that the network/proxy allows wss://openws.work.weixin.qq.com and that bot_id/bot_secret are valid.",
+            exc,
+        )
+
+    def _on_ws_error(self, error: Any) -> None:
+        logger.error("WeCom WebSocket error: %s", error)
+
+    def _on_ws_disconnected(self, *args: Any) -> None:
+        detail = f" ({args[0]})" if args else ""
+        logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
     async def stop(self) -> None:
         self._running = False
