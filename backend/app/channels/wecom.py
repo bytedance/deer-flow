@@ -102,8 +102,9 @@ class WeComChannel(Channel):
     def _on_ws_error(self, error: Any) -> None:
         logger.error("WeCom WebSocket error: %s", error)
 
-    def _on_ws_disconnected(self, *_args: Any) -> None:
-        logger.warning("WeCom WebSocket disconnected; SDK will attempt to reconnect")
+    def _on_ws_disconnected(self, *args: Any) -> None:
+        detail = f" ({args[0]})" if args else ""
+        logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
     async def stop(self) -> None:
         self._running = False
