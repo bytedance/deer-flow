@@ -412,7 +412,9 @@ def _provider_response(
     from app.gateway.auth_disabled import is_auth_disabled
 
     status, unavailable_reason = _provider_status(config, channels_config, provider)
-    if connection:
+    if unavailable_reason is not None:
+        connection_status = "not_connected"
+    elif connection:
         connection_status = connection["status"]
     elif is_auth_disabled() and status["configured"] and unavailable_reason is None:
         # Auth-disabled local mode routes every channel message to the default
@@ -561,7 +563,6 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
     if not provider_config.enabled:
         raise HTTPException(status_code=400, detail="Channel provider is not enabled")
 
-    owner_user_id = _get_user_id(request)
     try:
         repo = _get_repository(request, config)
     except HTTPException as exc:
@@ -569,25 +570,22 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
             raise
         repo = None
 
-    if repo is not None:
-        for connection in await repo.list_connections(owner_user_id):
-            if connection["provider"] == provider and connection["status"] != "revoked":
-                await repo.disconnect_connection(
-                    connection_id=connection["id"],
-                    owner_user_id=owner_user_id,
-                )
+    current_channels_config = await _get_channels_config(request)
+    candidate_channels_config = dict(current_channels_config)
+    candidate_channels_config.pop(provider, None)
 
-    store = await _get_runtime_config_store(request)
-    await asyncio.to_thread(store.set_provider_disconnected, provider)
-    channels_config = await _load_channels_config(request, config)
-    request.app.state.channels_config = channels_config
-
-    stopped = await _sync_runtime_channel_after_removal(provider, channels_config)
+    stopped = await _sync_runtime_channel_after_removal(provider, candidate_channels_config)
     if stopped is False:
         display_name = _PROVIDER_META[provider]["display_name"]
         raise HTTPException(status_code=400, detail=f"Failed to stop {display_name} channel. Try again.")
 
-    return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])
+    store = await _get_runtime_config_store(request)
+    await asyncio.to_thread(store.set_provider_disconnected, provider)
+    request.app.state.channels_config = candidate_channels_config
+    if repo is not None:
+        await repo.disconnect_provider_connections(provider=provider)
+
+    return _provider_response(config, candidate_channels_config, provider, _PROVIDER_META[provider])
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
@@ -656,8 +654,8 @@ async def configure_channel_provider_runtime(
         # cached by get_app_config().
         runtime_config["bot_username"] = values["bot_username"]
 
-    channels_config[provider] = runtime_config
-    request.app.state.channels_config = channels_config
+    candidate_channels_config = dict(channels_config)
+    candidate_channels_config[provider] = runtime_config
 
     started = await _restart_runtime_channel_if_available(provider, runtime_config)
     if started is False:
@@ -666,5 +664,6 @@ async def configure_channel_provider_runtime(
 
     store = await _get_runtime_config_store(request)
     await asyncio.to_thread(store.set_provider_config, provider, runtime_config)
+    request.app.state.channels_config = candidate_channels_config
 
-    return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])
+    return _provider_response(config, candidate_channels_config, provider, _PROVIDER_META[provider])
