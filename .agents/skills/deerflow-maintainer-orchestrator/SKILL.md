@@ -125,7 +125,7 @@ Before posting a PR review comment:
 6. Immediately before posting, refresh reviews/comments and skip if an equivalent maintainer or trusted-agent review appeared during analysis.
 7. If there are high-confidence findings, post a PR review comment using the PR language. If there are no high-confidence findings, do not post a public PR review/comment; report `No high-confidence review findings.` to the maintainer in the run result.
 
-For public PR reviews with findings, start with one short opener that fits the review context, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
+For public PR reviews with findings, start with one short opener that fits the review context and matches the finding count. Use singular wording only for exactly one finding, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Use plural wording for multiple findings, for example `Thanks @author. I found a few issues that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
 
 For each finding, use:
 

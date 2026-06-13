@@ -90,7 +90,7 @@ Review only the current diff and changed files. Do not comment on unrelated pre-
 
 Prioritize correctness, safety, maintainability, production risk, compatibility, and missing critical tests. Architecture, security, public API, default-behavior, and compatibility problems should be reported as findings when the diff causes or exposes them.
 
-For public PR reviews with findings, start with one short opener that fits the review context, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
+For public PR reviews with findings, start with one short opener that fits the review context and matches the finding count. Use singular wording only for exactly one finding, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Use plural wording for multiple findings, for example `Thanks @author. I found a few issues that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
 
 Use this finding format:
 
