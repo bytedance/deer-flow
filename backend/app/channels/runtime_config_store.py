@@ -51,6 +51,10 @@ class ChannelRuntimeConfigStore:
             delete=False,
         )
         try:
+            try:
+                Path(fd.name).chmod(0o600)
+            except OSError:
+                logger.debug("Unable to chmod temporary channel runtime config store at %s", fd.name, exc_info=True)
             json.dump(self._data, fd, indent=2, ensure_ascii=False)
             fd.close()
             Path(fd.name).replace(self._path)

@@ -113,10 +113,27 @@ Connection records live in SQL tables under `deerflow.persistence.channel_connec
 
 Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
 
+Runtime provider credentials are deployment-level bot secrets, not user-owned
+connection credentials. They can come from `channels.*` in `config.yaml` or
+from the browser runtime setup flow, which persists them through
+`ChannelRuntimeConfigStore` so local/private deployments can configure bots
+without editing YAML. The runtime store is a local plaintext JSON fallback with
+owner-only file permissions (`0600`); use it only where the DeerFlow data
+directory is already trusted as secret storage. WeChat QR login auth state
+follows the same local-runtime model and may persist a QR-derived bot token in
+the channel state directory.
+
 ## Security Notes
 
 - Browser APIs remain authenticated and CSRF-protected.
 - Connect codes are 128-bit random, short-lived, and single-use.
-- Provider bot tokens remain in `channels.*` and are never returned to the browser.
-- Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
+- Runtime provider bot tokens are shared deployment secrets. Runtime setup
+  responses mask password fields, and mutating runtime/channel-worker APIs
+  require an admin user.
+- Stored per-connection credentials use the `channel_credentials` encryption
+  path. If stored credential material cannot be decrypted, DeerFlow treats it
+  as unavailable instead of using corrupt secrets.
+- The local plaintext runtime credential fallback is documented above; prefer
+  deployment-managed environment/config secrets for non-local deployments until
+  a dedicated secret backend is configured.
 - This implementation does not add public provider callback or webhook routes.
