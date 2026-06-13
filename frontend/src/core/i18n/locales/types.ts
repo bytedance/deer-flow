@@ -406,6 +406,8 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      adminRequired: string;
+      empty: string;
     };
     channels: {
       title: string;
