@@ -217,9 +217,7 @@ class TestCheckWebSearch:
     def test_brave_with_inline_api_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            'config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: "inline-key"\n'
-        )
+        cfg.write_text('config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: "inline-key"\n')
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "api_key configured" in result.detail
@@ -227,9 +225,7 @@ class TestCheckWebSearch:
     def test_brave_with_api_key_env_ref_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: $BRAVE_SEARCH_API_KEY\n"
-        )
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: $BRAVE_SEARCH_API_KEY\n")
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "api_key" in result.detail
