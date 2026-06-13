@@ -56,7 +56,6 @@ export function capBlockquoteNesting(markdown: string): string {
 }
 
 type MathDelimiter = {
-  marker: "\\(" | "\\[";
   close: "\\)" | "\\]";
   replacement: "$" | "$$";
 };
@@ -92,7 +91,6 @@ function convertLatexDelimitersInLine(
     if (!inInlineCode && !currentBlock && (two === "\\(" || two === "\\[")) {
       const isDisplay = two === "\\[";
       currentBlock = {
-        marker: two,
         close: isDisplay ? "\\]" : "\\)",
         replacement: isDisplay ? "$$" : "$",
       };
@@ -146,8 +144,73 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
     .join("\n");
 }
 
+function flattenDisplayMathBody(lines: string[]): string {
+  return lines.map((line) => line.trim()).join(" ");
+}
+
+/**
+ * Keep complete display-math blocks atomic for Streamdown.
+ *
+ * Streamdown first splits Markdown into render blocks with marked, then runs
+ * react-markdown on each block. Multi-line `$$ ... $$` can be split before
+ * remark-math sees the matching delimiters, especially in long numbered
+ * responses. Compacting the content between the opening and closing `$$`
+ * preserves the LaTeX semantics (visual line breaks still come from `\\`,
+ * `aligned`, `matrix`, `cases`, etc.) while keeping the display-math block
+ * atomic for Streamdown's splitter.
+ */
+export function compactDisplayMathBlocks(markdown: string): string {
+  if (!markdown.includes("$$")) {
+    return markdown;
+  }
+
+  const output: string[] = [];
+  let insideFence = false;
+  let mathLines: string[] | null = null;
+
+  for (const line of markdown.split("\n")) {
+    if (CODE_FENCE_RE.test(line) && mathLines === null) {
+      insideFence = !insideFence;
+      output.push(line);
+      continue;
+    }
+
+    if (insideFence || (INDENTED_CODE_RE.test(line) && mathLines === null)) {
+      output.push(line);
+      continue;
+    }
+
+    if (line.trim() === "$$") {
+      if (mathLines === null) {
+        mathLines = [];
+      } else {
+        output.push("$$", flattenDisplayMathBody(mathLines), "$$");
+        mathLines = null;
+      }
+      continue;
+    }
+
+    if (mathLines !== null) {
+      mathLines.push(line);
+      continue;
+    }
+
+    output.push(line);
+  }
+
+  if (mathLines !== null) {
+    output.push("$$", ...mathLines);
+  }
+
+  return output.join("\n");
+}
+
+export function normalizeStreamdownMathMarkdown(markdown: string): string {
+  return compactDisplayMathBlocks(normalizeLatexMathDelimiters(markdown));
+}
+
 export function preprocessStreamdownMarkdown(markdown: string): string {
-  const mathNormalized = normalizeLatexMathDelimiters(markdown);
+  const mathNormalized = normalizeStreamdownMathMarkdown(markdown);
 
   if (
     !MERMAID_BLOCK_HINT_RE.test(mathNormalized) ||

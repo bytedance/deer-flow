@@ -399,11 +399,14 @@
     overflow-x: auto;
     padding: 0.35rem 0.125rem 0.45rem;
     margin: 0.85rem 0;
+    text-align: center;
   }
 
   .katex-display > .katex {
+    display: inline-block;
     max-width: 100%;
     white-space: nowrap;
+    text-align: initial;
   }
 
   .katex-display::-webkit-scrollbar {

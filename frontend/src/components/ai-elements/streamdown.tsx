@@ -6,7 +6,7 @@ import { Streamdown } from "streamdown";
 import { installClipboardFallback } from "@/core/clipboard";
 import {
   capBlockquoteNesting,
-  normalizeLatexMathDelimiters,
+  normalizeStreamdownMathMarkdown,
 } from "@/core/streamdown/preprocess";
 
 export type ClipboardSafeStreamdownProps = ComponentProps<typeof Streamdown>;
@@ -59,6 +59,7 @@ class StreamdownFallbackBoundary extends Component<
 
 export function ClipboardSafeStreamdown({
   children,
+  parseIncompleteMarkdown,
   ...props
 }: ClipboardSafeStreamdownProps) {
   // Fast path for the dominant pathological input (pure ">" chains) so the
@@ -67,11 +68,16 @@ export function ClipboardSafeStreamdown({
     if (typeof children !== "string") {
       return children;
     }
-    return normalizeLatexMathDelimiters(capBlockquoteNesting(children));
+    return normalizeStreamdownMathMarkdown(capBlockquoteNesting(children));
   }, [children]);
   return (
     <StreamdownFallbackBoundary raw={children}>
-      <Streamdown {...props}>{safeChildren}</Streamdown>
+      <Streamdown
+        parseIncompleteMarkdown={parseIncompleteMarkdown ?? false}
+        {...props}
+      >
+        {safeChildren}
+      </Streamdown>
     </StreamdownFallbackBoundary>
   );
 }

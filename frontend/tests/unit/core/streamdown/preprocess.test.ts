@@ -2,7 +2,8 @@ import { expect, test } from "vitest";
 
 import {
   capBlockquoteNesting,
-  normalizeLatexMathDelimiters,
+  compactDisplayMathBlocks,
+  normalizeStreamdownMathMarkdown,
   preprocessStreamdownMarkdown,
 } from "@/core/streamdown/preprocess";
 
@@ -52,12 +53,12 @@ test("capBlockquoteNesting only rewrites pathological lines", () => {
   expect(lines[2]).toBe("plain");
 });
 
-test("normalizeLatexMathDelimiters converts inline math delimiters", () => {
-  expect(normalizeLatexMathDelimiters("Given \\(x\\), compute \\(x^2\\)."))
+test("normalizeStreamdownMathMarkdown converts inline math delimiters", () => {
+  expect(normalizeStreamdownMathMarkdown("Given \\(x\\), compute \\(x^2\\)."))
     .toBe("Given $x$, compute $x^2$.");
 });
 
-test("normalizeLatexMathDelimiters converts multiline display math delimiters", () => {
+test("normalizeStreamdownMathMarkdown converts multiline display math delimiters", () => {
   const input = [
     "Before",
     "\\[",
@@ -69,10 +70,10 @@ test("normalizeLatexMathDelimiters converts multiline display math delimiters", 
     "After",
   ].join("\n");
   const expected = input.replace("\\[", "$$").replace("\\]", "$$");
-  expect(normalizeLatexMathDelimiters(input)).toBe(expected);
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
 });
 
-test("normalizeLatexMathDelimiters leaves fenced and indented code untouched", () => {
+test("normalizeStreamdownMathMarkdown leaves fenced and indented code untouched", () => {
   const input = [
     "Text \\(x\\)",
     "```tex",
@@ -91,10 +92,55 @@ test("normalizeLatexMathDelimiters leaves fenced and indented code untouched", (
     "```",
     "    \\(literal\\)",
   ].join("\n");
-  expect(normalizeLatexMathDelimiters(input)).toBe(expected);
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
 });
 
-test("preprocessStreamdownMarkdown leaves plain non-math content unchanged", () => {
-  const input = "just some text";
-  expect(preprocessStreamdownMarkdown(input)).toBe(input);
+test("compactDisplayMathBlocks keeps display math as display math", () => {
+  const input = ["Before", "$$", "x", "=", "y", "$$", "After"].join("\n");
+  const expected = ["Before", "$$", "x = y", "$$", "After"].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks leaves fenced code content untouched", () => {
+  const input = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a",
+    "=",
+    "b",
+    "$$",
+  ].join("\n");
+  const expected = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a = b",
+    "$$",
+  ].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("preprocessStreamdownMarkdown normalizes math before Mermaid fixes", () => {
+  const input = [
+    "Before \\(x\\)",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  const expected = [
+    "Before $x$",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  expect(preprocessStreamdownMarkdown(input)).toBe(expected);
 });
