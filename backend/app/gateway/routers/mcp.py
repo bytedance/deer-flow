@@ -13,6 +13,13 @@ from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_c
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
+# Serializes the read-modify-write of extensions_config.json within this worker
+# process. Offloading the RMW to a thread removed the implicit serialization the
+# single-threaded event loop used to provide, so two concurrent
+# PUT /api/mcp/config calls could otherwise interleave and clobber each other.
+# (Cross-process writers remain a separate, pre-existing concern.)
+_mcp_config_write_lock = asyncio.Lock()
+
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
 _DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST = frozenset({"npx", "uvx"})
@@ -377,8 +384,11 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         _validate_mcp_update_request(body)
 
         # Offload the blocking read-modify-write of extensions_config.json
-        # (path resolve, existence probe, raw read, merged write, reload).
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
+        # (path resolve, existence probe, raw read, merged write, reload). The
+        # lock serializes concurrent updates within this process so the RMW stays
+        # atomic now that it no longer runs inline on the event loop.
+        async with _mcp_config_write_lock:
+            reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         return McpConfigResponse(mcp_servers=servers)

@@ -14,6 +14,8 @@ IO runs at collection, outside the gate.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -47,3 +49,44 @@ async def test_update_mcp_configuration_does_not_block_event_loop(tmp_path: Path
     # The merged config was actually written to the env-pointed path (offload the
     # stat so the assertion itself doesn't trip the gate).
     assert await asyncio.to_thread(config_path.exists)
+
+
+async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
+    """The write lock keeps the offloaded read-modify-write atomic within the process.
+
+    Offloading the RMW to a worker thread dropped the implicit serialization the
+    single-threaded event loop provided. ``_mcp_config_write_lock`` restores it:
+    even with several concurrent ``PUT /api/mcp/config`` calls, only one
+    ``_apply_mcp_config_update`` runs at a time. (Without the lock the tracked
+    max concurrency would exceed 1.)
+    """
+
+    async def _noop_admin(_request) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "_require_admin_user", _noop_admin)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
+
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def _tracking_apply(_body) -> dict:
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)  # worker thread (off-loop): hold long enough to expose any overlap
+        with state_lock:
+            active -= 1
+        return {}
+
+    monkeypatch.setattr(mcp_router, "_apply_mcp_config_update", _tracking_apply)
+
+    body = McpConfigUpdateRequest(
+        mcp_servers={"s": McpServerConfigResponse(type="http", url="https://example.test/mcp")},
+    )
+
+    await asyncio.gather(*[update_mcp_configuration(request=None, body=body) for _ in range(5)])
+
+    assert max_active == 1, f"config updates were not serialized (max concurrency {max_active})"
