@@ -49,6 +49,11 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+# Stream modes requested from the runtime, and the SSE event names under which
+# the message-tuple stream may arrive: the embedded runtime (and LangGraph
+# Platform) deliver the requested "messages-tuple" mode as event "messages".
+STREAM_MODES = ["messages-tuple", "values"]
+MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
@@ -56,7 +61,7 @@ CHANNEL_CAPABILITIES = {
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": False},
+    "telegram": {"supports_streaming": True},
     "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }
@@ -1135,7 +1140,7 @@ class ChannelManager:
             "input": {"messages": [human_message]},
             "config": run_config,
             "context": run_context,
-            "stream_mode": ["messages-tuple", "values"],
+            "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
         }
         if owner_headers := _owner_headers(msg):
@@ -1150,7 +1155,7 @@ class ChannelManager:
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
-                if event == "messages-tuple":
+                if event in MESSAGE_STREAM_EVENTS:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
