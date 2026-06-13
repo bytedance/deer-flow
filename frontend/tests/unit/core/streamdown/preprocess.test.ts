@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 
 import {
   capBlockquoteNesting,
+  normalizeLatexMathDelimiters,
   preprocessStreamdownMarkdown,
 } from "@/core/streamdown/preprocess";
 
@@ -51,7 +52,49 @@ test("capBlockquoteNesting only rewrites pathological lines", () => {
   expect(lines[2]).toBe("plain");
 });
 
-test("preprocessStreamdownMarkdown leaves non-mermaid content unchanged", () => {
+test("normalizeLatexMathDelimiters converts inline math delimiters", () => {
+  expect(normalizeLatexMathDelimiters("Given \\(x\\), compute \\(x^2\\)."))
+    .toBe("Given $x$, compute $x^2$.");
+});
+
+test("normalizeLatexMathDelimiters converts multiline display math delimiters", () => {
+  const input = [
+    "Before",
+    "\\[",
+    "\\begin{aligned}",
+    "x_t &= \\sqrt{\\bar{\\alpha}_t}x_0 + \\sqrt{1-\\bar{\\alpha}_t}\\epsilon, \\\\",
+    "\\hat{x}_0 &= x_t",
+    "\\end{aligned}",
+    "\\]",
+    "After",
+  ].join("\n");
+  const expected = input.replace("\\[", "$$").replace("\\]", "$$");
+  expect(normalizeLatexMathDelimiters(input)).toBe(expected);
+});
+
+test("normalizeLatexMathDelimiters leaves fenced and indented code untouched", () => {
+  const input = [
+    "Text \\(x\\)",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  const expected = [
+    "Text $x$",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  expect(normalizeLatexMathDelimiters(input)).toBe(expected);
+});
+
+test("preprocessStreamdownMarkdown leaves plain non-math content unchanged", () => {
   const input = "just some text";
   expect(preprocessStreamdownMarkdown(input)).toBe(input);
 });

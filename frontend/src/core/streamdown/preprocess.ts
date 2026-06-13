@@ -55,10 +55,106 @@ export function capBlockquoteNesting(markdown: string): string {
     .join("\n");
 }
 
-export function preprocessStreamdownMarkdown(markdown: string): string {
-  if (!MERMAID_BLOCK_HINT_RE.test(markdown) || !markdown.includes("-.->")) {
+type MathDelimiter = {
+  marker: "\\(" | "\\[";
+  close: "\\)" | "\\]";
+  replacement: "$" | "$$";
+};
+
+function convertLatexDelimitersInLine(
+  line: string,
+  openBlock: MathDelimiter | null,
+): { line: string; openBlock: MathDelimiter | null } {
+  let result = "";
+  let i = 0;
+  let inInlineCode = false;
+  let currentBlock = openBlock;
+
+  while (i < line.length) {
+    const two = line.slice(i, i + 2);
+
+    if (line[i] === "`") {
+      result += line[i];
+      if (!currentBlock) {
+        inInlineCode = !inInlineCode;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (!inInlineCode && currentBlock?.close === two) {
+      result += currentBlock.replacement;
+      currentBlock = null;
+      i += 2;
+      continue;
+    }
+
+    if (!inInlineCode && !currentBlock && (two === "\\(" || two === "\\[")) {
+      const isDisplay = two === "\\[";
+      currentBlock = {
+        marker: two,
+        close: isDisplay ? "\\]" : "\\)",
+        replacement: isDisplay ? "$$" : "$",
+      };
+      result += currentBlock.replacement;
+      i += 2;
+      continue;
+    }
+
+    result += line[i];
+    i += 1;
+  }
+
+  return { line: result, openBlock: currentBlock };
+}
+
+/**
+ * Normalize common LLM LaTeX delimiters for remark-math.
+ *
+ * remark-math recognizes `$...$` and `$$...$$`, but many models output
+ * `\(...\)` and `\[...\]`. Convert those delimiters outside fenced/indented
+ * code so KaTeX can render equations without corrupting code blocks. The
+ * conversion is stateful across lines, because display math normally spans
+ * several lines:
+ *
+ *   \[
+ *   ...
+ *   \]
+ */
+export function normalizeLatexMathDelimiters(markdown: string): string {
+  if (!/[\\][([\])]/.test(markdown)) {
     return markdown;
   }
 
-  return normalizeMermaidMarkdown(markdown);
+  let insideFence = false;
+  let openMath: MathDelimiter | null = null;
+
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (CODE_FENCE_RE.test(line) && !openMath) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence || (INDENTED_CODE_RE.test(line) && !openMath)) {
+        return line;
+      }
+      const converted = convertLatexDelimitersInLine(line, openMath);
+      openMath = converted.openBlock;
+      return converted.line;
+    })
+    .join("\n");
+}
+
+export function preprocessStreamdownMarkdown(markdown: string): string {
+  const mathNormalized = normalizeLatexMathDelimiters(markdown);
+
+  if (
+    !MERMAID_BLOCK_HINT_RE.test(mathNormalized) ||
+    !mathNormalized.includes("-.->")
+  ) {
+    return mathNormalized;
+  }
+
+  return normalizeMermaidMarkdown(mathNormalized);
 }
