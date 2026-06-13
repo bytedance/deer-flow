@@ -205,10 +205,14 @@ class DiscordChannel(Channel):
             return False
 
         try:
-            fp = open(str(attachment.actual_path), "rb")  # noqa: SIM115
-            file = self._discord_module.File(fp, filename=attachment.filename)
-            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            # Keep the file handle open only for the duration of the upload: discord.py
+            # reads ``fp`` while ``target.send`` runs on ``_discord_loop``; once that
+            # future resolves the bytes are consumed, so closing here is safe and avoids
+            # leaking the handle on both the success and failure paths.
+            with open(str(attachment.actual_path), "rb") as fp:
+                file = self._discord_module.File(fp, filename=attachment.filename)
+                send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
+                await asyncio.wrap_future(send_future)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
