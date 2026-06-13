@@ -832,6 +832,8 @@ sandbox:
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
+#   # Custom images should extend the default image or implement the same AIO
+#   # sandbox HTTP API used by agent-sandbox. See backend/docs/CONFIGURATION.md.
 #   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
@@ -870,6 +872,8 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
+#   # environment variable, not sandbox.image from this config file.
 
 # ============================================================================
 # Subagents Configuration
