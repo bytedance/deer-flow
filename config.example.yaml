@@ -530,6 +530,16 @@ tools:
   #   max_results: 5
   #   # api_key: $SERPER_API_KEY  # Optional if SERPER_API_KEY env var is set
 
+  # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
+  # Brave Search returns results from an independent index. Sign up at
+  # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
+  # `backend: brave` option above, this calls the official Brave API directly.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.brave.tools:web_search_tool
+  #   max_results: 5                  # Capped at 20 by the Brave Search API
+  #   # api_key: $BRAVE_SEARCH_API_KEY  # Optional if the env var is set
+
   # Web search tool (requires Tavily API key)
   # - name: web_search
   #   group: web
