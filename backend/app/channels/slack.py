@@ -313,11 +313,6 @@ class SlackChannel(Channel):
 
         user_id = event.get("user", "")
 
-        # Check allowed users
-        if self._allowed_users and user_id not in self._allowed_users:
-            logger.debug("Ignoring message from non-allowed user: %s", user_id)
-            return
-
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
@@ -334,7 +329,13 @@ class SlackChannel(Channel):
                         code=connect_code,
                     ),
                     self._loop,
-                )
+            )
+            return
+
+        # Check allowed users after connect-code handling so browser-initiated
+        # binding can bootstrap a new external identity.
+        if self._allowed_users and user_id not in self._allowed_users:
+            logger.debug("Ignoring message from non-allowed user: %s", user_id)
             return
 
         channel_id = event.get("channel", "")
