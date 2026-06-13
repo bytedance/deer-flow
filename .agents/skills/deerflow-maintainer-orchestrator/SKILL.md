@@ -9,9 +9,9 @@ description: "Use when a DeerFlow maintainer needs comment-only GitHub issue or 
 
 This is a comment-plane skill: resolve GitHub scope, inspect evidence, and prepare or post DeerFlow issue comments and PR review comments. Keep the work comment-scoped; do not turn it into coding, branch management, release work, artifact closure, or other maintainer operations.
 
-When the maintainer asks to process, handle, comment on, or review a bounded set of issues or PRs, proceed without asking follow-up questions. Treat that request as authorization for one public issue comment or one PR review comment per selected non-skipped artifact. If the maintainer explicitly asks for analysis only, return comment-ready drafts without posting.
+When the maintainer asks to process, handle, comment on, or review a bounded set of issues or PRs, proceed without asking follow-up questions. Treat that request as authorization for one public issue comment per selected non-skipped issue and one PR review comment per selected PR with high-confidence findings. If a PR has no high-confidence findings, do not post a public comment; report that result to the maintainer only. If the maintainer explicitly asks for analysis only, return comment-ready drafts without posting.
 
-The maintainer's normal interaction should be: provide scope; receive posted comment URLs, skipped items, failures, or drafts. Do not offload technical analysis to the maintainer. Make the best evidence-backed recommendation in the comment itself: describe the risk, impact, likely fix, and validation path. Ask the reporter or PR author for missing evidence only when the artifact lacks enough data to diagnose.
+The maintainer's normal interaction should be: provide scope; receive posted comment URLs, PR review URLs, clean results, skipped items, failures, or drafts. Do not offload technical analysis to the maintainer. Make the best evidence-backed recommendation in the comment itself: describe the risk, impact, likely fix, and validation path. Ask the reporter or PR author for missing evidence only when the artifact lacks enough data to diagnose.
 
 Output only the maintainer run result or comment draft. Do not announce the skill name, mode, or that no code was edited unless the user asks for process details.
 
@@ -67,13 +67,26 @@ For non-skipped issues:
    - `needs-more-evidence`: repro, logs, environment, screenshots, exact expected behavior, or failing case missing.
    - `defer-or-close`: duplicate, stale, unsupported, unactionable, or out of scope.
    - `rfc-no-comment`: RFC issue; skip public comments by default.
-4. Produce a public-safe comment:
-   - State the likely cause or investigation direction.
-   - Give concrete modification suggestions.
-   - Name the files/components to inspect when useful.
-   - Include validation commands or test ideas.
-   - If evidence is missing, ask the reporter for the smallest useful missing data.
-   - If the issue touches architecture, security, public API, default behavior, or compatibility, explain the risk and recommended direction directly in the comment.
+4. Produce a public-safe comment from the analysis, not the analysis labels:
+   - Start with one natural opener that connects to the issue context. Prefer `Thanks @author.` for reporter-authored issues when it reads naturally; omit the mention for bots, maintainer-authored tracking issues, or cases where it would add noise.
+   - The opener must say something specific about the next step or boundary, not a generic assessment. Do not use generic phrases such as "This is actionable", "I would treat this as", "ready to fix", or surface/actionability/risk labels.
+   - Use the smallest stable template that fits:
+
+```text
+Thanks @author. <one specific sentence that frames the fix, investigation, or missing evidence.>
+
+Recommended solution:
+- ...
+
+Validation:
+- ...
+```
+
+   - Add `Evidence:` only when citing concrete code, logs, reproduction details, or other proof helps the author act.
+   - Add `Risk:` only when architecture, security, public API, default behavior, or compatibility impact must be called out explicitly; make the risk specific.
+   - Add `Missing info:` only when the issue cannot be diagnosed without more evidence; ask for the smallest useful data.
+   - Put relevant files/components inside `Evidence:` or `Recommended solution:` bullets instead of separate metadata fields.
+   - Every posted issue comment should contain concrete modification guidance and validation guidance unless the only useful response is `Missing info:`.
 5. Immediately before posting, refresh comments and skip if an equivalent maintainer or trusted-agent comment appeared during analysis.
 6. Post one issue comment when posting is authorized; otherwise return the same text as `Reply draft`.
 
@@ -110,7 +123,9 @@ Before posting a PR review comment:
 4. Report concrete architecture, security, public API, default-behavior, and compatibility problems as findings when the diff causes or exposes them.
 5. Check changed behavior, edge cases, error paths, state mutation, transactions, locks, cache invalidation, cleanup, security boundaries, missing tests, performance/reliability, and API compatibility.
 6. Immediately before posting, refresh reviews/comments and skip if an equivalent maintainer or trusted-agent review appeared during analysis.
-7. Post a PR review comment using the PR language. If there are no high-confidence findings, use exactly: `No high-confidence review findings.`
+7. If there are high-confidence findings, post a PR review comment using the PR language. If there are no high-confidence findings, do not post a public PR review/comment; report `No high-confidence review findings.` to the maintainer in the run result.
+
+For public PR reviews with findings, start with one short opener that fits the review context, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
 
 For each finding, use:
 
@@ -130,7 +145,7 @@ Severity guide:
 - `P1`: likely production bug, serious regression, broken compatibility, or high-risk security/architecture issue.
 - `P2`: correctness, maintainability, or test concern with lower risk.
 
-Do not produce compliments, summaries, or general advice unless there are no findings. For sensitive security issues, describe impact and remediation without exploit instructions.
+Do not produce compliments, summaries, or general advice. For sensitive security issues, describe impact and remediation without exploit instructions.
 
 ## No-Question Policy
 
@@ -197,13 +212,26 @@ For PR Review Flow:
 Run result:
 Reviewed:
 Skipped:
+Clean:
 Failed:
 Per PR:
   PR:
+  Public review:
   Findings:
   Review status:
 ```
 
 For analysis-only requests, replace `Posted`/`Reviewed` with `Drafted` and include the comment/review text without posting.
+
+For batches, prefer a compact maintainer-facing table after the headline counts:
+
+```text
+| Artifact | Status | Public action | Notes |
+| --- | --- | --- | --- |
+| #123 | posted | comment URL | short reason |
+| PR #456 | reviewed | review URL | P1: finding title |
+| PR #789 | clean | none | No high-confidence review findings. |
+| #321 | skipped | none | existing maintainer comment |
+```
 
 Omit empty categories, no-op fields, routine command output, and raw logs. Report meaningful changes, evidence, and options.

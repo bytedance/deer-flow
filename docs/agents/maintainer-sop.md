@@ -14,11 +14,13 @@ The local skill lives at `.agents/skills/deerflow-maintainer-orchestrator/SKILL.
 
 ## Comment Authorization
 
-When the maintainer asks to process, handle, comment on, or review a bounded set of issues or PRs, the skill may post one public issue comment or one PR review comment per selected non-skipped artifact.
+When the maintainer asks to process, handle, comment on, or review a bounded set of issues or PRs, the skill may post one public issue comment per selected non-skipped issue and one PR review comment per selected PR with high-confidence findings.
+
+If a PR has no high-confidence findings, the skill should not post a public review/comment. It should report that clean result to the maintainer only.
 
 When the maintainer explicitly asks for analysis only, the skill should return comment-ready drafts without posting.
 
-The maintainer's normal interaction should be: provide scope; receive posted comment URLs, skipped items, failures, or drafts.
+The maintainer's normal interaction should be: provide scope; receive posted comment URLs, PR review URLs, clean results, skipped items, failures, or drafts.
 
 The skill should not announce its own name, mode, or "no code edited" status in normal output. Those are process details, not maintainer signal.
 
@@ -50,14 +52,29 @@ Maintainer reports and comments can use concise repo-local references such as `#
 
 For each issue, first perform a cheap precheck: read issue metadata, labels, author, body, and existing comments. If labels, title, or body mark the issue as RFC (`rfc`, `[RFC]`, `RFC:`, or `Request for Comments`), classify it as `rfc-no-comment`, skip deep analysis, and do not post anything public unless the maintainer explicitly overrides the RFC skip for that item. If a maintainer or trusted agent already posted an equivalent diagnosis, modification suggestion, information request, or blocking decision, skip deep analysis and do not post anything public for that issue.
 
-If the precheck does not skip the issue, gather the issue body, comments, screenshots, logs, reproduction details, linked artifacts, and relevant DeerFlow code/docs. Then post or draft a concise comment that includes:
+If the precheck does not skip the issue, gather the issue body, comments, screenshots, logs, reproduction details, linked artifacts, and relevant DeerFlow code/docs.
 
-- likely cause or investigation direction
-- concrete modification suggestions
-- relevant files/components when useful
-- requested missing evidence when the issue is under-specified
-- validation commands or test ideas
-- risk and recommended direction for architecture, security, public API, default behavior, or compatibility concerns
+The public issue comment should start naturally, then move quickly into execution guidance. Prefer a short opener like `Thanks @author. <specific context sentence>.` when the issue is reporter-authored and the mention reads naturally. Omit the mention for bots, maintainer-authored tracking issues, or cases where it would add noise.
+
+Do not include internal analysis labels or generic assessment openers such as "This is actionable", "I would treat this as", `ready-to-fix`, surface labels, or risk labels. Use the smallest stable template that fits:
+
+```text
+Thanks @author. <one specific sentence that frames the fix, investigation, or missing evidence.>
+
+Recommended solution:
+- ...
+
+Validation:
+- ...
+```
+
+Add optional sections only when they add signal:
+
+- `Evidence:` for concrete code, logs, reproduction details, or proof.
+- `Risk:` for specific architecture, security, public API, default behavior, or compatibility impact.
+- `Missing info:` when the issue cannot be diagnosed without more evidence.
+
+Put relevant files/components inside `Evidence:` or `Recommended solution:` bullets. Every posted issue comment should contain concrete modification guidance and validation guidance unless the only useful response is `Missing info:`.
 
 Architecture and security concerns should be explained in the comment when they are relevant. They are not reasons to ask the maintainer what to do. Avoid private reasoning, credentials, internal-only context, exploit instructions, and unsupported promises.
 
@@ -72,6 +89,8 @@ Before local diff review, establish the base from the base repository, not from 
 Review only the current diff and changed files. Do not comment on unrelated pre-existing code unless the diff makes it newly risky. Do not report low-confidence guesses.
 
 Prioritize correctness, safety, maintainability, production risk, compatibility, and missing critical tests. Architecture, security, public API, default-behavior, and compatibility problems should be reported as findings when the diff causes or exposes them.
+
+For public PR reviews with findings, start with one short opener that fits the review context, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
 
 Use this finding format:
 
@@ -91,7 +110,7 @@ Severity:
 - `P1`: likely production bug, serious regression, broken compatibility, or high-risk security/architecture issue.
 - `P2`: correctness, maintainability, or test concern with lower risk.
 
-If there are no high-confidence findings, say exactly: `No high-confidence review findings.`
+If there are no high-confidence findings, do not post a public PR review/comment. Report `No high-confidence review findings.` to the maintainer in the run result.
 
 Immediately before posting, refresh reviews/comments and skip if an equivalent maintainer or trusted-agent review appeared during analysis.
 
@@ -137,4 +156,17 @@ Treat these as high-signal areas for issue comments and PR findings:
 
 For Issue Flow, report posted, skipped, failed, and per-issue comment status. For analysis-only requests, report drafted comments instead of posted comments.
 
-For PR Review Flow, report reviewed, skipped, failed, and per-PR review status. Omit empty categories, no-op fields, routine command output, and raw logs. Report meaningful changes, evidence, and options.
+For PR Review Flow, report reviewed, skipped, clean, failed, and per-PR review status. `Clean` means no high-confidence findings and no public comment posted.
+
+For batches, prefer a compact maintainer-facing table:
+
+```text
+| Artifact | Status | Public action | Notes |
+| --- | --- | --- | --- |
+| #123 | posted | comment URL | short reason |
+| PR #456 | reviewed | review URL | P1: finding title |
+| PR #789 | clean | none | No high-confidence review findings. |
+| #321 | skipped | none | existing maintainer comment |
+```
+
+Omit empty categories, no-op fields, routine command output, and raw logs. Report meaningful changes, evidence, and options.
