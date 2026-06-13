@@ -83,6 +83,7 @@ class RunRecord:
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
+    user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -118,13 +119,48 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
+        # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
+        # used as an ordered set), maintained in lockstep with ``_runs`` so
+        # per-thread queries avoid O(total in-memory runs) full scans while
+        # preserving ``_runs`` iteration order (see ``_thread_records_locked``).
+        self._runs_by_thread: dict[str, dict[str, None]] = {}
         self._lock = asyncio.Lock()
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
 
+    def _index_run_locked(self, record: RunRecord) -> None:
+        """Register *record* in the thread index. Caller must hold ``self._lock``."""
+        self._runs_by_thread.setdefault(record.thread_id, {})[record.run_id] = None
+
+    def _unindex_run_locked(self, run_id: str, thread_id: str) -> None:
+        """Drop *run_id* from the thread index. Caller must hold ``self._lock``."""
+        bucket = self._runs_by_thread.get(thread_id)
+        if bucket is not None:
+            bucket.pop(run_id, None)
+            if not bucket:
+                self._runs_by_thread.pop(thread_id, None)
+
+    def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
+        """Return live in-memory records for *thread_id*. Caller must hold ``self._lock``.
+
+        Uses the ``_runs_by_thread`` index for O(runs-in-thread) lookup instead of
+        scanning every in-memory run. Correctness rests on the index and ``_runs``
+        being mutated in lockstep under ``self._lock`` (no ``await`` between the two
+        writes), so any holder of the lock sees them agree. The ``self._runs.get``
+        filter is defense-in-depth, not reconciliation: it drops a stale id still in
+        the index but already gone from ``_runs``, yet it cannot recover a run that is
+        in ``_runs`` but missing from the index (such a run would be silently
+        omitted). It guards only that one direction, should a future refactor ever
+        break the lockstep invariant.
+        """
+        run_ids = self._runs_by_thread.get(thread_id)
+        if not run_ids:
+            return []
+        return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
+
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
-        return {
+        payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
             "status": record.status.value,
@@ -135,6 +171,9 @@ class RunManager:
             "created_at": record.created_at,
             "model_name": record.model_name,
         }
+        if record.user_id is not None:
+            payload["user_id"] = record.user_id
+        return payload
 
     async def _call_store_with_retry(
         self,
@@ -241,6 +280,7 @@ class RunManager:
             kwargs=row.get("kwargs") or {},
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
+            user_id=row.get("user_id"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -320,6 +360,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        user_id: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -333,11 +374,13 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
+            user_id=user_id,
             created_at=now,
             updated_at=now,
         )
         async with self._lock:
             self._runs[run_id] = record
+            self._index_run_locked(record)
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
@@ -349,6 +392,7 @@ class RunManager:
                 # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
+                    self._unindex_run_locked(run_id, record.thread_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -404,8 +448,7 @@ class RunManager:
             limit: Maximum number of runs to return.
         """
         async with self._lock:
-            # Dict insertion order gives deterministic results when timestamps tie.
-            memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
+            memory_records = self._thread_records_locked(thread_id)
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
@@ -504,6 +547,7 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
         model_name: str | None = None,
+        user_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -524,7 +568,7 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running)]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -546,11 +590,13 @@ class RunManager:
                 multitask_strategy=multitask_strategy,
                 metadata=metadata or {},
                 kwargs=kwargs or {},
+                user_id=user_id,
                 created_at=now,
                 updated_at=now,
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            self._index_run_locked(record)
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
@@ -562,6 +608,7 @@ class RunManager:
                 # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
+                    self._unindex_run_locked(run_id, record.thread_id)
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
@@ -635,14 +682,16 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running) for r in self._runs.values())
+            return any(r.status in (RunStatus.pending, RunStatus.running) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:
-            self._runs.pop(run_id, None)
+            record = self._runs.pop(run_id, None)
+            if record is not None:
+                self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:

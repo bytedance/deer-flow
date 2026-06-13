@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
 """Inventory async/thread boundary points for developer review.
 
 This detector is intentionally non-invasive: it parses Python source with AST
 and reports places where code crosses sync/async/thread boundaries. Findings
 are review evidence, not automatic bug decisions.
+
+Not directly executable: import as `support.detectors.thread_boundaries` or
+run via the CLI shim `scripts/detect_thread_boundaries.py`.
 """
 
 from __future__ import annotations
@@ -12,12 +14,13 @@ import argparse
 import ast
 import json
 import os
-import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+from support.detectors.repo_root import resolve_repo_root
+
+REPO_ROOT = resolve_repo_root(Path(__file__))
 DEFAULT_SCAN_PATHS = (
     REPO_ROOT / "backend" / "app",
     REPO_ROOT / "backend" / "packages" / "harness" / "deerflow",
@@ -501,7 +504,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(format_text(findings))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -7,6 +7,9 @@ new versus the merge base — the latter catches exposure created without
 touching the blocking line itself (a new async caller making an old sync
 helper async-reachable). Used by the `blocking-io-guard` skill as the
 deterministic scope step.
+
+Not directly executable: import as `support.detectors.blocking_io_changed` or
+run via the CLI shim `scripts/scan_changed_blocking_io.py`.
 """
 
 from __future__ import annotations
@@ -15,14 +18,14 @@ import argparse
 import json
 import re
 import subprocess
-import sys
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
 from support.detectors import blocking_io_static as static
+from support.detectors.repo_root import resolve_repo_root
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = resolve_repo_root(Path(__file__))
 SCAN_ROOTS = (
     "backend/app",
     "backend/packages/harness/deerflow",
@@ -207,7 +210,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(format_report(findings, args.base))
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

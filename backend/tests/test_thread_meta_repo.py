@@ -137,6 +137,19 @@ class TestThreadMetaRepository:
     async def test_update_metadata_nonexistent_is_noop(self, repo):
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
 
+    @pytest.mark.anyio
+    async def test_update_owner_with_bypass_moves_row(self, repo):
+        await repo.create("t1", user_id="default", metadata={"source": "channel"})
+        await repo.update_owner("t1", "owner-1", user_id=None)
+
+        owner_row = await repo.get("t1", user_id="owner-1")
+        default_row = await repo.get("t1", user_id="default")
+
+        assert owner_row is not None
+        assert owner_row["user_id"] == "owner-1"
+        assert owner_row["metadata"] == {"source": "channel"}
+        assert default_row is None
+
     # --- search with metadata filter (SQL push-down) ---
 
     @pytest.mark.anyio

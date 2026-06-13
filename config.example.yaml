@@ -510,6 +510,16 @@ tools:
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
 
+  # Web search tool (uses SearXNG, self-hosted, no API key required)
+  # SearXNG is a free internet metasearch engine which aggregates results from
+  # various search services. Deploy your own instance: https://github.com/searxng/searxng
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.searxng.tools:web_search_tool
+  #   base_url: http://localhost:8088   # SearXNG instance URL (default: :8088; Docker: http://searxng:8080)
+  #   max_results: 5                     # Maximum number of search results
+
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
   # Serper provides real-time Google Search results. Sign up at https://serper.dev
   # Note: set SERPER_API_KEY in your environment before starting the app, or
@@ -549,6 +559,22 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_search_tool
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
+
+  # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
+  # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
+  # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.browserless.tools:web_fetch_tool
+  #   base_url: http://localhost:3032    # Browserless instance URL (default: :3032; Docker: http://browserless:3000)
+  #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
+  #   timeout_s: 30                       # Request timeout in seconds
+  #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
+  #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
+  #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
@@ -1139,6 +1165,45 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# User-Owned IM Channel Connections
+# ============================================================================
+# Lets logged-in users connect their own IM accounts from the DeerFlow frontend
+# while reusing the existing `channels` runtime configuration below.
+#
+# Security notes:
+# - No public IP, OAuth callback URL, or provider webhook is required.
+# - Provider bot/app credentials stay under `channels.*`.
+# - `channel_connections` stores per-user bindings and one-time connect codes.
+# - Telegram uses a deep link when `bot_username` is configured.
+# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+#   through the already-running bot/app.
+#
+# channel_connections:
+#   enabled: false
+#
+#   telegram:
+#     enabled: false
+#     bot_username: $TELEGRAM_BOT_USERNAME
+#
+#   slack:
+#     enabled: false
+#
+#   discord:
+#     enabled: false
+#
+#   feishu:
+#     enabled: false
+#
+#   dingtalk:
+#     enabled: false
+#
+#   wechat:
+#     enabled: false
+#
+#   wecom:
+#     enabled: false
 
 # ============================================================================
 # IM Channels Configuration

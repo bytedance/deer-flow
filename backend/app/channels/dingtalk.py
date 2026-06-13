@@ -14,7 +14,8 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ class DingTalkChannel(Channel):
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
+        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -395,6 +397,24 @@ class DingTalkChannel(Channel):
                 text[:100],
             )
 
+            connect_code = extract_connect_code(text)
+            if connect_code and self._connection_repo is not None:
+                if self._main_loop and self._main_loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._bind_connection_from_connect_code(
+                            conversation_type=conversation_type,
+                            sender_staff_id=sender_staff_id,
+                            sender_nick=sender_nick,
+                            conversation_id=conversation_id,
+                            code=connect_code,
+                        ),
+                        self._main_loop,
+                    )
+                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                else:
+                    logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
+                return
+
             if _is_dingtalk_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
@@ -450,10 +470,94 @@ class DingTalkChannel(Channel):
         return ""
 
     async def _prepare_inbound(self, chat_id: str, inbound: InboundMessage) -> None:
+        inbound = await self._attach_connection_identity(inbound)
         # Running reply must finish before publish_inbound so AI card tracks are
         # registered before the manager emits streaming outbounds.
         await self._send_running_reply(chat_id, inbound)
         await self.bus.publish_inbound(inbound)
+
+    @staticmethod
+    def _connection_workspace_id(conversation_type: str, conversation_id: str) -> str | None:
+        if conversation_type == _CONVERSATION_TYPE_GROUP and conversation_id:
+            return conversation_id
+        return None
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        conversation_type = str(inbound.metadata.get("conversation_type") or _CONVERSATION_TYPE_P2P)
+        conversation_id = str(inbound.metadata.get("conversation_id") or "")
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="dingtalk",
+            workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
+            fallback_without_workspace=True,
+        )
+
+    async def _bind_connection_from_connect_code(
+        self,
+        *,
+        conversation_type: str,
+        sender_staff_id: str,
+        sender_nick: str,
+        conversation_id: str,
+        code: str,
+    ) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="dingtalk", state=code)
+        if state is None:
+            await self._send_connection_reply(
+                conversation_type,
+                sender_staff_id,
+                conversation_id,
+                "DingTalk connection code is invalid or expired.",
+            )
+            return True
+
+        if not sender_staff_id:
+            await self._send_connection_reply(
+                conversation_type,
+                sender_staff_id,
+                conversation_id,
+                "DingTalk connection could not be completed from this message.",
+            )
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="dingtalk",
+            external_account_id=sender_staff_id,
+            external_account_name=sender_nick or None,
+            workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
+            metadata={
+                "conversation_type": conversation_type,
+                "conversation_id": conversation_id,
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(
+            conversation_type,
+            sender_staff_id,
+            conversation_id,
+            "DingTalk connected to DeerFlow.",
+        )
+        return True
+
+    async def _send_connection_reply(
+        self,
+        conversation_type: str,
+        sender_staff_id: str,
+        conversation_id: str,
+        text: str,
+    ) -> None:
+        robot_code = self._client_id
+        if conversation_type == _CONVERSATION_TYPE_GROUP:
+            if conversation_id:
+                await self._send_text_message_to_group(robot_code, conversation_id, text)
+            return
+        if sender_staff_id:
+            await self._send_text_message_to_user(robot_code, sender_staff_id, text)
 
     async def _send_running_reply(self, chat_id: str, inbound: InboundMessage) -> None:
         conversation_type = inbound.metadata.get("conversation_type", _CONVERSATION_TYPE_P2P)
