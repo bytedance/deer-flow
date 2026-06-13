@@ -459,6 +459,11 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 
 Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
 
+**Context injection snapshot** (observability, `prompt.py` + `dynamic_context_middleware.py`):
+- `build_injected_memory_snapshot()` returns an `InjectedMemorySnapshot` (selected fact ids, counts, sections, token count, budget, a `sha256` of the injected text, and a `truncated` flag). It shares the `_build_injection_parts()` selection pass with `format_memory_for_injection()`, so the snapshot always matches the text actually injected. `to_event_payload()` carries an explicit `schema_version`.
+- `_get_memory_context_with_snapshot()` (lead_agent `prompt.py`) loads memory **once** and returns both the injection text and its snapshot — a single read so the recorded provenance can never diverge from what was put in the prompt (no second read that a concurrent memory update could change).
+- Memory is frozen per-thread on a conversation's first turn, so `DynamicContextMiddleware` builds the snapshot inside the timed `_inject` pass, carries it out via `_InjectResult`, and records it **once per thread** (first-turn full-reminder branch) via `RunJournal.record_context_snapshot("memory", ...)` — a `category="context"`, `event_type="context:memory"` run-event stamped with the run's `(thread_id, run_id)`. Recording is a buffer append (no I/O), so emission is non-blocking and within the same timeout bound as injection. Gateway-path only (no journal on the embedded `DeerFlowClient` path); degrades to a no-op when no journal is present. The payload is bounded provenance only — never the full injected text. Tests: `test_memory_injection_snapshot.py`, `test_run_journal_context_snapshot.py`, `test_dynamic_context_middleware_snapshot.py`.
+
 **Configuration** (`config.yaml` → `memory`):
 - `enabled` / `injection_enabled` - Master switches
 - `storage_path` - Path to memory.json (absolute path opts out of per-user isolation)

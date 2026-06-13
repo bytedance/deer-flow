@@ -507,6 +507,28 @@ class RunJournal(BaseCallbackHandler):
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
 
+    def record_context_snapshot(self, kind: str, *, payload: dict[str, Any]) -> None:
+        """Record an input-side context-assembly snapshot.
+
+        Output-side callbacks above (messages, tool results, token usage)
+        capture what the model *produced*. This captures what was assembled
+        *into* the model's context for this run — e.g. which memory facts were
+        injected, under what token budget, with what content hash. ``kind`` is
+        the context slice ("memory"; "skills"/"config" arrive in later
+        milestones), recorded as ``event_type="context:{kind}"`` under the
+        dedicated ``category="context"``.
+
+        The payload must be a small, bounded summary (ids, counts, budget,
+        hash) — never the full injected text, which belongs in dev-debug sinks
+        rather than the shared event ledger. Events are stamped with this run's
+        ``(thread_id, run_id)``, so a context snapshot joins the rest of the run
+        timeline on the same spine.
+
+        This is a pure-observation hook; unlike :meth:`record_middleware` it is
+        meant to be called by middleware that only watches context assembly.
+        """
+        self._put(event_type=f"context:{kind}", category="context", content=payload)
+
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._pending_flush_tasks:

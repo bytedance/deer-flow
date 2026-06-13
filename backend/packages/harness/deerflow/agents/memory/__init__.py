@@ -9,6 +9,8 @@ This module provides a global memory mechanism that:
 from deerflow.agents.memory.prompt import (
     FACT_EXTRACTION_PROMPT,
     MEMORY_UPDATE_PROMPT,
+    InjectedMemorySnapshot,
+    build_injected_memory_snapshot,
     format_conversation_for_update,
     format_memory_for_injection,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
+    "InjectedMemorySnapshot",
+    "build_injected_memory_snapshot",
     # Queue
     "ConversationContext",
     "MemoryUpdateQueue",

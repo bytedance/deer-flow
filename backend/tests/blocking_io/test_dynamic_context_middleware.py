@@ -51,7 +51,7 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context_with_snapshot", return_value=("", None)),
     ):
         agent = await asyncio.to_thread(
             lambda: create_agent(
@@ -78,7 +78,7 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     runtime = SimpleNamespace(context={})
 
     with (
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context_with_snapshot", return_value=("", None)),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-06-05, Friday"

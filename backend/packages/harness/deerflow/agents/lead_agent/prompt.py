@@ -13,7 +13,9 @@ from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
 
 if TYPE_CHECKING:
+    from deerflow.agents.memory import InjectedMemorySnapshot
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -571,37 +573,81 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    return _get_memory_context_with_snapshot(agent_name, app_config=app_config)[0]
+
+
+def _get_memory_context_with_snapshot(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> tuple[str, InjectedMemorySnapshot | None]:
+    """Load memory once and return both the injection text and its snapshot.
+
+    Single source of truth: the text and the snapshot are derived from the
+    **same** memory load, so the recorded snapshot describes exactly what was
+    injected into the prompt — never a second read that could diverge (e.g. a
+    concurrent memory update or file reload landing between two loads). The two
+    formatting passes are pure functions over the same in-memory ``memory_data``,
+    so the injected text and the snapshot's hash cannot disagree.
+
+    Returns ``("", None)`` when memory injection is disabled or the selection is
+    empty. Never raises — memory context is best-effort.
+    """
     try:
-        from deerflow.agents.memory import format_memory_for_injection, get_memory_data
-        from deerflow.runtime.user_context import get_effective_user_id
+        loaded = _load_injection_memory(agent_name, app_config=app_config)
+        if loaded is None:
+            return "", None
+        memory_data, config = loaded
 
-        if app_config is None:
-            from deerflow.config.memory_config import get_memory_config
+        from deerflow.agents.memory import build_injected_memory_snapshot, format_memory_for_injection
 
-            config = get_memory_config()
-        else:
-            config = app_config.memory
-
-        if not config.enabled or not config.injection_enabled:
-            return ""
-
-        memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
+        use_tiktoken = config.token_counting == "tiktoken"
         memory_content = format_memory_for_injection(
             memory_data,
             max_tokens=config.max_injection_tokens,
-            use_tiktoken=(config.token_counting == "tiktoken"),
+            use_tiktoken=use_tiktoken,
         )
 
         if not memory_content.strip():
-            return ""
+            return "", None
 
-        return f"""<memory>
+        snapshot = build_injected_memory_snapshot(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            use_tiktoken=use_tiktoken,
+        )
+
+        return (
+            f"""<memory>
 {memory_content}
 </memory>
-"""
+""",
+            snapshot,
+        )
     except Exception:
         logger.exception("Failed to load memory context")
-        return ""
+        return "", None
+
+
+def _load_injection_memory(agent_name: str | None, *, app_config: AppConfig | None) -> tuple[dict, MemoryConfig] | None:
+    """Resolve memory config and load memory data for injection.
+
+    Returns ``(memory_data, memory_config)`` or ``None`` when memory injection
+    is disabled. Shared by :func:`_get_memory_context` (which formats the text)
+    and :func:`_get_memory_injection_snapshot` (which records its provenance) so
+    both observe identical inputs and never disagree about what was injected.
+    """
+    from deerflow.agents.memory import get_memory_data
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    if app_config is None:
+        from deerflow.config.memory_config import get_memory_config
+
+        config = get_memory_config()
+    else:
+        config = app_config.memory
+
+    if not config.enabled or not config.injection_enabled:
+        return None
+
+    memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
+    return memory_data, config
 
 
 @lru_cache(maxsize=32)

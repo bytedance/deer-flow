@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
@@ -316,23 +318,63 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> str:
-    """Format memory data for injection into system prompt.
+# Section identifiers recorded in an injection snapshot's ``sections`` list.
+_SECTION_USER_CONTEXT = "user_context"
+_SECTION_HISTORY = "history"
+_SECTION_FACTS = "facts"
 
-    Args:
-        memory_data: The memory data dictionary.
-        max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
-        use_tiktoken: When ``False``, all token counting uses the network-free
-            character-based estimate instead of tiktoken (see
-            ``memory.token_counting`` config). Defaults to ``True``.
 
-    Returns:
-        Formatted memory string for system prompt injection.
+@dataclass(slots=True)
+class _InjectionParts:
+    """Result of the memory-injection selection pass.
+
+    Single source of truth shared by :func:`format_memory_for_injection`
+    (which uses only ``text``) and :func:`build_injected_memory_snapshot`
+    (which uses the provenance fields). Deriving both from one helper keeps the
+    injected text and its snapshot in lockstep — they can never disagree about
+    which facts were selected or how large the result was.
+    """
+
+    text: str
+    sections_present: tuple[str, ...]
+    fact_ids: tuple[str, ...]
+    total_facts: int
+    # True when the whole-text budget safety-net clipped ``text`` *after* fact
+    # selection. ``fact_ids``/``sections_present`` then describe the selected
+    # set, which may slightly overstate what survives in the clipped tail;
+    # consumers needing an exact match should rely on ``text`` and its hash.
+    truncated: bool
+
+
+def _fact_identity(fact: dict[str, Any], content: str) -> str:
+    """Return a stable identifier for an injected fact.
+
+    Prefers the fact's own ``id``; falls back to a short content hash so the
+    injected set stays meaningful even for legacy facts written without an id.
+    """
+    fact_id = fact.get("id")
+    if isinstance(fact_id, str) and fact_id.strip():
+        return fact_id.strip()
+    if fact_id is not None:
+        return str(fact_id)
+    return "sha1:" + hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_injection_parts(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> _InjectionParts:
+    """Select and format memory for injection, capturing provenance alongside.
+
+    The text-building logic is the authoritative implementation;
+    :func:`format_memory_for_injection` is a thin wrapper over it. Provenance
+    (which sections, which fact ids, how many candidates) is captured during the
+    same pass so a snapshot can be produced without re-deriving the selection.
     """
     if not memory_data:
-        return ""
+        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=0, truncated=False)
 
-    sections = []
+    sections: list[str] = []
+    sections_present: list[str] = []
+    selected_fact_ids: list[str] = []
+    total_facts = 0
 
     # Format user context
     user_data = memory_data.get("user", {})
@@ -353,6 +395,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
+            sections_present.append(_SECTION_USER_CONTEXT)
 
     # Format history
     history_data = memory_data.get("history", {})
@@ -373,6 +416,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
+            sections_present.append(_SECTION_HISTORY)
 
     # Format facts (sorted by confidence; include as many as token budget allows)
     facts_data = memory_data.get("facts", [])
@@ -382,6 +426,7 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
             key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
             reverse=True,
         )
+        total_facts = len(ranked_facts)
 
         # Compute token count for existing sections once, then account
         # incrementally for each fact line to avoid full-string re-tokenization.
@@ -414,20 +459,23 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
             if running_tokens + line_tokens <= max_tokens:
                 fact_lines.append(line)
+                selected_fact_ids.append(_fact_identity(fact, content))
                 running_tokens += line_tokens
             else:
                 break
 
         if fact_lines:
             sections.append("Facts:\n" + "\n".join(fact_lines))
+            sections_present.append(_SECTION_FACTS)
 
     if not sections:
-        return ""
+        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=total_facts, truncated=False)
 
     result = "\n\n".join(sections)
 
     # Use accurate token counting with tiktoken (or the char-based estimate
     # when use_tiktoken is False).
+    truncated = False
     token_count = _count_tokens(result, use_tiktoken=use_tiktoken)
     if token_count > max_tokens:
         # Truncate to fit within token limit
@@ -435,8 +483,112 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         char_per_token = len(result) / token_count
         target_chars = int(max_tokens * char_per_token * 0.95)  # 95% to leave margin
         result = result[:target_chars] + "\n..."
+        # The per-fact budget accounting (above) is non-additive vs the
+        # whole-string count, so this safety net can fire even though each fact
+        # "fit". Flag it: fact_ids/sections describe the pre-clip selection.
+        truncated = True
 
-    return result
+    return _InjectionParts(
+        text=result,
+        sections_present=tuple(sections_present),
+        fact_ids=tuple(selected_fact_ids),
+        total_facts=total_facts,
+        truncated=truncated,
+    )
+
+
+def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> str:
+    """Format memory data for injection into system prompt.
+
+    Args:
+        memory_data: The memory data dictionary.
+        max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
+        use_tiktoken: When ``False``, all token counting uses the network-free
+            character-based estimate instead of tiktoken (see
+            ``memory.token_counting`` config). Defaults to ``True``.
+
+    Returns:
+        Formatted memory string for system prompt injection.
+    """
+    return _build_injection_parts(memory_data, max_tokens, use_tiktoken=use_tiktoken).text
+
+
+@dataclass(slots=True)
+class InjectedMemorySnapshot:
+    """Minimal, always-on provenance of one memory injection.
+
+    Records *what* memory injection placed into the model context — which facts,
+    how big, which sections, and a content hash of the injected text — without
+    storing the full text. Produced from the same selection pass as
+    :func:`format_memory_for_injection`, so it always matches what was actually
+    injected. Independent of any optional ranking-debug tracing: it is emitted
+    even when tracing is disabled.
+
+    This is the M1 unit of the context-observability ledger. Memory is injected
+    once per conversation (frozen-snapshot pattern), so a snapshot is recorded
+    once per thread, on its first turn.
+    """
+
+    fact_ids: tuple[str, ...]
+    fact_count: int
+    total_facts: int
+    sections: tuple[str, ...]
+    token_count: int
+    max_tokens: int
+    content_hash: str
+    # True when the injected text was clipped by the budget safety-net after
+    # fact selection. ``content_hash`` always matches the exact injected text;
+    # when this is set, ``fact_ids`` may overstate the clipped tail.
+    truncated: bool = False
+
+    # Payload schema version. Bump when the shape of ``to_event_payload`` changes
+    # so rows already persisted in ``run_events`` can be distinguished from new
+    # ones during replay/aggregation.
+    PAYLOAD_SCHEMA_VERSION = 1
+
+    def to_event_payload(self) -> dict[str, Any]:
+        """Return a small, JSON-serializable payload for the run-event ledger.
+
+        Bounded by construction (fact ids + counts + budget + hash); it never
+        carries the full injected text, which belongs in dev-debug sinks rather
+        than the shared event store. Carries an explicit ``schema_version`` so
+        the persisted record format can evolve safely.
+        """
+        return {
+            "schema_version": self.PAYLOAD_SCHEMA_VERSION,
+            "fact_ids": list(self.fact_ids),
+            "fact_count": self.fact_count,
+            "total_facts": self.total_facts,
+            "sections": list(self.sections),
+            "token_count": self.token_count,
+            "max_tokens": self.max_tokens,
+            "content_hash": self.content_hash,
+            "truncated": self.truncated,
+        }
+
+
+def build_injected_memory_snapshot(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> InjectedMemorySnapshot | None:
+    """Build a provenance snapshot for what memory injection would inject.
+
+    Returns ``None`` when nothing would be injected (no memory data or an empty
+    selection), so callers can cheaply skip emitting an empty snapshot. The
+    ``content_hash`` is over the exact injected text, making it a drift key for
+    later milestones (did the injected context go stale against live memory?).
+    """
+    parts = _build_injection_parts(memory_data, max_tokens, use_tiktoken=use_tiktoken)
+    if not parts.text:
+        return None
+    content_hash = "sha256:" + hashlib.sha256(parts.text.encode("utf-8")).hexdigest()
+    return InjectedMemorySnapshot(
+        fact_ids=parts.fact_ids,
+        fact_count=len(parts.fact_ids),
+        total_facts=parts.total_facts,
+        sections=parts.sections_present,
+        token_count=_count_tokens(parts.text, use_tiktoken=use_tiktoken),
+        max_tokens=max_tokens,
+        content_hash=content_hash,
+        truncated=parts.truncated,
+    )
 
 
 def format_conversation_for_update(messages: list[Any]) -> str:
