@@ -95,9 +95,7 @@ class WeComChannel(Channel):
         if exc is None:
             return
         logger.error(
-            "WeCom WebSocket connection task failed: %s. "
-            "Check that the network/proxy allows wss://openws.work.weixin.qq.com "
-            "and that bot_id/bot_secret are valid.",
+            "WeCom WebSocket connection task failed: %s. Check that the network/proxy allows wss://openws.work.weixin.qq.com and that bot_id/bot_secret are valid.",
             exc,
         )
 
