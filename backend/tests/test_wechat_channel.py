@@ -1249,5 +1249,6 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert auth_state["status"] == "confirmed"
         assert auth_state["bot_token"] == "bound-token"
         assert auth_state["ilink_bot_id"] == "bot-99"
+        assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
 
     _run(go())
