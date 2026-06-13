@@ -19,7 +19,6 @@ import { Loader } from "@/components/ai-elements/loader";
 import {
   Message as AIElementMessage,
   MessageContent as AIElementMessageContent,
-  MessageResponse as AIElementMessageResponse,
   MessageToolbar,
 } from "@/components/ai-elements/message";
 import {
@@ -44,7 +43,6 @@ import {
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
-import { humanMessagePlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
@@ -300,22 +298,23 @@ function MessageContent_({
   }
 
   if (isHuman) {
-    const messageResponse = contentToDisplay ? (
-      <AIElementMessageResponse
-        remarkPlugins={humanMessagePlugins.remarkPlugins}
-        rehypePlugins={humanMessagePlugins.rehypePlugins}
-        components={components}
-        parseIncompleteMarkdown={false}
-      >
-        {contentToDisplay}
-      </AIElementMessageResponse>
-    ) : null;
+    // Composer input is plain text, not authored Markdown. Parsing it as
+    // Markdown mangles pasted code/logs (indented lines become code blocks,
+    // "$...$" spans become math) and lets pathological input crash the page
+    // through marked's recursive blockquote lexer, so render it verbatim.
     return (
-      <div className={cn("ml-auto flex flex-col gap-2", className)}>
+      <div
+        className={cn(
+          "ml-auto flex max-w-full min-w-0 flex-col gap-2",
+          className,
+        )}
+      >
         {filesList}
-        {messageResponse && (
-          <AIElementMessageContent className="w-fit">
-            {messageResponse}
+        {contentToDisplay && (
+          <AIElementMessageContent className="w-full max-w-full">
+            <div className="break-words whitespace-pre-wrap">
+              {contentToDisplay}
+            </div>
           </AIElementMessageContent>
         )}
       </div>

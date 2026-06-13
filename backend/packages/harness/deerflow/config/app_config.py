@@ -7,10 +7,11 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
+from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -117,6 +118,13 @@ class AppConfig(BaseModel):
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    channel_connections: ChannelConnectionsConfig = Field(
+        default_factory=ChannelConnectionsConfig,
+        description=format_field_description(
+            "channel_connections",
+            field_doc="User-facing IM channel connection configuration.",
+        ),
+    )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     llm_io_trace: LLMIOTraceConfig = Field(default_factory=LLMIOTraceConfig, description="LLM I/O trace (dev tool) — prints model request/response")
@@ -149,6 +157,21 @@ class AppConfig(BaseModel):
             field_doc="Stream bridge connecting agent workers to SSE endpoints.",
         ),
     )
+
+    @field_validator("models", "tools", "tool_groups", mode="before")
+    @classmethod
+    def _coerce_null_list_sections(cls, value: Any) -> Any:
+        """Treat a present-but-empty config section as an empty list.
+
+        Commenting out every entry under a top-level YAML key — e.g. ``models:``
+        with only comments beneath it, exactly as shipped in
+        ``config.example.yaml`` — makes PyYAML parse the value as ``None``.
+        Without this, the documented ``cp config.example.yaml config.yaml``
+        first-run flow crashes with an opaque ``Input should be a valid list``
+        pydantic error. Coercing ``None`` to ``[]`` keeps that flow working and
+        matches the field's own ``default_factory=list``.
+        """
+        return [] if value is None else value
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -211,6 +234,11 @@ class AppConfig(BaseModel):
         config_data["extensions"] = extensions_config.model_dump()
 
         result = cls.model_validate(config_data)
+        if not result.models:
+            logger.warning(
+                "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
+                resolved_path,
+            )
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result

@@ -233,3 +233,15 @@ def test_non_auth_mutation_rejects_mismatched_double_submit_token():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "CSRF token mismatch."
+
+
+def test_channel_posts_require_double_submit_csrf():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    response = client.post(
+        "/api/channels/slack/connect",
+        headers={"Origin": "https://deerflow.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "CSRF token missing. Include X-CSRF-Token header."

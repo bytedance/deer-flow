@@ -127,8 +127,8 @@ complex_agent = create_agent_for_task("high")
 ## How It Works
 
 1. When `make_lead_agent(config)` is called, it extracts `is_plan_mode` from `config.configurable`
-2. The config is passed to `_build_middlewares(config)`
-3. `_build_middlewares()` reads `is_plan_mode` and calls `_create_todo_list_middleware(is_plan_mode)`
+2. The config is passed to `build_middlewares(config)`
+3. `build_middlewares()` reads `is_plan_mode` and calls `_create_todo_list_middleware(is_plan_mode)`
 4. If `is_plan_mode=True`, a `TodoListMiddleware` instance is created and added to the middleware chain
 5. The middleware automatically adds a `write_todos` tool to the agent's toolset
 6. The agent can use this tool to manage tasks during execution
@@ -141,7 +141,7 @@ make_lead_agent(config)
   │
   ├─> Extracts: is_plan_mode = config.configurable.get("is_plan_mode", False)
   │
-  └─> _build_middlewares(config)
+  └─> build_middlewares(config)
         │
         ├─> ThreadDataMiddleware
         ├─> SandboxMiddleware
@@ -156,7 +156,7 @@ make_lead_agent(config)
 ### Agent Module
 - **Location**: `packages/harness/deerflow/agents/lead_agent/agent.py`
 - **Function**: `_create_todo_list_middleware(is_plan_mode: bool)` - Creates TodoListMiddleware if plan mode is enabled
-- **Function**: `_build_middlewares(config: RunnableConfig)` - Builds middleware chain based on runtime config
+- **Function**: `build_middlewares(config: RunnableConfig)` - Builds middleware chain based on runtime config
 - **Function**: `make_lead_agent(config: RunnableConfig)` - Creates agent with appropriate middlewares
 
 ### Runtime Configuration

@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -51,13 +51,19 @@ import {
 } from "@/core/threads/export";
 import {
   useDeleteThread,
+  useInfiniteThreads,
   useRenameThread,
-  useThreads,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
-import { pathOfThread, titleOfThread } from "@/core/threads/utils";
+import {
+  channelSourceOfThread,
+  pathOfThread,
+  titleOfThread,
+} from "@/core/threads/utils";
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
+
+import { ThreadChannelIcon } from "./thread-channel-source";
 
 export function RecentChatList() {
   const { t } = useI18n();
@@ -68,7 +74,35 @@ export function RecentChatList() {
       thread_id: string;
       agent_name?: string;
     }>();
-  const { data: threads = [] } = useThreads();
+  const {
+    data: infiniteThreads,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteThreads();
+  const threads = useMemo(
+    () => infiniteThreads?.pages.flat() ?? [],
+    [infiniteThreads],
+  );
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const element = sentinelRef.current;
+    if (!element || !hasNextPage) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { rootMargin: "120px 0px 120px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -182,6 +216,7 @@ export function RecentChatList() {
             <div className="flex w-full flex-col gap-1">
               {threads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
+                const channelSource = channelSourceOfThread(thread);
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -190,10 +225,23 @@ export function RecentChatList() {
                     <SidebarMenuButton isActive={isActive} asChild>
                       <div>
                         <Link
-                          className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                          className="text-muted-foreground flex min-w-0 items-center gap-1.5 pr-7 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                           href={pathOfThread(thread)}
                         >
-                          {titleOfThread(thread)}
+                          <ThreadChannelIcon source={channelSource} />
+                          <span className="min-w-0 truncate">
+                            {titleOfThread(thread)}
+                          </span>
+                          {channelSource && (
+                            <span
+                              className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
+                              title={`${channelSource.label} channel`}
+                            >
+                              <span className="truncate">
+                                {channelSource.label}
+                              </span>
+                            </span>
+                          )}
                         </Link>
                         {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                           <DropdownMenu>
@@ -267,6 +315,28 @@ export function RecentChatList() {
                   </SidebarMenuItem>
                 );
               })}
+              {hasNextPage && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mx-2 my-1 w-[calc(100%-1rem)] justify-center text-xs"
+                    onClick={() => void fetchNextPage()}
+                    disabled={isFetchingNextPage}
+                    data-testid="recent-chat-list-load-more"
+                  >
+                    {isFetchingNextPage
+                      ? t.chats.loadingMore
+                      : t.chats.loadOlderChats}
+                  </Button>
+                  <div
+                    ref={sentinelRef}
+                    aria-hidden="true"
+                    className="h-px w-full"
+                    data-testid="recent-chat-list-sentinel"
+                  />
+                </>
+              )}
             </div>
           </SidebarMenu>
         </SidebarGroupContent>

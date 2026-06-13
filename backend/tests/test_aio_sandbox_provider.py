@@ -317,6 +317,28 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
     pytest.fail("provider thread lock was not released after successor acquire_async")
 
 
+@pytest.mark.anyio
+async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
+    """Async cached reuse must keep backend health checks off the event loop."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, _sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-cached-async")
+    provider._thread_sandboxes = {"thread-cached-async": "sandbox-cached-async"}
+    provider._backend.is_alive = MagicMock(return_value=True)
+
+    to_thread_calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        to_thread_calls.append((func, args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(aio_mod.asyncio, "to_thread", fake_to_thread)
+
+    sandbox_id = await provider._acquire_internal_async("thread-cached-async")
+
+    assert sandbox_id == "sandbox-cached-async"
+    assert to_thread_calls == [(provider._reuse_in_process_sandbox, ("thread-cached-async",))]
+
+
 def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
     """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
@@ -422,6 +444,136 @@ def test_release_swallows_close_errors(tmp_path, caplog):
     assert "Error closing sandbox sandbox-rel-err during release" in caplog.text
     # Still moved to warm pool: client teardown failure must not block lifecycle.
     assert "sandbox-rel-err" in provider._warm_pool
+
+
+def test_get_uses_in_memory_registry_only(tmp_path):
+    """get() must stay event-loop safe by avoiding backend health checks."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
+    provider._backend.is_alive = MagicMock(side_effect=AssertionError("get must not call backend health checks"))
+
+    assert provider.get("sandbox-dead") is sandbox
+
+
+def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
+    """acquire() must replace a stale active cache entry after its container dies."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
+    provider._thread_locks = {}
+    provider._thread_sandboxes = {"thread-dead": "sandbox-dead"}
+    provider._config = {"replicas": 3}
+    provider._backend.is_alive = MagicMock(return_value=False)
+    provider._backend.discover = MagicMock(return_value=None)
+    provider._backend.create = MagicMock(
+        return_value=aio_mod.SandboxInfo(
+            sandbox_id="sandbox-dead",
+            sandbox_url="http://fresh-sandbox",
+            container_name="deer-flow-sandbox-sandbox-dead",
+        )
+    )
+
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_sandbox_id_for_thread", lambda _self, _thread_id: "sandbox-dead")
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id: [])
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, timeout=60: True)
+
+    sandbox_id = provider.acquire("thread-dead")
+
+    assert sandbox_id == "sandbox-dead"
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once()
+    provider._backend.create.assert_called_once()
+    assert provider._thread_sandboxes["thread-dead"] == "sandbox-dead"
+    assert provider._sandboxes["sandbox-dead"].base_url == "http://fresh-sandbox"
+
+
+def test_acquire_keeps_cached_sandbox_when_health_check_errors(tmp_path):
+    """Transient backend health-check errors must not destroy a tracked sandbox."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-transient")
+    provider._thread_locks = {}
+    provider._thread_sandboxes = {"thread-transient": "sandbox-transient"}
+    provider._backend.is_alive = MagicMock(side_effect=OSError("docker daemon busy"))
+
+    sandbox_id = provider.acquire("thread-transient")
+
+    assert sandbox_id == "sandbox-transient"
+    sandbox.close.assert_not_called()
+    provider._backend.destroy.assert_not_called()
+    assert provider._sandboxes["sandbox-transient"] is sandbox
+
+
+def test_drop_unhealthy_sandbox_skips_recreated_entry(tmp_path):
+    """A stale health-check result must not delete a newly registered sandbox."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._last_activity = {"sandbox-toctou": 1.0}
+    provider._thread_sandboxes = {"thread-toctou": "sandbox-toctou"}
+    old_info = aio_mod.SandboxInfo(sandbox_id="sandbox-toctou", sandbox_url="http://old-sandbox")
+    new_info = aio_mod.SandboxInfo(sandbox_id="sandbox-toctou", sandbox_url="http://new-sandbox")
+    new_sandbox = MagicMock()
+    provider._sandbox_infos = {"sandbox-toctou": new_info}
+    provider._sandboxes = {"sandbox-toctou": new_sandbox}
+    provider._backend = SimpleNamespace(destroy=MagicMock())
+
+    provider._drop_unhealthy_sandbox("sandbox-toctou", "stale health check", expected_info=old_info)
+
+    new_sandbox.close.assert_not_called()
+    provider._backend.destroy.assert_not_called()
+    assert provider._sandbox_infos["sandbox-toctou"] is new_info
+    assert provider._sandboxes["sandbox-toctou"] is new_sandbox
+    assert provider._thread_sandboxes == {"thread-toctou": "sandbox-toctou"}
+
+
+def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):
+    """acquire() must create a fresh sandbox when the warm-pool entry died."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._thread_locks = {}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._warm_pool = {
+        "sandbox-warm-dead": (
+            aio_mod.SandboxInfo(
+                sandbox_id="sandbox-warm-dead",
+                sandbox_url="http://stale-sandbox",
+                container_name="deer-flow-sandbox-sandbox-warm-dead",
+            ),
+            0.0,
+        )
+    }
+    provider._config = {"replicas": 3}
+    provider._backend = SimpleNamespace(
+        is_alive=MagicMock(return_value=False),
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+        create=MagicMock(
+            return_value=aio_mod.SandboxInfo(
+                sandbox_id="sandbox-warm-dead",
+                sandbox_url="http://fresh-sandbox",
+                container_name="deer-flow-sandbox-sandbox-warm-dead",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_sandbox_id_for_thread", lambda _self, _thread_id: "sandbox-warm-dead")
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id: [])
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, timeout=60: True)
+
+    sandbox_id = provider.acquire("thread-warm-dead")
+
+    assert sandbox_id == "sandbox-warm-dead"
+    provider._backend.destroy.assert_called_once()
+    provider._backend.create.assert_called_once()
+    assert provider._warm_pool == {}
+    assert provider._thread_sandboxes["thread-warm-dead"] == "sandbox-warm-dead"
+    assert provider._sandboxes["sandbox-warm-dead"].base_url == "http://fresh-sandbox"
 
 
 def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, caplog):

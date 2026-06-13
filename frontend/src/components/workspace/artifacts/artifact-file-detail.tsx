@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
 
 import {
   Artifact,
@@ -20,6 +19,7 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -400,13 +400,13 @@ export function ArtifactFilePreview({
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
-        <Streamdown
+        <ClipboardSafeStreamdown
           className="size-full"
           {...streamdownPlugins}
           components={{ a: ArtifactLink }}
         >
           {content ?? ""}
-        </Streamdown>
+        </ClipboardSafeStreamdown>
       </div>
     );
   }

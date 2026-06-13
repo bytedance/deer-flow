@@ -164,7 +164,18 @@ class RunJournal(BaseCallbackHandler):
                 metadata={"caller": caller, **(metadata or {})},
             )
 
-    def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_end(
+        self,
+        outputs: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Nested chain ends fire for internal graph nodes; only the root chain
+        # represents the user-visible run lifecycle.
+        if parent_run_id is not None:
+            return
         self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
