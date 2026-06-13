@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -220,10 +221,20 @@ async def delete_custom_skill(skill_name: str, config: AppConfig = Depends(get_c
 async def get_custom_skill_history(skill_name: str, config: AppConfig = Depends(get_config)) -> CustomSkillHistoryResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = get_or_new_skill_storage(app_config=config)
-        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+
+        def _read_history() -> list[dict] | None:
+            # Worker thread: storage construction, the existence probes, and the
+            # history-file read are blocking filesystem IO that must stay off the
+            # event loop. None signals 404 to the caller.
+            storage = get_or_new_skill_storage(app_config=config)
+            if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+                return None
+            return storage.read_history(skill_name)
+
+        history = await asyncio.to_thread(_read_history)
+        if history is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillHistoryResponse(history=storage.read_history(skill_name))
+        return CustomSkillHistoryResponse(history=history)
     except HTTPException:
         raise
     except Exception as e:
