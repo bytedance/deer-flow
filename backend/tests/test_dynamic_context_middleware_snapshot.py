@@ -12,7 +12,7 @@ covers snapshot building.
 from __future__ import annotations
 
 import hashlib
-import time
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -135,6 +135,50 @@ def test_no_snapshot_when_memory_empty():
     journal.record_context_snapshot.assert_not_called()
 
 
+def test_no_loader_call_or_snapshot_when_injection_disabled():
+    """When ``memory.injection_enabled`` is False, ``_build_full_reminder`` must
+    short-circuit to ("", None) WITHOUT loading memory and WITHOUT recording a
+    snapshot — only the date reminder is injected."""
+    app_config = SimpleNamespace(memory=SimpleNamespace(injection_enabled=False))
+    mw = DynamicContextMiddleware(app_config=app_config)
+    state = {"messages": [HumanMessage(content="hi", id="msg-1")]}
+    journal = mock.MagicMock()
+
+    with (
+        mock.patch(_CTX_SNAP_FN) as ctx_fn,
+        mock.patch(_DATETIME) as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-06-13, Saturday"
+        result = mw.before_agent(state, _runtime_with_journal(journal))
+
+    assert result is not None  # date reminder still injected
+    assert "<memory>" not in result["messages"][0].content
+    ctx_fn.assert_not_called()  # injection disabled → memory never loaded
+    journal.record_context_snapshot.assert_not_called()
+
+
+def test_emit_swallows_journal_errors_and_still_injects():
+    """A failure inside ``record_context_snapshot`` must not break the run:
+    ``_emit_memory_snapshot`` swallows it, and injection still succeeds."""
+    mw = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage(content="hi", id="msg-1")]}
+    journal = mock.MagicMock()
+    journal.record_context_snapshot.side_effect = RuntimeError("event store down")
+    snap = _snapshot()
+
+    with (
+        mock.patch(_CTX_SNAP_FN, return_value=("<memory>\nx\n</memory>", snap)),
+        mock.patch(_DATETIME) as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-06-13, Saturday"
+        # Must not raise despite the journal error.
+        result = mw.before_agent(state, _runtime_with_journal(journal))
+
+    assert result is not None
+    assert "<memory>" in result["messages"][0].content  # injection still happened
+    journal.record_context_snapshot.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_async_path_records_snapshot_on_first_turn():
     mw = DynamicContextMiddleware()
@@ -163,8 +207,14 @@ async def test_async_timeout_with_journal_records_nothing():
     mw = DynamicContextMiddleware()
     journal = mock.MagicMock()
 
+    # Gate the offloaded thread on an Event rather than a hard sleep: it must
+    # outlast the 0.1s timeout, but the test releases it the moment the timeout
+    # has been observed so the dangling thread doesn't block event-loop teardown
+    # (a fixed multi-second tax on every run otherwise).
+    release = threading.Event()
+
     def blocking_inject(state):
-        time.sleep(10)  # far exceeds the patched timeout
+        release.wait(10)  # exceeds the patched timeout; released by the test below
         return None
 
     with (
@@ -173,6 +223,7 @@ async def test_async_timeout_with_journal_records_nothing():
     ):
         state = {"messages": [HumanMessage(content="hi", id="msg-1")]}
         result = await mw.abefore_agent(state, _runtime_with_journal(journal))
+        release.set()  # let the offloaded thread return promptly
 
     assert result is None
     journal.record_context_snapshot.assert_not_called()

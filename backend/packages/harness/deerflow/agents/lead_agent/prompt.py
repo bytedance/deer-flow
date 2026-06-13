@@ -579,12 +579,12 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 def _get_memory_context_with_snapshot(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> tuple[str, InjectedMemorySnapshot | None]:
     """Load memory once and return both the injection text and its snapshot.
 
-    Single source of truth: the text and the snapshot are derived from the
-    **same** memory load, so the recorded snapshot describes exactly what was
-    injected into the prompt — never a second read that could diverge (e.g. a
-    concurrent memory update or file reload landing between two loads). The two
-    formatting passes are pure functions over the same in-memory ``memory_data``,
-    so the injected text and the snapshot's hash cannot disagree.
+    Single source of truth: one ``get_memory_data`` read feeds one selection
+    pass (:func:`build_injection_text_and_snapshot`), which yields the injected
+    text and its snapshot together. The snapshot therefore describes exactly the
+    bytes placed into the prompt — never a second read or a second formatting
+    pass that could diverge (e.g. a concurrent memory reload, or token counting
+    flipping from char-estimate to tiktoken mid-flight; see that function).
 
     Returns ``("", None)`` when memory injection is disabled or the selection is
     empty. Never raises — memory context is best-effort.
@@ -595,23 +595,16 @@ def _get_memory_context_with_snapshot(agent_name: str | None = None, *, app_conf
             return "", None
         memory_data, config = loaded
 
-        from deerflow.agents.memory import build_injected_memory_snapshot, format_memory_for_injection
+        from deerflow.agents.memory import build_injection_text_and_snapshot
 
-        use_tiktoken = config.token_counting == "tiktoken"
-        memory_content = format_memory_for_injection(
+        memory_content, snapshot = build_injection_text_and_snapshot(
             memory_data,
             max_tokens=config.max_injection_tokens,
-            use_tiktoken=use_tiktoken,
+            use_tiktoken=(config.token_counting == "tiktoken"),
         )
 
-        if not memory_content.strip():
+        if not memory_content:
             return "", None
-
-        snapshot = build_injected_memory_snapshot(
-            memory_data,
-            max_tokens=config.max_injection_tokens,
-            use_tiktoken=use_tiktoken,
-        )
 
         return (
             f"""<memory>
@@ -629,9 +622,9 @@ def _load_injection_memory(agent_name: str | None, *, app_config: AppConfig | No
     """Resolve memory config and load memory data for injection.
 
     Returns ``(memory_data, memory_config)`` or ``None`` when memory injection
-    is disabled. Shared by :func:`_get_memory_context` (which formats the text)
-    and :func:`_get_memory_injection_snapshot` (which records its provenance) so
-    both observe identical inputs and never disagree about what was injected.
+    is disabled. Sole caller is :func:`_get_memory_context_with_snapshot`, which
+    formats the text and records its provenance from a single load so the two
+    never disagree about what was injected.
     """
     from deerflow.agents.memory import get_memory_data
     from deerflow.runtime.user_context import get_effective_user_id

@@ -204,16 +204,16 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         captured["user_id"] = user_id
         return {"facts": []}
 
-    def fake_format_memory_for_injection(memory_data, *, max_tokens, use_tiktoken=True):
+    def fake_build_injection_text_and_snapshot(memory_data, max_tokens=2000, *, use_tiktoken=True):
         captured["memory_data"] = memory_data
         captured["max_tokens"] = max_tokens
         captured["use_tiktoken"] = use_tiktoken
-        return "remember this"
+        return "remember this", None
 
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
     monkeypatch.setattr("deerflow.agents.memory.get_memory_data", fake_get_memory_data)
-    monkeypatch.setattr("deerflow.agents.memory.format_memory_for_injection", fake_format_memory_for_injection)
+    monkeypatch.setattr("deerflow.agents.memory.build_injection_text_and_snapshot", fake_build_injection_text_and_snapshot)
 
     context = prompt_module._get_memory_context("agent-a", app_config=explicit_config)
 

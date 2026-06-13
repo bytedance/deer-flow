@@ -328,17 +328,24 @@ _SECTION_FACTS = "facts"
 class _InjectionParts:
     """Result of the memory-injection selection pass.
 
-    Single source of truth shared by :func:`format_memory_for_injection`
-    (which uses only ``text``) and :func:`build_injected_memory_snapshot`
-    (which uses the provenance fields). Deriving both from one helper keeps the
-    injected text and its snapshot in lockstep — they can never disagree about
-    which facts were selected or how large the result was.
+    Single source of truth shared by :func:`format_memory_for_injection` (text
+    only), :func:`build_injected_memory_snapshot`, and
+    :func:`build_injection_text_and_snapshot` (provenance fields). Deriving every
+    output from one pass keeps the injected text and its snapshot in lockstep —
+    they can never disagree about which facts were selected, how large the result
+    was, or whether the truncation safety-net fired. The last point is not merely
+    cosmetic: token counting is non-deterministic across calls while the tiktoken
+    encoding is still loading on another thread, so two separate passes could
+    straddle that transition and clip differently.
     """
 
     text: str
     sections_present: tuple[str, ...]
     fact_ids: tuple[str, ...]
     total_facts: int
+    # Token count of the final ``text`` (post-truncation when ``truncated``), so
+    # the snapshot can reuse it instead of re-tokenizing the same string.
+    token_count: int
     # True when the whole-text budget safety-net clipped ``text`` *after* fact
     # selection. ``fact_ids``/``sections_present`` then describe the selected
     # set, which may slightly overstate what survives in the clipped tail;
@@ -350,12 +357,17 @@ def _fact_identity(fact: dict[str, Any], content: str) -> str:
     """Return a stable identifier for an injected fact.
 
     Prefers the fact's own ``id``; falls back to a short content hash so the
-    injected set stays meaningful even for legacy facts written without an id.
+    injected set stays meaningful even for legacy facts written without an id
+    (or with a blank one).
     """
     fact_id = fact.get("id")
-    if isinstance(fact_id, str) and fact_id.strip():
-        return fact_id.strip()
-    if fact_id is not None:
+    if isinstance(fact_id, str):
+        stripped = fact_id.strip()
+        if stripped:
+            return stripped
+        # A blank/whitespace string is not a usable identity — fall through to
+        # the content hash rather than recording an empty (and colliding) id.
+    elif fact_id is not None:
         return str(fact_id)
     return "sha1:" + hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
 
@@ -369,7 +381,7 @@ def _build_injection_parts(memory_data: dict[str, Any], max_tokens: int = 2000, 
     same pass so a snapshot can be produced without re-deriving the selection.
     """
     if not memory_data:
-        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=0, truncated=False)
+        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=0, token_count=0, truncated=False)
 
     sections: list[str] = []
     sections_present: list[str] = []
@@ -469,7 +481,7 @@ def _build_injection_parts(memory_data: dict[str, Any], max_tokens: int = 2000, 
             sections_present.append(_SECTION_FACTS)
 
     if not sections:
-        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=total_facts, truncated=False)
+        return _InjectionParts(text="", sections_present=(), fact_ids=(), total_facts=total_facts, token_count=0, truncated=False)
 
     result = "\n\n".join(sections)
 
@@ -487,12 +499,16 @@ def _build_injection_parts(memory_data: dict[str, Any], max_tokens: int = 2000, 
         # whole-string count, so this safety net can fire even though each fact
         # "fit". Flag it: fact_ids/sections describe the pre-clip selection.
         truncated = True
+        # Recount the clipped text so ``token_count`` describes what is actually
+        # injected and the snapshot can reuse it rather than re-tokenizing.
+        token_count = _count_tokens(result, use_tiktoken=use_tiktoken)
 
     return _InjectionParts(
         text=result,
         sections_present=tuple(sections_present),
         fact_ids=tuple(selected_fact_ids),
         total_facts=total_facts,
+        token_count=token_count,
         truncated=truncated,
     )
 
@@ -567,15 +583,14 @@ class InjectedMemorySnapshot:
         }
 
 
-def build_injected_memory_snapshot(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> InjectedMemorySnapshot | None:
-    """Build a provenance snapshot for what memory injection would inject.
+def _snapshot_from_parts(parts: _InjectionParts, max_tokens: int) -> InjectedMemorySnapshot | None:
+    """Build a snapshot from an already-computed selection pass.
 
-    Returns ``None`` when nothing would be injected (no memory data or an empty
-    selection), so callers can cheaply skip emitting an empty snapshot. The
-    ``content_hash`` is over the exact injected text, making it a drift key for
-    later milestones (did the injected context go stale against live memory?).
+    Centralizing this keeps every snapshot — whether produced standalone via
+    :func:`build_injected_memory_snapshot` or alongside the text via
+    :func:`build_injection_text_and_snapshot` — hashed over the very bytes of
+    ``parts.text`` and stamped with the token count that same pass measured.
     """
-    parts = _build_injection_parts(memory_data, max_tokens, use_tiktoken=use_tiktoken)
     if not parts.text:
         return None
     content_hash = "sha256:" + hashlib.sha256(parts.text.encode("utf-8")).hexdigest()
@@ -584,11 +599,47 @@ def build_injected_memory_snapshot(memory_data: dict[str, Any], max_tokens: int 
         fact_count=len(parts.fact_ids),
         total_facts=parts.total_facts,
         sections=parts.sections_present,
-        token_count=_count_tokens(parts.text, use_tiktoken=use_tiktoken),
+        token_count=parts.token_count,
         max_tokens=max_tokens,
         content_hash=content_hash,
         truncated=parts.truncated,
     )
+
+
+def build_injected_memory_snapshot(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> InjectedMemorySnapshot | None:
+    """Build a provenance snapshot for what memory injection would inject.
+
+    Returns ``None`` when nothing would be injected (no memory data or an empty
+    selection), so callers can cheaply skip emitting an empty snapshot. The
+    ``content_hash`` is over the exact injected text, making it a drift key for
+    later milestones (did the injected context go stale against live memory?).
+
+    Prefer :func:`build_injection_text_and_snapshot` when the caller also needs
+    the injected text — it derives both from a single selection pass so the two
+    cannot disagree (see that function's note on tiktoken non-determinism).
+    """
+    parts = _build_injection_parts(memory_data, max_tokens, use_tiktoken=use_tiktoken)
+    return _snapshot_from_parts(parts, max_tokens)
+
+
+def build_injection_text_and_snapshot(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> tuple[str, InjectedMemorySnapshot | None]:
+    """Return the injected text and its snapshot from a single selection pass.
+
+    The text and the snapshot are derived from **one** ``_build_injection_parts``
+    call, so they describe exactly the same bytes. This matters beyond saving a
+    redundant pass: ``_count_tokens`` is *not* deterministic across calls while
+    the tiktoken encoding is loading on another thread — it falls back to the
+    char estimate until the encoding is cached, then switches. Two separate
+    passes could straddle that transition and disagree about whether the
+    whole-text truncation safety-net fired, recording a ``content_hash`` for
+    text that was never injected. One pass closes that window.
+
+    Returns ``("", None)`` when nothing (or only whitespace) would be injected.
+    """
+    parts = _build_injection_parts(memory_data, max_tokens, use_tiktoken=use_tiktoken)
+    if not parts.text.strip():
+        return "", None
+    return parts.text, _snapshot_from_parts(parts, max_tokens)
 
 
 def format_conversation_for_update(messages: list[Any]) -> str:

@@ -40,6 +40,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.runtime.journal import resolve_run_journal
+
 if TYPE_CHECKING:
     from deerflow.agents.memory import InjectedMemorySnapshot
     from deerflow.config.app_config import AppConfig
@@ -274,22 +276,12 @@ class DynamicContextMiddleware(AgentMiddleware):
     # The snapshot is built inside _inject() from the same memory load as the
     # injected text (single source of truth), carried out via _InjectResult, and
     # recorded here. Recording is a buffer append (no I/O), so it is non-blocking.
-
-    @staticmethod
-    def _resolve_journal(runtime: Runtime):
-        """Return the run-scoped RunJournal, or None if unavailable.
-
-        Available on the gateway worker path (``runtime.context['__run_journal']``);
-        absent on the embedded DeerFlowClient path and in plain graph invocations,
-        where snapshotting is simply skipped.
-        """
-        context = getattr(runtime, "context", None)
-        if not isinstance(context, dict):
-            return None
-        return context.get("__run_journal")
+    # The journal is available on the gateway worker path only; on the embedded
+    # DeerFlowClient path and plain graph invocations resolve_run_journal returns
+    # None and snapshotting is simply skipped.
 
     def _emit_memory_snapshot(self, runtime: Runtime, snapshot: InjectedMemorySnapshot) -> None:
-        journal = self._resolve_journal(runtime)
+        journal = resolve_run_journal(runtime)
         if journal is None:
             return
         try:

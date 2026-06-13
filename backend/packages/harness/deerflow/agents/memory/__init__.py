@@ -11,6 +11,7 @@ from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     InjectedMemorySnapshot,
     build_injected_memory_snapshot,
+    build_injection_text_and_snapshot,
     format_conversation_for_update,
     format_memory_for_injection,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "format_conversation_for_update",
     "InjectedMemorySnapshot",
     "build_injected_memory_snapshot",
+    "build_injection_text_and_snapshot",
     # Queue
     "ConversationContext",
     "MemoryUpdateQueue",

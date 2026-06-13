@@ -624,3 +624,27 @@ class RunJournal(BaseCallbackHandler):
     @property
     def llm_error_fallback_message(self) -> str | None:
         return self._llm_error_fallback_message
+
+
+# Sentinel key under which the worker exposes the run-scoped journal on the
+# LangGraph runtime context. Double-underscore marks it runtime-internal; user
+# code must not depend on the name.
+RUN_JOURNAL_CONTEXT_KEY = "__run_journal"
+
+
+def resolve_run_journal(runtime: Any) -> RunJournal | None:
+    """Return the run-scoped :class:`RunJournal`, or ``None`` if unavailable.
+
+    The worker exposes the journal under ``runtime.context[RUN_JOURNAL_CONTEXT_KEY]``.
+    It is absent on the embedded ``DeerFlowClient`` path, in plain graph
+    invocations, and in unit tests — callers must degrade to a no-op when this
+    returns ``None``. Middleware that watches a runtime should use this single
+    resolver instead of re-deriving the ``isinstance(context, dict)`` lookup.
+
+    Note: the value is returned as-is (not type-checked) so tests can inject a
+    journal double under the sentinel key.
+    """
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return None
+    return context.get(RUN_JOURNAL_CONTEXT_KEY)
