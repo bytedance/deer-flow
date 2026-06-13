@@ -4,7 +4,7 @@ This SOP defines how DeerFlow maintainers should use the repository-local `deerf
 
 The goal is practical automation: the maintainer provides an issue or PR scope, and the agent resolves the artifacts with GitHub tools, analyzes DeerFlow context, and posts or drafts useful comments. The skill should not turn routine judgment into maintainer questions or offload technical analysis back to the maintainer.
 
-The local skill lives at `.agents/skills/deerflow-maintainer-orchestrator/SKILL.md`.
+The local skill lives at `.agent/skills/deerflow-maintainer-orchestrator/SKILL.md`.
 
 ## Scope
 
