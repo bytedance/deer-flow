@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -19,6 +20,13 @@ from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["skills"])
+
+# Serializes the extensions_config read-modify-write in update_skill. Offloading
+# that RMW to a worker thread removes the implicit serialization the
+# single-threaded event loop provided, so concurrent PUT /skills/{name} calls
+# could otherwise interleave and clobber each other's toggle on the shared
+# extensions_config singleton.
+_skills_config_write_lock = asyncio.Lock()
 
 
 class SkillResponse(BaseModel):
@@ -310,34 +318,51 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
 async def update_skill(skill_name: str, request: SkillUpdateRequest, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
-        skill = next((s for s in skills if s.name == skill_name), None)
 
-        if skill is None:
+        def _apply_update() -> str:
+            # Worker thread: skill enumeration, config-path resolution, the
+            # extensions_config read-modify-write, and the reload are all
+            # blocking filesystem IO that must stay off the event loop.
+            # "not_found" signals 404 to the caller.
+            skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+            if next((s for s in skills if s.name == skill_name), None) is None:
+                return "not_found"
+
+            config_path = ExtensionsConfig.resolve_config_path()
+            if config_path is None:
+                config_path = Path.cwd().parent / "extensions_config.json"
+                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+
+            extensions_config = get_extensions_config()
+            extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
+
+            config_data = {
+                "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
+                "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
+            }
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=2)
+
+            logger.info(f"Skills configuration updated and saved to: {config_path}")
+            reload_extensions_config()
+            return "ok"
+
+        # Hold the lock across the whole read-modify-write so concurrent PUTs
+        # serialize on the shared extensions_config instead of clobbering.
+        async with _skills_config_write_lock:
+            status = await asyncio.to_thread(_apply_update)
+
+        if status == "not_found":
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-        extensions_config = get_extensions_config()
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
-
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
-
-        logger.info(f"Skills configuration updated and saved to: {config_path}")
-        reload_extensions_config()
         await refresh_skills_system_prompt_cache_async()
 
-        skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
-        updated_skill = next((s for s in skills if s.name == skill_name), None)
+        def _reload_skill() -> Skill | None:
+            skills = get_or_new_skill_storage(app_config=config).load_skills(enabled_only=False)
+            return next((s for s in skills if s.name == skill_name), None)
+
+        updated_skill = await asyncio.to_thread(_reload_skill)
 
         if updated_skill is None:
             raise HTTPException(status_code=500, detail=f"Failed to reload skill '{skill_name}' after update")
