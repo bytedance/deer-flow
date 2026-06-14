@@ -236,6 +236,7 @@ tools:
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Exa, InfoQuest, Firecrawl)
 - `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl)
+- `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper)
 - `ls` - List directory contents
 - `read_file` - Read file contents
 - `write_file` - Write file contents
@@ -364,6 +365,7 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
+- `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
