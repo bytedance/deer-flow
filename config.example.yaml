@@ -570,6 +570,15 @@ tools:
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web search tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
+  # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.fastcrw.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $CRW_API_KEY
+  #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
@@ -620,6 +629,16 @@ tools:
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+
+  # Web fetch tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
+  # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.fastcrw.tools:web_fetch_tool
+  #   # api_key: $CRW_API_KEY
+  #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
