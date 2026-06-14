@@ -25,6 +25,16 @@ def _setup_auth_config():
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
 
 
+@pytest.fixture(autouse=True)
+def _clear_bootstrap_env(monkeypatch):
+    """Default-clear DEER_FLOW_BOOTSTRAP_ADMIN_* so ambient shell env does
+    not silently flip the first-boot tests into the bootstrap branch.
+    Tests that exercise the bootstrap path re-set via monkeypatch."""
+    monkeypatch.delenv("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", raising=False)
+    monkeypatch.delenv("DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    yield
+
+
 def _make_app_stub(store=None):
     """Minimal app-like object with state.store."""
     app = SimpleNamespace()
@@ -92,6 +102,92 @@ def test_first_boot_skips_migration():
         asyncio.run(_ensure_admin_user(app))
 
     store.asearch.assert_not_called()
+
+
+# ── Env-gated admin bootstrap (DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL) ──────────
+
+
+def test_bootstrap_env_creates_admin_on_first_boot(monkeypatch):
+    """admin_count==0 AND DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL set → create admin row.
+
+    Validates the SSO bootstrap path used by the deer-flow stax deployment:
+    set the env var to the operator's Authentik email so the trust
+    middleware later finds an existing user row keyed on that email.
+    """
+    monkeypatch.setenv("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.setenv("DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD", "deterministic-test-pw")
+
+    provider = _make_provider(admin_count=0)
+    sf = _make_session_factory()
+    app = _make_app_stub()
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            from app.gateway.app import _ensure_admin_user
+
+            asyncio.run(_ensure_admin_user(app))
+
+    provider.create_user.assert_called_once()
+    kwargs = provider.create_user.call_args.kwargs
+    assert kwargs["email"] == "admin@example.com"
+    assert kwargs["system_role"] == "admin"
+    assert kwargs["needs_setup"] is False
+    assert kwargs["password"] == "deterministic-test-pw"
+
+
+def test_bootstrap_env_random_password_when_unset(monkeypatch):
+    """Email env set, password env unset → random password (>= 32 chars)."""
+    monkeypatch.setenv("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
+    monkeypatch.delenv("DEER_FLOW_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+
+    provider = _make_provider(admin_count=0)
+    sf = _make_session_factory()
+    app = _make_app_stub()
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            from app.gateway.app import _ensure_admin_user
+
+            asyncio.run(_ensure_admin_user(app))
+
+    provider.create_user.assert_called_once()
+    pw = provider.create_user.call_args.kwargs["password"]
+    assert isinstance(pw, str) and len(pw) >= 32
+
+
+def test_bootstrap_env_whitespace_email_falls_through(monkeypatch):
+    """Whitespace-only DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL → treat as unset."""
+    monkeypatch.setenv("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "   ")
+    provider = _make_provider(admin_count=0)
+    sf = _make_session_factory()
+    app = _make_app_stub()
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            from app.gateway.app import _ensure_admin_user
+
+            asyncio.run(_ensure_admin_user(app))
+
+    provider.create_user.assert_not_called()
+
+
+def test_bootstrap_env_create_failure_is_non_fatal(monkeypatch):
+    """provider.create_user raising → log and return, do not crash boot."""
+    monkeypatch.setenv("DEER_FLOW_BOOTSTRAP_ADMIN_EMAIL", "admin@example.com")
+
+    provider = _make_provider(admin_count=0)
+    provider.create_user = AsyncMock(side_effect=RuntimeError("dup email"))
+    sf = _make_session_factory()
+    app = _make_app_stub()
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            from app.gateway.app import _ensure_admin_user
+
+            # Must not raise
+            asyncio.run(_ensure_admin_user(app))
+
+    provider.create_user.assert_called_once()
 
 
 # ── Admin exists: migration runs when admin row found ────────────────────
