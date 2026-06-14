@@ -329,7 +329,7 @@ class SlackChannel(Channel):
                         code=connect_code,
                     ),
                     self._loop,
-            )
+                )
             return
 
         # Check allowed users after connect-code handling so browser-initiated

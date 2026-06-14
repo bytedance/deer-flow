@@ -144,11 +144,7 @@ class ChannelConnectionRepository:
             transferred_ids = [row_id for row_id in result.scalars()]
             if not transferred_ids:
                 return
-            await session.execute(
-                update(ChannelConnectionRow)
-                .where(ChannelConnectionRow.id.in_(transferred_ids))
-                .values(status="revoked")
-            )
+            await session.execute(update(ChannelConnectionRow).where(ChannelConnectionRow.id.in_(transferred_ids)).values(status="revoked"))
             await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(transferred_ids)))
 
         stmt = select(ChannelConnectionRow).where(
