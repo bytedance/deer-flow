@@ -9,8 +9,22 @@ import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+try:
+    from redis.asyncio import Redis
+    from redis.exceptions import ResponseError
+except ImportError:  # pragma: no cover - only hit when the optional extra is missing
+    # ``redis`` is an optional extra (mirrors the ``postgres``/asyncpg path in
+    # persistence/engine.py). This module is imported lazily from
+    # ``make_stream_bridge`` only when ``stream_bridge.type == "redis"``, so the
+    # hint surfaces exactly when a Redis bridge is requested without the package.
+    raise ImportError(
+        "stream_bridge.type is set to 'redis' but the redis package is not installed.\n"
+        "Install it with:\n"
+        "    cd backend && uv sync --all-packages --extra redis\n"
+        "On the next `make dev` the redis extra is auto-detected from config.yaml\n"
+        "(stream_bridge.type: redis) and reinstalled, so it will not be wiped again.\n"
+        "Or switch to stream_bridge.type: memory in config.yaml for single-process deployment."
+    ) from None
 
 from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
 
@@ -18,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 _KIND_EVENT = "event"
 _KIND_END = "end"
+
+# Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
+# a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
+# yields each event as it arrives because the consume loop returns mid-batch on
+# the end marker.
+_XREAD_COUNT = 64
 
 
 class RedisStreamBridge(StreamBridge):
@@ -36,12 +56,16 @@ class RedisStreamBridge(StreamBridge):
         redis_url: str,
         queue_maxsize: int = 256,
         key_prefix: str = "deerflow:stream_bridge",
+        max_connections: int | None = None,
         client: Redis | None = None,
     ) -> None:
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
         self._key_prefix = key_prefix.rstrip(":")
-        self._redis = client if client is not None else Redis.from_url(redis_url, decode_responses=True)
+        # Each live SSE subscriber holds one pooled connection blocked in
+        # ``XREAD ... BLOCK`` for up to ``heartbeat_interval``. ``max_connections``
+        # caps that pool; ``None`` keeps redis-py's effectively-unbounded default.
+        self._redis = client if client is not None else Redis.from_url(redis_url, decode_responses=True, max_connections=max_connections)
         self._owns_client = client is None
 
     def _stream_key(self, run_id: str) -> str:
@@ -116,23 +140,24 @@ class RedisStreamBridge(StreamBridge):
 
         while True:
             try:
-                response = await self._redis.xread({key: stream_id}, count=1, block=block_ms)
-            except ResponseError as exc:
-                # Only fall back when Redis rejects the provided stream ID (bad Last-Event-ID).
-                message = str(exc)
-                if stream_id != "0-0" and (
-                    "ID specified" in message
-                    or "stream ID" in message
-                    or "Invalid" in message
-                ):
-                    logger.warning(
-                        "Invalid Last-Event-ID %r for Redis stream bridge; replaying from earliest retained event",
-                        stream_id,
-                        exc_info=True,
-                    )
-                    stream_id = "0-0"
-                    continue
-                raise
+                response = await self._redis.xread({key: stream_id}, count=_XREAD_COUNT, block=block_ms)
+            except ResponseError:
+                # The only client-controllable stream ID is the Last-Event-ID
+                # header, so a rejected ID means a malformed reconnect token:
+                # fall back to replaying from the earliest retained event. We key
+                # off the control flow rather than the error wording, which is the
+                # server's text (Redis/Valkey/Dragonfly) and not a stable API. If
+                # the reset read from "0-0" also fails, the stream/connection is
+                # genuinely broken, so re-raise.
+                if stream_id == "0-0":
+                    raise
+                logger.warning(
+                    "Redis rejected Last-Event-ID %r for stream bridge; replaying from earliest retained event",
+                    stream_id,
+                    exc_info=True,
+                )
+                stream_id = "0-0"
+                continue
 
             if not response:
                 yield HEARTBEAT_SENTINEL

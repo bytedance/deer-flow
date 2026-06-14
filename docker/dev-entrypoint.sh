@@ -78,13 +78,17 @@ mkdir -p "$DEER_FLOW_HOME" /app/backend/.deer-flow /app/backend/sandbox
 cd /app/backend
 
 # `--all-packages` propagates extras into workspace members (PR #2584).
+# `--extra redis` is always installed because docker-compose-dev defaults the
+# stream bridge to Redis (DEER_FLOW_STREAM_BRIDGE_REDIS_URL); redis is an
+# optional extra elsewhere. It is kept out of EXTRAS_FLAGS so the --print-extras
+# contract (UV_EXTRAS-derived flags only) stays unchanged.
 # `$EXTRAS_FLAGS` intentionally unquoted so each `--extra X` becomes its own arg.
 # shellcheck disable=SC2086 # word-splitting is intentional here
-if ! uv sync --all-packages $EXTRAS_FLAGS; then
+if ! uv sync --all-packages --extra redis $EXTRAS_FLAGS; then
     echo "[startup] uv sync failed; recreating .venv and retrying once"
     uv venv --allow-existing .venv
     # shellcheck disable=SC2086
-    uv sync --all-packages $EXTRAS_FLAGS
+    uv sync --all-packages --extra redis $EXTRAS_FLAGS
 fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────

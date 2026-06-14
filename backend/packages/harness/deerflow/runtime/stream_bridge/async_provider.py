@@ -70,8 +70,16 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         from deerflow.runtime.stream_bridge.redis import RedisStreamBridge
 
         redis_url = _resolve_redis_url(config)
-        bridge = RedisStreamBridge(redis_url=redis_url, queue_maxsize=config.queue_maxsize)
-        logger.info("Stream bridge initialised: redis (queue_maxsize=%d)", config.queue_maxsize)
+        bridge = RedisStreamBridge(
+            redis_url=redis_url,
+            queue_maxsize=config.queue_maxsize,
+            max_connections=config.max_connections,
+        )
+        logger.info(
+            "Stream bridge initialised: redis (queue_maxsize=%d, max_connections=%s)",
+            config.queue_maxsize,
+            config.max_connections,
+        )
         try:
             yield bridge
         finally:
