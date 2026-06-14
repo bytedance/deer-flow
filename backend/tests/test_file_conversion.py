@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
-from types import ModuleType
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
+    LegacyDocConversionError,
+    _convert_legacy_doc_to_docx,
     _do_convert,
+    _find_legacy_doc_converter,
     _get_pdf_converter,
     _pymupdf_output_too_sparse,
     convert_file_to_markdown,
+    ensure_legacy_doc_conversion_supported,
     extract_outline,
 )
 
@@ -299,6 +307,29 @@ class TestConvertFileToMarkdown:
 
         assert result is None
 
+    def test_removes_partial_markdown_on_write_error(self, tmp_path):
+        """A failed markdown write must not leave a partial .md artifact."""
+        pdf = tmp_path / "broken-write.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        md_path = pdf.with_suffix(".md")
+
+        def fail_write(path: Path, text: str) -> None:
+            md_path.write_text("partial", encoding="utf-8")
+            raise OSError("disk full")
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch(
+                "deerflow.utils.file_conversion._do_convert",
+                return_value="# Partial",
+            ),
+            patch("deerflow.utils.file_conversion._write_markdown_file", side_effect=fail_write),
+        ):
+            result = _run(convert_file_to_markdown(pdf))
+
+        assert result is None
+        assert not md_path.exists()
+
     def test_writes_utf8_markdown_file(self, tmp_path):
         """Generated .md file is written with UTF-8 encoding."""
         pdf = tmp_path / "report.pdf"
@@ -476,3 +507,86 @@ class TestExtractOutline:
         assert len(outline) == 1
         # Title must be clean — no ** ** artefacts
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+def test_ensure_legacy_doc_conversion_supported_requires_converter():
+    with patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=None):
+        with pytest.raises(LegacyDocConversionError, match="Legacy \\.doc uploads require"):
+            ensure_legacy_doc_conversion_supported()
+
+
+def test_convert_file_to_markdown_uses_soffice_for_legacy_doc(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+
+    class FakeMarkItDown:
+        def convert(self, path: str):
+            assert path.endswith(".docx")
+            return SimpleNamespace(text_content="converted legacy doc")
+
+    fake_module = SimpleNamespace(MarkItDown=FakeMarkItDown)
+
+    def fake_run(cmd, check, capture_output, text, timeout):
+        assert timeout == 60
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        (outdir / "legacy.docx").write_bytes(b"docx-bytes")
+        return SimpleNamespace(stdout="", stderr="")
+
+    with (
+        patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=("soffice", "soffice")),
+        patch("deerflow.utils.file_conversion.subprocess.run", side_effect=fake_run),
+        patch.dict("sys.modules", {"markitdown": fake_module}),
+    ):
+        md_path = asyncio.run(convert_file_to_markdown(source))
+
+    assert md_path == source.with_suffix(".md")
+    assert md_path.read_text(encoding="utf-8") == "converted legacy doc"
+
+
+def test_convert_file_to_markdown_offloads_legacy_doc_conversion(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        assert fn.__name__ == "_convert_legacy_doc_to_markdown"
+        return "converted in thread"
+
+    with patch("deerflow.utils.file_conversion.asyncio.to_thread", side_effect=fake_to_thread) as to_thread:
+        md_path = asyncio.run(convert_file_to_markdown(source))
+
+    to_thread.assert_called_once()
+    assert md_path == source.with_suffix(".md")
+    assert md_path.read_text(encoding="utf-8") == "converted in thread"
+
+
+def test_convert_legacy_doc_timeout_raises_conversion_error(tmp_path):
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"fake-doc")
+    output_dir = tmp_path / "out"
+
+    with (
+        patch("deerflow.utils.file_conversion._find_legacy_doc_converter", return_value=("soffice", "soffice")),
+        patch(
+            "deerflow.utils.file_conversion.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="soffice", timeout=60),
+        ),
+    ):
+        with pytest.raises(LegacyDocConversionError, match="Timed out converting legacy Word file"):
+            _convert_legacy_doc_to_docx(source, output_dir)
+
+
+def test_find_legacy_doc_converter_prefers_soffice_exe_on_windows():
+    _find_legacy_doc_converter.cache_clear()
+    with (
+        patch("deerflow.utils.file_conversion.platform.system", return_value="Windows"),
+        patch(
+            "deerflow.utils.file_conversion.shutil.which",
+            side_effect=lambda name: {
+                "soffice.exe": r"C:\Program Files\LibreOffice\program\soffice.exe",
+                "soffice": r"C:\Program Files\LibreOffice\program\soffice.COM",
+            }.get(name),
+        ),
+    ):
+        converter = _find_legacy_doc_converter()
+
+    assert converter == ("soffice", r"C:\Program Files\LibreOffice\program\soffice.exe")
