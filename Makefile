@@ -45,6 +45,7 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo "  make docker-logs-redis - View Docker Redis logs"
 
 ## Setup & Diagnosis
 setup:
@@ -148,6 +149,8 @@ docker-logs-frontend:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
+docker-logs-redis:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --redis
 
 # ==========================================
 # Production Docker Commands
