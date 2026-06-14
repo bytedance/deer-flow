@@ -290,11 +290,7 @@ class ChannelConnectionRepository:
             )
 
         async with self.session_factory() as session:
-            result = await session.execute(
-                select(func.count())
-                .select_from(ChannelOAuthStateRow)
-                .where(*conditions)
-            )
+            result = await session.execute(select(func.count()).select_from(ChannelOAuthStateRow).where(*conditions))
             return int(result.scalar_one())
 
     async def consume_oauth_state(

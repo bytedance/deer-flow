@@ -934,14 +934,7 @@ class ChannelManager:
         if message_id is None:
             return None
 
-        workspace_id = (
-            msg.workspace_id
-            or metadata.get("workspace_id")
-            or metadata.get("team_id")
-            or metadata.get("guild_id")
-            or metadata.get("aibotid")
-            or ""
-        )
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or ""
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
     def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
