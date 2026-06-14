@@ -5,6 +5,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
@@ -135,14 +136,15 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
 
     assert captured["app_config"] is app_config
     # 7 baseline (ToolOutputBudget, ThreadData, Sandbox, DanglingToolCall,
-    # LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    # LLMErrorHandling, SandboxAudit, ToolErrorHandling) +
+    # ToolArgsCompactionMiddleware + SafetyFinishReasonMiddleware.
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 8
+    assert len(middlewares) == 9
     assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
+    assert any(isinstance(m, ToolArgsCompactionMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 
 

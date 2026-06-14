@@ -217,6 +217,12 @@ def build_subagent_runtime_middlewares(
         lazy_init=lazy_init,
     )
 
+    from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
+
+    # Subagents have their own model-bound histories; compact completed large
+    # write_file args there as well without mutating persisted state.
+    middlewares.append(ToolArgsCompactionMiddleware())
+
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name
 
