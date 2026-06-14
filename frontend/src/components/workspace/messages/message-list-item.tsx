@@ -13,7 +13,6 @@ import {
   type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
-import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -327,7 +326,7 @@ function MessageContent_({
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />

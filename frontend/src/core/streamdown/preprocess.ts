@@ -55,10 +55,169 @@ export function capBlockquoteNesting(markdown: string): string {
     .join("\n");
 }
 
-export function preprocessStreamdownMarkdown(markdown: string): string {
-  if (!MERMAID_BLOCK_HINT_RE.test(markdown) || !markdown.includes("-.->")) {
+type MathDelimiter = {
+  close: "\\)" | "\\]";
+  replacement: "$" | "$$";
+};
+
+function convertLatexDelimitersInLine(
+  line: string,
+  openBlock: MathDelimiter | null,
+): { line: string; openBlock: MathDelimiter | null } {
+  let result = "";
+  let i = 0;
+  let inInlineCode = false;
+  let currentBlock = openBlock;
+
+  while (i < line.length) {
+    const two = line.slice(i, i + 2);
+
+    if (line[i] === "`") {
+      result += line[i];
+      if (!currentBlock) {
+        inInlineCode = !inInlineCode;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (!inInlineCode && currentBlock?.close === two) {
+      result += currentBlock.replacement;
+      currentBlock = null;
+      i += 2;
+      continue;
+    }
+
+    if (!inInlineCode && !currentBlock && (two === "\\(" || two === "\\[")) {
+      const isDisplay = two === "\\[";
+      currentBlock = {
+        close: isDisplay ? "\\]" : "\\)",
+        replacement: isDisplay ? "$$" : "$",
+      };
+      result += currentBlock.replacement;
+      i += 2;
+      continue;
+    }
+
+    result += line[i];
+    i += 1;
+  }
+
+  return { line: result, openBlock: currentBlock };
+}
+
+/**
+ * Normalize common LLM LaTeX delimiters for remark-math.
+ *
+ * remark-math recognizes `$...$` and `$$...$$`, but many models output
+ * `\(...\)` and `\[...\]`. Convert those delimiters outside fenced/indented
+ * code so KaTeX can render equations without corrupting code blocks. The
+ * conversion is stateful across lines, because display math normally spans
+ * several lines:
+ *
+ *   \[
+ *   ...
+ *   \]
+ */
+export function normalizeLatexMathDelimiters(markdown: string): string {
+  if (!/[\\][([\])]/.test(markdown)) {
     return markdown;
   }
 
-  return normalizeMermaidMarkdown(markdown);
+  let insideFence = false;
+  let openMath: MathDelimiter | null = null;
+
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (CODE_FENCE_RE.test(line) && !openMath) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence || (INDENTED_CODE_RE.test(line) && !openMath)) {
+        return line;
+      }
+      const converted = convertLatexDelimitersInLine(line, openMath);
+      openMath = converted.openBlock;
+      return converted.line;
+    })
+    .join("\n");
+}
+
+function flattenDisplayMathBody(lines: string[]): string {
+  return lines.map((line) => line.trim()).join(" ");
+}
+
+/**
+ * Keep complete display-math blocks atomic for Streamdown.
+ *
+ * Streamdown first splits Markdown into render blocks with marked, then runs
+ * react-markdown on each block. Multi-line `$$ ... $$` can be split before
+ * remark-math sees the matching delimiters, especially in long numbered
+ * responses. Compacting the content between the opening and closing `$$`
+ * preserves the LaTeX semantics (visual line breaks still come from `\\`,
+ * `aligned`, `matrix`, `cases`, etc.) while keeping the display-math block
+ * atomic for Streamdown's splitter.
+ */
+export function compactDisplayMathBlocks(markdown: string): string {
+  if (!markdown.includes("$$")) {
+    return markdown;
+  }
+
+  const output: string[] = [];
+  let insideFence = false;
+  let mathLines: string[] | null = null;
+
+  for (const line of markdown.split("\n")) {
+    if (CODE_FENCE_RE.test(line) && mathLines === null) {
+      insideFence = !insideFence;
+      output.push(line);
+      continue;
+    }
+
+    if (insideFence || (INDENTED_CODE_RE.test(line) && mathLines === null)) {
+      output.push(line);
+      continue;
+    }
+
+    if (line.trim() === "$$") {
+      if (mathLines === null) {
+        mathLines = [];
+      } else {
+        output.push("$$", flattenDisplayMathBody(mathLines), "$$");
+        mathLines = null;
+      }
+      continue;
+    }
+
+    if (mathLines !== null) {
+      mathLines.push(line);
+      continue;
+    }
+
+    output.push(line);
+  }
+
+  if (mathLines !== null) {
+    output.push("$$", ...mathLines);
+  }
+
+  return output.join("\n");
+}
+
+export function normalizeStreamdownMathMarkdown(markdown: string): string {
+  return compactDisplayMathBlocks(normalizeLatexMathDelimiters(markdown));
+}
+
+export function preprocessStreamdownMarkdown(markdown: string): string {
+  const mathNormalized = normalizeStreamdownMathMarkdown(markdown);
+
+  if (
+    !MERMAID_BLOCK_HINT_RE.test(mathNormalized) ||
+    !mathNormalized.includes("-.->")
+  ) {
+    return mathNormalized;
+  }
+
+  return normalizeMermaidMarkdown(mathNormalized);
 }

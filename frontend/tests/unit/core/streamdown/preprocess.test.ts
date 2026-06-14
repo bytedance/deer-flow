@@ -2,6 +2,8 @@ import { expect, test } from "vitest";
 
 import {
   capBlockquoteNesting,
+  compactDisplayMathBlocks,
+  normalizeStreamdownMathMarkdown,
   preprocessStreamdownMarkdown,
 } from "@/core/streamdown/preprocess";
 
@@ -51,7 +53,94 @@ test("capBlockquoteNesting only rewrites pathological lines", () => {
   expect(lines[2]).toBe("plain");
 });
 
-test("preprocessStreamdownMarkdown leaves non-mermaid content unchanged", () => {
-  const input = "just some text";
-  expect(preprocessStreamdownMarkdown(input)).toBe(input);
+test("normalizeStreamdownMathMarkdown converts inline math delimiters", () => {
+  expect(normalizeStreamdownMathMarkdown("Given \\(x\\), compute \\(x^2\\)."))
+    .toBe("Given $x$, compute $x^2$.");
+});
+
+test("normalizeStreamdownMathMarkdown converts multiline display math delimiters", () => {
+  const input = [
+    "Before",
+    "\\[",
+    "\\begin{aligned}",
+    "x_t &= \\sqrt{\\bar{\\alpha}_t}x_0 + \\sqrt{1-\\bar{\\alpha}_t}\\epsilon, \\\\",
+    "\\hat{x}_0 &= x_t",
+    "\\end{aligned}",
+    "\\]",
+    "After",
+  ].join("\n");
+  const expected = input.replace("\\[", "$$").replace("\\]", "$$");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test("normalizeStreamdownMathMarkdown leaves fenced and indented code untouched", () => {
+  const input = [
+    "Text \\(x\\)",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  const expected = [
+    "Text $x$",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks keeps display math as display math", () => {
+  const input = ["Before", "$$", "x", "=", "y", "$$", "After"].join("\n");
+  const expected = ["Before", "$$", "x = y", "$$", "After"].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks leaves fenced code content untouched", () => {
+  const input = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a",
+    "=",
+    "b",
+    "$$",
+  ].join("\n");
+  const expected = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a = b",
+    "$$",
+  ].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("preprocessStreamdownMarkdown normalizes math before Mermaid fixes", () => {
+  const input = [
+    "Before \\(x\\)",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  const expected = [
+    "Before $x$",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  expect(preprocessStreamdownMarkdown(input)).toBe(expected);
 });

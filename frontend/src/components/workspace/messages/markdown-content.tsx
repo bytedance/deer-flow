@@ -9,7 +9,7 @@ import {
 } from "@/components/ai-elements/message";
 import {
   preprocessStreamdownMarkdown,
-  streamdownPlugins,
+  streamdownPluginsWithoutRawHtml,
 } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
@@ -22,7 +22,7 @@ function isExternalUrl(href: string | undefined): boolean {
 export type MarkdownContentProps = {
   content: string;
   isLoading: boolean;
-  rehypePlugins: MessageResponseProps["rehypePlugins"];
+  rehypePlugins?: MessageResponseProps["rehypePlugins"];
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
@@ -33,13 +33,18 @@ export function MarkdownContent({
   content,
   rehypePlugins,
   className,
-  remarkPlugins = streamdownPlugins.remarkPlugins,
+  remarkPlugins = streamdownPluginsWithoutRawHtml.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
   const normalizedContent = useMemo(
     () => preprocessStreamdownMarkdown(content),
     [content],
   );
+  const effectiveRehypePlugins = useMemo(() => {
+    const base = streamdownPluginsWithoutRawHtml.rehypePlugins ?? [];
+    const extra = rehypePlugins ?? [];
+    return [...base, ...extra] as MessageResponseProps["rehypePlugins"];
+  }, [rehypePlugins]);
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -74,7 +79,7 @@ export function MarkdownContent({
     <MessageResponse
       className={className}
       remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
+      rehypePlugins={effectiveRehypePlugins}
       components={components}
     >
       {normalizedContent}

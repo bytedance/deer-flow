@@ -382,6 +382,41 @@
     -webkit-text-fill-color: transparent;
     text-fill-color: transparent;
   }
+
+  /* KaTeX rendering polish for chat messages.
+     Keep this narrowly scoped to KaTeX classes so normal Markdown text is not
+     affected. Display equations can be wider than the chat column; horizontal
+     scrolling is safer than wrapping/corrupting matrices, aligned equations, or
+     long PGD/DDPM expressions. */
+  .katex {
+    font-size: 1.02em;
+    line-height: 1.35;
+    text-rendering: auto;
+  }
+
+  .katex-display {
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 0.35rem 0.125rem 0.45rem;
+    margin: 0.85rem 0;
+    text-align: center;
+  }
+
+  .katex-display > .katex {
+    display: inline-block;
+    max-width: 100%;
+    white-space: nowrap;
+    text-align: initial;
+  }
+
+  .katex-display::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .katex-display::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+    border-radius: 999px;
+  }
 }
 
 :root {
