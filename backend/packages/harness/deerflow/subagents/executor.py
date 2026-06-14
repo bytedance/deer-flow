@@ -285,6 +285,7 @@ class SubagentExecutor:
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
+        user_id: str | None = None,
         trace_id: str | None = None,
     ):
         """Initialize the executor.
@@ -299,6 +300,7 @@ class SubagentExecutor:
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
+            user_id: Authenticated user ID from the parent runtime.
             trace_id: Trace ID from parent for distributed tracing.
         """
         self.config = config
@@ -314,6 +316,7 @@ class SubagentExecutor:
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
+        self.user_id = user_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
 
@@ -526,6 +529,8 @@ class SubagentExecutor:
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}
                 context["thread_id"] = self.thread_id
+            if self.user_id:
+                context["user_id"] = self.user_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
 
