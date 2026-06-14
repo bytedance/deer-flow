@@ -37,6 +37,11 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import {
+  InteractiveClarificationCard,
+  type ClarificationPayload,
+  type ClarificationResponse,
+} from "./interactive-clarification-card";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -161,6 +166,7 @@ export function MessageList({
   threadId,
   thread,
   paddingBottom = MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
+  onSubmitClarification,
   tokenUsageInlineMode = "off",
   hasMoreHistory,
   loadMoreHistory,
@@ -170,6 +176,7 @@ export function MessageList({
   threadId: string;
   thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
+  onSubmitClarification?: (response: ClarificationResponse) => void;
   tokenUsageInlineMode?: TokenUsageInlineMode;
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
@@ -313,6 +320,63 @@ export function MessageList({
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
+              const content = extractContentFromMessage(message);
+              let payload: ClarificationPayload | null = null;
+
+              try {
+                const parsed = JSON.parse(content) as Record<string, unknown>;
+                if (
+                  parsed &&
+                  typeof parsed === "object" &&
+                  parsed.kind === "clarification"
+                ) {
+                  if (parsed.mode === "single") {
+                    const hasQuestion = typeof parsed.question === "string";
+                    const hasInteractionMode =
+                      parsed.interaction_mode === "single_select" ||
+                      parsed.interaction_mode === "free_text" ||
+                      Array.isArray(parsed.options);
+
+                    if (hasQuestion && hasInteractionMode) {
+                      payload = parsed as unknown as ClarificationPayload;
+                    }
+                  } else if (parsed.mode === "form") {
+                    const questions = parsed.questions;
+                    if (Array.isArray(questions) && questions.length > 0) {
+                      const allValid = questions.every((question) => {
+                        return (
+                          question &&
+                          typeof question === "object" &&
+                          typeof question.id === "string" &&
+                          typeof question.question === "string"
+                        );
+                      });
+
+                      if (allValid) {
+                        payload = parsed as unknown as ClarificationPayload;
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // Not JSON, fallback to markdown
+              }
+
+              if (payload && onSubmitClarification) {
+                return (
+                  <div key={group.id} className="w-full">
+                    <InteractiveClarificationCard
+                      payload={payload}
+                      onSubmit={onSubmitClarification}
+                      disabled={
+                        thread.isLoading ||
+                        group.id !== messages[messages.length - 1]?.id
+                      }
+                    />
+                  </div>
+                );
+              }
+
               return (
                 <div key={group.id} className="w-full">
                   <MarkdownContent

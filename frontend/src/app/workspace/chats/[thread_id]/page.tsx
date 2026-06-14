@@ -15,6 +15,7 @@ import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
+import type { ClarificationResponse } from "@/components/workspace/messages/interactive-clarification-card";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -118,6 +119,51 @@ export default function ChatPage() {
     },
     [sendMessage, threadId],
   );
+
+  const handleClarificationSubmit = useCallback(
+    (response: ClarificationResponse) => {
+      const lines: string[] = [];
+      if (response.title) {
+        lines.push(`[Clarification] ${response.title}`);
+      }
+
+      if (response.mode === "single") {
+        const answer = response.answers[0];
+        if (!answer) {
+          return;
+        }
+        const value = Array.isArray(answer.answer)
+          ? answer.answer.join(", ")
+          : answer.answer;
+        const textValue = typeof value === "string" ? value.trim() : "";
+        if (textValue) {
+          lines.push(`1. ${answer.question}: ${textValue}`);
+        }
+      } else if (response.mode === "form") {
+        response.answers.forEach((answer, index) => {
+          const value = Array.isArray(answer.answer)
+            ? answer.answer.join(", ")
+            : answer.answer;
+          const textValue = typeof value === "string" ? value.trim() : "";
+          if (textValue) {
+            lines.push(`${index + 1}. ${answer.question}: ${textValue}`);
+          }
+        });
+      }
+
+      const text = lines.join("\n");
+      if (!text) {
+        return;
+      }
+
+      void sendMessage(threadId, {
+        text,
+        files: [],
+      });
+    },
+    [sendMessage, threadId],
+  );
+
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
@@ -164,6 +210,7 @@ export default function ChatPage() {
                 className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                onSubmitClarification={handleClarificationSubmit}
                 paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                 hasMoreHistory={hasMoreHistory}
                 loadMoreHistory={loadMoreHistory}
