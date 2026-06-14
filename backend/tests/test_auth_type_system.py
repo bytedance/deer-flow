@@ -530,6 +530,21 @@ def test_api_auth_me_no_cookie_returns_structured_401():
     assert "message" in body["detail"]
 
 
+def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch):
+    _setup_config()
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    client = _get_auth_client()
+
+    resp = client.get("/api/v1/auth/me")
+
+    assert resp.status_code == 200
+    from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+
+    body = resp.json()
+    assert body["id"] == AUTH_DISABLED_USER_ID
+    assert body["oauth_provider"] is None
+
+
 def test_api_auth_me_expired_token_returns_structured_401():
     """/api/v1/auth/me with expired token → 401 with {code: 'token_expired'}."""
     _setup_config()
