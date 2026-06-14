@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -18,6 +19,28 @@ from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _get_prefixed_tool_server(tool_name: str, server_names: Iterable[str]) -> str | None:
+    for server_name in server_names:
+        if tool_name.startswith(f"{server_name}_"):
+            return server_name
+    return None
+
+
+def _strip_mcp_tool_prefix(tool_name: str, server_name: str) -> str:
+    prefix = f"{server_name}_"
+    return tool_name[len(prefix) :] if tool_name.startswith(prefix) else tool_name
+
+
+def _rename_tool_for_exposure(tool: BaseTool, exposed_name: str) -> BaseTool:
+    if tool.name == exposed_name:
+        return tool
+    if hasattr(tool, "model_copy"):
+        return tool.model_copy(update={"name": exposed_name})
+    renamed = tool.copy()
+    renamed.name = exposed_name
+    return renamed
 
 
 def _extract_thread_id(runtime: Runtime | None) -> str:
@@ -109,6 +132,7 @@ def _make_session_pool_tool(
     server_name: str,
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
+    exposed_name: str | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -119,11 +143,7 @@ def _make_session_pool_tool(
     The configured ``tool_interceptors`` (OAuth, custom) are preserved and
     applied on every call before invoking the pooled session.
     """
-    # Strip the server-name prefix to recover the original MCP tool name.
-    original_name = tool.name
-    prefix = f"{server_name}_"
-    if original_name.startswith(prefix):
-        original_name = original_name[len(prefix) :]
+    original_name = _strip_mcp_tool_prefix(tool.name, server_name)
 
     pool = get_session_pool()
 
@@ -170,7 +190,7 @@ def _make_session_pool_tool(
         return _convert_call_tool_result(call_tool_result)
 
     return StructuredTool(
-        name=tool.name,
+        name=exposed_name or tool.name,
         description=tool.description,
         args_schema=tool.args_schema,
         coroutine=call_with_persistent_session,
@@ -257,7 +277,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         )
 
         # Get all tools from all servers (discovers tool definitions via
-        # temporary sessions – the persistent-session wrapping is applied below).
+        # temporary sessions; the persistent-session wrapping is applied below).
         tools = await client.get_tools()
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
@@ -266,21 +286,34 @@ async def get_mcp_tools() -> list[BaseTool]:
         # internally which cannot be closed from a different async task, so
         # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
-        for tool in tools:
-            tool_server: str | None = None
-            for name in servers_config:
-                if tool.name.startswith(f"{name}_"):
-                    tool_server = name
-                    break
+        server_names_by_prefix_length = tuple(sorted(servers_config, key=len, reverse=True))
+        tool_servers = [_get_prefixed_tool_server(tool.name, server_names_by_prefix_length) for tool in tools]
+        exposed_name_candidates: list[str] = []
+        for tool, tool_server in zip(tools, tool_servers, strict=True):
+            if tool_server is None:
+                exposed_name_candidates.append(tool.name)
+            else:
+                exposed_name_candidates.append(_strip_mcp_tool_prefix(tool.name, tool_server))
+        exposed_name_counts = Counter(exposed_name_candidates)
 
+        for tool, tool_server, exposed_name_candidate in zip(tools, tool_servers, exposed_name_candidates, strict=True):
+            exposed_name = exposed_name_candidate if exposed_name_counts[exposed_name_candidate] == 1 else tool.name
             if tool_server is not None:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
-                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                    wrapped_tools.append(
+                        _make_session_pool_tool(
+                            tool,
+                            tool_server,
+                            servers_config[tool_server],
+                            tool_interceptors,
+                            exposed_name=exposed_name,
+                        )
+                    )
                 else:
-                    wrapped_tools.append(tool)
+                    wrapped_tools.append(_rename_tool_for_exposure(tool, exposed_name))
             else:
-                wrapped_tools.append(tool)
+                wrapped_tools.append(_rename_tool_for_exposure(tool, exposed_name))
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:
