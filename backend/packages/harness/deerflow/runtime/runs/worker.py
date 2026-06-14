@@ -28,6 +28,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 if TYPE_CHECKING:
     from langchain_core.messages import HumanMessage
+    from deerflow.runtime.journal import RunJournal
 
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
@@ -37,6 +38,7 @@ from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
+from .partial_persist import PartialMessageAccumulator, persist_partial_on_cancel
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,11 @@ async def run_agent(
     llm_error_fallback_message: str | None = None
 
     journal = None
+    # Accumulates AIMessageChunks from messages-mode streaming so the cancel
+    # path can persist the partial response. Kept independent of `journal`
+    # so even checkpointer-only deployments capture the partial in the
+    # checkpoint for the next-turn agent context.
+    accumulator = PartialMessageAccumulator()
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -314,6 +321,8 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                if single_mode == "messages":
+                    _feed_partial_accumulator(accumulator, chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -333,6 +342,8 @@ async def run_agent(
                     continue
 
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                if mode == "messages":
+                    _feed_partial_accumulator(accumulator, chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -354,6 +365,14 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
+                await _persist_partial_safely(
+                    accumulator=accumulator,
+                    journal=journal,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    abort_action=action,
+                    run_id=run_id,
+                )
                 await run_manager.set_status(run_id, RunStatus.interrupted)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
@@ -381,6 +400,14 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
+            await _persist_partial_safely(
+                accumulator=accumulator,
+                journal=journal,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                abort_action=action,
+                run_id=run_id,
+            )
             await run_manager.set_status(run_id, RunStatus.interrupted)
             logger.info("Run %s was cancelled", run_id)
 
@@ -665,6 +692,55 @@ def _extract_human_message(graph_input: dict) -> HumanMessage | None:
         content = last.get("content", "")
         return HumanMessage(content=content) if content else None
     return None
+
+
+def _feed_partial_accumulator(accumulator: PartialMessageAccumulator, chunk: Any) -> None:
+    """Forward a messages-mode chunk tuple to the partial-message accumulator.
+
+    LangGraph's ``messages`` mode yields ``(AIMessageChunk, metadata)`` tuples;
+    middleware-tagged chunks and non-message payloads are no-ops inside the
+    accumulator. Any exception here is swallowed because accumulation is a
+    best-effort side channel — losing partial buffering must never break the
+    SSE stream itself.
+    """
+    if not isinstance(chunk, tuple) or len(chunk) != 2:
+        return
+    message_chunk, metadata = chunk
+    try:
+        accumulator.feed(message_chunk, metadata if isinstance(metadata, dict) else None)
+    except Exception:  # pragma: no cover — defensive
+        logger.debug("Partial accumulator feed failed", exc_info=True)
+
+
+async def _persist_partial_safely(
+    *,
+    accumulator: PartialMessageAccumulator,
+    journal: RunJournal | None,
+    checkpointer: Any | None,
+    thread_id: str,
+    abort_action: str | None,
+    run_id: str,
+) -> None:
+    """Run :func:`persist_partial_on_cancel` and never let it raise.
+
+    The cancel path must stay deterministic even when partial persistence
+    fails (DB down, schema mismatch, etc.) — the run still has to reach
+    ``interrupted`` status and the bridge has to emit ``end``.
+    """
+    if accumulator.is_empty():
+        return
+    try:
+        persisted = await persist_partial_on_cancel(
+            accumulator=accumulator,
+            journal=journal,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            abort_action=abort_action,
+        )
+        if persisted:
+            logger.info("Run %s: persisted partial response on cancel (action=%s)", run_id, abort_action)
+    except Exception:
+        logger.warning("Run %s: partial persistence failed (non-fatal)", run_id, exc_info=True)
 
 
 def _unpack_stream_item(
