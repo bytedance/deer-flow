@@ -8,6 +8,7 @@ sync/async code paths.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _snap_to_line_boundary,
     _tool_message_over_budget,
 )
+from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -226,7 +228,7 @@ class TestNeedsBudget:
 
 
 class TestBuildPreview:
-    def test_contains_head_and_tail_and_reference(self):
+    def test_contains_typed_summary_and_reference(self):
         content = "HEAD_" + "x" * 5000 + "_TAIL"
         preview = _build_preview(
             content,
@@ -235,8 +237,9 @@ class TestBuildPreview:
             head_chars=100,
             tail_chars=50,
         )
-        assert preview.startswith("HEAD_")
-        assert "_TAIL" in preview
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
         assert "start_line and end_line" in preview
@@ -251,6 +254,102 @@ class TestBuildPreview:
             tail_chars=100,
         )
         assert "10000 chars" in preview
+
+    def test_json_preview_extracts_structure_instead_of_head_tail(self):
+        content = (
+            '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],'
+            '"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
+        )
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys" in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "items: array length 2" in preview
+        assert "$.meta.source: \"unit\"" in preview
+        assert not preview.startswith('{"meta"')
+        assert "SHOULD_NOT_NEED_TAIL" not in preview
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        assert "line " in preview
+        assert "byte offset " in preview
+        assert "Start near the line hints above" in preview
+
+    def test_json_line_hints_use_original_content_offsets(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items (line 4," in preview
+
+    def test_table_preview_extracts_columns(self):
+        content = "name,score\nAda,98\nGrace,99\n"
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 2 data rows and 2 columns" in preview
+        assert "columns: name, score" in preview
+        assert "first data row: Ada,98" in preview
+
+
+class TestToolOutputSynopsis:
+    def test_code_synopsis_extracts_imports_and_symbols(self):
+        content = "import os\nfrom pathlib import Path\n\nclass Runner:\n    pass\n\ndef main():\n    return Path(os.getcwd())\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="python")
+        assert synopsis.kind == "code"
+        assert "line count" in synopsis.structure[0]
+        assert any("imports: os, pathlib" in item for item in synopsis.structure)
+        assert "class Runner" in synopsis.notable_items
+        assert "def main" in synopsis.notable_items
+
+    def test_yaml_synopsis_extracts_top_level_keys(self):
+        content = "name: deer\nsettings:\n  enabled: true\n  retries: 3\nitems:\n  - alpha\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="config")
+        assert synopsis.kind == "yaml"
+        assert "Top-level keys: name, settings, items" in synopsis.summary
+        assert "settings: object" in synopsis.structure
+        assert "items: array" in synopsis.structure
+
+    def test_xml_synopsis_extracts_root_and_children(self):
+        content = "<feed><entry id=\"1\"/><entry id=\"2\"/><meta/></feed>"
+        synopsis = build_tool_output_synopsis(content, tool_name="xml")
+        assert synopsis.kind == "xml"
+        assert "XML document with root tag feed." in synopsis.summary
+        assert "root tag: feed" in synopsis.structure
+        assert "entry: 2" in synopsis.structure
 
 
 class TestBuildFallback:
@@ -331,7 +430,7 @@ class TestWrapToolCallExternalize:
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
 
-    def test_preview_contains_head_and_tail(self):
+    def test_preview_contains_typed_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
             mw = ToolOutputBudgetMiddleware(config=config)
@@ -341,8 +440,10 @@ class TestWrapToolCallExternalize:
 
             result = mw.wrap_tool_call(req, lambda _: msg)
 
-            assert result.content.startswith("HEADPART_")
-            assert "_TAILPART" in result.content
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Text output" in result.content
+            assert "HEADPART_" in result.content
 
 
 class TestWrapToolCallFallback:
