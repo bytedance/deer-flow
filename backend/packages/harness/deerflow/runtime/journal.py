@@ -92,6 +92,10 @@ class RunJournal(BaseCallbackHandler):
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
 
+        # Message IDs that completed normally via on_llm_end.
+        # Used by record_partial_ai_message() to avoid duplicating already-recorded messages.
+        self._completed_message_ids: set[str] = set()
+
         # LLM request/response tracking
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
@@ -331,6 +335,10 @@ class RunJournal(BaseCallbackHandler):
 
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
+            for message in messages:
+                msg_id = getattr(message, "id", None)
+                if msg_id:
+                    self._completed_message_ids.add(msg_id)
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
@@ -505,6 +513,25 @@ class RunJournal(BaseCallbackHandler):
             event_type=f"middleware:{tag}",
             category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
+        )
+
+    def record_partial_ai_message(self, msg_id: str | None, content: str, *, caller: str = "lead_agent") -> None:
+        """Write a partial AI message for a run that was interrupted before the LLM finished.
+
+        Skips silently if content is empty or if msg_id was already recorded as a
+        completed message by on_llm_end (prevents double-writing on the rare race
+        where the LLM finishes just as abort is detected).
+        """
+        if not content:
+            return
+        if msg_id and msg_id in self._completed_message_ids:
+            return
+        partial_msg = AIMessage(content=content, id=msg_id) if msg_id else AIMessage(content=content)
+        self._put(
+            event_type="llm.ai.partial",
+            category="message",
+            content=partial_msg.model_dump(),
+            metadata={"caller": caller, "partial": True},
         )
 
     async def flush(self) -> None:
