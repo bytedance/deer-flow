@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -24,7 +25,11 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import {
+  useThreadMetadata,
+  useThreadStream,
+  useThreadTokenUsage,
+} from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -32,6 +37,7 @@ import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const router = useRouter();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
   // `isNewThread` tracks whether the backend has the thread yet — gates the
@@ -47,6 +53,10 @@ export default function ChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadMetadata = useThreadMetadata(threadId, {
+    enabled: !isNewThread && !isMock,
+    isMock,
+  });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
   useSpecificChatMode();
@@ -107,6 +117,33 @@ export default function ChatPage() {
       }
     },
   });
+
+  const hasThreadMessages = thread.messages.length > 0;
+
+  useEffect(() => {
+    if (
+      !isNewThread &&
+      !isMock &&
+      threadMetadata.data === null &&
+      !threadMetadata.isLoading &&
+      !threadMetadata.isFetching &&
+      !isHistoryLoading &&
+      !hasMoreHistory &&
+      !hasThreadMessages
+    ) {
+      router.replace("/workspace/chats/new");
+    }
+  }, [
+    hasMoreHistory,
+    hasThreadMessages,
+    isHistoryLoading,
+    isMock,
+    isNewThread,
+    router,
+    threadMetadata.data,
+    threadMetadata.isFetching,
+    threadMetadata.isLoading,
+  ]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {

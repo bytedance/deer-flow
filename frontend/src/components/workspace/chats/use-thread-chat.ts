@@ -5,6 +5,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { uuid } from "@/core/utils/uuid";
 
+export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
+
+type ThreadChatResetDetail = {
+  deletedThreadId: string;
+  nextPath: string;
+  force?: boolean;
+};
+
+export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent<ThreadChatResetDetail>(THREAD_CHAT_RESET_EVENT, {
+      detail,
+    }),
+  );
+}
+
 export function useThreadChat() {
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
   const pathname = usePathname();
@@ -30,6 +49,13 @@ export function useThreadChat() {
     () => threadIdFromPath === "new",
   );
 
+  const resetToNewThread = useCallback(() => {
+    const nextThreadId = uuid();
+    newThreadIdRef.current = nextThreadId;
+    setIsNewThreadState(true);
+    setThreadIdState(nextThreadId);
+  }, []);
+
   useEffect(() => {
     if (isNewPath) {
       const nextThreadId = newThreadIdRef.current ?? uuid();
@@ -50,6 +76,35 @@ export function useThreadChat() {
     setIsNewThreadState(false);
     setThreadIdState(threadIdFromPath);
   }, [isNewPath, threadIdFromPath]);
+
+  useEffect(() => {
+    const handleReset = (event: Event) => {
+      const detail = (event as CustomEvent<ThreadChatResetDetail>).detail;
+      if (!detail?.nextPath) {
+        return;
+      }
+
+      const currentPathname = window.location.pathname;
+      const isDeletingCurrentThread =
+        detail.force === true ||
+        detail.deletedThreadId === threadId ||
+        detail.deletedThreadId === threadIdFromPath ||
+        currentPathname.endsWith(`/${detail.deletedThreadId}`);
+
+      if (!isDeletingCurrentThread) {
+        return;
+      }
+
+      // URL replacement is owned by the caller's Next router action; this hook
+      // only resets local chat state so the router state and browser URL stay
+      // in sync.
+      resetToNewThread();
+    };
+
+    window.addEventListener(THREAD_CHAT_RESET_EVENT, handleReset);
+    return () =>
+      window.removeEventListener(THREAD_CHAT_RESET_EVENT, handleReset);
+  }, [resetToNewThread, threadId, threadIdFromPath]);
 
   const setThreadId = useCallback((nextThreadId: string) => {
     newThreadIdRef.current = null;
