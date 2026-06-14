@@ -20,7 +20,17 @@ class StreamBridgeConfig(BaseModel):
     )
     queue_maxsize: int = Field(
         default=256,
-        description="Maximum number of events buffered per run in the memory bridge.",
+        description="Maximum number of events retained per run (memory bridge queue size / redis stream MAXLEN).",
+    )
+    max_connections: int | None = Field(
+        default=None,
+        description=(
+            "Max Redis connections in the pool for the redis stream bridge. Each live SSE "
+            "client holds one connection blocked in XREAD ... BLOCK for up to heartbeat_interval "
+            "(15s), so hundreds of concurrent clients open hundreds of connections. Leave unset "
+            "for redis-py's default (effectively unbounded), or set a ceiling sized for peak "
+            "concurrent SSE clients. Only applies to the redis bridge."
+        ),
     )
 
 

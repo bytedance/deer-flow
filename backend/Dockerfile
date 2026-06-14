@@ -45,10 +45,13 @@ WORKDIR /app
 # Copy backend source code
 COPY backend ./backend
 
-# Install dependencies with cache mount
-# When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
+# Install dependencies with cache mount.
+# `redis` is always installed because Docker Compose defaults the stream bridge
+# to Redis (DEER_FLOW_STREAM_BRIDGE_REDIS_URL); it is an optional extra elsewhere
+# so slim non-Docker installs do not pull it. When UV_EXTRAS is set (e.g.
+# "postgres"), those optional dependencies are installed in addition.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --extra redis ${UV_EXTRAS:+--extra $UV_EXTRAS}"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
