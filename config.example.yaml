@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 12
+config_version: 13
 
 # ============================================================================
 # Logging
@@ -1049,6 +1049,52 @@ summarization:
     - read
     - view
     - cat
+
+# ============================================================================
+# Context Compaction (Headroom)
+# ============================================================================
+# Non-destructive, per-call message compression powered by the optional
+# "headroom-ai" package. Unlike summarization (which rewrites persisted state
+# with an LLM-generated summary), compaction only shrinks the *copy* of the
+# messages handed to the model for a single call — primarily large tool
+# outputs, logs, and search results. The full history stays in the checkpointer
+# untouched, so it is fully reversible. Summarization and compaction are
+# complementary and can both be enabled.
+#
+# Requires: pip install "deerflow-harness[compaction]"  (or  headroom-ai)
+# When the package is absent the middleware is a transparent no-op.
+compaction:
+  enabled: false
+
+  # Model name Headroom uses for token counting / context sizing.
+  # null = resolve from the active model at call time (falls back to a default).
+  model: null
+  model_limit: 200000
+
+  # Only run compaction once the estimated history exceeds this many tokens —
+  # keeps short conversations untouched and prefix-cache-friendly.
+  min_total_tokens: 4000
+
+  # Per-message floor: messages estimated below this many tokens are never compressed.
+  min_tokens_to_compress: 250
+
+  # Leave the most recent N messages uncompressed (the active conversation).
+  protect_recent: 4
+
+  # By default user and system messages are left byte-exact; only tool/assistant
+  # content is compressed. Flip these on for document/RAG-style workloads.
+  compress_user_messages: false
+  compress_system_messages: false
+
+  # Keep-ratio hint for Headroom's text compressor (e.g. 0.5 keeps ~50%).
+  # null lets Headroom decide (most aggressive). Named profiles like "agent-90"
+  # can be set via savings_profile instead.
+  target_ratio: null
+  savings_profile: null
+
+  # If true, any error during compaction is swallowed and the original messages
+  # are sent unchanged. Set false to surface compaction errors.
+  fail_open: true
 
 # ============================================================================
 # Memory Configuration

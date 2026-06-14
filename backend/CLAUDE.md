@@ -212,6 +212,7 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 8. **ToolErrorHandlingMiddleware** - Converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting
 9. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, reads `SKILL.md` from trusted skill storage, injects the skill body as hidden current-turn model context, and records a `middleware:skill_activation` audit event with skill name, category, path, and content hash
 10. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
+10b. **HeadroomCompactionMiddleware** - Non-destructive per-call message compression via the optional `headroom-ai` package (optional, if `compaction.enabled`). Runs in `wrap_model_call` and only rewrites the request copy of the messages (`request.override(messages=...)`); persisted state keeps full originals, so it is reversible. Content is compressed in place; message count and `tool_calls` are always preserved (falls back to originals on any shape change or error). No-op when `headroom-ai` is not installed. Also added to the subagent runtime chain.
 11. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
 12. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional); subagent usage is cached by `tool_call_id` only while token usage is enabled and merged back into the dispatching AIMessage by message position rather than message id
 13. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
@@ -502,6 +503,7 @@ Returns `{}` when Langfuse is not in the enabled providers — LangSmith-only de
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory
 - `title` - Auto-title generation (enabled, max_words, max_chars, prompt_template)
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
+- `compaction` - Headroom context compaction (enabled, model, model_limit, min_total_tokens, min_tokens_to_compress, protect_recent, compress_user_messages, compress_system_messages, target_ratio, savings_profile, fail_open). Optional `headroom-ai` dependency; no-op when absent
 - `subagents.enabled` - Master switch for subagent delegation
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
 
@@ -645,6 +647,18 @@ Automatic conversation summarization when approaching token limits:
 
 See [docs/summarization.md](docs/summarization.md) for details.
 
+### Context Compaction (Headroom)
+
+Non-destructive, per-call message compression for large tool outputs / logs / RAG chunks:
+- Configured in `config.yaml` under `compaction` key (disabled by default)
+- Powered by the optional `headroom-ai` package — install with `pip install "deerflow-harness[compaction]"`; the middleware is a transparent no-op when the package is absent
+- Implemented by `HeadroomCompactionMiddleware` (`agents/middlewares/compaction_middleware.py`) in `wrap_model_call`: only the request copy of the messages is shrunk via `request.override(...)`, so checkpointed state is untouched and the operation is reversible
+- Complementary to summarization: compaction shrinks message *content* in place (preserving count + `tool_calls`), while summarization reduces *history*. Both can be enabled together
+- Wired into both the lead agent (`build_middlewares`, after summarization) and the subagent runtime (`build_subagent_runtime_middlewares`)
+- Tests: `tests/test_compaction_config.py`, `tests/test_compaction_middleware.py` (use a `compress_fn` injection seam, so they never import the heavy ML stack)
+
+See [docs/compaction.md](docs/compaction.md) for details.
+
 ### Vision Support
 
 For models with `supports_vision: true`:
@@ -669,4 +683,5 @@ See `docs/` directory for detailed documentation:
 - [FILE_UPLOAD.md](docs/FILE_UPLOAD.md) - File upload feature
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
+- [compaction.md](docs/compaction.md) - Headroom context compaction
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
