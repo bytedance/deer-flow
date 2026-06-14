@@ -389,30 +389,20 @@ class WeComChannel(Channel):
             if not stream_id:
                 return
 
-            last_exc: Exception | None = None
-            for attempt in range(_max_retries):
-                try:
-                    await self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final))
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < _max_retries - 1:
-                        await asyncio.sleep(2**attempt)
-            if last_exc:
-                raise last_exc
+            await self._send_with_retry(
+                lambda: self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final)),
+                max_retries=_max_retries,
+                log_prefix="[WeCom]",
+                operation_name="stream send",
+            )
+            return
 
         body = {"msgtype": "markdown", "markdown": {"content": msg.text}}
-        last_exc = None
-        for attempt in range(_max_retries):
-            try:
-                await self._ws_client.send_message(msg.chat_id, body)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    await asyncio.sleep(2**attempt)
-        if last_exc:
-            raise last_exc
+        await self._send_with_retry(
+            lambda: self._ws_client.send_message(msg.chat_id, body),
+            max_retries=_max_retries,
+            log_prefix="[WeCom]",
+        )
 
     async def _upload_media_ws(
         self,

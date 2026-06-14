@@ -241,28 +241,11 @@ class FeishuChannel(Channel):
             len(msg.text),
         )
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await self._send_card_message(msg)
-                return  # success
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-
-        logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("Feishu send failed without an exception from any attempt")
-        raise last_exc
+        await self._send_with_retry(
+            lambda: self._send_card_message(msg),
+            max_retries=_max_retries,
+            log_prefix="[Feishu]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -724,16 +707,6 @@ class FeishuChannel(Channel):
                     logger.exception("[Feishu] failed to resolve stored topic mapping for topic_id=%s", candidate)
 
         return root_id or msg_id, False
-
-    @staticmethod
-    def _log_future_error(fut, name: str, msg_id: str) -> None:
-        """Callback for run_coroutine_threadsafe futures to surface errors."""
-        try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[Feishu] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except Exception:
-            pass
 
     @staticmethod
     def _log_task_error(task: asyncio.Task, name: str, msg_id: str) -> None:
