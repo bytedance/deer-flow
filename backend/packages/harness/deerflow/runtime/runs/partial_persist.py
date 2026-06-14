@@ -403,7 +403,11 @@ async def append_messages_to_checkpoint(
     metadata["updated_at"] = now_iso()
     metadata["source"] = "update"
     metadata["step"] = metadata.get("step", 0) + 1
-    metadata["writes"] = {CHECKPOINT_WRITE_SOURCE: {"messages": deduped_new}}
+    metadata["writes"] = {
+        CHECKPOINT_WRITE_SOURCE: {
+            "message_ids": [getattr(message, "id", None) for message in deduped_new],
+        }
+    }
     if abort_action:
         metadata["abort_action"] = abort_action
 

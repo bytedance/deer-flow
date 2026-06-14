@@ -455,7 +455,47 @@ class TestAppendMessagesToCheckpoint:
         assert metadata["source"] == "update"
         assert metadata["step"] == 1
         assert CHECKPOINT_WRITE_SOURCE in metadata["writes"]
+        assert metadata["writes"][CHECKPOINT_WRITE_SOURCE] == {"message_ids": ["m1"]}
         assert metadata["abort_action"] == "interrupt"
+
+    async def test_round_trips_with_async_sqlite_saver(self, tmp_path):
+        from langgraph.checkpoint.base import empty_checkpoint
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        db_path = tmp_path / "checkpoints.sqlite"
+        thread_id = "thread-sqlite-partial"
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+        async with AsyncSqliteSaver.from_conn_string(str(db_path)) as saver:
+            await saver.setup()
+
+            seed_checkpoint = empty_checkpoint()
+            seed_version = saver.get_next_version(None, None)
+            seed_checkpoint["channel_values"] = {"messages": [HumanMessage(id="h1", content="hi")]}
+            seed_checkpoint["channel_versions"] = {"messages": seed_version}
+            await saver.aput(config, seed_checkpoint, {"source": "input", "step": 0}, {"messages": seed_version})
+
+            new_messages = [
+                AIMessage(id="m_partial", content="partial"),
+                ToolMessage(id="tm_interrupted_tc1", content=INTERRUPTED_TOOL_MESSAGE_CONTENT, tool_call_id="tc1", status="error"),
+            ]
+            ok = await append_messages_to_checkpoint(
+                saver,
+                thread_id=thread_id,
+                new_messages=new_messages,
+                abort_action="interrupt",
+            )
+
+            assert ok is True
+            latest = await saver.aget_tuple(config)
+            assert latest is not None
+            messages = latest.checkpoint["channel_values"]["messages"]
+            ids = [getattr(message, "id", None) for message in messages]
+            assert ids == ["h1", "m_partial", "tm_interrupted_tc1"]
+            assert latest.checkpoint["channel_versions"]["messages"] != seed_version
+            assert latest.metadata["writes"][CHECKPOINT_WRITE_SOURCE] == {
+                "message_ids": ["m_partial", "tm_interrupted_tc1"]
+            }
 
     async def test_dedup_by_id(self):
         existing_ai = AIMessage(id="m1", content="x")
