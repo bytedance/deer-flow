@@ -90,7 +90,13 @@ class ChannelService:
     instantiates enabled channels, and starts the ChannelManager dispatcher.
     """
 
-    def __init__(self, channels_config: dict[str, Any] | None = None, *, connection_repo: Any | None = None) -> None:
+    def __init__(
+        self,
+        channels_config: dict[str, Any] | None = None,
+        *,
+        connection_repo: Any | None = None,
+        require_bound_identity: bool = False,
+    ) -> None:
         self.bus = MessageBus()
         self.store = ChannelStore()
         self._connection_repo = connection_repo
@@ -107,6 +113,7 @@ class ChannelService:
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
+            require_bound_identity=require_bound_identity,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
@@ -126,7 +133,13 @@ class ChannelService:
         if "channels" in extra:
             channels_config = dict(extra["channels"] or {})
         _merge_channel_connection_runtime_config(channels_config, app_config)
-        return cls(channels_config=channels_config, connection_repo=_make_connection_repo(app_config))
+        connection_config = getattr(app_config, "channel_connections", None)
+        require_bound_identity = bool(connection_config is not None and getattr(connection_config, "enabled", False) and getattr(connection_config, "require_bound_identity", True))
+        return cls(
+            channels_config=channels_config,
+            connection_repo=_make_connection_repo(app_config),
+            require_bound_identity=require_bound_identity,
+        )
 
     async def start(self) -> None:
         """Start the manager and all enabled channels."""

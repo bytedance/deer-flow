@@ -55,6 +55,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings first, then send your message again."
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -735,6 +736,7 @@ class ChannelManager:
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
+        require_bound_identity: bool = False,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -745,6 +747,7 @@ class ChannelManager:
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
+        self._require_bound_identity = require_bound_identity
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         self._skill_storage: SkillStorage | None = None
@@ -950,6 +953,29 @@ class ChannelManager:
 
     # -- chat handling -----------------------------------------------------
 
+    def _requires_bound_identity(self, msg: InboundMessage) -> bool:
+        if not self._require_bound_identity:
+            return False
+        if _auth_disabled_owner_user_id():
+            return False
+        return not (bool(msg.connection_id) and bool(msg.owner_user_id))
+
+    async def _reject_unbound_channel_message(self, msg: InboundMessage) -> None:
+        logger.info(
+            "[Manager] rejecting unbound channel message: channel=%s, chat_id=%s",
+            msg.channel_name,
+            msg.chat_id,
+        )
+        outbound = OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id=await self._lookup_thread_id(msg) or "",
+            text=BOUND_IDENTITY_REQUIRED_MESSAGE,
+            thread_ts=msg.thread_ts,
+            metadata=_slim_metadata(msg.metadata),
+        )
+        await self.bus.publish_outbound(outbound)
+
     async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
         if msg.connection_id and self._connection_repo is not None:
             return await self._connection_repo.get_thread_id(
@@ -1012,6 +1038,10 @@ class ChannelManager:
         self._channel_metadata_synced.add(thread_id)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
+        if self._requires_bound_identity(msg):
+            await self._reject_unbound_channel_message(msg)
+            return
+
         client = self._get_client()
 
         # Look up existing DeerFlow thread.
