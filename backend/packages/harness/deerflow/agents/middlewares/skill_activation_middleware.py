@@ -16,6 +16,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.journal import resolve_run_journal
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -200,9 +201,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
     @staticmethod
     def _record_activation(request: ModelRequest, activation: _Activation, *, hook: str) -> None:
-        runtime = getattr(request, "runtime", None)
-        context = getattr(runtime, "context", None)
-        journal = context.get("__run_journal") if isinstance(context, dict) else None
+        journal = resolve_run_journal(getattr(request, "runtime", None))
         if journal is None:
             return
         try:

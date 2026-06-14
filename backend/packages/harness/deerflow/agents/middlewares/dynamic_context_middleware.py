@@ -32,6 +32,7 @@ import asyncio
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
@@ -39,7 +40,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.runtime.journal import resolve_run_journal
+
 if TYPE_CHECKING:
+    from deerflow.agents.memory import InjectedMemorySnapshot
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,23 @@ def _is_user_injection_target(message: object) -> bool:
     return isinstance(message, HumanMessage) and not is_dynamic_context_reminder(message) and message.name != _SUMMARY_MESSAGE_NAME
 
 
+@dataclass(slots=True)
+class _InjectResult:
+    """Outcome of one ``_inject`` pass.
+
+    ``state_update`` is the LangGraph state delta to return from the hook (or
+    ``None`` when nothing is injected). ``snapshot`` is set only on the
+    first-turn full-reminder branch with non-empty memory — the single point
+    where memory is frozen into the conversation — and carries the provenance
+    of exactly what was injected, built in the same pass as the reminder so it
+    cannot diverge from the prompt. It is recorded once per thread into the
+    context-observability ledger.
+    """
+
+    state_update: dict | None
+    snapshot: InjectedMemorySnapshot | None = None
+
+
 class DynamicContextMiddleware(AgentMiddleware):
     """Inject memory and current date into HumanMessages as a <system-reminder>.
 
@@ -108,12 +129,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> str:
-        from deerflow.agents.lead_agent.prompt import _get_memory_context
+    def _build_full_reminder(self) -> tuple[str, InjectedMemorySnapshot | None]:
+        from deerflow.agents.lead_agent.prompt import _get_memory_context_with_snapshot
 
         # Memory injection is gated by injection_enabled; date is always included.
+        # The snapshot is produced from the same memory load as the text, so the
+        # ledger records exactly what this reminder injects.
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        if injection_enabled:
+            memory_context, snapshot = _get_memory_context_with_snapshot(self._agent_name, app_config=self._app_config)
+        else:
+            memory_context, snapshot = "", None
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         lines: list[str] = ["<system-reminder>"]
@@ -123,7 +149,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         lines.append(f"<current_date>{current_date}</current_date>")
         lines.append("</system-reminder>")
 
-        return "\n".join(lines)
+        return "\n".join(lines), snapshot
 
     def _build_date_update_reminder(self) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
@@ -160,10 +186,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return reminder_msg, user_msg
 
-    def _inject(self, state) -> dict | None:
+    def _inject(self, state) -> _InjectResult:
         messages = list(state.get("messages", []))
         if not messages:
-            return None
+            return _InjectResult(None)
 
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
         last_date = _last_injected_date(messages)
@@ -178,8 +204,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             # ── First turn: inject full reminder as a separate HumanMessage ─────
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
-                return None
-            full_reminder = self._build_full_reminder()
+                return _InjectResult(None)
+            full_reminder, snapshot = self._build_full_reminder()
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s) into first HumanMessage id=%r",
                 len(full_reminder),
@@ -187,40 +213,50 @@ class DynamicContextMiddleware(AgentMiddleware):
                 messages[first_idx].id,
             )
             reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[first_idx], full_reminder)
-            return {"messages": [reminder_msg, user_msg]}
+            # Memory is frozen on the first turn (per-thread snapshot pattern),
+            # so this is the one point where a memory snapshot is recorded. The
+            # snapshot was built inside this (timed) pass, from the same memory
+            # load as the reminder.
+            return _InjectResult({"messages": [reminder_msg, user_msg]}, snapshot=snapshot)
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
-            return None
+            return _InjectResult(None)
 
         # ── Midnight crossed: inject date-update reminder as a separate HumanMessage ──
         last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
-            return None
+            return _InjectResult(None)
 
         reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
-        return {"messages": [reminder_msg, user_msg]}
+        # A date-only update carries no memory, so no memory snapshot is recorded.
+        return _InjectResult({"messages": [reminder_msg, user_msg]})
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+        result = self._inject(state)
+        if result.snapshot is not None:
+            self._emit_memory_snapshot(runtime, result.snapshot)
+        return result.state_update
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
         # _inject() performs synchronous file I/O (memory JSON loading) and
         # potentially blocking network calls (tiktoken encoding download on
-        # first use).  Offload to a thread so the event loop is never blocked
-        # — a blocking call here starves all concurrent HTTP handlers (auth,
-        # SSE heartbeats, etc.).  See issue #3402.
+        # first use), AND now builds the memory snapshot in the same pass.
+        # Offload to a thread so the event loop is never blocked — a blocking
+        # call here starves all concurrent HTTP handlers (auth, SSE heartbeats,
+        # etc.).  See issue #3402.
         #
         # Bounded timeout: if startup warm-up failed silently (e.g. network
         # blip during deploy), the first request's cold tiktoken download can
         # block for tens of minutes (OS TCP timeout).  Time-box injection so
         # the request degrades gracefully (no memory context) rather than
-        # hanging.
+        # hanging.  The snapshot build is inside this timed work, so it shares
+        # the same bound — it cannot hang the request after injection.
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 asyncio.to_thread(self._inject, state),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
@@ -230,3 +266,25 @@ class DynamicContextMiddleware(AgentMiddleware):
                 _INJECT_TIMEOUT_SECONDS,
             )
             return None
+        if result.snapshot is not None:
+            # Recording only buffers the event (no I/O), so it is safe to do
+            # directly on the event loop without a further offload.
+            self._emit_memory_snapshot(runtime, result.snapshot)
+        return result.state_update
+
+    # ── Context-observability snapshot (M1) ──────────────────────────────────
+    # The snapshot is built inside _inject() from the same memory load as the
+    # injected text (single source of truth), carried out via _InjectResult, and
+    # recorded here. Recording is a buffer append (no I/O), so it is non-blocking.
+    # The journal is available on the gateway worker path only; on the embedded
+    # DeerFlowClient path and plain graph invocations resolve_run_journal returns
+    # None and snapshotting is simply skipped.
+
+    def _emit_memory_snapshot(self, runtime: Runtime, snapshot: InjectedMemorySnapshot) -> None:
+        journal = resolve_run_journal(runtime)
+        if journal is None:
+            return
+        try:
+            journal.record_context_snapshot("memory", payload=snapshot.to_event_payload())
+        except Exception:
+            logger.debug("Failed to record memory context snapshot", exc_info=True)

@@ -93,6 +93,7 @@ LLM-powered persistent context retention across conversations:
 - **Structured storage**: User context (work, personal, top-of-mind), history, and confidence-scored facts
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
+- **Context injection snapshot**: On the Gateway run path, first-turn memory injection records a compact `context:memory` event in `run_events` with selected fact IDs, section/count metadata, token budget, and a content hash. The event is provenance only and does not store the full injected text.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem

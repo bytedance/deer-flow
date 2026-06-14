@@ -48,6 +48,7 @@ from deerflow.agents.middlewares.safety_termination_detectors import (
     default_detectors,
 )
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.runtime.journal import resolve_run_journal
 
 if TYPE_CHECKING:
     from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
@@ -227,11 +228,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         purpose of the safety filter. Names / count / ids are sufficient for
         audit and debugging (issue #3028 review).
         """
-        journal = None
-        if runtime is not None and getattr(runtime, "context", None):
-            context = runtime.context
-            if isinstance(context, dict):
-                journal = context.get("__run_journal")
+        journal = resolve_run_journal(runtime)
         if journal is None:
             return
 
