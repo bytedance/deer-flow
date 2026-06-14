@@ -260,12 +260,14 @@ async def run_agent(
         # _resolve_model_name in agent.py may return the default model if the
         # requested name is not in the allowlist — this update ensures the
         # persisted model_name reflects the actual model used.
-        if record.model_name is not None:
-            resolved = getattr(agent, "metadata", {}) or {}
-            if isinstance(resolved, dict):
-                effective = resolved.get("model_name")
-                if effective and effective != record.model_name:
-                    await run_manager.update_model_name(record.run_id, effective)
+        # NOTE: Removed the "record.model_name is not None" guard so that runs
+        # created without an explicit model_name (which leaves it as None) still
+        # get their resolved effective model persisted to the database.
+        resolved = getattr(agent, "metadata", {}) or {}
+        if isinstance(resolved, dict):
+            effective = resolved.get("model_name")
+            if effective:
+                await run_manager.update_model_name(record.run_id, effective)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
