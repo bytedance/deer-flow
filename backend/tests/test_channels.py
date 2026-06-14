@@ -712,6 +712,42 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_dispatch_loop_dedupes_stable_provider_message_id(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U123",
+                text="sensitive prompt",
+                topic_id="1710000000.000100",
+                metadata={"team_id": "T123", "message_id": "1710000000.000200"},
+            )
+            await bus.publish_inbound(inbound)
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 1 and len(outbound_received) == 1)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert manager._client.threads.create.call_count == 1
+            assert manager._client.runs.wait.call_count == 1
+            assert len(outbound_received) == 1
+
+        _run(go())
+
     def test_handle_chat_outbound_preserves_inbound_metadata(self):
         """DingTalk (and similar) need inbound metadata on outbound sends (e.g. sender_staff_id)."""
         from app.channels.manager import ChannelManager
@@ -3225,7 +3261,7 @@ class TestWeComChannel:
             assert inbound.thread_ts == "msg-1"
             assert inbound.topic_id == "user-1"
             assert inbound.files == files
-            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single"}
+            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single", "message_id": "msg-1"}
             assert channel._ws_frames["msg-1"] is frame
             assert channel._ws_stream_ids["msg-1"] == "stream-1"
 

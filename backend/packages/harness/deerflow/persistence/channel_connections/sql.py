@@ -261,15 +261,39 @@ class ChannelConnectionRepository:
             session.add(row)
             await session.commit()
 
-    async def count_oauth_states(self, *, owner_user_id: str, provider: str) -> int:
+    async def delete_expired_oauth_states(self, *, now: datetime | None = None) -> int:
+        current_time = now or datetime.now(UTC)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def count_oauth_states(
+        self,
+        *,
+        owner_user_id: str,
+        provider: str,
+        active_only: bool = False,
+        now: datetime | None = None,
+    ) -> int:
+        current_time = now or datetime.now(UTC)
+        conditions = [
+            ChannelOAuthStateRow.owner_user_id == owner_user_id,
+            ChannelOAuthStateRow.provider == provider,
+        ]
+        if active_only:
+            conditions.extend(
+                [
+                    ChannelOAuthStateRow.consumed_at.is_(None),
+                    ChannelOAuthStateRow.expires_at >= current_time,
+                ]
+            )
+
         async with self.session_factory() as session:
             result = await session.execute(
                 select(func.count())
                 .select_from(ChannelOAuthStateRow)
-                .where(
-                    ChannelOAuthStateRow.owner_user_id == owner_user_id,
-                    ChannelOAuthStateRow.provider == provider,
-                )
+                .where(*conditions)
             )
             return int(result.scalar_one())
 
