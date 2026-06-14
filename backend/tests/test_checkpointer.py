@@ -141,6 +141,18 @@ class TestCheckpointerConfig:
         assert config is not None
         assert config.type == "postgres"
         assert config.connection_string == "postgresql://localhost/db"
+        assert config.postgres_schema == ""
+
+    def test_postgres_schema_accepts_valid_identifier(self):
+        config = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db", postgres_schema="deerflow")
+        assert config.postgres_schema == "deerflow"
+
+    @pytest.mark.parametrize("schema", ["1abc", "a b", "a;b", "a-b", "a" * 64, 'a"b'])
+    def test_postgres_schema_rejects_invalid_identifier(self, schema):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db", postgres_schema=schema)
 
     def test_default_connection_string_is_none(self):
         config = CheckpointerConfig(type="memory")
@@ -390,6 +402,78 @@ class TestGetCheckpointer:
         mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
 
+    def test_postgres_schema_creates_schema_and_sets_search_path(self):
+        """Sync Postgres checkpointer should create schema before setup."""
+        load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db", "postgres_schema": "deerflow"})
+
+        mock_saver_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.PostgresSaver = mock_saver_cls
+
+        mock_conn = MagicMock()
+        mock_connect_cm = MagicMock()
+        mock_connect_cm.__enter__.return_value = mock_conn
+        mock_connect_cm.__exit__.return_value = False
+        mock_psycopg = MagicMock()
+        mock_psycopg.connect.return_value = mock_connect_cm
+
+        with (
+            patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg": mock_psycopg}),
+        ):
+            reset_checkpointer()
+            cp = get_checkpointer()
+
+        assert cp is mock_saver_instance
+        mock_psycopg.connect.assert_called_once_with("postgresql://localhost/db", autocommit=True)
+        mock_conn.execute.assert_called_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
+        called_dsn = mock_saver_cls.from_conn_string.call_args.args[0]
+        assert "options=-c%20search_path%3Ddeerflow" in called_dsn
+        mock_saver_instance.setup.assert_called_once()
+
+    def test_store_postgres_schema_creates_schema_and_sets_search_path(self):
+        """Sync Postgres store should use the legacy checkpointer schema."""
+        load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db", "postgres_schema": "deerflow"})
+
+        mock_store_instance = MagicMock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_store_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.PostgresStore = mock_store_cls
+
+        mock_conn = MagicMock()
+        mock_connect_cm = MagicMock()
+        mock_connect_cm.__enter__.return_value = mock_conn
+        mock_connect_cm.__exit__.return_value = False
+        mock_psycopg = MagicMock()
+        mock_psycopg.connect.return_value = mock_connect_cm
+
+        with (
+            patch.dict(sys.modules, {"langgraph.store.postgres": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg": mock_psycopg}),
+        ):
+            reset_store()
+            store = get_store()
+
+        assert store is mock_store_instance
+        mock_psycopg.connect.assert_called_once_with("postgresql://localhost/db", autocommit=True)
+        mock_conn.execute.assert_called_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
+        called_dsn = mock_store_cls.from_conn_string.call_args.args[0]
+        assert "options=-c%20search_path%3Ddeerflow" in called_dsn
+        mock_store_instance.setup.assert_called_once()
+
 
 class TestSyncSingletonThreadSafety:
     def test_store_reset_clears_singleton(self):
@@ -573,7 +657,7 @@ class TestAsyncCheckpointer:
         from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
         mock_config = MagicMock()
-        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db")
+        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db", postgres_schema="deerflow")
 
         mock_saver = AsyncMock()
 
@@ -582,6 +666,11 @@ class TestAsyncCheckpointer:
         mock_pool_instance = AsyncMock()
         mock_pool_instance.__aenter__.return_value = mock_pool_instance
         mock_pool_instance.__aexit__.return_value = False
+        mock_conn = AsyncMock()
+        mock_conn_cm = AsyncMock()
+        mock_conn_cm.__aenter__.return_value = mock_conn
+        mock_conn_cm.__aexit__.return_value = False
+        mock_pool_instance.connection = MagicMock(return_value=mock_conn_cm)
 
         mock_pool_cls = MagicMock(return_value=mock_pool_instance)
         mock_pool_cls.check_connection = AsyncMock()
@@ -609,6 +698,8 @@ class TestAsyncCheckpointer:
         call_kwargs = mock_pool_cls.call_args
         assert call_kwargs[0][0] == "postgresql://localhost/db"
         assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+        assert call_kwargs[1]["kwargs"]["options"] == "-c search_path=deerflow"
+        mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
 
         # Verify saver was constructed with the pool (not via from_conn_string)
         mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
@@ -620,7 +711,7 @@ class TestAsyncCheckpointer:
         from deerflow.config.database_config import DatabaseConfig
         from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
-        db_config = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db")
+        db_config = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db", postgres_schema="deerflow")
         mock_config = MagicMock()
         mock_config.checkpointer = None
         mock_config.database = db_config
@@ -632,6 +723,11 @@ class TestAsyncCheckpointer:
         mock_pool_instance = AsyncMock()
         mock_pool_instance.__aenter__.return_value = mock_pool_instance
         mock_pool_instance.__aexit__.return_value = False
+        mock_conn = AsyncMock()
+        mock_conn_cm = AsyncMock()
+        mock_conn_cm.__aenter__.return_value = mock_conn
+        mock_conn_cm.__aexit__.return_value = False
+        mock_pool_instance.connection = MagicMock(return_value=mock_conn_cm)
 
         mock_pool_cls = MagicMock(return_value=mock_pool_instance)
         mock_pool_cls.check_connection = AsyncMock()
@@ -656,6 +752,8 @@ class TestAsyncCheckpointer:
         call_kwargs = mock_pool_cls.call_args
         assert call_kwargs[0][0] == "postgresql://localhost/db"
         assert call_kwargs[1]["check"] is mock_pool_cls.check_connection
+        assert call_kwargs[1]["kwargs"]["options"] == "-c search_path=deerflow"
+        mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
 
         mock_saver_cls.assert_called_once_with(conn=mock_pool_instance)
         mock_saver.setup.assert_awaited_once()
@@ -700,6 +798,88 @@ class TestAsyncCheckpointer:
         assert called_db_config is db_config
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/data/deerflow.db")
         mock_saver.setup.assert_awaited_once()
+
+
+class TestAsyncStore:
+    @pytest.mark.anyio
+    async def test_postgres_schema_creates_schema_and_sets_search_path(self):
+        """Async Postgres store should use the legacy checkpointer schema."""
+        from deerflow.runtime.store.async_provider import make_store
+
+        mock_config = MagicMock()
+        mock_config.checkpointer = CheckpointerConfig(type="postgres", connection_string="postgresql://localhost/db", postgres_schema="deerflow")
+
+        mock_store = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_store
+        mock_cm.__aexit__.return_value = False
+
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = mock_cm
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresStore = mock_store_cls
+
+        mock_conn = AsyncMock()
+        mock_async_connection = MagicMock()
+        mock_async_connection.connect = AsyncMock(return_value=mock_conn)
+        mock_psycopg = MagicMock()
+        mock_psycopg.AsyncConnection = mock_async_connection
+
+        with (
+            patch.dict(sys.modules, {"langgraph.store.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg": mock_psycopg}),
+        ):
+            async with make_store(mock_config) as store:
+                assert store is mock_store
+
+        mock_async_connection.connect.assert_awaited_once_with("postgresql://localhost/db", autocommit=True)
+        mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
+        mock_conn.close.assert_awaited_once()
+        called_dsn = mock_store_cls.from_conn_string.call_args.args[0]
+        assert "options=-c%20search_path%3Ddeerflow" in called_dsn
+        mock_store.setup.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_database_postgres_schema_creates_schema_and_sets_search_path(self):
+        """Unified database postgres store should use database.postgres_schema."""
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.runtime.store.async_provider import make_store
+
+        mock_config = MagicMock()
+        mock_config.checkpointer = None
+        mock_config.database = DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db", postgres_schema="deerflow")
+
+        mock_store = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_store
+        mock_cm.__aexit__.return_value = False
+
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = mock_cm
+
+        mock_pg_module = MagicMock()
+        mock_pg_module.AsyncPostgresStore = mock_store_cls
+
+        mock_conn = AsyncMock()
+        mock_async_connection = MagicMock()
+        mock_async_connection.connect = AsyncMock(return_value=mock_conn)
+        mock_psycopg = MagicMock()
+        mock_psycopg.AsyncConnection = mock_async_connection
+
+        with (
+            patch.dict(sys.modules, {"langgraph.store.postgres.aio": mock_pg_module}),
+            patch.dict(sys.modules, {"psycopg": mock_psycopg}),
+        ):
+            async with make_store(mock_config) as store:
+                assert store is mock_store
+
+        mock_async_connection.connect.assert_awaited_once_with("postgresql://localhost/db", autocommit=True)
+        mock_conn.execute.assert_awaited_once_with('CREATE SCHEMA IF NOT EXISTS "deerflow"')
+        mock_conn.close.assert_awaited_once()
+        called_dsn = mock_store_cls.from_conn_string.call_args.args[0]
+        assert "options=-c%20search_path%3Ddeerflow" in called_dsn
+        mock_store.setup.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

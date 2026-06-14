@@ -34,7 +34,9 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
 
 
 class DatabaseConfig(BaseModel):
@@ -63,6 +65,22 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    postgres_schema: str = Field(
+        default="",
+        description=(
+            "PostgreSQL schema for both app ORM tables and LangGraph "
+            "checkpointer/store tables (postgres only). Empty string keeps "
+            "the server default search_path (usually 'public'). When set, "
+            "the schema is created automatically at startup and applied via "
+            "connection-level search_path. Only plain identifiers are "
+            f"allowed: {POSTGRES_SCHEMA_PATTERN}."
+        ),
+    )
+
+    @field_validator("postgres_schema")
+    @classmethod
+    def _validate_postgres_schema(cls, value: str) -> str:
+        return validate_postgres_schema(value)
 
     # -- Derived helpers (not user-configured) --
 

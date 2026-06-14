@@ -61,6 +61,7 @@ async def init_engine(
     echo: bool = False,
     pool_size: int = 5,
     sqlite_dir: str = "",
+    postgres_schema: str = "",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -70,6 +71,10 @@ async def init_engine(
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
+        postgres_schema: Target PostgreSQL schema. When set, the engine
+            pins the connection ``search_path`` to it via asyncpg
+            ``server_settings`` and the schema is created (if missing)
+            before tables are auto-created. Ignored for non-postgres.
     """
     global _engine, _session_factory
 
@@ -122,12 +127,16 @@ async def init_engine(
             finally:
                 cursor.close()
     elif backend == "postgres":
+        from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+        pg_connect_args = build_asyncpg_connect_args(postgres_schema)
         _engine = create_async_engine(
             url,
             echo=echo,
             pool_size=pool_size,
             pool_pre_ping=True,
             json_serializer=_json_serializer,
+            connect_args=pg_connect_args,
         )
     else:
         raise ValueError(f"Unknown persistence backend: {backend!r}")
@@ -146,19 +155,38 @@ async def init_engine(
         # This is expected during initial scaffolding or minimal installs.
         logger.debug("deerflow.persistence.models not found; skipping auto-create tables")
 
+    async def _ensure_schema_and_tables(conn) -> None:
+        # CREATE SCHEMA is DDL and is unaffected by search_path, so it is
+        # safe even though the connection's search_path already points at
+        # the (not-yet-existing) target schema.
+        if backend == "postgres" and postgres_schema:
+            from sqlalchemy.schema import CreateSchema
+
+            await conn.execute(CreateSchema(postgres_schema, if_not_exists=True))
+        await conn.run_sync(Base.metadata.create_all)
+
     try:
         async with _engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await _ensure_schema_and_tables(conn)
     except Exception as exc:
         if backend == "postgres" and "does not exist" in str(exc):
             # Database not yet created — attempt to auto-create it, then retry.
             await _auto_create_postgres_db(url)
-            # Rebuild engine against the now-existing database
+            # Rebuild engine against the now-existing database. The rebuilt
+            # engine MUST keep the same connect_args so the retried
+            # create_all lands in the target schema, not the default one.
             await _engine.dispose()
-            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, pool_pre_ping=True, json_serializer=_json_serializer)
+            _engine = create_async_engine(
+                url,
+                echo=echo,
+                pool_size=pool_size,
+                pool_pre_ping=True,
+                json_serializer=_json_serializer,
+                connect_args=pg_connect_args,
+            )
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
             async with _engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+                await _ensure_schema_and_tables(conn)
         else:
             raise
 
@@ -176,6 +204,7 @@ async def init_engine_from_config(config) -> None:
         echo=config.echo_sql,
         pool_size=config.pool_size,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
+        postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
     )
 
 
