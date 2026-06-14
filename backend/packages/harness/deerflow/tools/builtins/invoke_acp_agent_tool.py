@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sys
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -10,6 +11,16 @@ from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+_THOUGHT_PREVIEW_CHARS = 200
+_PROMPT_PREVIEW_CHARS = 200
+_RESULT_PREVIEW_CHARS = 1000
+
+
+def _truncate_preview(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 class _InvokeACPAgentInput(BaseModel):
@@ -164,7 +175,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
     async def _invoke(agent: str, prompt: str, config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:
         logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
-        logger.debug("Invoking ACP agent %s with prompt: %.200s%s", agent, prompt, "..." if len(prompt) > 200 else "")
+        logger.debug("Invoking ACP agent %s with prompt: %s", agent, _truncate_preview(prompt, _PROMPT_PREVIEW_CHARS))
         if agent not in _agents:
             available = ", ".join(_agents.keys())
             return f"Error: Unknown agent '{agent}'. Available: {available}"
@@ -178,6 +189,13 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         except ImportError:
             return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
 
+        acp_schema = sys.modules.get("acp.schema")
+        agent_message_chunk_cls = getattr(acp_schema, "AgentMessageChunk", None)
+        agent_thought_chunk_cls = getattr(acp_schema, "AgentThoughtChunk", None)
+        text_content_block_cls = getattr(acp_schema, "TextContentBlock", None)
+        tool_call_start_cls = getattr(acp_schema, "ToolCallStart", None)
+        tool_call_update_cls = getattr(acp_schema, "ToolCallUpdate", None)
+
         class _CollectingClient(Client):
             """Minimal ACP Client that collects streamed text from session updates."""
 
@@ -190,12 +208,34 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async def session_update(self, session_id: str, update, **kwargs) -> None:  # type: ignore[override]
                 try:
-                    from acp.schema import TextContentBlock
-
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
-                        self._chunks.append(update.content.text)
+                    content = getattr(update, "content", None)
+                    if text_content_block_cls is not None and isinstance(content, text_content_block_cls):
+                        if agent_message_chunk_cls is not None and isinstance(update, agent_message_chunk_cls):
+                            self._chunks.append(content.text)
+                        elif agent_thought_chunk_cls is not None and isinstance(update, agent_thought_chunk_cls):
+                            logger.debug(
+                                "ACP agent thought [session=%s]: %s",
+                                session_id,
+                                _truncate_preview(content.text, _THOUGHT_PREVIEW_CHARS),
+                            )
+                    elif tool_call_start_cls is not None and isinstance(update, tool_call_start_cls):
+                        logger.debug(
+                            "ACP agent tool start [session=%s, id=%s, title=%s, kind=%s]",
+                            session_id,
+                            update.tool_call_id,
+                            update.title,
+                            getattr(update, "kind", None),
+                        )
+                    elif tool_call_update_cls is not None and isinstance(update, tool_call_update_cls):
+                        logger.debug(
+                            "ACP agent tool update [session=%s, id=%s, title=%s, status=%s]",
+                            session_id,
+                            update.tool_call_id,
+                            getattr(update, "title", None),
+                            getattr(update, "status", None),
+                        )
                 except Exception:
-                    pass
+                    logger.warning("ACP session_update failed [session=%s]", session_id, exc_info=True)
 
             async def request_permission(self, options, session_id: str, tool_call, **kwargs):  # type: ignore[override]
                 response = _build_permission_response(options, auto_approve=agent_config.auto_approve_permissions)
@@ -242,7 +282,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     prompt=[text_block(prompt)],
                 )
             result = client.collected_text
-            logger.info("ACP agent '%s' returned %s", agent, result[:1000])
+            logger.info("ACP agent '%s' returned %s", agent, _truncate_preview(result, _RESULT_PREVIEW_CHARS))
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
             return result or "(no response)"
         except Exception as e:

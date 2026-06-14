@@ -17,6 +17,12 @@ from deerflow.tools.builtins.invoke_acp_agent_tool import (
 from deerflow.tools.tools import get_available_tools
 
 
+class _DummyRequestError(Exception):
+    @staticmethod
+    def method_not_found(method):
+        return _DummyRequestError(method)
+
+
 def test_build_mcp_servers_filters_disabled_and_maps_transports():
     set_extensions_config(ExtensionsConfig(mcp_servers={"stale": McpServerConfig(enabled=True, type="stdio", command="echo")}, skills={}))
     fresh_config = ExtensionsConfig(
@@ -175,7 +181,7 @@ def test_get_work_dir_falls_back_to_global_for_invalid_thread_id(monkeypatch, tm
 
 @pytest.mark.anyio
 async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
-    """ACP agent uses {base_dir}/acp-workspace/ when no thread_id is available (no config)."""
+    """ACP agent uses the fixed global ACP workspace when thread_id is absent."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -218,10 +224,17 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         async def prompt(self, **kwargs):
             captured["prompt"] = kwargs
             client = captured["client"]
-            await client.session_update(
-                "session-1",
-                SimpleNamespace(content=text_content_block("ACP result")),
-            )
+            thought_chunk = sys.modules["acp.schema"].AgentThoughtChunk()
+            thought_chunk.content = text_content_block("internal thought")
+            await client.session_update("session-1", thought_chunk)
+
+            user_chunk = sys.modules["acp.schema"].UserMessageChunk()
+            user_chunk.content = text_content_block("user prompt echo")
+            await client.session_update("session-1", user_chunk)
+
+            agent_chunk = sys.modules["acp.schema"].AgentMessageChunk()
+            agent_chunk.content = text_content_block("ACP result")
+            await client.session_update("session-1", agent_chunk)
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, cwd):
@@ -234,18 +247,13 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method: str):
-            return DummyRequestError(method)
-
     monkeypatch.setitem(
         sys.modules,
         "acp",
         SimpleNamespace(
             PROTOCOL_VERSION="2026-03-24",
             Client=DummyClient,
-            RequestError=DummyRequestError,
+            RequestError=_DummyRequestError,
             spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, cwd=cwd),
             text_block=lambda text: {"type": "text", "text": text},
         ),
@@ -256,6 +264,11 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         SimpleNamespace(
             ClientCapabilities=lambda: {"supports": []},
             Implementation=lambda **kwargs: kwargs,
+            AgentMessageChunk=type("AgentMessageChunk", (), {}),
+            AgentThoughtChunk=type("AgentThoughtChunk", (), {}),
+            ToolCallStart=type("ToolCallStart", (), {}),
+            ToolCallUpdate=type("ToolCallUpdate", (), {}),
+            UserMessageChunk=type("UserMessageChunk", (), {}),
             TextContentBlock=type(
                 "TextContentBlock",
                 (),
@@ -278,14 +291,10 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         }
     )
 
-    try:
-        result = await tool.coroutine(
-            agent="codex",
-            prompt="Implement the fix",
-        )
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
+    result = await tool.coroutine(
+        agent="codex",
+        prompt="Implement the fix",
+    )
 
     assert result == "ACP result"
     assert captured["spawn"] == {"cmd": "codex-acp", "args": ["--json"], "cwd": expected_cwd}
@@ -359,18 +368,13 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method):
-            return DummyRequestError(method)
-
     monkeypatch.setitem(
         sys.modules,
         "acp",
         SimpleNamespace(
             PROTOCOL_VERSION="2026-03-24",
             Client=DummyClient,
-            RequestError=DummyRequestError,
+            RequestError=_DummyRequestError,
             spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, cwd=cwd),
             text_block=lambda text: {"type": "text", "text": text},
         ),
@@ -390,15 +394,11 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
 
     tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
 
-    try:
-        await tool.coroutine(
-            agent="codex",
-            prompt="Do something",
-            config={"configurable": {"thread_id": thread_id}},
-        )
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
+    await tool.coroutine(
+        agent="codex",
+        prompt="Do something",
+        config={"configurable": {"thread_id": thread_id}},
+    )
 
     assert captured["cwd"] == expected_cwd
 
@@ -451,18 +451,13 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method):
-            return DummyRequestError(method)
-
     monkeypatch.setitem(
         sys.modules,
         "acp",
         SimpleNamespace(
             PROTOCOL_VERSION="2026-03-24",
             Client=DummyClient,
-            RequestError=DummyRequestError,
+            RequestError=_DummyRequestError,
             spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
             text_block=lambda text: {"type": "text", "text": text},
         ),
@@ -487,11 +482,7 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
         }
     )
 
-    try:
-        await tool.coroutine(agent="codex", prompt="Do something")
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
+    await tool.coroutine(agent="codex", prompt="Do something")
 
     assert captured["env"] == {"OPENAI_API_KEY": "sk-from-env", "FOO": "bar"}
 
@@ -544,18 +535,13 @@ async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path,
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method):
-            return DummyRequestError(method)
-
     monkeypatch.setitem(
         sys.modules,
         "acp",
         SimpleNamespace(
             PROTOCOL_VERSION="2026-03-24",
             Client=DummyClient,
-            RequestError=DummyRequestError,
+            RequestError=_DummyRequestError,
             spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
             text_block=lambda text: {"type": "text", "text": text},
         ),
@@ -573,11 +559,7 @@ async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path,
     tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
     caplog.set_level("WARNING")
 
-    try:
-        await tool.coroutine(agent="codex", prompt="Do something")
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
+    await tool.coroutine(agent="codex", prompt="Do something")
 
     assert captured["new_session"]["mcp_servers"] == []
     assert "continuing without MCP servers" in caplog.text
@@ -631,18 +613,13 @@ async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch,
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method):
-            return DummyRequestError(method)
-
     monkeypatch.setitem(
         sys.modules,
         "acp",
         SimpleNamespace(
             PROTOCOL_VERSION="2026-03-24",
             Client=DummyClient,
-            RequestError=DummyRequestError,
+            RequestError=_DummyRequestError,
             spawn_agent_process=lambda client, cmd, *args, env=None, cwd: DummyProcessContext(client, cmd, *args, env=env, cwd=cwd),
             text_block=lambda text: {"type": "text", "text": text},
         ),
@@ -659,11 +636,7 @@ async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch,
 
     tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
 
-    try:
-        await tool.coroutine(agent="codex", prompt="Do something")
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
+    await tool.coroutine(agent="codex", prompt="Do something")
 
     assert captured["env"] is None
 
