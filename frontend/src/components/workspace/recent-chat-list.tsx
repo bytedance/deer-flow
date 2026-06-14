@@ -42,6 +42,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { getAPIClient } from "@/core/api";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
@@ -112,24 +113,41 @@ export function RecentChatList() {
   const [renameValue, setRenameValue] = useState("");
 
   const handleDelete = useCallback(
-    (threadId: string) => {
-      deleteThread({ threadId });
-      if (threadId === threadIdFromPath) {
-        const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
-        let nextThreadPath = pathOfThread("new", {
-          agent_name: agentNameFromPath,
-        });
-        if (threadIndex > -1) {
-          if (threads[threadIndex + 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex + 1]!);
-          } else if (threads[threadIndex - 1]) {
-            nextThreadPath = pathOfThread(threads[threadIndex - 1]!);
-          }
-        }
-        void router.push(nextThreadPath);
-      }
+    (thread: AgentThread) => {
+      const currentPathname =
+        typeof window === "undefined" ? pathname : window.location.pathname;
+      const threadPath = pathOfThread(thread);
+      const nextThreadPath = pathOfThread("new", {
+        agent_name: agentNameFromPath,
+      });
+      const isNewThreadPath = currentPathname === nextThreadPath;
+      const isCurrentThread =
+        thread.thread_id === threadIdFromPath ||
+        threadPath === currentPathname ||
+        (isNewThreadPath && threads[0]?.thread_id === thread.thread_id);
+
+      deleteThread({
+        threadId: thread.thread_id,
+        onRemoteDeleted: isCurrentThread
+          ? () => {
+              resetThreadChatAfterDelete({
+                deletedThreadId: thread.thread_id,
+                nextPath: nextThreadPath,
+                force: true,
+              });
+              void router.replace(nextThreadPath);
+            }
+          : undefined,
+      });
     },
-    [agentNameFromPath, deleteThread, router, threadIdFromPath, threads],
+    [
+      agentNameFromPath,
+      deleteThread,
+      pathname,
+      router,
+      threadIdFromPath,
+      threads,
+    ],
   );
 
   const handleRenameClick = useCallback(
@@ -302,7 +320,7 @@ export function RecentChatList() {
                               </DropdownMenuSub>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
-                                onSelect={() => handleDelete(thread.thread_id)}
+                                onSelect={() => handleDelete(thread)}
                               >
                                 <Trash2 className="text-muted-foreground" />
                                 <span>{t.common.delete}</span>
