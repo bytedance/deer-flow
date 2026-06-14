@@ -494,6 +494,34 @@ class TestHomeDirectoryStartupFileSpellings:
         assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
 
 
+class TestHomeDirectorySpellingsBlockExecution:
+    """The variable spellings are a real block, not only an audit label (#7029)."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm -rf $HOME/",
+            "rm -rf ${HOME}/*",
+            'rm -rf "$HOME/"',
+            "> $HOME/.bashrc",
+            "> ${HOME}/.zshrc",
+            'echo x > "$HOME/.profile"',
+        ],
+    )
+    def test_destructive_home_spellings_do_not_run(self, cmd):
+        request = _make_request(cmd)
+        handler = _make_handler()
+        with patch.object(self.mw, "_write_audit"):
+            result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called, f"handler should NOT be called for: {cmd!r}"
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "blocked" in result.content.lower()
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 
