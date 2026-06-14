@@ -134,6 +134,18 @@ If MCP tools appear in `extensions_config.json` but are not available in the age
 - Check that the storage path is writable: `ls -la backend/.deer-flow/`.
 - Look for memory update errors in `logs/gateway.log` (search for "memory").
 
+### Checkpoint storage grows unexpectedly
+
+Use the read-only checkpoint storage report to inspect SQLite size, checkpoint rows, orphan checkpoint threads, and retention estimates before deleting any data:
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py report
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py report --keep 1 --top 20
+```
+
+Raw thread IDs are hidden by default. Pass `--show-thread-ids` only when you need to map report entries back to specific local threads.
+
 ## Data backup
 
 Thread data and memory are stored under `backend/.deer-flow/`:

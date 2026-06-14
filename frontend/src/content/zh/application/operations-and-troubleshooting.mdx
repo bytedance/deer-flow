@@ -140,6 +140,18 @@ grep -i "mcp\|timeout" logs/gateway.log | tail -20
 2. 检查 `K8S_NAMESPACE` 和 RBAC 配置是否允许 Provisioner 创建 Pod。
 3. 验证 `SANDBOX_IMAGE` 可以从 K8s 节点拉取。
 
+### Checkpoint 存储异常增长
+
+删除任何数据前，先用只读诊断命令查看 SQLite 大小、checkpoint 行数、孤儿 checkpoint 线程和保留策略估算：
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py report
+PYTHONPATH=. uv run python scripts/checkpoint_storage.py report --keep 1 --top 20
+```
+
+默认不输出原始 thread ID。只有需要把报告结果映射回本地线程时，再加 `--show-thread-ids`。
+
 ## 数据备份
 
 DeerFlow 将持久化数据存储在：
