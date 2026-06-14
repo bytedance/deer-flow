@@ -53,3 +53,91 @@ test("fetchThreadTokenUsage returns null for unavailable token usage", async () 
 
   await expect(fetchThreadTokenUsage("thread-1")).resolves.toBeNull();
 });
+
+test("createThreadShare posts selected message ids", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      share_id: "share-1",
+      title: "Shared answer",
+      created_at: "2026-05-28T00:00:00+00:00",
+    }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: ["human-1", "ai-1"],
+      title: "Shared answer",
+    }),
+  ).resolves.toMatchObject({ share_id: "share-1" });
+
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/shares/threads/thread-1"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message_ids: ["human-1", "ai-1"],
+        title: "Shared answer",
+      }),
+    },
+  );
+});
+
+test("createThreadShare rejects with backend error detail", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 400,
+    json: async () => ({ detail: "Message IDs not found: missing-message" }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: ["missing-message"],
+    }),
+  ).rejects.toThrow("Message IDs not found: missing-message");
+});
+
+test("createThreadShare rejects with validation array details", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 422,
+    json: async () => ({
+      detail: [
+        { msg: "Field required", loc: ["body", "message_ids"] },
+        { msg: "String should have at most 256 characters" },
+      ],
+    }),
+  });
+
+  const { createThreadShare } = await import("@/core/threads/api");
+
+  await expect(
+    createThreadShare({
+      threadId: "thread-1",
+      messageIds: [],
+    }),
+  ).rejects.toThrow(
+    "Field required; String should have at most 256 characters",
+  );
+});
+
+test("readErrorDetail formats object details", async () => {
+  const { readErrorDetail } = await import("@/core/threads/api");
+
+  await expect(
+    readErrorDetail(
+      {
+        status: 503,
+        json: async () => ({ detail: { error: "Store not available" } }),
+      } as Response,
+      "Failed to load share",
+    ),
+  ).resolves.toBe('{"error":"Store not available"}');
+});
