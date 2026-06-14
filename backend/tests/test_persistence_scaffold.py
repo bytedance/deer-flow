@@ -132,6 +132,38 @@ class TestMemoryRunStore:
         await store.delete("nope")  # should not raise
 
     @pytest.mark.anyio
+    async def test_list_by_thread_unknown_thread_is_empty(self, store):
+        await store.put("r1", thread_id="t1")
+        assert await store.list_by_thread("missing") == []
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_newest_first(self, store):
+        await store.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
+        await store.put("r2", thread_id="t1", created_at="2024-01-03T00:00:00+00:00")
+        await store.put("r3", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        rows = await store.list_by_thread("t1")
+        assert [r["run_id"] for r in rows] == ["r2", "r3", "r1"]
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_respects_limit(self, store):
+        for i in range(5):
+            await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
+        rows = await store.list_by_thread("t1", limit=2)
+        assert [r["run_id"] for r in rows] == ["r4", "r3"]
+
+    @pytest.mark.anyio
+    async def test_delete_keeps_thread_index_consistent(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.put("r2", thread_id="t1")
+        await store.delete("r1")
+        rows = await store.list_by_thread("t1")
+        assert [r["run_id"] for r in rows] == ["r2"]
+        # deleting the last run in a thread drops the now-empty index bucket
+        await store.delete("r2")
+        assert await store.list_by_thread("t1") == []
+        assert "t1" not in store._runs_by_thread
+
+    @pytest.mark.anyio
     async def test_list_pending(self, store):
         await store.put("r1", thread_id="t1", status="pending")
         await store.put("r2", thread_id="t1", status="running")
