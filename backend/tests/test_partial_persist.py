@@ -301,9 +301,7 @@ class TestClosureToolMessages:
         # In the cancel context, invalid_tool_calls are also "interrupted"
         # (their args JSON was being streamed and got cut off). Using the
         # canonical interrupted body keeps closure semantics consistent.
-        closures = build_closure_tool_messages(
-            [{"id": "tc1", "name": "bash", "args": {}, "invalid": True, "error": "bad"}]
-        )
+        closures = build_closure_tool_messages([{"id": "tc1", "name": "bash", "args": {}, "invalid": True, "error": "bad"}])
         assert len(closures) == 1
         assert closures[0].content == INTERRUPTED_TOOL_MESSAGE_CONTENT
 
@@ -493,9 +491,7 @@ class TestAppendMessagesToCheckpoint:
             ids = [getattr(message, "id", None) for message in messages]
             assert ids == ["h1", "m_partial", "tm_interrupted_tc1"]
             assert latest.checkpoint["channel_versions"]["messages"] != seed_version
-            assert latest.metadata["writes"][CHECKPOINT_WRITE_SOURCE] == {
-                "message_ids": ["m_partial", "tm_interrupted_tc1"]
-            }
+            assert latest.metadata["writes"][CHECKPOINT_WRITE_SOURCE] == {"message_ids": ["m_partial", "tm_interrupted_tc1"]}
 
     async def test_dedup_by_id(self):
         existing_ai = AIMessage(id="m1", content="x")
@@ -529,9 +525,7 @@ class TestPersistPartialOnCancel:
         cp = _make_checkpointer_mock()
         store = MemoryRunEventStore()
         journal = RunJournal(run_id="r1", thread_id="t1", event_store=store)
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is False
         cp.aget_tuple.assert_not_called()
 
@@ -544,9 +538,7 @@ class TestPersistPartialOnCancel:
         journal = RunJournal(run_id="r1", thread_id="t1", event_store=store)
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="hi")]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         await journal.flush()
 
@@ -578,9 +570,7 @@ class TestPersistPartialOnCancel:
         journal = RunJournal(run_id="r1", thread_id="t1", event_store=store)
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="run ls")]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         await journal.flush()
 
@@ -607,9 +597,7 @@ class TestPersistPartialOnCancel:
 
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is False
         cp.aput.assert_not_called()
 
@@ -619,9 +607,7 @@ class TestPersistPartialOnCancel:
         acc.feed(AIMessageChunk(id="m1", content="hi"))
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=None, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=None, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         cp.aput.assert_called_once()
 
@@ -638,9 +624,7 @@ class TestPersistPartialOnCancel:
 
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=broken_journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=broken_journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         cp.aput.assert_called_once()
 
@@ -673,13 +657,9 @@ class TestPersistPartialOnCancel:
             content="let me run that",
             tool_calls=[{"id": "call_b1", "name": "bash", "args": {"cmd": "sleep 60"}}],
         )
-        cp = _make_checkpointer_mock(
-            aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="ls"), completed_ai])
-        )
+        cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="ls"), completed_ai]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         await journal.flush()
 
@@ -726,13 +706,9 @@ class TestPersistPartialOnCancel:
             content="old",
             tool_calls=[{"id": "call_old", "name": "external", "args": {}}],
         )
-        cp = _make_checkpointer_mock(
-            aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="hi"), historical_ai])
-        )
+        cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="hi"), historical_ai]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
         await journal.flush()
 
@@ -769,9 +745,7 @@ class TestPersistPartialOnCancel:
         journal = RunJournal(run_id="r1", thread_id="t1", event_store=store)
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="x")]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is True
 
         _, ckpt, _, _ = cp.aput.call_args.args
@@ -802,9 +776,7 @@ class TestPersistPartialOnCancel:
         completed_ai = AIMessage(id="m_done", content="already done")
         cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="x"), completed_ai]))
 
-        ok = await persist_partial_on_cancel(
-            accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt"
-        )
+        ok = await persist_partial_on_cancel(accumulator=acc, journal=journal, checkpointer=cp, thread_id="t1", abort_action="interrupt")
         assert ok is False
         cp.aput.assert_not_called()
 

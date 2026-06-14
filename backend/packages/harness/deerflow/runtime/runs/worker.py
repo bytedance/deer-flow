@@ -28,6 +28,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 if TYPE_CHECKING:
     from langchain_core.messages import HumanMessage
+
     from deerflow.runtime.journal import RunJournal
 
 from deerflow.config.app_config import AppConfig
