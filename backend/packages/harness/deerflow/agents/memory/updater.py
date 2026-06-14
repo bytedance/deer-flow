@@ -377,6 +377,67 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+def _compute_relevance_score(fact: dict[str, Any], *, decay_half_life_days: int, category_weights: dict[str, float], now_iso: str | None = None) -> float:
+    """Compute a composite relevance score for a memory fact.
+
+    Score formula:
+        relevance = confidence * decay_factor * category_weight
+
+    Where:
+        - confidence: the fact's stored confidence (0-1).
+        - decay_factor: exponential decay based on age in days:
+          decay_factor = 0.5 ** (age_days / half_life)
+          Ranges from 1.0 (brand new) to ~0.0 (very old).
+        - category_weight: per-category multiplier from config (default 1.0; correction=1.5, goal=1.2).
+    """
+
+    from datetime import UTC, datetime
+
+    # Coerce confidence to a bounded float in [0.0, 1.0] locally to avoid circular imports
+    try:
+        confidence = float(fact.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    # Temporal decay: age in days since creation
+    created_at_str = fact.get("createdAt", "")
+    age_days = 0.0
+    if created_at_str:
+        try:
+            created_at_raw = created_at_str.replace("Z", "+00:00")
+            created_at = datetime.fromisoformat(created_at_raw)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if now_iso:
+                now_raw = now_iso.replace("Z", "+00:00")
+                now = datetime.fromisoformat(now_raw)
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=UTC)
+            else:
+                now = datetime.now(UTC)
+            delta = now - created_at
+            age_days = max(0.0, delta.total_seconds() / 86400)
+        except (ValueError, TypeError, OverflowError):
+            age_days = 0.0
+    else:
+        logger.warning("Memory fact missing 'createdAt' timestamp (id=%s). Temporal decay will not be applied to this fact.", fact.get("id", "unknown"))
+
+    # Exponential decay: 0.5 ^ (age_days / half_life)
+    if decay_half_life_days > 0 and age_days > 0:
+        decay_factor = 0.5 ** (age_days / decay_half_life_days)
+    else:
+        decay_factor = 1.0
+
+    # Category weight
+    category = str(fact.get("category", "context")).strip() or "context"
+    weight = category_weights.get(category, 1.0)
+
+    return confidence * decay_factor * weight
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -674,12 +735,11 @@ class MemoryUpdater:
 
         # Enforce max facts limit
         if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
+            # Sort by relevance score and keep top ones
+            def get_relevance(f):
+                return _compute_relevance_score(f, decay_half_life_days=config.decay_half_life_days, category_weights=config.category_weights, now_iso=now)
+
+            current_memory["facts"] = sorted(current_memory["facts"], key=get_relevance, reverse=True)[: config.max_facts]
 
         return current_memory
 

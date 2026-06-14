@@ -374,12 +374,37 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    # Format facts (sorted by confidence; include as many as token budget allows)
+    # Format facts (sorted by relevance; include as many as token budget allows)
+    #
+    # Architectural Property (Injection Feedback Loop):
+    # Sorting facts by relevance and placing the most relevant ones at the top of the prompt
+    # introduces an injection feedback loop: facts placed higher in the context are more likely
+    # to be attended to and reinforced/referenced by the agent in subsequent turns.
+    # When these facts are reused, their 'createdAt' timestamps are updated or they get
+    # re-committed to memory, resetting their temporal decay. This allows frequently-accessed
+    # memories to remain fresh (essentially immortalized) while unused memories naturally decay.
+
     facts_data = memory_data.get("facts", [])
     if isinstance(facts_data, list) and facts_data:
+        from datetime import UTC, datetime
+
+        from deerflow.agents.memory.updater import _compute_relevance_score
+        from deerflow.config.memory_config import get_memory_config
+
+        config = get_memory_config()
+        now_iso = datetime.now(UTC).isoformat()
+
+        def get_relevance(f):
+            return _compute_relevance_score(
+                f,
+                decay_half_life_days=config.decay_half_life_days,
+                category_weights=config.category_weights,
+                now_iso=now_iso,
+            )
+
         ranked_facts = sorted(
             (f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content").strip()),
-            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
+            key=get_relevance,
             reverse=True,
         )
 
