@@ -77,6 +77,13 @@ export function ArtifactFileDetail({
     }
     return filepathFromProps;
   }, [filepathFromProps, isWriteFile]);
+  const artifactOptions = useMemo(() => {
+    const list = artifacts ?? [];
+    if (list.includes(filepath)) {
+      return list;
+    }
+    return [filepath, ...list];
+  }, [artifacts, filepath]);
   const isSkillFile = useMemo(() => {
     return filepath.endsWith(".skill");
   }, [filepath]);
@@ -168,9 +175,9 @@ export function ArtifactFileDetail({
                 </SelectTrigger>
                 <SelectContent className="select-none">
                   <SelectGroup>
-                    {(artifacts ?? []).map((filepath) => (
-                      <SelectItem key={filepath} value={filepath}>
-                        {getFileName(filepath)}
+                    {artifactOptions.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {getFileName(option)}
                       </SelectItem>
                     ))}
                   </SelectGroup>
