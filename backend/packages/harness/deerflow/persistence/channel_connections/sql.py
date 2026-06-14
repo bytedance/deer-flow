@@ -177,6 +177,24 @@ class ChannelConnectionRepository:
             await session.commit()
             return True
 
+    async def disconnect_provider_connections(self, *, provider: str) -> int:
+        """Revoke all active user connections for an instance-wide provider removal."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(ChannelConnectionRow.id).where(
+                    ChannelConnectionRow.provider == provider,
+                    ChannelConnectionRow.status != "revoked",
+                )
+            )
+            connection_ids = [row_id for row_id in result.scalars()]
+            if not connection_ids:
+                return 0
+
+            await session.execute(update(ChannelConnectionRow).where(ChannelConnectionRow.id.in_(connection_ids)).values(status="revoked"))
+            await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(connection_ids)))
+            await session.commit()
+            return len(connection_ids)
+
     async def store_credentials(
         self,
         connection_id: str,
