@@ -319,6 +319,7 @@ export function MessageList({
                     content={extractContentFromMessage(message)}
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
+                    threadId={threadId}
                   />
                   {renderTokenUsage({
                     messages: group.messages,
@@ -344,6 +345,7 @@ export function MessageList({
                     isLoading={thread.isLoading}
                     rehypePlugins={rehypePlugins}
                     className="mb-4"
+                    threadId={threadId}
                   />
                 )}
                 <ArtifactFileList files={files} threadId={threadId} />
@@ -403,6 +405,7 @@ export function MessageList({
                     key={"thinking-group-" + message.id}
                     messages={[message]}
                     isLoading={thread.isLoading}
+                    threadId={threadId}
                     tokenDebugSteps={tokenDebugSteps.filter(
                       (step) => step.messageId === message.id,
                     )}
@@ -423,6 +426,7 @@ export function MessageList({
                     key={"task-group-" + taskId}
                     taskId={taskId!}
                     isLoading={thread.isLoading}
+                    threadId={threadId}
                   />,
                 );
               }
@@ -446,6 +450,7 @@ export function MessageList({
               <MessageGroup
                 messages={group.messages}
                 isLoading={thread.isLoading}
+                threadId={threadId}
                 tokenDebugSteps={tokenDebugSteps.filter((step) =>
                   group.messages.some(
                     (message) => message.id === step.messageId,

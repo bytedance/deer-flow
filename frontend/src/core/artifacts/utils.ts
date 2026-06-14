@@ -2,6 +2,14 @@ import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThread } from "../threads";
 
+export function isArtifactVirtualPath(path: string) {
+  return path.startsWith("/mnt/") || path.startsWith("mnt/");
+}
+
+export function normalizeArtifactVirtualPath(path: string) {
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
 export function urlOfArtifact({
   filepath,
   threadId,
@@ -13,13 +21,18 @@ export function urlOfArtifact({
   download?: boolean;
   isMock?: boolean;
 }) {
+  const normalizedFilepath = normalizeArtifactVirtualPath(filepath);
   if (isStaticWebsiteOnly()) {
-    return staticDemoArtifactURL({ filepath, threadId, download });
+    return staticDemoArtifactURL({
+      filepath: normalizedFilepath,
+      threadId,
+      download,
+    });
   }
   if (isMock) {
-    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${normalizedFilepath}${download ? "?download=true" : ""}`;
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${normalizedFilepath}${download ? "?download=true" : ""}`;
 }
 
 export function extractArtifactsFromThread(thread: AgentThread) {
@@ -27,10 +40,11 @@ export function extractArtifactsFromThread(thread: AgentThread) {
 }
 
 export function resolveArtifactURL(absolutePath: string, threadId: string) {
+  const normalizedFilepath = normalizeArtifactVirtualPath(absolutePath);
   if (isStaticWebsiteOnly()) {
-    return staticDemoArtifactURL({ filepath: absolutePath, threadId });
+    return staticDemoArtifactURL({ filepath: normalizedFilepath, threadId });
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${absolutePath}`;
+  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${normalizedFilepath}`;
 }
 
 function staticDemoArtifactURL({

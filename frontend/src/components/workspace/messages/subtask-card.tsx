@@ -33,10 +33,12 @@ export function SubtaskCard({
   className,
   taskId,
   isLoading,
+  threadId,
 }: {
   className?: string;
   taskId: string;
   isLoading: boolean;
+  threadId?: string;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
@@ -158,6 +160,7 @@ export function SubtaskCard({
                       content={task.result}
                       isLoading={false}
                       rehypePlugins={rehypePlugins}
+                      threadId={threadId}
                     />
                   ) : null
                 }
