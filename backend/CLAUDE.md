@@ -281,6 +281,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - `RunManager.get()` is async; direct callers must `await` it.
 - When a persistent `RunStore` is configured, `get()` and `list_by_thread()` hydrate historical runs from the store. In-memory records win for the same `run_id` so task, abort, and stream-control state stays attached to active local runs.
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
+- On an `interrupt` cancel (not `rollback`), `run_agent` persists the partial answer streamed so far as an `llm.ai.response` run event (flagged `interrupted`) before flushing the journal, so the half-finished message survives a refresh. `RunJournal.on_llm_end` never fires for a cancelled-mid-stream LLM call, so the worker accumulates streamed `messages`-mode AI chunks by id and hands the not-yet-completed ones to `RunJournal.record_interrupted_ai_messages()` (issue #3403).
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 

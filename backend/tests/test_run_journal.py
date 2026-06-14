@@ -819,6 +819,86 @@ class TestProgressSnapshots:
         assert snapshots[-1]["last_ai_message"] == "First"
 
 
+class TestInterruptedPartialMessages:
+    """Tests for record_interrupted_ai_messages (cancelled-mid-stream persistence, #3403)."""
+
+    @pytest.mark.anyio
+    async def test_persists_partial_ai_message(self, journal_setup):
+        from langchain_core.messages import AIMessageChunk
+
+        j, store = journal_setup
+        chunk = AIMessageChunk(content="partial answer so f", id="msg-1")
+        written = j.record_interrupted_ai_messages([chunk])
+        await j.flush()
+
+        assert written == 1
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["event_type"] == "llm.ai.response"
+        assert messages[0]["content"]["type"] == "ai"
+        assert messages[0]["content"]["content"] == "partial answer so f"
+        assert messages[0]["content"]["id"] == "msg-1"
+        assert messages[0]["metadata"]["interrupted"] is True
+
+    @pytest.mark.anyio
+    async def test_skips_message_already_completed_via_on_llm_end(self, journal_setup):
+        from langchain_core.messages import AIMessageChunk
+
+        j, store = journal_setup
+        # A completed call recorded the message in full — do not re-persist a partial.
+        response = _make_llm_response("Full answer")
+        response.generations[0][0].message.id = "msg-done"
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        written = j.record_interrupted_ai_messages([AIMessageChunk(content="Full ans", id="msg-done")])
+        await j.flush()
+
+        assert written == 0
+        messages = await store.list_messages("t1")
+        # Only the completed message, not a duplicate partial.
+        assert [m["content"]["content"] for m in messages] == ["Full answer"]
+
+    @pytest.mark.anyio
+    async def test_skips_empty_chunk(self, journal_setup):
+        from langchain_core.messages import AIMessageChunk
+
+        j, store = journal_setup
+        # Tool-call-only chunk with no visible text and no reasoning — nothing to restore.
+        written = j.record_interrupted_ai_messages([AIMessageChunk(content="", id="msg-empty")])
+        await j.flush()
+
+        assert written == 0
+        assert await store.list_messages("t1") == []
+
+    @pytest.mark.anyio
+    async def test_keeps_reasoning_only_chunk(self, journal_setup):
+        from langchain_core.messages import AIMessageChunk
+
+        j, store = journal_setup
+        # The user saw streamed thinking before cancelling, even with no final text.
+        chunk = AIMessageChunk(content="", id="msg-think", additional_kwargs={"reasoning_content": "let me think"})
+        written = j.record_interrupted_ai_messages([chunk])
+        await j.flush()
+
+        assert written == 1
+        messages = await store.list_messages("t1")
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_content"] == "let me think"
+
+    @pytest.mark.anyio
+    async def test_dedups_repeated_partial(self, journal_setup):
+        from langchain_core.messages import AIMessageChunk
+
+        j, store = journal_setup
+        chunk = AIMessageChunk(content="partial", id="msg-dup")
+        assert j.record_interrupted_ai_messages([chunk]) == 1
+        # A second emit for the same id (e.g. both abort branches firing) is a no-op.
+        assert j.record_interrupted_ai_messages([chunk]) == 0
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+
+
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
 

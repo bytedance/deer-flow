@@ -151,6 +151,10 @@ async def run_agent(
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
+    # AI message chunks accumulated from the stream so a user interrupt can
+    # persist the partial answer already shown in the UI (issue #3403). Defined
+    # up here so the finally block can read it even if streaming never started.
+    partial_ai_chunks: dict[str, Any] = {}
 
     journal = None
 
@@ -314,6 +318,7 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                _accumulate_partial_ai_chunk(single_mode, chunk, partial_ai_chunks)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
@@ -333,6 +338,7 @@ async def run_agent(
                     continue
 
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                _accumulate_partial_ai_chunk(mode, chunk, partial_ai_chunks)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
@@ -400,6 +406,18 @@ async def run_agent(
     finally:
         # Flush any buffered journal events and persist completion data
         if journal is not None:
+            # On a user interrupt (but not a rollback, which discards the run),
+            # persist the partial answer streamed so far so it survives a page
+            # refresh instead of vanishing — on_llm_end never fired for the
+            # cancelled-mid-stream call (issue #3403).
+            if partial_ai_chunks and record.abort_event.is_set() and record.abort_action != "rollback":
+                try:
+                    written = journal.record_interrupted_ai_messages(partial_ai_chunks.values())
+                    if written:
+                        logger.info("Run %s: persisted %d interrupted partial message(s)", run_id, written)
+                except Exception:
+                    logger.warning("Failed to persist interrupted partial messages for run %s", run_id, exc_info=True)
+
             try:
                 await journal.flush()
             except Exception:
@@ -691,3 +709,26 @@ def _unpack_stream_item(
 
     # Fallback: single-element output from first mode
     return lg_modes[0] if lg_modes else None, item
+
+
+def _accumulate_partial_ai_chunk(mode: str | None, chunk: Any, accum: dict[str, Any]) -> None:
+    """Merge a streamed ``messages``-mode AI chunk into *accum* keyed by message id.
+
+    Lets a user interrupt persist the partial answer that was already streamed
+    to the UI (issue #3403). ``messages`` mode yields ``(message_chunk, meta)``;
+    consecutive ``AIMessageChunk``s for one response share an ``id`` and merge
+    with ``+`` to rebuild the partial message (content, reasoning, metadata).
+    Only AI chunks are accumulated; tool results have their own end callbacks.
+    """
+    if mode != "messages":
+        return
+    from langchain_core.messages import AIMessageChunk
+
+    message = chunk[0] if isinstance(chunk, (tuple, list)) and chunk else chunk
+    if not isinstance(message, AIMessageChunk):
+        return
+    message_id = getattr(message, "id", None)
+    if not message_id:
+        return
+    existing = accum.get(message_id)
+    accum[message_id] = message if existing is None else existing + message
