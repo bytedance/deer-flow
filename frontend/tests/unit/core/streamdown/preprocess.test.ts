@@ -78,7 +78,7 @@ test("capListNesting only rewrites pathological lines", () => {
   const result = capListNesting(`${normal}\n${deep}\nplain`);
   const lines = result.split("\n");
   expect(lines[0]).toBe(normal);
-  expect((/^[ \t]*/.exec(lines[1]!)![0]).length).toBe(200);
+  expect(/^[ \t]*/.exec(lines[1]!)![0].length).toBe(200);
   expect(lines[2]).toBe("plain");
 });
 
@@ -87,7 +87,7 @@ test("capMarkdownNesting caps both blockquote and list nesting", () => {
   const result = capMarkdownNesting(input);
   const lines = result.split("\n");
   expect((lines[0]?.match(/>/g) ?? []).length).toBe(100);
-  expect((/^[ \t]*/.exec(lines[1]!)![0]).length).toBe(200);
+  expect(/^[ \t]*/.exec(lines[1]!)![0].length).toBe(200);
 });
 
 test("preprocessStreamdownMarkdown leaves non-mermaid content unchanged", () => {
