@@ -252,11 +252,17 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["context"]["agent_name"] == "explicit-agent"
     assert config["run_name"] == "explicit-agent"
 
 
 def test_build_run_config_context_custom_agent_injects_agent_name():
-    """Custom assistant_id must be forwarded as context['agent_name'] in context mode."""
+    """Custom assistant_id must be forwarded as ``agent_name`` in both
+    ``context`` and ``configurable`` (issue #3549). Previously only the
+    active container was populated, so when the caller sent context-only the
+    setup_agent tool — which reads ``ToolRuntime.context`` — saw
+    ``agent_name=None`` and wrote SOUL.md to the global base_dir.
+    """
     from app.gateway.services import build_run_config
 
     config = build_run_config(
@@ -267,7 +273,7 @@ def test_build_run_config_context_custom_agent_injects_agent_name():
     )
 
     assert config["context"]["agent_name"] == "finalis"
-    assert "configurable" not in config
+    assert config["configurable"]["agent_name"] == "finalis"
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
@@ -279,6 +285,56 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("lead_agent") is make_lead_agent
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+
+
+def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
+    """Regression for issue #3549: even when the caller uses the legacy
+    ``configurable`` path, ``agent_name`` must also land in
+    ``config['context']`` so LangGraph >=1.1.9 ``ToolRuntime.context`` consumers
+    (e.g. ``setup_agent``) observe the same value.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", None, None, assistant_id="finalis")
+
+    assert config["configurable"]["agent_name"] == "finalis"
+    assert config["context"]["agent_name"] == "finalis"
+
+
+def test_build_run_config_context_explicit_agent_name_not_overwritten():
+    """An explicit ``context['agent_name']`` from the request must take
+    precedence over the value derived from ``assistant_id`` and be mirrored
+    to ``configurable`` so the two containers never diverge.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"agent_name": "explicit-agent"}},
+        None,
+        assistant_id="other-agent",
+    )
+
+    assert config["context"]["agent_name"] == "explicit-agent"
+    assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["run_name"] == "explicit-agent"
+
+
+def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape():
+    """The shape produced by ``build_run_config`` for a custom agent must be
+    indistinguishable from what ``merge_run_context_overrides`` would produce
+    when ``agent_name`` is supplied via ``body.context`` — guarding against
+    the two code paths drifting apart again (issue #3549).
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    via_assistant_id = build_run_config("thread-1", None, None, assistant_id="finalis")
+
+    via_context = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(via_context, {"agent_name": "finalis"})
+
+    assert via_assistant_id["configurable"]["agent_name"] == via_context["configurable"]["agent_name"]
+    assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
 # ---------------------------------------------------------------------------
@@ -610,13 +666,15 @@ def test_build_run_config_rejects_non_mapping_context():
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():
-    """Custom assistant_id can still be injected when context=null starts context mode."""
+    """Custom assistant_id must be injected into both containers even when the
+    request started in context-only mode with ``context=null`` .
+    """
     from app.gateway.services import build_run_config
 
     config = build_run_config("thread-1", {"context": None}, None, assistant_id="finalis")
 
-    assert config["context"] == {"agent_name": "finalis"}
-    assert "configurable" not in config
+    assert config["context"]["agent_name"] == "finalis"
+    assert config["configurable"]["agent_name"] == "finalis"
 
 
 def test_build_run_config_context_plus_configurable_warns(caplog):

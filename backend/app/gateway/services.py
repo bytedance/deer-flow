@@ -211,11 +211,14 @@ def build_run_config(
 
     When *assistant_id* refers to a custom agent (anything other than
     ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
-    whichever runtime options container is active: ``context`` for
-    LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    both ``configurable`` and ``context`` so it is visible to legacy
+    configurable readers and to LangGraph ``ToolRuntime.context`` consumers
+    (e.g. the ``setup_agent`` tool, which since LangGraph >=1.1.9 no longer
+    falls back from ``context`` to ``configurable``).  An explicit
+    ``agent_name`` in either container takes precedence over the value
+    derived from ``assistant_id``.  ``make_lead_agent`` reads this key to
+    load the matching ``agents/<name>/SOUL.md`` and per-agent config —
+    without it the agent silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
@@ -253,19 +256,23 @@ def build_run_config(
         config["configurable"] = {"thread_id": thread_id}
 
     # Inject custom agent name when the caller specified a non-default assistant.
-    # Honour an explicit agent_name in the active runtime options container.
+    # Honour an explicit agent_name in either runtime options container.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
         normalized = assistant_id.strip().lower().replace("_", "-")
         if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
             raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-        if "configurable" in config:
-            target = config["configurable"]
-        elif "context" in config:
-            target = config["context"]
-        else:
-            target = config.setdefault("configurable", {})
-        if target is not None and "agent_name" not in target:
-            target["agent_name"] = normalized
+        configurable = config.setdefault("configurable", {})
+        runtime_context = config.setdefault("context", {})
+        explicit_agent_name: str | None = None
+        if isinstance(configurable, dict) and isinstance(configurable.get("agent_name"), str):
+            explicit_agent_name = configurable["agent_name"]
+        elif isinstance(runtime_context, dict) and isinstance(runtime_context.get("agent_name"), str):
+            explicit_agent_name = runtime_context["agent_name"]
+        effective_agent_name = explicit_agent_name or normalized
+        if isinstance(configurable, dict):
+            configurable["agent_name"] = effective_agent_name
+        if isinstance(runtime_context, dict):
+            runtime_context["agent_name"] = effective_agent_name
         config.setdefault("run_name", resolve_root_run_name(config, normalized))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)

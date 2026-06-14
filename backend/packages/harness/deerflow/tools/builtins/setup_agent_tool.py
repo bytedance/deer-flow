@@ -28,6 +28,25 @@ def setup_agent(
         skills: Optional list of skill names this agent should use. None means use all enabled skills, empty list means no skills.
     """
 
+    # Reject empty / whitespace-only soul before touching the filesystem.
+    # Without this guard the tool would happily persist an empty SOUL.md and
+    # still report success, which caused the frontend to enter the "agent
+    # created" state for an unusable agent (issue #3549). Failing loud lets
+    # the model retry instead of silently producing a broken artifact and,
+    # together with the upstream agent_name fix, prevents the global default
+    # SOUL.md from being overwritten with empty content.
+    if not soul or not soul.strip():
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: soul content is empty; refusing to create agent with an empty SOUL.md",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
+
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
     agent_dir = None
     is_new_dir = False
