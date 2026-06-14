@@ -13,7 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   ChainOfThought,
@@ -25,6 +25,7 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { getCollapsedThinkingSummary } from "@/core/messages/thinking";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
@@ -32,6 +33,7 @@ import {
   findToolCallResult,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { useLocalSettings } from "@/core/settings";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -56,6 +58,7 @@ export function MessageGroup({
   showTokenDebugSummaries?: boolean;
 }) {
   const { t } = useI18n();
+  const [localSettings] = useLocalSettings();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
@@ -224,6 +227,21 @@ export function MessageGroup({
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
+  const collapsedThinkingSummary = useMemo(
+    () =>
+      getCollapsedThinkingSummary({
+        reasoning: lastReasoningStep?.reasoning,
+        showCollapsedThinkingStep:
+          localSettings.appearance.showCollapsedThinkingStep,
+        showLastThinking,
+      }),
+    [
+      lastReasoningStep?.reasoning,
+      localSettings.appearance.showCollapsedThinkingStep,
+      showLastThinking,
+    ],
+  );
+  const collapsedThinkingSummaryToShow = collapsedThinkingSummary || undefined;
 
   return (
     <ChainOfThought
@@ -310,7 +328,12 @@ export function MessageGroup({
                 className="font-normal"
                 label={
                   <DebugStepLabel
-                    label={t.common.thinking}
+                    label={
+                      <ThinkingStepLabel
+                        label={t.common.thinking}
+                        summary={collapsedThinkingSummaryToShow}
+                      />
+                    }
                     token={shouldInlineThinkingToken({
                       debugStep: lastReasoningDebugStep,
                       toolCallCount: lastReasoningStep.messageId
@@ -395,7 +418,7 @@ function DebugStepLabel({
   label,
   token,
 }: {
-  label: React.ReactNode;
+  label: ReactNode;
   token?: string | null;
 }) {
   return (
@@ -405,6 +428,25 @@ function DebugStepLabel({
         <div className="text-muted-foreground shrink-0 font-mono text-[11px]">
           {token}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ThinkingStepLabel({
+  label,
+  summary,
+}: {
+  label: ReactNode;
+  summary?: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-2">
+      <span className="shrink-0">{label}</span>
+      {summary ? (
+        <span className="text-primary min-w-0 flex-1 truncate text-xs">
+          {summary}
+        </span>
       ) : null}
     </div>
   );

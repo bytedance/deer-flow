@@ -491,6 +491,20 @@ export const enUS: Translations = {
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
+      preferencesTitle: "Preferences",
+      preferencesDescription: "Tune optional conversation display behavior.",
+      collapsedThinkingStepTitle: "Collapsed thinking preview",
+      collapsedThinkingStepDescription:
+        "Show one current thinking step when the thinking block is collapsed.",
+      collapsedThinkingStepHelp:
+        "The preview compares the collapsed thinking block with this setting off and on.",
+      collapsedThinkingStepPreview: {
+        off: "Off",
+        on: "On",
+        offState: "Thinking",
+        onState: "Thinking",
+        sampleStep: "Reviewing sources and deciding the next step",
+      },
     },
     tools: {
       title: "Tools",

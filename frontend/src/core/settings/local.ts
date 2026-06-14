@@ -9,6 +9,9 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
     headerTotal: true,
     inlineMode: "per_turn",
   },
+  appearance: {
+    showCollapsedThinkingStep: false,
+  },
   context: {
     model_name: undefined,
     mode: undefined,
@@ -30,6 +33,9 @@ export interface LocalSettings {
   tokenUsage: {
     headerTotal: boolean;
     inlineMode: TokenUsageInlineMode;
+  };
+  appearance: {
+    showCollapsedThinkingStep: boolean;
   };
   context: Omit<
     AgentThreadContext,
@@ -56,6 +62,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
       ...settings?.tokenUsage,
+    },
+    appearance: {
+      ...DEFAULT_LOCAL_SETTINGS.appearance,
+      ...settings?.appearance,
     },
     notification: {
       ...DEFAULT_LOCAL_SETTINGS.notification,
