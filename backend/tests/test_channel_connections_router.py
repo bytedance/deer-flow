@@ -993,10 +993,7 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
     async def get_connection_statuses():
         return {
             "admin_slack": (await repo.list_connections(str(_user().id)))[0]["status"],
-            "other": {
-                item["provider"]: item["status"]
-                for item in await repo.list_connections("other-user")
-            },
+            "other": {item["provider"]: item["status"] for item in await repo.list_connections("other-user")},
         }
 
     statuses = anyio.run(get_connection_statuses)

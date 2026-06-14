@@ -190,11 +190,7 @@ class ChannelConnectionRepository:
             if not connection_ids:
                 return 0
 
-            await session.execute(
-                update(ChannelConnectionRow)
-                .where(ChannelConnectionRow.id.in_(connection_ids))
-                .values(status="revoked")
-            )
+            await session.execute(update(ChannelConnectionRow).where(ChannelConnectionRow.id.in_(connection_ids)).values(status="revoked"))
             await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(connection_ids)))
             await session.commit()
             return len(connection_ids)
