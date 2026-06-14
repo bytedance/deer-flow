@@ -855,6 +855,36 @@ class TestChatModelStartHumanMessage:
         assert j._first_human_msg == "Real question"
 
     @pytest.mark.anyio
+    async def test_skips_injected_reminder_human_messages(self, journal_setup):
+        """Injected reminder HumanMessages (hide_from_ui) are not mistaken for user input.
+
+        Regression for #3337: TodoMiddleware appends a `todo_reminder` HumanMessage
+        after the real user prompt when the todo list scrolls out of context. Because
+        the prompt batch is scanned in reverse, that injected reminder used to be
+        captured as the first human message, overwriting the real user input in
+        `run_events` / `runs.first_human_message`.
+        """
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        reminder = HumanMessage(
+            content="<system_reminder>\nYour todo list ...\n</system_reminder>",
+            name="todo_reminder",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        messages_batch = [
+            [HumanMessage(content="再来一局脑筋急转弯"), reminder],
+        ]
+        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "再来一局脑筋急转弯"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "再来一局脑筋急转弯"
+
+    @pytest.mark.anyio
     async def test_only_first_human_message_captured(self, journal_setup):
         """Subsequent on_chat_model_start calls do not overwrite the first message."""
         from langchain_core.messages import HumanMessage
