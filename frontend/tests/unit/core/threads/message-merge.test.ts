@@ -10,6 +10,7 @@ import {
   getVisibleOptimisticMessages,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
+  mergeThreadValues,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
 } from "@/core/threads/hooks";
@@ -485,4 +486,36 @@ test("shouldAutoContinueOnEmptyRun input must use the post-filter visible count,
   const rawPageSize = 3; // pretend the raw page had 3 middleware-only entries
   expect(shouldAutoContinueOnEmptyRun(filteredVisibleCount, 0)).toBe(true);
   expect(shouldAutoContinueOnEmptyRun(rawPageSize, 0)).toBe(false);
+});
+
+test("mergeThreadValues preserves todos when a later state omits them", () => {
+  expect(
+    mergeThreadValues(
+      {
+        title: "Thread",
+        todos: [{ content: "Keep me", status: "in_progress" }],
+      },
+      {
+        title: "Thread",
+      },
+    ),
+  ).toEqual({
+    title: "Thread",
+    todos: [{ content: "Keep me", status: "in_progress" }],
+  });
+});
+
+test("mergeThreadValues allows explicit todo clearing", () => {
+  expect(
+    mergeThreadValues(
+      {
+        todos: [{ content: "Done", status: "completed" }],
+      },
+      {
+        todos: [],
+      },
+    ),
+  ).toEqual({
+    todos: [],
+  });
 });
