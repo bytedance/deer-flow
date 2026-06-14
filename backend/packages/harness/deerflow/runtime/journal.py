@@ -82,6 +82,12 @@ class RunJournal(BaseCallbackHandler):
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
 
+        # Stable AIMessage ids already persisted via on_llm_end. The worker's
+        # partial-message persistence path reads this set to skip messages that
+        # already completed (and therefore are not actually partial) earlier in
+        # the same run — e.g. turn 1 completed, turn 2 cancelled mid-stream.
+        self._recorded_ai_message_ids: set[str] = set()
+
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
@@ -305,6 +311,13 @@ class RunJournal(BaseCallbackHandler):
             if rid not in self._counted_message_llm_run_ids:
                 self._record_message_summary(message, caller=caller)
 
+            # Track the AIMessage id so the worker's partial-persistence path
+            # can identify which buffered chunks have already been recorded
+            # via the regular on_llm_end pipeline and skip them on cancel.
+            ai_msg_id = getattr(message, "id", None)
+            if isinstance(ai_msg_id, str) and ai_msg_id:
+                self._recorded_ai_message_ids.add(ai_msg_id)
+
             # Token accumulation (dedup by langchain run_id to avoid double-counting
             # when the callback fires more than once for the same response)
             if self._track_tokens:
@@ -436,6 +449,135 @@ class RunJournal(BaseCallbackHandler):
         return "lead_agent"
 
     # -- Public methods (called by worker) --
+
+    @property
+    def recorded_ai_message_ids(self) -> set[str]:
+        """AIMessage ids already emitted via ``on_llm_end``.
+
+        The worker consults this set when finalizing its partial-message
+        accumulator on cancel so messages whose stream completed earlier in
+        the same run (and were already journaled) are not duplicated.
+        """
+        return self._recorded_ai_message_ids
+
+    def record_partial_response(
+        self,
+        ai_message: AIMessage,
+        tool_messages: list[ToolMessage] | None = None,
+        *,
+        caller: str = "lead_agent",
+        abort_action: str | None = None,
+    ) -> None:
+        """Journal an AIMessage and its closure ToolMessages from a cancelled stream.
+
+        Behaves like a synthetic ``on_llm_end`` + ``on_tool_end`` pair for the
+        partial response: emits ``llm.ai.response`` for the AIMessage and one
+        ``llm.tool.result`` per ToolMessage, tags each event metadata with
+        ``interrupted=True`` so consumers can identify cancel-time persistence,
+        and accumulates token usage from the partial AIMessage so the run's
+        completion total reflects the work the LLM actually performed.
+
+        Idempotent: if ``ai_message.id`` was already recorded via the normal
+        ``on_llm_end`` path or by a prior call to this method, the entire call
+        is a no-op (no event is emitted and no token usage is double-counted).
+        """
+        msg_id = getattr(ai_message, "id", None)
+        if isinstance(msg_id, str) and msg_id in self._recorded_ai_message_ids:
+            return
+
+        partial_meta: dict[str, Any] = {
+            "caller": caller,
+            "interrupted": True,
+            "partial": True,
+        }
+        if abort_action:
+            partial_meta["abort_action"] = abort_action
+
+        usage = getattr(ai_message, "usage_metadata", None)
+        usage_dict = dict(usage) if usage else {}
+        partial_meta["usage"] = usage_dict
+
+        self._put(
+            event_type="llm.ai.response",
+            category="message",
+            content=ai_message.model_dump(),
+            metadata=partial_meta,
+        )
+        self._record_message_summary(ai_message, caller=caller)
+        if isinstance(msg_id, str) and msg_id:
+            self._recorded_ai_message_ids.add(msg_id)
+
+        # Token accumulation — dedup on the synthetic source id so the same
+        # partial does not double-count if record_partial_response is called
+        # twice (e.g. interrupt branch and CancelledError branch overlap).
+        if self._track_tokens and usage_dict:
+            input_tk = usage_dict.get("input_tokens", 0) or 0
+            output_tk = usage_dict.get("output_tokens", 0) or 0
+            total_tk = usage_dict.get("total_tokens", 0) or 0
+            if total_tk == 0:
+                total_tk = input_tk + output_tk
+            source_id = f"partial:{msg_id or id(ai_message)}"
+            if total_tk > 0 and source_id not in self._counted_llm_run_ids:
+                self._counted_llm_run_ids.add(source_id)
+                self._total_input_tokens += input_tk
+                self._total_output_tokens += output_tk
+                self._total_tokens += total_tk
+                self._llm_call_count += 1
+                if caller.startswith("subagent:"):
+                    self._subagent_tokens += total_tk
+                elif caller.startswith("middleware:"):
+                    self._middleware_tokens += total_tk
+                else:
+                    self._lead_agent_tokens += total_tk
+
+        for tm in tool_messages or []:
+            tm_meta: dict[str, Any] = {
+                "caller": caller,
+                "interrupted": True,
+                "synthetic": True,
+                "reason": "tool_call_interrupted_before_execution",
+            }
+            if abort_action:
+                tm_meta["abort_action"] = abort_action
+            self._put(
+                event_type="llm.tool.result",
+                category="message",
+                content=tm.model_dump(),
+                metadata=tm_meta,
+            )
+            self._record_message_summary(tm)
+
+    def record_synthetic_closures(
+        self,
+        tool_messages: list[ToolMessage],
+        *,
+        caller: str = "lead_agent",
+        abort_action: str | None = None,
+    ) -> None:
+        """Journal synthetic closure ToolMessages without an associated partial AIMessage.
+
+        Used by the cancel path when the AIMessage already completed via
+        ``on_llm_end`` (so it is already in ``recorded_ai_message_ids`` and
+        ``run_events``) but its tool was still executing when cancel landed.
+        The AIMessage stays unchanged; we only need to write the missing
+        ``llm.tool.result`` event so the message pair is well-formed.
+        """
+        for tm in tool_messages:
+            meta: dict[str, Any] = {
+                "caller": caller,
+                "interrupted": True,
+                "synthetic": True,
+                "reason": "tool_call_interrupted_during_execution",
+            }
+            if abort_action:
+                meta["abort_action"] = abort_action
+            self._put(
+                event_type="llm.tool.result",
+                category="message",
+                content=tm.model_dump(),
+                metadata=meta,
+            )
+            self._record_message_summary(tm)
 
     def record_external_llm_usage_records(
         self,

@@ -205,7 +205,7 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 1. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode); Web UI thread deletion now follows LangGraph thread removal with Gateway cleanup of the local thread directory
 2. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation
 3. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
-4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption), including raw provider tool-call payloads preserved only in `additional_kwargs["tool_calls"]`
+4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption), including raw provider tool-call payloads preserved only in `additional_kwargs["tool_calls"]`. Exposes `INTERRUPTED_TOOL_MESSAGE_CONTENT` at module level so the worker's cancel-time persistence (`runtime/runs/partial_persist.py`) emits the same closure text.
 5. **LLMErrorHandlingMiddleware** - Normalizes provider/model invocation failures into recoverable assistant-facing errors before later middleware/tool stages run
 6. **GuardrailMiddleware** - Pre-tool-call authorization via pluggable `GuardrailProvider` protocol (optional, if `guardrails.enabled` in config). Evaluates each tool call and returns error ToolMessage on deny. Three provider options: built-in `AllowlistProvider` (zero deps), OAP policy providers (e.g. `aport-agent-guardrails`), or custom providers. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md) for setup, usage, and how to implement a provider.
 7. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations for security logging before tool execution continues
@@ -283,6 +283,15 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - `cancel()` and `create_or_reject(..., multitask_strategy="interrupt"|"rollback")` persist interrupted status through `RunStore.update_status()`, matching normal `set_status()` transitions.
 - Store-only hydrated runs are readable history. If the current worker has no in-memory task/control state for that run, cancellation APIs can return 409 because this worker cannot stop the task.
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
+
+**Partial-stream persistence on cancel** (`packages/harness/deerflow/runtime/runs/partial_persist.py`):
+- The worker's `messages`-mode stream loop feeds every `AIMessageChunk` into a `PartialMessageAccumulator` keyed by message id; chunks tagged `middleware:*` are filtered so secondary LLM calls (e.g. title generation) never leak into persisted history.
+- When `abort_event` fires with `abort_action != "rollback"`, `persist_partial_on_cancel()` finalizes the accumulator, computes the open tool-calls (any `tool_calls`/`invalid_tool_calls` whose id lacks a matching `ToolMessage`), synthesizes closure ToolMessages using `INTERRUPTED_TOOL_MESSAGE_CONTENT` from `DanglingToolCallMiddleware`, then writes the partial AIMessage + closures to BOTH stores:
+  - `run_events` via `RunJournal.record_partial_response()` — append-only, surfaces in `GET /messages` and survives summarization
+  - the checkpoint via `append_messages_to_checkpoint()` — uuid6 INSERT pattern, bumps `channel_versions["messages"]` so InMemory/SQLite/Postgres savers actually persist the new payload (passing `new_versions={}` silently drops channel values on read)
+- The journal tracks every recorded AIMessage id in `recorded_ai_message_ids`; the orchestrator passes this as `skip_ids` to the accumulator so messages whose `on_llm_end` already fired in an earlier turn of the same run are not duplicated.
+- Closure ToolMessage ids are derived as `tm_interrupted_{tool_call_id}` so the same identity lands in both stores and the frontend's `mergeMessages` dedup works.
+- `abort_action == "rollback"` skips partial persistence entirely — rollback restores the pre-run checkpoint, and partial data would conflict with that semantic.
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 

@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # synthetic ToolMessage does not echo large or malformed content back to the model.
 _MAX_RECOVERY_ERROR_DETAIL_LEN = 500
 
+# Body of the synthetic ToolMessage emitted when a tool call was interrupted
+# before it could execute. Module-level so other cancel-time persistence paths
+# (e.g. ``runtime/runs/partial_persist.py``) can emit identical text.
+INTERRUPTED_TOOL_MESSAGE_CONTENT = "[Tool call was interrupted and did not return a result.]"
+
 
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """Inserts placeholder ToolMessages for dangling tool calls before model invocation.
@@ -123,7 +128,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             if error_text:
                 return f"[Tool call could not be executed because its arguments were invalid: {error_text}]"
             return "[Tool call could not be executed because its arguments were invalid.]"
-        return "[Tool call was interrupted and did not return a result.]"
+        return INTERRUPTED_TOOL_MESSAGE_CONTENT
 
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
