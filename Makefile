@@ -76,7 +76,7 @@ install:
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
 	@echo "Installing pre-commit hooks..."
-	@$(BACKEND_UV_RUN) --with pre-commit pre-commit install
+        @$(BACKEND_UV_RUN) --with pre-commit pre-commit install
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="

@@ -13,7 +13,7 @@
 #   DEER_FLOW_CONFIG_PATH            — path to config.yaml
 #   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
 #   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
-#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path, default /var/run/docker.sock
+#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
@@ -84,21 +84,17 @@ services:
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
       - ../skills:/app/skills:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
-      # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
-      - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
-      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
-      - type: bind
-        source: ${HOME:?HOME must be set}/.claude
-        target: /root/.claude
-        read_only: true
-        bind:
-          create_host_path: true
-      - type: bind
-        source: ${HOME:?HOME must be set}/.codex
-        target: /root/.codex
-        read_only: true
-        bind:
-          create_host_path: true
+      # DooD: the host Docker socket is NOT mounted by default. It is added only
+      # for aio (pure-DooD) sandbox mode via the opt-in docker-compose.dood.yaml
+      # overlay (appended by scripts/deploy.sh). See backend/docs/CONFIGURATION.md
+      # Security Note section for details.
+       
+      # CLI auth dirs (Claude Code / Codex) are NOT mounted by default: they
+      # expose the entire ~/.claude and ~/.codex (history, projects, global
+      # config, credentials) into the container. Mount them only when you use
+      # the Claude/Codex CLI login as a model provider or ACP agent, via the
+      # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
+      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
       - CI=true
