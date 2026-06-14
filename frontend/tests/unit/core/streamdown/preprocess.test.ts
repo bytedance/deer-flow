@@ -72,6 +72,12 @@ test("capListNesting leaves fenced code content untouched", () => {
   expect(capListNesting(input).split("\n")[1]).toBe(literal);
 });
 
+test("capListNesting leaves indented code blocks untouched", () => {
+  const literal = "    " + " ".repeat(400) + "deeply indented ascii art";
+  const input = `paragraph\n\n${literal}`;
+  expect(capListNesting(input).split("\n")[2]).toBe(literal);
+});
+
 test("capListNesting only rewrites pathological lines", () => {
   const normal = "    indented paragraph";
   const deep = " ".repeat(500) + "- deep";
