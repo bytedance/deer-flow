@@ -20,7 +20,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
-import { useSubtask } from "@/core/tasks/context";
+import { useLatestSubtaskMessage } from "@/core/tasks/context";
+import type { Subtask } from "@/core/tasks/types";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -31,17 +32,25 @@ import { MarkdownContent } from "./markdown-content";
 
 export function SubtaskCard({
   className,
-  taskId,
+  task: baseTask,
   isLoading,
 }: {
   className?: string;
-  taskId: string;
+  task: Subtask;
   isLoading: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
+  // Bytedance/deer-flow#3147: base fields come in as a prop (derived
+  // from the message list inside MessageList), only the streaming
+  // `latestMessage` is pulled from the shared context — it lands via
+  // `task_running` SSE events outside the render phase.
+  const latestMessage = useLatestSubtaskMessage(baseTask.id);
+  const task = useMemo<Subtask>(
+    () => (latestMessage ? { ...baseTask, latestMessage } : baseTask),
+    [baseTask, latestMessage],
+  );
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
