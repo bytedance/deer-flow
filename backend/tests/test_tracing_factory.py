@@ -28,6 +28,7 @@ def clear_tracing_env(monkeypatch):
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
         "LANGFUSE_BASE_URL",
+        "LANGFUSE_TRACING_ENVIRONMENT",
     ):
         monkeypatch.delenv(name, raising=False)
     reset_tracing_config()
@@ -150,6 +151,7 @@ def test_create_langfuse_handler_initializes_client_before_handler(monkeypatch):
             "secret_key": "sk-lf-test",
             "public_key": "pk-lf-test",
             "host": "https://langfuse.example.com",
+            "environment": None,
         },
     )()
 
@@ -171,3 +173,75 @@ def test_create_langfuse_handler_initializes_client_before_handler(monkeypatch):
             },
         ),
     ]
+
+
+def test_create_langfuse_handler_passes_environment_when_set(monkeypatch):
+    """When environment is set, it must be forwarded to the Langfuse client constructor."""
+    calls: list[tuple[str, dict]] = []
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs):
+            calls.append(("client", kwargs))
+
+    class FakeCallbackHandler:
+        def __init__(self, **kwargs):
+            calls.append(("handler", kwargs))
+
+    fake_langfuse_module = types.ModuleType("langfuse")
+    fake_langfuse_module.Langfuse = FakeLangfuse
+    fake_langfuse_langchain_module = types.ModuleType("langfuse.langchain")
+    fake_langfuse_langchain_module.CallbackHandler = FakeCallbackHandler
+    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse_module)
+    monkeypatch.setitem(sys.modules, "langfuse.langchain", fake_langfuse_langchain_module)
+
+    cfg = type(
+        "LangfuseCfg",
+        (),
+        {
+            "secret_key": "sk-lf-test",
+            "public_key": "pk-lf-test",
+            "host": "https://langfuse.example.com",
+            "environment": "staging",
+        },
+    )()
+
+    tracing_factory._create_langfuse_handler(cfg)
+
+    client_call = next(c for name, c in calls if name == "client")
+    assert client_call["environment"] == "staging"
+
+
+def test_create_langfuse_handler_omits_environment_when_none(monkeypatch):
+    """When environment is None, the environment kwarg must not be forwarded to Langfuse."""
+    calls: list[tuple[str, dict]] = []
+
+    class FakeLangfuse:
+        def __init__(self, **kwargs):
+            calls.append(("client", kwargs))
+
+    class FakeCallbackHandler:
+        def __init__(self, **kwargs):
+            pass
+
+    fake_langfuse_module = types.ModuleType("langfuse")
+    fake_langfuse_module.Langfuse = FakeLangfuse
+    fake_langfuse_langchain_module = types.ModuleType("langfuse.langchain")
+    fake_langfuse_langchain_module.CallbackHandler = FakeCallbackHandler
+    monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse_module)
+    monkeypatch.setitem(sys.modules, "langfuse.langchain", fake_langfuse_langchain_module)
+
+    cfg = type(
+        "LangfuseCfg",
+        (),
+        {
+            "secret_key": "sk-lf-test",
+            "public_key": "pk-lf-test",
+            "host": "https://langfuse.example.com",
+            "environment": None,
+        },
+    )()
+
+    tracing_factory._create_langfuse_handler(cfg)
+
+    client_call = next(c for name, c in calls if name == "client")
+    assert "environment" not in client_call

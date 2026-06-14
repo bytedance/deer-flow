@@ -30,6 +30,7 @@ class LangfuseTracingConfig(BaseModel):
     public_key: str | None = Field(...)
     secret_key: str | None = Field(...)
     host: str = Field(...)
+    environment: str | None = Field(None)
 
     @property
     def is_configured(self) -> bool:
@@ -124,6 +125,7 @@ def get_tracing_config() -> TracingConfig:
                 public_key=_first_env_value("LANGFUSE_PUBLIC_KEY"),
                 secret_key=_first_env_value("LANGFUSE_SECRET_KEY"),
                 host=_first_env_value("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
+                environment=_first_env_value("LANGFUSE_TRACING_ENVIRONMENT"),
             ),
         )
         return _tracing_config
