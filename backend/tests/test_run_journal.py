@@ -714,6 +714,16 @@ class TestExternalUsageRecords:
         assert j._total_tokens == 0
         assert j._subagent_tokens == 0
 
+    def test_record_external_increments_llm_call_count(self, journal_setup):
+        """Each valid external record must increment _llm_call_count."""
+        j, _ = journal_setup
+        records = [
+            {"source_run_id": "ext-a", "caller": "subagent:gp", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            {"source_run_id": "ext-b", "caller": "subagent:bash", "input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+        ]
+        j.record_external_llm_usage_records(records)
+        assert j._llm_call_count == 2
+
 
 class TestProgressSnapshots:
     @pytest.mark.anyio
