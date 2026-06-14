@@ -379,10 +379,6 @@ class DingTalkChannel(Channel):
             msg_id = message.message_id or ""
             sender_nick = message.sender_nick or ""
 
-            if self._allowed_users and sender_staff_id not in self._allowed_users:
-                logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
-                return
-
             text = self._extract_text(message)
             if not text:
                 logger.info("[DingTalk] empty text, ignoring message")
@@ -413,6 +409,10 @@ class DingTalkChannel(Channel):
                     fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
                 else:
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
+                return
+
+            if self._allowed_users and sender_staff_id not in self._allowed_users:
+                logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
             if _is_dingtalk_command(text):

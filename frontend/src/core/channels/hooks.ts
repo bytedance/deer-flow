@@ -12,6 +12,55 @@ import type { ChannelProviderId, ChannelRuntimeConfigValues } from "./types";
 
 export const channelProviderQueryKey = ["channelProviders"] as const;
 export const channelConnectionsQueryKey = ["channelConnections"] as const;
+const CONNECT_POLL_INTERVAL_MS = 2000;
+
+function pollChannelConnectionUntilResolved(
+  queryClient: ReturnType<typeof useQueryClient>,
+  provider: ChannelProviderId,
+  expiresInSeconds: number,
+) {
+  const deadline = Date.now() + Math.max(1, expiresInSeconds) * 1000;
+
+  const poll = () => {
+    window.setTimeout(() => {
+      void Promise.all([
+        queryClient.fetchQuery({
+          queryKey: channelProviderQueryKey,
+          queryFn: () => listChannelProviders(),
+        }),
+        queryClient.fetchQuery({
+          queryKey: channelConnectionsQueryKey,
+          queryFn: () => listChannelConnections(),
+        }),
+      ])
+        .then(([providersResponse, connections]) => {
+          const providerConnected = providersResponse.providers.some(
+            (item) =>
+              item.provider === provider &&
+              item.connection_status === "connected",
+          );
+          const connectionConnected = connections.some(
+            (item) => item.provider === provider && item.status === "connected",
+          );
+          if (
+            providerConnected ||
+            connectionConnected ||
+            Date.now() >= deadline
+          ) {
+            return;
+          }
+          poll();
+        })
+        .catch(() => {
+          if (Date.now() < deadline) {
+            poll();
+          }
+        });
+    }, CONNECT_POLL_INTERVAL_MS);
+  };
+
+  poll();
+}
 
 export function useChannelProviders() {
   const { data, isLoading, error } = useQuery({
@@ -39,11 +88,16 @@ export function useConnectChannelProvider() {
   return useMutation({
     mutationFn: (provider: ChannelProviderId) =>
       connectChannelProvider(provider),
-    onSuccess: () => {
+    onSuccess: (result, provider) => {
       void queryClient.invalidateQueries({ queryKey: channelProviderQueryKey });
       void queryClient.invalidateQueries({
         queryKey: channelConnectionsQueryKey,
       });
+      pollChannelConnectionUntilResolved(
+        queryClient,
+        provider,
+        result.expires_in,
+      );
     },
   });
 }

@@ -128,6 +128,25 @@ class ChannelConnectionRepository:
             row.capabilities_json = dict(capabilities or {})
             row.metadata_json = dict(metadata or {})
 
+        async def _revoke_other_active_owners(session: AsyncSession) -> None:
+            if status != "connected":
+                return
+            with session.no_autoflush:
+                result = await session.execute(
+                    select(ChannelConnectionRow.id).where(
+                        ChannelConnectionRow.provider == provider,
+                        ChannelConnectionRow.external_account_id == external_account_id_value,
+                        ChannelConnectionRow.workspace_id == workspace_id_value,
+                        ChannelConnectionRow.owner_user_id != owner_user_id,
+                        ChannelConnectionRow.status != "revoked",
+                    )
+                )
+            transferred_ids = [row_id for row_id in result.scalars()]
+            if not transferred_ids:
+                return
+            await session.execute(update(ChannelConnectionRow).where(ChannelConnectionRow.id.in_(transferred_ids)).values(status="revoked"))
+            await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(transferred_ids)))
+
         stmt = select(ChannelConnectionRow).where(
             ChannelConnectionRow.owner_user_id == owner_user_id,
             ChannelConnectionRow.provider == provider,
@@ -147,6 +166,7 @@ class ChannelConnectionRepository:
                 session.add(row)
 
             _apply(row)
+            await _revoke_other_active_owners(session)
             try:
                 await session.commit()
             except IntegrityError:
@@ -155,6 +175,7 @@ class ChannelConnectionRepository:
                 await session.rollback()
                 row = (await session.execute(stmt)).scalar_one()
                 _apply(row)
+                await _revoke_other_active_owners(session)
                 await session.commit()
             await session.refresh(row)
             return self._connection_to_dict(row)

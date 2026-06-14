@@ -89,6 +89,37 @@ class TestChannelConnectionRepository:
         assert len(await repo.list_connections("alice")) == 1
 
     @pytest.mark.anyio
+    async def test_upsert_connection_transfers_external_identity_between_owners(self, repo):
+        await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        bob = await repo.upsert_connection(
+            owner_user_id="bob",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        alice_rows = await repo.list_connections("alice")
+        resolved = await repo.find_connection_by_external_identity(
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+        )
+
+        assert alice_rows[0]["status"] == "revoked"
+        assert bob["status"] == "connected"
+        assert resolved is not None
+        assert resolved["owner_user_id"] == "bob"
+        assert resolved["id"] == bob["id"]
+
+    @pytest.mark.anyio
     async def test_credentials_are_encrypted_at_rest_and_decrypted_by_repository(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
