@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/channels", tags=["channel-connections"])
 logger = logging.getLogger(__name__)
 
 _STATE_TTL_SECONDS = 600
+_MAX_PENDING_CONNECT_CODES_PER_PROVIDER = 5
 _MASKED_CREDENTIAL_VALUE = "********"
 
 
@@ -332,12 +333,26 @@ async def _create_state(
     owner_user_id: str,
     provider: str,
 ) -> str:
+    now = datetime.now(UTC)
+    await repo.delete_expired_oauth_states(now=now)
+    pending_count = await repo.count_oauth_states(
+        owner_user_id=owner_user_id,
+        provider=provider,
+        active_only=True,
+        now=now,
+    )
+    if pending_count >= _MAX_PENDING_CONNECT_CODES_PER_PROVIDER:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many pending channel connection codes. Wait for existing codes to expire or use one of them.",
+        )
+
     state = _new_binding_code()
     await repo.create_oauth_state(
         owner_user_id=owner_user_id,
         provider=provider,
         state=state,
-        expires_at=datetime.now(UTC) + timedelta(seconds=_STATE_TTL_SECONDS),
+        expires_at=now + timedelta(seconds=_STATE_TTL_SECONDS),
     )
     return state
 
