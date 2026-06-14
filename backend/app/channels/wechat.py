@@ -1383,6 +1383,7 @@ class WechatChannel(Channel):
             try:
                 self._auth_path.parent.mkdir(parents=True, exist_ok=True)
                 self._auth_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._auth_path.chmod(0o600)
             except OSError:
                 logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
         return data

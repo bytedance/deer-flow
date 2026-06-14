@@ -66,6 +66,9 @@ class _FakeRepo:
     async def list_connections(self, owner_user_id):
         return []
 
+    async def disconnect_provider_connections(self, *, provider):
+        return 0
+
 
 async def test_configure_runtime_channel_does_not_block_event_loop(tmp_path) -> None:
     request = await asyncio.to_thread(_make_request, tmp_path)
@@ -104,3 +107,17 @@ async def test_disconnect_runtime_channel_does_not_block_event_loop(tmp_path) ->
         "enabled": False,
         "_runtime_disabled": True,
     }
+
+
+async def test_runtime_config_store_file_is_owner_only(tmp_path) -> None:
+    path = tmp_path / "channels" / "runtime-config.json"
+    store = await asyncio.to_thread(ChannelRuntimeConfigStore, path)
+
+    await asyncio.to_thread(
+        store.set_provider_config,
+        "slack",
+        {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+    )
+
+    mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
+    assert mode == 0o600
