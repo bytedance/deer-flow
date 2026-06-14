@@ -211,6 +211,10 @@ export function InputBox({
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  // Set when the user interrupts a streaming turn (e.g. by stopping it or by
+  // submitting a new message mid-stream). Such a turn ends on a half-finished
+  // response, so we must NOT generate follow-up suggestions for it.
+  const stoppedByUserRef = useRef(false);
   const messagesRef = useRef(thread.messages);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -306,6 +310,13 @@ export function InputBox({
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
       if (status === "streaming") {
+        // The user interrupted an in-progress turn. Mark it so the follow-up
+        // generation effect skips this streaming->ready transition instead of
+        // suggesting questions for a half-finished response.
+        stoppedByUserRef.current = true;
+        setFollowups([]);
+        setFollowupsHidden(true);
+        setFollowupsLoading(false);
         onStop?.();
         return;
       }
@@ -491,6 +502,10 @@ export function InputBox({
     !isWelcomeMode &&
     !showSkillSuggestions &&
     !followupsHidden &&
+    // Never show stale follow-up chips while a turn is streaming: a message
+    // sent before the previous response finished would otherwise leave the
+    // old chips (and the lone close button) overlapping the input box.
+    status !== "streaming" &&
     (followupsLoading || followups.length > 0);
 
   useEffect(() => {
@@ -510,6 +525,13 @@ export function InputBox({
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (!wasStreaming || streaming) {
+      return;
+    }
+
+    // The turn was interrupted by the user (stopped or superseded by a new
+    // message), so skip generating follow-ups for this half-finished response.
+    if (stoppedByUserRef.current) {
+      stoppedByUserRef.current = false;
       return;
     }
 
