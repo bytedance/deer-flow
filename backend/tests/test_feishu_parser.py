@@ -73,6 +73,31 @@ def test_feishu_on_message_plain_text():
         assert mock_make_inbound.call_args[1]["text"] == "Hello world"
 
 
+def test_feishu_is_not_running_when_ws_thread_exits():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._running = True
+    channel._thread = MagicMock()
+    channel._thread.is_alive.return_value = False
+
+    assert channel.is_running is False
+
+
+def test_feishu_event_handler_ignores_non_content_message_events():
+    import lark_oapi as lark
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+
+    event_handler = channel._build_event_handler(lark)
+
+    assert "p2.im.message.receive_v1" in event_handler._processorMap
+    assert "p2.im.message.message_read_v1" in event_handler._processorMap
+    assert "p2.im.message.reaction.created_v1" in event_handler._processorMap
+    assert "p2.im.message.reaction.deleted_v1" in event_handler._processorMap
+    assert "p2.im.message.recalled_v1" in event_handler._processorMap
+
+
 def test_feishu_on_message_rich_text():
     bus = MessageBus()
     config = {"app_id": "test", "app_secret": "test"}

@@ -48,6 +48,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `threads/` — Thread creation, streaming, state management (hooks + types)
   - `api/` — LangGraph client singleton
   - `artifacts/` — Artifact loading and caching
+  - `channels/` — IM channel connections (provider catalog, connect/runtime-config API + hooks)
   - `i18n/` — Internationalization (en-US, zh-CN)
   - `settings/` — User preferences in localStorage
   - `memory/` — Persistent user memory system

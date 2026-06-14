@@ -90,6 +90,7 @@ def test_appconfig_descriptions_retain_original_field_documentation():
         "run_events": "memory for dev",
         "checkpointer": "state-persistence checkpointer",
         "stream_bridge": "Stream bridge",
+        "channel_connections": "IM channel connection",
     }
     for field_name, expected_substring in descriptions.items():
         description = AppConfig.model_fields[field_name].description or ""

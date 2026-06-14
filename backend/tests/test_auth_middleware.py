@@ -39,6 +39,8 @@ def test_public_paths(path: str):
         "/api/threads/123/uploads",
         "/api/agents",
         "/api/channels",
+        "/api/channels/providers",
+        "/api/channels/slack/connect",
         "/api/runs/stream",
         "/api/threads/123/runs",
         "/api/v1/auth/me",
@@ -183,7 +185,7 @@ def _make_auth_csrf_app():
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
     return TestClient(_make_app())
 
 
@@ -221,7 +223,7 @@ def test_auth_disabled_allows_protected_path_without_cookie(monkeypatch):
     assert res.json() == {"models": []}
 
 
-def test_auth_disabled_stamps_e2e_admin_user_without_cookie(monkeypatch):
+def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     client = TestClient(_make_app())
 
@@ -229,10 +231,10 @@ def test_auth_disabled_stamps_e2e_admin_user_without_cookie(monkeypatch):
 
     assert res.status_code == 200
     assert res.json() == {
-        "id": "e2e-user",
-        "email": "e2e@test.local",
+        "id": "default",
+        "email": "default@test.local",
         "system_role": "admin",
-        "context_user_id": "e2e-user",
+        "context_user_id": "default",
     }
 
 
@@ -244,8 +246,8 @@ def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch
 
     assert res.status_code == 200
     assert res.json() == {
-        "id": "e2e-user",
-        "email": "e2e@test.local",
+        "id": "default",
+        "email": "default@test.local",
         "system_role": "admin",
         "needs_setup": False,
     }
@@ -329,7 +331,7 @@ def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
         warn_if_auth_disabled_enabled()
 
     assert "authentication is bypassed" in caplog.text
-    assert "e2e-user" in caplog.text
+    assert "default" in caplog.text
 
 
 def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(monkeypatch, caplog):
@@ -348,7 +350,8 @@ def test_protected_path_with_junk_cookie_rejected(client):
     """Junk cookie → 401. Middleware strictly validates the JWT now
     (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad
     tokens through to the route handler."""
-    res = client.get("/api/models", cookies={"access_token": "some-token"})
+    client.cookies.set("access_token", "some-token")
+    res = client.get("/api/models")
     assert res.status_code == 401
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import logging
@@ -20,6 +21,10 @@ from deerflow.skills.types import SkillCategory
 logger = logging.getLogger(__name__)
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+
+# Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
+# cannot hold back the install outcome propagating out of the finally block.
+_INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 class LocalSkillStorage(SkillStorage):
@@ -94,19 +99,56 @@ class LocalSkillStorage(SkillStorage):
         make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
+        from deerflow.skills.installer import _scan_skill_archive_contents_or_raise
+
+        logger.info("Installing skill from %s", archive_path)
+        path = Path(archive_path)
+        custom_dir = self._host_root / "custom"
+
+        # The per-file security scan is an async LLM call and must stay on the
+        # event loop; every filesystem phase around it runs in a worker thread.
+        tmp = await asyncio.to_thread(tempfile.mkdtemp)
+        try:
+            skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
+
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+
+            await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
+            logger.info("Skill %r installed to %s", skill_name, target)
+        finally:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._cleanup_install_tmp, tmp),
+                    timeout=_INSTALL_TMP_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning("Timed out cleaning up skill install temp dir %s", tmp)
+
+        return {
+            "success": True,
+            "skill_name": skill_name,
+            "message": f"Skill '{skill_name}' installed successfully",
+        }
+
+    @staticmethod
+    def _cleanup_install_tmp(tmp: str) -> None:
+        """Best-effort removal that never masks the install outcome, but leaves a trace."""
+        try:
+            shutil.rmtree(tmp)
+        except OSError:
+            logger.warning("Failed to clean up skill install temp dir %s", tmp, exc_info=True)
+
+    def _prepare_skill_archive(self, path: Path, tmp_path: Path, custom_dir: Path, archive_path: str | Path) -> tuple[Path, str, Path]:
+        """Extract and validate the archive (blocking; runs off the event loop)."""
         import zipfile
 
         from deerflow.skills.installer import (
             SkillAlreadyExistsError,
-            _move_staged_skill_into_reserved_target,
-            _scan_skill_archive_contents_or_raise,
             resolve_skill_dir_from_archive,
             safe_extract_skill_archive,
         )
         from deerflow.skills.validation import _validate_skill_frontmatter
 
-        logger.info("Installing skill from %s", archive_path)
-        path = Path(archive_path)
         if not path.is_file():
             if not path.exists():
                 raise FileNotFoundError(f"Skill file not found: {archive_path}")
@@ -114,47 +156,40 @@ class LocalSkillStorage(SkillStorage):
         if path.suffix != ".skill":
             raise ValueError("File must have .skill extension")
 
-        custom_dir = self._host_root / "custom"
         custom_dir.mkdir(parents=True, exist_ok=True)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+        try:
+            zf = zipfile.ZipFile(path, "r")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
+        except (zipfile.BadZipFile, IsADirectoryError):
+            raise ValueError("File is not a valid ZIP archive") from None
 
-            try:
-                zf = zipfile.ZipFile(path, "r")
-            except FileNotFoundError:
-                raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
-            except (zipfile.BadZipFile, IsADirectoryError):
-                raise ValueError("File is not a valid ZIP archive") from None
+        with zf:
+            safe_extract_skill_archive(zf, tmp_path)
 
-            with zf:
-                safe_extract_skill_archive(zf, tmp_path)
+        skill_dir = resolve_skill_dir_from_archive(tmp_path)
 
-            skill_dir = resolve_skill_dir_from_archive(tmp_path)
+        is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
+        if not is_valid:
+            raise ValueError(f"Invalid skill: {message}")
+        if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+            raise ValueError(f"Invalid skill name: {skill_name}")
 
-            is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-            if not is_valid:
-                raise ValueError(f"Invalid skill: {message}")
-            if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
-                raise ValueError(f"Invalid skill name: {skill_name}")
+        target = custom_dir / skill_name
+        if target.exists():
+            raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
 
-            target = custom_dir / skill_name
-            if target.exists():
-                raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
+        return skill_dir, skill_name, target
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+    def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path) -> None:
+        """Stage and move the validated skill into place (blocking; runs off the event loop)."""
+        from deerflow.skills.installer import _move_staged_skill_into_reserved_target
 
-            with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
-                staging_target = Path(staging_root) / skill_name
-                shutil.copytree(skill_dir, staging_target)
-                _move_staged_skill_into_reserved_target(staging_target, target)
-            logger.info("Skill %r installed to %s", skill_name, target)
-
-        return {
-            "success": True,
-            "skill_name": skill_name,
-            "message": f"Skill '{skill_name}' installed successfully",
-        }
+        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
+            staging_target = Path(staging_root) / skill_name
+            shutil.copytree(skill_dir, staging_target)
+            _move_staged_skill_into_reserved_target(staging_target, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

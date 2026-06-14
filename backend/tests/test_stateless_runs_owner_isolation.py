@@ -164,10 +164,42 @@ def test_stream_shared_thread_passes_owner_check():
     create_or_reject.assert_awaited()
 
 
-def test_stream_internal_role_bypasses_owner_check():
-    """IM channels run with the internal system role on behalf of platform
-    users whose threads they do not own — the owner check must not break them."""
+def test_stream_internal_role_scoped_by_owner_header():
+    """IM channels run with the internal system role on behalf of the
+    connection owner named in X-DeerFlow-Owner-User-Id — the owner check is
+    scoped to that owner rather than bypassed."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
     with _client(INTERNAL_USER) as (client, create_or_reject):
-        response = client.post("/api/runs/stream", json=_body(THREAD_A))
+        response = client.post(
+            "/api/runs/stream",
+            json=_body(THREAD_A),
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: str(USER_A.id)},
+        )
     assert response.status_code == 409
+    create_or_reject.assert_awaited()
+
+
+def test_stream_internal_role_with_foreign_owner_header_returns_404():
+    """The internal token alone must not grant access to another user's thread."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+    with _client(INTERNAL_USER) as (client, create_or_reject):
+        response = client.post(
+            "/api/runs/stream",
+            json=_body(THREAD_A),
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: str(USER_B.id)},
+        )
+    assert response.status_code == 404
+    create_or_reject.assert_not_awaited()
+
+
+def test_stream_internal_role_without_owner_header_is_scoped_to_internal_user():
+    """Without an owner header internal callers keep access to their own and
+    shared/untracked threads, but not to user-owned threads."""
+    with _client(INTERNAL_USER) as (client, create_or_reject):
+        denied = client.post("/api/runs/stream", json=_body(THREAD_A))
+        allowed = client.post("/api/runs/stream", json=_body(THREAD_SHARED))
+    assert denied.status_code == 404
+    assert allowed.status_code == 409
     create_or_reject.assert_awaited()
