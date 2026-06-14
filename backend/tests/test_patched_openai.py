@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import PatchedChatOpenAI, _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,5 +172,124 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
 
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+def test_create_chat_result_preserves_raw_tool_calls():
+    """Raw tool_calls stay attached to the parsed AIMessage for later replay."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [RAW_TC_SIGNED],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "gpt-4o-mini",
+    }
+
+    result = model._create_chat_result(response)
+    message = result.generations[0].message
+
+    assert isinstance(message, AIMessage)
+    assert message.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_final_stream_chunk_keeps_raw_tool_calls():
+    """Final streaming chunk should not drop raw signed tool_calls."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    completion = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [RAW_TC_SIGNED],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "gpt-4o-mini",
+    }
+
+    chunk = model._get_generation_chunk_from_completion(completion)
+
+    assert chunk.message.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage: edge cases for the new overrides
+# ---------------------------------------------------------------------------
+
+
+def _make_response(tool_calls: list[dict] | None = None, content: str | None = None) -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                },
+                "finish_reason": "tool_calls" if tool_calls else "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "gpt-4o-mini",
+    }
+
+
+def test_create_chat_result_no_tool_calls_does_not_crash():
+    """Text-only response should not raise even though there are no tool calls."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    result = model._create_chat_result(_make_response(content="Hello!"))
+    message = result.generations[0].message
+    assert isinstance(message, AIMessage)
+
+
+def test_create_chat_result_empty_tool_calls_list_does_not_crash():
+    """Empty tool_calls list should not raise."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    result = model._create_chat_result(_make_response(tool_calls=[]))
+    assert result.generations[0].message is not None
+
+
+def test_create_chat_result_preserves_multiple_signed_tool_calls():
+    """All tool calls in a multi-call response should retain their signatures."""
+    raw_tc_b = {
+        "id": "call_2",
+        "type": "function",
+        "function": {"name": "bash", "arguments": '{"cmd":"ls"}'},
+        "thought_signature": "SIG_B==",
+    }
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    result = model._create_chat_result(_make_response(tool_calls=[RAW_TC_SIGNED, raw_tc_b]))
+    raw = result.generations[0].message.additional_kwargs["tool_calls"]
+    assert raw[0]["thought_signature"] == "SIG_A=="
+    assert raw[1]["thought_signature"] == "SIG_B=="
+
+
+def test_create_chat_result_unsigned_tool_calls_have_no_signature():
+    """Tool calls without thought_signature should not have one added."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    result = model._create_chat_result(_make_response(tool_calls=[RAW_TC_UNSIGNED]))
+    raw = result.generations[0].message.additional_kwargs["tool_calls"]
+    assert "thought_signature" not in raw[0]
+
+
+def test_final_stream_chunk_no_tool_calls_does_not_crash():
+    """Streaming chunk for a text-only completion should not raise."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    chunk = model._get_generation_chunk_from_completion(_make_response(content="Done"))
+    assert chunk is not None
+
+
+def test_final_stream_chunk_preserves_usage_metadata():
+    """The usage_metadata field should survive the chunk reconstruction."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    chunk = model._get_generation_chunk_from_completion(_make_response(tool_calls=[RAW_TC_SIGNED]))
+    # usage_metadata may be None for some responses but must not raise
+    assert hasattr(chunk.message, "usage_metadata")
