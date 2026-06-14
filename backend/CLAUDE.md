@@ -234,7 +234,7 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `channels`, `channel_connections`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `channels`, `channel_connections`, `scheduler`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
 
 Configuration priority:
 1. Explicit `config_path` argument
@@ -273,9 +273,10 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
-| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens |
+| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /../events` - thread-level browser invalidation SSE; `GET /../messages` - thread messages with feedback; `GET /../token-usage` - aggregate tokens |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
+| **Scheduled Tasks** (`/api/scheduled-tasks`) | `GET /` - list current user's scheduled tasks; `GET /{id}` - task details; `DELETE /{id}` - cancel an active task |
 
 **RunManager / RunStore contract**:
 - `RunManager.get()` is async; direct callers must `await` it.
@@ -285,6 +286,16 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
+
+### Scheduled Runs (`app/scheduler/` + `deerflow.persistence.scheduled_tasks`)
+
+The first scheduled-run implementation supports one-time tasks created by the built-in `schedule_task` tool. Keep the layer split strict:
+
+- Harness owns the data model, repository, and tool (`deerflow.persistence.scheduled_tasks`, `deerflow.tools.builtins.schedule_task_tool`). It never imports `app.*`.
+- App owns execution (`app.scheduler.service`). Gateway starts `ScheduledRunService` at lifespan only when `scheduler.enabled` is true and a SQL database backend is available.
+- The service polls `scheduled_tasks` for due `active` rows, claims each row with a DB lease, starts a normal `RunManager`/`run_agent()` execution in the original `thread_id`, then marks the task `completed`, `failed`, or `missed`.
+- Tasks created from IM channels persist channel routing metadata from `ChannelManager`'s run context. On completion, `ScheduledRunService` sends an `OutboundMessage` through the active channel if available. Web-created tasks write the result into the thread checkpoint/history and publish a thread-scoped SSE invalidation through `app.gateway.thread_events` so open browser conversations refresh their run history.
+- `scheduler.*` is restart-required because the polling loop and semaphore are built once during Gateway startup.
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
@@ -325,6 +336,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
+   - `schedule_task` - Create a one-time scheduled run in the current thread (requires SQL persistence and Gateway scheduler)
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):

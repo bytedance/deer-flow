@@ -788,7 +788,20 @@ class ChannelManager:
         # For browser-connected IM channels, prefer the DeerFlow account that
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
-        run_context_identity: dict[str, Any] = {"thread_id": thread_id}
+        run_context_identity: dict[str, Any] = {
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "channel_name": msg.channel_name,
+            "channel_chat_id": msg.chat_id,
+        }
+        if msg.topic_id:
+            run_context_identity["channel_topic_id"] = msg.topic_id
+        if msg.thread_ts:
+            run_context_identity["channel_thread_ts"] = msg.thread_ts
+        if msg.connection_id:
+            run_context_identity["channel_connection_id"] = msg.connection_id
+        if msg.owner_user_id:
+            run_context_identity["channel_owner_user_id"] = msg.owner_user_id
         owner_user_id = _effective_owner_user_id(msg)
         if owner_user_id:
             run_context_identity["user_id"] = _safe_user_id_for_run(owner_user_id)

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 12
+config_version: 13
 
 # ============================================================================
 # Logging
@@ -1165,6 +1165,20 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Scheduled Runs Configuration
+# ============================================================================
+# Lets the lead agent create one-time scheduled tasks from a conversation via
+# the built-in `schedule_task` tool. Requires database.backend to be sqlite or
+# postgres so tasks survive Gateway restarts. The first implementation supports
+# one-time tasks only; recurring schedules are planned separately.
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5.0
+  max_concurrent_runs: 2
+  claim_ttl_seconds: 300
+  misfire_grace_time_seconds: 300
 
 # ============================================================================
 # User-Owned IM Channel Connections

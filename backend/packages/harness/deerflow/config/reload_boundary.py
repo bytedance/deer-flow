@@ -59,6 +59,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "channel_connections": (
         "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
     ),
+    "scheduler": ("start_scheduler_service() is invoked once during startup; scheduled-run polling intervals, concurrency limits, and enablement are not rebuilt when scheduler.* changes."),
 }
 
 

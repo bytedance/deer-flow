@@ -23,6 +23,7 @@ from app.gateway.routers import (
     memory,
     models,
     runs,
+    scheduled_tasks,
     skills,
     suggestions,
     thread_runs,
@@ -210,6 +211,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
+        from app.gateway.thread_events import ThreadEventHub
+
+        app.state.thread_event_hub = ThreadEventHub()
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
@@ -224,7 +228,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
+        # Start scheduled-run service when enabled.
+        try:
+            from app.scheduler.service import start_scheduler_service
+
+            await start_scheduler_service(app, startup_config)
+        except Exception:
+            logger.exception("Scheduled-run service failed to start")
+
         yield
+
+        # Stop scheduled-run service before runtime teardown.
+        try:
+            from app.scheduler.service import stop_scheduler_service
+
+            await asyncio.wait_for(
+                stop_scheduler_service(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Scheduled-run service shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop scheduled-run service")
+
+        try:
+            await app.state.thread_event_hub.close()
+        except Exception:
+            logger.exception("Failed to close thread event hub")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -384,6 +417,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Scheduled task API is mounted at /api/scheduled-tasks
+    app.include_router(scheduled_tasks.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

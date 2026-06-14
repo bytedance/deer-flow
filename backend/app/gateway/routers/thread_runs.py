@@ -12,6 +12,7 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Literal
 
@@ -20,9 +21,18 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import (
+    get_checkpointer,
+    get_current_user,
+    get_feedback_repo,
+    get_run_event_store,
+    get_run_manager,
+    get_run_store,
+    get_stream_bridge,
+    get_thread_event_hub,
+)
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import format_sse, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
 
 logger = logging.getLogger(__name__)
@@ -109,14 +119,40 @@ def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
 
 
+def _json_safe_run_payload(value: Any) -> Any:
+    """Return JSON-safe run metadata for API responses.
+
+    In-flight runtime config can contain process-local objects such as
+    ``Runtime`` or ``RunJournal``. Those are useful while executing a graph but
+    must never leak into the LangGraph-compatible runs list response.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.startswith("__") or key_text == "callbacks":
+                continue
+            result[key_text] = _json_safe_run_payload(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_run_payload(item) for item in value]
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
         status=record.status.value,
-        metadata=record.metadata,
-        kwargs=record.kwargs,
+        metadata=_json_safe_run_payload(record.metadata),
+        kwargs=_json_safe_run_payload(record.kwargs),
         multitask_strategy=record.multitask_strategy,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -336,6 +372,44 @@ async def stream_existing_run(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/{thread_id}/events")
+@require_permission("runs", "read", owner_check=True)
+async def stream_thread_events(thread_id: str, request: Request) -> StreamingResponse:
+    """Stream thread-scoped browser notifications via SSE.
+
+    This stream carries invalidation signals, not durable conversation data.
+    Clients should refresh the canonical thread/run APIs after receiving an
+    event such as ``scheduled_run_completed``.
+    """
+    hub = get_thread_event_hub(request)
+    user_id = await get_current_user(request)
+
+    async def event_consumer():
+        async with hub.subscribe(thread_id, user_id) as queue:
+            yield format_sse("ready", {"thread_id": thread_id})
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is None:
+                    return
+                yield format_sse(item.event, item.data, event_id=item.id)
+
+    return StreamingResponse(
+        event_consumer(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{thread_id}/messages")
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages(
@@ -396,6 +470,12 @@ async def list_run_messages(
     Response: { data: [...], has_more: bool }
     """
     event_store = get_run_event_store(request)
+    run_mgr = getattr(request.app.state, "run_manager", None)
+    run_source = None
+    if run_mgr is not None:
+        user_id = await get_current_user(request)
+        record = await run_mgr.get(run_id, user_id=user_id)
+        run_source = record.metadata.get("source") if record is not None else None
     rows = await event_store.list_messages_by_run(
         thread_id,
         run_id,
@@ -404,6 +484,11 @@ async def list_run_messages(
         after_seq=after_seq,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+    if run_source:
+        for row in data:
+            metadata = row.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata.setdefault("source", run_source)
     return {"data": data, "has_more": has_more}
 
 

@@ -74,6 +74,7 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.thread_events import ThreadEventHub
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -260,6 +261,7 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_thread_event_hub: Callable[[Request], ThreadEventHub] = _require("thread_event_hub", "Thread event hub")
 
 
 def get_store(request: Request):

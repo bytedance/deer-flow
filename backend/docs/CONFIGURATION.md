@@ -241,6 +241,7 @@ tools:
 - `write_file` - Write file contents
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
+- `schedule_task` - Create one-time scheduled conversation runs when the scheduler is enabled
 
 ### Sandbox
 
@@ -302,6 +303,23 @@ sandbox:
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
+### Scheduler
+
+Enable conversation-created one-time scheduled runs:
+
+```yaml
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5.0
+  max_concurrent_runs: 2
+  claim_ttl_seconds: 300
+  misfire_grace_time_seconds: 300
+```
+
+The scheduler is disabled by default. When enabled, Gateway starts a local polling service that executes due `schedule_task` entries in their original conversation thread. Scheduled tasks require `database.backend` to be `sqlite` or `postgres`; memory persistence is rejected because it cannot survive Gateway restarts.
+
+The first scheduler implementation supports one-time tasks only. Recurring schedules should be modeled in a later feature.
 
 ### Skills
 

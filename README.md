@@ -339,6 +339,22 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+#### Scheduled Runs
+
+DeerFlow can let the lead agent create one-time scheduled tasks from a conversation with the built-in `schedule_task` tool. Enable the Gateway scheduler when you want prompts such as "tomorrow at 18:00 run the backup check" to persist a task and run it later in the same thread.
+
+Scheduled runs require `database.backend` to be `sqlite` or `postgres`; `memory` persistence is rejected because tasks would be lost on restart. The first implementation supports one-time tasks only.
+When a Web-created scheduled run completes, the Gateway emits a thread-scoped SSE invalidation event so an open conversation can refresh its run history and show the new assistant message.
+
+```yaml
+scheduler:
+  enabled: true
+  poll_interval_seconds: 5.0
+  max_concurrent_runs: 2
+  claim_ttl_seconds: 300
+  misfire_grace_time_seconds: 300
+```
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
@@ -595,6 +611,8 @@ Users can explicitly activate an enabled skill for a single turn by starting the
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+
+The lead agent also includes a `schedule_task` tool for one-time scheduled runs when the Gateway scheduler is enabled. The model converts the user's natural-language time into an ISO-8601 datetime; DeerFlow persists the task, runs it later in the same thread, and sends a channel notification when the task originated from an IM integration.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 

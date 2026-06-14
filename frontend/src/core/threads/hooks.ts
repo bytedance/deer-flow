@@ -153,6 +153,30 @@ type RunMessagesPageResponse = {
   hasMore?: boolean;
 };
 
+type ThreadEventPayload = {
+  run_id?: string | null;
+  status?: string;
+  thread_id?: string;
+  type?: string;
+};
+
+function isDisplayableRunMessage(message: RunMessage) {
+  if (message.metadata.caller?.startsWith("middleware:")) {
+    return false;
+  }
+  if (
+    message.metadata.source === "scheduled_task" &&
+    message.content.type === "human"
+  ) {
+    return false;
+  }
+  return !isHiddenFromUIMessage(message.content);
+}
+
+function isDisplayableScheduledRunMessage(message: RunMessage) {
+  return isDisplayableRunMessage(message) && message.content.type === "ai";
+}
+
 export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
   return result.has_more ?? result.hasMore ?? false;
 }
@@ -193,6 +217,16 @@ export function buildRunMessagesUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
+}
+
+export function buildThreadEventsUrl(baseUrl: string, threadId: string) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+  const path = `/api/threads/${encodeURIComponent(threadId)}/events`;
+  const url = new URL(
+    `${normalizedBaseUrl}${path}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -421,6 +455,7 @@ export function useThreadStream({
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
+  const [backgroundMessages, setBackgroundMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
@@ -494,6 +529,94 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+
+  useEffect(() => {
+    if (isMock || !onStreamThreadId || typeof window === "undefined") {
+      return;
+    }
+
+    const subscribedThreadId = onStreamThreadId;
+    const source = new EventSource(
+      buildThreadEventsUrl(getBackendBaseURL(), subscribedThreadId),
+      { withCredentials: true },
+    );
+
+    const refreshThreadHistory = () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", subscribedThreadId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: threadTokenUsageQueryKey(subscribedThreadId),
+      });
+    };
+
+    const fetchRunMessages = async (runId: string) => {
+      const url = buildRunMessagesUrl(
+        getBackendBaseURL(),
+        subscribedThreadId,
+        runId,
+      );
+      const result: RunMessagesPageResponse = await fetch(url, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }).then((res) => res.json());
+      const messages = result.data
+        .filter(isDisplayableScheduledRunMessage)
+        .map((m) => m.content);
+      if (messages.length > 0) {
+        setBackgroundMessages((prev) =>
+          dedupeMessagesByIdentity([...prev, ...messages]),
+        );
+      }
+    };
+
+    const handleScheduledRunEvent = (event: MessageEvent<string>) => {
+      refreshThreadHistory();
+      let payload: ThreadEventPayload | null = null;
+      try {
+        payload = JSON.parse(event.data) as ThreadEventPayload;
+      } catch {
+        payload = null;
+      }
+      const runId = payload?.run_id;
+      if (typeof runId === "string" && runId.length > 0) {
+        void fetchRunMessages(runId).catch((error: unknown) => {
+          console.warn("[deer-flow] Failed to load scheduled run messages", error);
+        });
+      }
+    };
+
+    source.addEventListener("ready", refreshThreadHistory);
+    source.addEventListener("scheduled_run_completed", handleScheduledRunEvent);
+    source.addEventListener("scheduled_run_failed", handleScheduledRunEvent);
+    source.addEventListener("scheduled_run_missed", handleScheduledRunEvent);
+
+    source.onerror = () => {
+      if (source.readyState === EventSource.CLOSED) {
+        return;
+      }
+      console.warn(
+        `[deer-flow] Thread event stream interrupted for ${subscribedThreadId}; browser will retry.`,
+      );
+    };
+
+    return () => {
+      source.removeEventListener("ready", refreshThreadHistory);
+      source.removeEventListener(
+        "scheduled_run_completed",
+        handleScheduledRunEvent,
+      );
+      source.removeEventListener("scheduled_run_failed", handleScheduledRunEvent);
+      source.removeEventListener("scheduled_run_missed", handleScheduledRunEvent);
+      source.close();
+    };
+  }, [isMock, onStreamThreadId, queryClient]);
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
@@ -722,6 +845,7 @@ export function useThreadStream({
     sendInFlightRef.current = false;
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
+    setBackgroundMessages([]);
     pendingUsageBaselineMessageIdsRef.current = new Set();
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
@@ -994,11 +1118,23 @@ export function useThreadStream({
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
+  const visibleMessageIds = new Set(
+    [...visibleHistory, ...persistedMessages]
+      .map(messageIdentity)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const pendingBackgroundMessages = backgroundMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    return !identity || !visibleMessageIds.has(identity);
+  });
 
   const mergedMessages = mergeMessages(
     visibleHistory,
     persistedMessages,
-    visibleOptimisticMessages,
+    dedupeMessagesByIdentity([
+      ...pendingBackgroundMessages,
+      ...visibleOptimisticMessages,
+    ]),
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
@@ -1112,7 +1248,7 @@ export function useThreadHistory(
           return;
         }
         const _messages = result.data
-          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
+          .filter(isDisplayableRunMessage)
           .map((m) => m.content);
         setMessages((prev) =>
           dedupeMessagesByIdentity([..._messages, ...prev]),

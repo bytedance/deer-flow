@@ -29,6 +29,7 @@ export interface RunMessage {
   content: Message;
   metadata: {
     caller: string;
+    source?: string;
   };
   created_at: string;
 }
