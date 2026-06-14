@@ -170,6 +170,41 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
     assert config.tool_groups == []
 
 
+def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch):
+    """Commenting out every entry under an object key makes PyYAML parse it as None.
+
+    Same documented ``cp config.example.yaml config.yaml`` flow as the list
+    sections: object sections (memory, summarization, ...) must fall back to
+    their defaults instead of raising ``Input should be a valid dictionary``.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "memory": None,
+                "summarization": None,
+                "guardrails": None,
+                "tool_output": None,
+                "run_events": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    # Each present-but-null object section falls back to its default config.
+    assert config.memory is not None
+    assert config.summarization is not None
+    assert config.guardrails is not None
+    assert config.tool_output is not None
+    assert config.run_events is not None
+
+
 def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
