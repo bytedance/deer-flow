@@ -247,6 +247,26 @@ class TestChannelConnectionRepository:
         assert [state.state_hash for state in states] == [repo.hash_state("active-state")]
 
     @pytest.mark.anyio
+    async def test_count_oauth_states_active_only_and_delete_expired(self, repo):
+        now = datetime.now(UTC)
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="expired-state",
+            expires_at=now - timedelta(minutes=1),
+        )
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="active-state",
+            expires_at=now + timedelta(minutes=5),
+        )
+
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+        assert await repo.delete_expired_oauth_states(now=now) == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack") == 1
+
+    @pytest.mark.anyio
     async def test_consume_oauth_state_is_one_time_even_under_concurrent_consumers(self, repo):
         import anyio
 

@@ -313,7 +313,11 @@ class WeComChannel(Channel):
             msg_type=inbound_type,
             thread_ts=msg_id,
             files=files or [],
-            metadata={"aibotid": body.get("aibotid"), "chattype": body.get("chattype")},
+            metadata={
+                "aibotid": body.get("aibotid"),
+                "chattype": body.get("chattype"),
+                "message_id": msg_id,
+            },
         )
         inbound.topic_id = user_id  # keep the same thread
 

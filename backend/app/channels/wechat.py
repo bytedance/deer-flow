@@ -612,7 +612,8 @@ class WechatChannel(Channel):
             return
 
         context_token = str(raw_message.get("context_token") or "").strip()
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+        message_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or raw_message.get("client_id") or "").strip()
+        thread_ts = context_token or message_id or None
 
         if context_token:
             self._context_tokens_by_chat[chat_id] = context_token
@@ -639,6 +640,7 @@ class WechatChannel(Channel):
             metadata={
                 "context_token": context_token,
                 "ilink_user_id": chat_id,
+                "message_id": message_id,
                 "ref_msg": self._extract_ref_message(raw_message),
                 "raw_message": raw_message,
             },

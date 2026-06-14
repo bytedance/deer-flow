@@ -90,15 +90,8 @@ class SlackChannel(Channel):
         bot_token = self.config.get("bot_token", "")
         app_token = self.config.get("app_token", "")
 
-        if self._connection_repo is not None and self.config.get("event_delivery") == "http":
-            if not bot_token:
-                logger.error("Slack HTTP Events mode requires bot_token")
-                return
-            await self._initialize_operator_web_client(str(bot_token))
-            self._loop = asyncio.get_event_loop()
-            self._running = True
-            self.bus.subscribe_outbound(self._on_outbound)
-            logger.info("Slack channel started in HTTP Events mode")
+        if self.config.get("event_delivery") == "http":
+            logger.error("Slack HTTP Events mode is not supported by this channel adapter; use Socket Mode with app_token")
             return
 
         if not bot_token or not app_token:
@@ -354,6 +347,11 @@ class SlackChannel(Channel):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            metadata={
+                "team_id": team_id or event.get("team"),
+                "message_id": event.get("ts"),
+                "client_msg_id": event.get("client_msg_id"),
+            },
         )
         inbound.topic_id = thread_ts
 

@@ -55,6 +55,9 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
+INBOUND_DEDUPE_MAX_ENTRIES = 4096
+INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id", "client_msg_id", "client_id")
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -752,6 +755,7 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        self._recent_inbound_events: dict[tuple[str, str, str, str], float] = {}
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -898,14 +902,66 @@ class ChannelManager:
                 break
 
             logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text=%r",
+                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
                 msg.channel_name,
                 msg.chat_id,
                 msg.msg_type.value,
-                msg.text[:100] if msg.text else "",
+                len(msg.text or ""),
+                len(msg.files),
             )
+            if self._is_duplicate_inbound(msg):
+                continue
             task = asyncio.create_task(self._handle_message(msg))
             task.add_done_callback(self._log_task_error)
+
+    @staticmethod
+    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+        metadata = msg.metadata or {}
+        message_id = None
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = metadata.get(key)
+            if value:
+                message_id = str(value)
+                break
+        if message_id is None:
+            raw_message = metadata.get("raw_message")
+            if isinstance(raw_message, Mapping):
+                for key in INBOUND_DEDUPE_METADATA_KEYS:
+                    value = raw_message.get(key)
+                    if value:
+                        message_id = str(value)
+                        break
+        if message_id is None:
+            return None
+
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or ""
+        return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
+
+    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+        key = self._inbound_dedupe_key(msg)
+        if key is None:
+            return False
+
+        now = time.monotonic()
+        for seen_key, seen_at in list(self._recent_inbound_events.items()):
+            if now - seen_at > INBOUND_DEDUPE_TTL_SECONDS:
+                self._recent_inbound_events.pop(seen_key, None)
+        if len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
+            overflow = len(self._recent_inbound_events) - INBOUND_DEDUPE_MAX_ENTRIES
+            for seen_key in list(self._recent_inbound_events)[:overflow]:
+                self._recent_inbound_events.pop(seen_key, None)
+
+        if key in self._recent_inbound_events:
+            logger.info(
+                "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                key[-1],
+            )
+            return True
+
+        self._recent_inbound_events[key] = now
+        return False
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1060,7 +1116,7 @@ class ChannelManager:
             )
             return
 
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         run_kwargs: dict[str, Any] = {
             "input": {"messages": [human_message]},
             "config": run_config,
@@ -1127,7 +1183,7 @@ class ChannelManager:
         run_context: dict[str, Any],
         human_message: dict[str, Any],
     ) -> None:
-        logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        logger.info("[Manager] invoking runs.stream(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
 
         last_values: dict[str, Any] | list | None = None
         streamed_buffers: dict[str, str] = {}

@@ -389,12 +389,12 @@ class DingTalkChannel(Channel):
                 return
 
             logger.info(
-                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
+                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text_len=%d",
                 conversation_type,
                 msg_id,
                 sender_staff_id,
                 sender_nick,
-                text[:100],
+                len(text or ""),
             )
 
             connect_code = extract_connect_code(text)
