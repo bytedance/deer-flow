@@ -30,34 +30,40 @@ from deerflow.runtime.runs.partial_persist import (
     build_closure_tool_messages,
     closure_tool_message_id,
     find_open_tool_calls,
-    is_middleware_chunk,
+    is_non_lead_chunk,
     mark_partial,
     persist_partial_on_cancel,
 )
 
 # ---------------------------------------------------------------------------
-# is_middleware_chunk
+# is_non_lead_chunk
 # ---------------------------------------------------------------------------
 
 
-class TestIsMiddlewareChunk:
+class TestIsNonLeadChunk:
     def test_none_metadata(self):
-        assert is_middleware_chunk(None) is False
+        assert is_non_lead_chunk(None) is False
 
     def test_no_tags(self):
-        assert is_middleware_chunk({"langgraph_node": "agent"}) is False
+        assert is_non_lead_chunk({"langgraph_node": "agent"}) is False
 
     def test_lead_agent_tag(self):
-        assert is_middleware_chunk({"tags": ["lead_agent"]}) is False
+        assert is_non_lead_chunk({"tags": ["lead_agent"]}) is False
 
     def test_middleware_title_tag(self):
-        assert is_middleware_chunk({"tags": ["middleware:title"]}) is True
+        assert is_non_lead_chunk({"tags": ["middleware:title"]}) is True
 
     def test_middleware_anything_tag(self):
-        assert is_middleware_chunk({"tags": ["middleware:summarize"]}) is True
+        assert is_non_lead_chunk({"tags": ["middleware:summarize"]}) is True
 
     def test_mixed_tags_with_middleware(self):
-        assert is_middleware_chunk({"tags": ["lead_agent", "middleware:guardrail"]}) is True
+        assert is_non_lead_chunk({"tags": ["lead_agent", "middleware:guardrail"]}) is True
+
+    def test_subagent_tag(self):
+        assert is_non_lead_chunk({"tags": ["subagent:researcher"]}) is True
+
+    def test_mixed_tags_with_subagent(self):
+        assert is_non_lead_chunk({"tags": ["lead_agent", "subagent:researcher"]}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +115,11 @@ class TestPartialMessageAccumulator:
     def test_feed_middleware_skipped(self):
         acc = PartialMessageAccumulator()
         acc.feed(AIMessageChunk(id="m1", content="title"), {"tags": ["middleware:title"]})
+        assert acc.is_empty()
+
+    def test_feed_subagent_skipped(self):
+        acc = PartialMessageAccumulator()
+        acc.feed(AIMessageChunk(id="m1", content="subagent scratch"), {"tags": ["subagent:researcher"]})
         assert acc.is_empty()
 
     def test_finalize_skip_ids(self):
@@ -555,6 +566,29 @@ class TestPersistPartialOnCancel:
         assert "m1" in ids
         # Accumulator cleared after
         assert acc.is_empty()
+
+    async def test_subagent_tagged_partial_is_not_persisted(self):
+        acc = PartialMessageAccumulator()
+        acc.feed(AIMessageChunk(id="m_subagent", content="internal draft"), {"tags": ["subagent:researcher"]})
+
+        store = MemoryRunEventStore()
+        journal = RunJournal(run_id="r1", thread_id="t1", event_store=store)
+        cp = _make_checkpointer_mock(aget_return=_make_checkpoint_tuple([HumanMessage(id="h1", content="hi")]))
+
+        ok = await persist_partial_on_cancel(
+            accumulator=acc,
+            journal=journal,
+            checkpointer=cp,
+            thread_id="t1",
+            abort_action="interrupt",
+        )
+        assert ok is False
+        await journal.flush()
+
+        events = await store.list_messages_by_run("t1", "r1", limit=100)
+        ai_events = [e for e in events if e["event_type"] == "llm.ai.response"]
+        assert ai_events == []
+        cp.aput.assert_not_called()
 
     async def test_closes_open_tool_call(self):
         acc = PartialMessageAccumulator()

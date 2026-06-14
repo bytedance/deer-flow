@@ -52,6 +52,9 @@ PARTIAL_FINISH_REASON = "interrupted"
 CHECKPOINT_WRITE_SOURCE = "partial_persist"
 
 
+_NON_LEAD_TAG_PREFIXES = ("middleware:", "subagent:")
+
+
 def closure_tool_message_id(tool_call_id: str) -> str:
     """Derive a stable id for a synthetic closure ToolMessage.
 
@@ -62,20 +65,21 @@ def closure_tool_message_id(tool_call_id: str) -> str:
     return f"tm_interrupted_{tool_call_id}"
 
 
-def is_middleware_chunk(metadata: dict | None) -> bool:
-    """Return True when the stream chunk belongs to a middleware sub-call.
+def is_non_lead_chunk(metadata: dict | None) -> bool:
+    """Return True when the stream chunk belongs to a non-lead model call.
 
     LangChain tags middleware-driven model invocations with
-    ``middleware:<name>`` so they can be distinguished from the lead
-    agent's response. Such chunks must not be persisted as partial user-
-    visible messages — they would surface inside the chat history as
-    ghost replies (e.g. half-generated thread titles).
+    ``middleware:<name>`` and subagent invocations with ``subagent:<name>``
+    so they can be distinguished from the lead agent's response. Such
+    chunks must not be persisted as partial user-visible messages — they
+    would surface inside the chat history as ghost replies (e.g.
+    half-generated thread titles or subagent scratch output).
     """
     if not metadata:
         return False
     tags = metadata.get("tags") or ()
     for tag in tags:
-        if isinstance(tag, str) and tag.startswith("middleware:"):
+        if isinstance(tag, str) and tag.startswith(_NON_LEAD_TAG_PREFIXES):
             return True
     return False
 
@@ -89,8 +93,8 @@ class PartialMessageAccumulator:
     (covering Anthropic ``thinking`` blocks and reasoning content), merges
     ``tool_call_chunks`` by index, and sums ``usage_metadata``.
 
-    Middleware chunks (identified by ``middleware:*`` tags) are dropped
-    at feed time so they never end up persisted.
+    Non-lead chunks (identified by ``middleware:*`` or ``subagent:*`` tags)
+    are dropped at feed time so they never end up persisted.
     """
 
     def __init__(self) -> None:
@@ -102,11 +106,11 @@ class PartialMessageAccumulator:
         No-op when:
         - ``chunk`` is not an ``AIMessageChunk``
         - the chunk has no stable ``id``
-        - the chunk originated from a middleware sub-call
+        - the chunk originated from a non-lead sub-call
         """
         if not isinstance(chunk, AIMessageChunk):
             return
-        if is_middleware_chunk(metadata):
+        if is_non_lead_chunk(metadata):
             return
         msg_id = getattr(chunk, "id", None)
         if not msg_id:
