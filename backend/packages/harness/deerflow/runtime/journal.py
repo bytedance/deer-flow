@@ -82,6 +82,12 @@ class RunJournal(BaseCallbackHandler):
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
 
+        # Message ids already persisted by on_llm_end (a completed LLM call) and
+        # by record_interrupted_ai_messages (a cancelled-mid-stream partial), so
+        # an interrupt never re-writes a message that already reached the store.
+        self._completed_message_ids: set[str] = set()
+        self._partial_message_ids: set[str] = set()
+
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
@@ -261,6 +267,12 @@ class RunJournal(BaseCallbackHandler):
         for message in messages:
             caller = self._identify_caller(tags)
 
+            # Remember the id so an interrupt does not re-persist this message
+            # as a "partial" — on_llm_end means the call completed in full.
+            completed_id = getattr(message, "id", None)
+            if completed_id:
+                self._completed_message_ids.add(completed_id)
+
             # Latency
             rid = str(run_id)
             start = self._llm_start_times.pop(rid, None)
@@ -331,6 +343,55 @@ class RunJournal(BaseCallbackHandler):
 
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
+
+    def record_interrupted_ai_messages(self, chunks: Any) -> int:
+        """Persist partial AI answers from a cancelled-mid-stream run (#3403).
+
+        A user interrupt stops streaming before the in-flight LLM call finishes,
+        so ``on_llm_end`` — the only callback that writes an AI message event —
+        never fires for it. The partial text was already streamed to the UI but
+        would vanish on refresh because history is rebuilt from ``run_events``.
+
+        ``chunks`` are the accumulated ``AIMessageChunk`` objects the worker
+        merged from the ``messages`` stream. Each not-yet-persisted, non-empty
+        partial is written in the same ``llm.ai.response`` / ``category=message``
+        shape ``on_llm_end`` uses (so history rebuilds it identically), flagged
+        ``interrupted``. Returns the number of partials written.
+        """
+        from langchain_core.messages import AIMessage
+
+        written = 0
+        for chunk in chunks:
+            message_id = getattr(chunk, "id", None)
+            if message_id and (message_id in self._completed_message_ids or message_id in self._partial_message_ids):
+                continue
+
+            additional_kwargs = dict(getattr(chunk, "additional_kwargs", {}) or {})
+            content = getattr(chunk, "content", None) or ""
+            # Nothing the user actually saw — skip empty tool-call-only chunks.
+            if not content and not additional_kwargs.get("reasoning_content"):
+                continue
+
+            # Keep the user-visible text and reasoning; drop partial tool calls,
+            # whose arguments may be truncated mid-JSON and are not resumable.
+            message = AIMessage(
+                content=content,
+                id=message_id,
+                additional_kwargs=additional_kwargs,
+                response_metadata=dict(getattr(chunk, "response_metadata", {}) or {}),
+            )
+
+            if message_id:
+                self._partial_message_ids.add(message_id)
+            self._put(
+                event_type="llm.ai.response",
+                category="message",
+                content=message.model_dump(),
+                metadata={"caller": "lead_agent", "interrupted": True},
+            )
+            self._record_message_summary(message, caller="lead_agent")
+            written += 1
+        return written
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
