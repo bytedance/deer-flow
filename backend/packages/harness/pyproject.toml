@@ -24,6 +24,7 @@ dependencies = [
     "markitdown[all,xlsx]>=0.0.1a2",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
+    "requests>=2.28.0",
     "readabilipy>=0.3.0",
     "tavily-python>=0.7.17",
     "firecrawl-py>=1.15.0",
