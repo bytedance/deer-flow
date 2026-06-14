@@ -72,10 +72,14 @@ test("capListNesting leaves fenced code content untouched", () => {
   expect(capListNesting(input).split("\n")[1]).toBe(literal);
 });
 
-test("capListNesting leaves indented code blocks untouched", () => {
-  const literal = "    " + " ".repeat(400) + "deeply indented ascii art";
-  const input = `paragraph\n\n${literal}`;
-  expect(capListNesting(input).split("\n")[2]).toBe(literal);
+// Outside a fence, deep indentation is capped regardless of blank-line context:
+// we cannot tell an indented-code line from deeply nested list content (both can
+// follow a blank line), and exempting either reopens the crash — blank-separated
+// deep-indent lists otherwise blow up marked just like contiguous ones.
+test("capListNesting caps deep indentation even after a blank line", () => {
+  const input = `- a\n\n${" ".repeat(500)}- deep`;
+  const lines = capListNesting(input).split("\n");
+  expect(/^[ \t]*/.exec(lines[2]!)![0].length).toBe(200);
 });
 
 test("capListNesting only rewrites pathological lines", () => {

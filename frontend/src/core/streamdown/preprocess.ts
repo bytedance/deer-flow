@@ -73,34 +73,16 @@ export function capListNesting(markdown: string): string {
   }
 
   let insideFence = false;
-  // A markdown indented code block opens only after a blank line, so a deeply
-  // indented line that follows blank/code lines is literal code, not list
-  // nesting. We track that context with `afterBlank` so we exempt genuine
-  // indented code without also exempting (and thus failing to cap) the
-  // pathological deep-indent list lines this function guards against.
-  let afterBlank = false;
-  let insideIndentedCode = false;
   return markdown
     .split("\n")
     .map((line) => {
       if (CODE_FENCE_RE.test(line)) {
         insideFence = !insideFence;
-        afterBlank = false;
-        insideIndentedCode = false;
         return line;
       }
+      // Indentation inside fenced code is literal layout (ASCII art, pasted
+      // source); collapsing it would corrupt the rendered block.
       if (insideFence) {
-        return line;
-      }
-      const isBlank = line.trim() === "";
-      const isIndentedCodeLine =
-        INDENTED_CODE_RE.test(line) && (afterBlank || insideIndentedCode);
-      insideIndentedCode = isIndentedCodeLine;
-      afterBlank = isBlank;
-      // Indentation inside fenced or indented code is literal layout (ASCII
-      // art, pasted source); indented code can't create list nesting, and
-      // collapsing it would corrupt the rendered block.
-      if (isIndentedCodeLine) {
         return line;
       }
       const whitespace = /^[ \t]*/.exec(line)![0];
