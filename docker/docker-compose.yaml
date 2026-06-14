@@ -86,14 +86,15 @@ services:
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
       # DooD: the host Docker socket is NOT mounted by default. It is added only
       # for aio (pure-DooD) sandbox mode via the opt-in docker-compose.dood.yaml
-      # overlay (appended by scripts/deploy.sh). See SECURITY.md.
+      # overlay (appended by scripts/deploy.sh). See backend/docs/CONFIGURATION.md
+      # Security Note section for details.
        
       # CLI auth dirs (Claude Code / Codex) are NOT mounted by default: they
       # expose the entire ~/.claude and ~/.codex (history, projects, global
       # config, credentials) into the container. Mount them only when you use
       # the Claude/Codex CLI login as a model provider or ACP agent, via the
       # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
-      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / SECURITY.md).
+      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
       - CI=true
