@@ -35,6 +35,10 @@ export interface UserMemory {
       summary: string;
       updatedAt: string;
     };
+    cognitiveStyle: {
+      summary: string;
+      updatedAt: string;
+    };
   };
   history: {
     recentMonths: {

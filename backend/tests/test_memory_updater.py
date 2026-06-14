@@ -22,6 +22,7 @@ def _make_memory(facts: list[dict[str, object]] | None = None) -> dict[str, obje
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -37,6 +38,28 @@ def _memory_config(**overrides: object) -> MemoryConfig:
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def test_apply_updates_cognitive_style_section() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "user": {
+            "cognitiveStyle": {
+                "summary": "Prefers conclusions first, then details.",
+                "shouldUpdate": True,
+            }
+        }
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-cognitive")
+
+    assert result["user"]["cognitiveStyle"]["summary"] == "Prefers conclusions first, then details."
+    assert result["user"]["cognitiveStyle"]["updatedAt"]
 
 
 def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None:
@@ -340,6 +363,37 @@ def test_import_memory_data_saves_and_returns_imported_memory() -> None:
     mock_storage.save.assert_called_once_with(imported_memory, None, user_id=None)
     mock_storage.load.assert_called_once_with(None, user_id=None)
     assert result == imported_memory
+
+
+def test_import_memory_data_returns_normalized_legacy_without_cognitive_style() -> None:
+    """Backend import reloads via storage.load(), which normalizes legacy payloads."""
+    legacy = {
+        "version": "1.0",
+        "lastUpdated": "2026-01-01T00:00:00Z",
+        "user": {
+            "workContext": {"summary": "work", "updatedAt": "2026-01-01T00:00:00Z"},
+            "personalContext": {"summary": "", "updatedAt": ""},
+            "topOfMind": {"summary": "", "updatedAt": ""},
+        },
+        "history": {
+            "recentMonths": {"summary": "", "updatedAt": ""},
+            "earlierContext": {"summary": "", "updatedAt": ""},
+            "longTermBackground": {"summary": "", "updatedAt": ""},
+        },
+        "facts": [],
+    }
+    from deerflow.agents.memory.storage import normalize_memory_data
+
+    normalized = normalize_memory_data(legacy)
+    mock_storage = MagicMock()
+    mock_storage.save.return_value = True
+    mock_storage.load.return_value = normalized
+
+    with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
+        result = import_memory_data(legacy)
+
+    mock_storage.save.assert_called_once_with(legacy, None, user_id=None)
+    assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
 
 
 def test_update_memory_fact_updates_only_matching_fact() -> None:

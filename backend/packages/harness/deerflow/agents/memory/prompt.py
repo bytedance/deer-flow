@@ -58,6 +58,11 @@ Memory Section Guidelines:
   Example: Primary project work, parallel technical investigations, ongoing learning/tracking
   Include: Active implementation work, troubleshooting issues, market/research interests
   Note: This captures SEVERAL concurrent focus areas, not just one task
+- cognitiveStyle: How the user thinks and wants to collaborate (2-4 sentences)
+  Example: Prefers conclusions first vs. exploratory reasoning; concise vs. detailed;
+  risk tolerance; how they give feedback; decision style (data-driven vs. intuition)
+  This is higher-level than task skills — capture stable thinking and communication habits,
+  not one-off task steps.
 
 **History** (Temporal context - rich paragraphs):
 - recentMonths: Detailed summary of recent activities (4-6 sentences or 1-2 paragraphs)
@@ -79,6 +84,7 @@ Memory Section Guidelines:
   * knowledge: Specific expertise, technologies mastered, domain knowledge
   * context: Background facts (job title, projects, locations, languages)
   * behavior: Working patterns, communication habits, problem-solving approaches
+  * cognitive: Stable thinking habits (reasoning style, depth, structure preferences)
   * goal: Stated objectives, learning targets, project ambitions
   * correction: Explicit agent mistakes or user corrections, including the correct approach
 - Confidence levels:
@@ -91,6 +97,7 @@ Memory Section Guidelines:
 - personalContext: Languages, personality, interests outside direct work tasks
 - topOfMind: Multiple ongoing priorities and focus areas user cares about recently (gets updated most frequently)
   Should capture 3-5 concurrent themes: main work, side explorations, learning/tracking interests
+- cognitiveStyle: Stable thinking and collaboration habits (update when clear new signals appear)
 - recentMonths: Detailed account of recent technical explorations and work
 - earlierContext: Patterns from slightly older interactions still relevant
 - longTermBackground: Unchanging foundational facts about the user
@@ -105,7 +112,8 @@ Output Format (JSON):
   "user": {{
     "workContext": {{ "summary": "...", "shouldUpdate": true/false }},
     "personalContext": {{ "summary": "...", "shouldUpdate": true/false }},
-    "topOfMind": {{ "summary": "...", "shouldUpdate": true/false }}
+    "topOfMind": {{ "summary": "...", "shouldUpdate": true/false }},
+    "cognitiveStyle": {{ "summary": "...", "shouldUpdate": true/false }}
   }},
   "history": {{
     "recentMonths": {{ "summary": "...", "shouldUpdate": true/false }},
@@ -113,7 +121,7 @@ Output Format (JSON):
     "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
   }},
   "newFacts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|cognitive|goal|correction", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"]
 }}
@@ -147,7 +155,7 @@ Message:
 Extract facts in this JSON format:
 {{
   "facts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|cognitive|goal|correction", "confidence": 0.0-1.0 }}
   ]
 }}
 
@@ -156,6 +164,7 @@ Categories:
 - knowledge: User's expertise or knowledge areas
 - context: Background context (location, job, projects)
 - behavior: Behavioral patterns
+- cognitive: Stable thinking and collaboration habits (reasoning style, depth, structure)
 - goal: User's goals or objectives
 - correction: Explicit corrections or mistakes to avoid repeating
 
@@ -350,6 +359,10 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         top_of_mind = user_data.get("topOfMind", {})
         if top_of_mind.get("summary"):
             user_sections.append(f"Current Focus: {top_of_mind['summary']}")
+
+        cognitive_style = user_data.get("cognitiveStyle", {})
+        if isinstance(cognitive_style, dict) and cognitive_style.get("summary"):
+            user_sections.append(f"Thinking Style: {cognitive_style['summary']}")
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))

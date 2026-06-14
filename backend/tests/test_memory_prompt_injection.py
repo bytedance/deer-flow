@@ -156,6 +156,24 @@ def test_format_memory_renders_correction_without_source_error_normally() -> Non
     assert "avoid:" not in result
 
 
+def test_format_memory_includes_cognitive_style() -> None:
+    memory_data = {
+        "user": {
+            "cognitiveStyle": {
+                "summary": "Prefers conclusions first, then details.",
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        },
+        "history": {},
+        "facts": [],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Thinking Style:" in result
+    assert "Prefers conclusions first, then details." in result
+
+
 def test_format_memory_includes_long_term_background() -> None:
     """longTermBackground in history must be injected into the prompt."""
     memory_data = {

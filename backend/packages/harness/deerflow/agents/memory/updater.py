@@ -618,7 +618,7 @@ class MemoryUpdater:
 
         # Update user sections
         user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
+        for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
             if section_data.get("shouldUpdate") and section_data.get("summary"):
                 current_memory["user"][section] = {

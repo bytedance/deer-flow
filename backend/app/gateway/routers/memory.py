@@ -31,6 +31,10 @@ class UserContext(BaseModel):
     workContext: ContextSection = Field(default_factory=ContextSection)
     personalContext: ContextSection = Field(default_factory=ContextSection)
     topOfMind: ContextSection = Field(default_factory=ContextSection)
+    cognitiveStyle: ContextSection = Field(
+        default_factory=ContextSection,
+        description="Stable thinking and collaboration habits (reasoning style, depth, feedback patterns)",
+    )
 
 
 class HistoryContext(BaseModel):

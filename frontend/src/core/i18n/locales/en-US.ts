@@ -456,6 +456,7 @@ export const enUS: Translations = {
         work: "Work",
         personal: "Personal",
         topOfMind: "Top of mind",
+        cognitiveStyle: "Thinking style",
         historyBackground: "History",
         recentMonths: "Recent months",
         earlierContext: "Earlier context",
