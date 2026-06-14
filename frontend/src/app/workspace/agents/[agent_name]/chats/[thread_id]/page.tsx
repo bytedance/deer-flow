@@ -25,7 +25,11 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import {
+  useThreadMetadata,
+  useThreadStream,
+  useThreadTokenUsage,
+} from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -54,6 +58,10 @@ export default function AgentChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadMetadata = useThreadMetadata(threadId, {
+    enabled: !isNewThread && !isMock,
+    isMock,
+  });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
@@ -105,6 +113,34 @@ export default function AgentChatPage() {
       }
     },
   });
+
+  const hasThreadMessages = thread.messages.length > 0;
+
+  useEffect(() => {
+    if (
+      !isNewThread &&
+      !isMock &&
+      threadMetadata.data === null &&
+      !threadMetadata.isLoading &&
+      !threadMetadata.isFetching &&
+      !isHistoryLoading &&
+      !hasMoreHistory &&
+      !hasThreadMessages
+    ) {
+      router.replace(`/workspace/agents/${agent_name}/chats/new`);
+    }
+  }, [
+    agent_name,
+    hasMoreHistory,
+    hasThreadMessages,
+    isHistoryLoading,
+    isMock,
+    isNewThread,
+    router,
+    threadMetadata.data,
+    threadMetadata.isFetching,
+    threadMetadata.isLoading,
+  ]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {

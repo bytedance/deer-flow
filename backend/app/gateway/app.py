@@ -16,6 +16,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     auth,
+    channel_connections,
     channels,
     feedback,
     mcp,
@@ -383,6 +384,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # User-facing IM channel connection API is mounted at /api/channels
+    app.include_router(channel_connections.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

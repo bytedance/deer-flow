@@ -23,7 +23,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
+from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -192,7 +192,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
             if checkpoint_tuple is not None:
                 checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
                 channel_values = checkpoint.get("channel_values", {})
-                return serialize_channel_values(channel_values)
+                return serialize_channel_values_for_api(channel_values)
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 

@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -130,6 +130,17 @@ tools:
 High-quality search with structured results. Requires a [Tavily](https://tavily.com) API key.
 
 Install: `cd backend && uv add 'deerflow-harness[tavily]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:web_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Results from Brave's independent index via the official [Brave Search API](https://brave.com/search/api/). Requires an API key. `max_results` is capped at 20.
+
+No extra dependency required.
 
   </Tabs.Tab>
   <Tabs.Tab>

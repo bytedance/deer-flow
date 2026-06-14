@@ -33,3 +33,18 @@ def test_internal_auth_generates_process_local_fallback(monkeypatch):
         assert reloaded.is_valid_internal_auth_token(token) is True
     finally:
         importlib.reload(reloaded)
+
+
+def test_internal_auth_headers_can_carry_owner_user_id(monkeypatch):
+    import app.gateway.internal_auth as internal_auth
+
+    monkeypatch.setenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", "shared-token")
+    reloaded = importlib.reload(internal_auth)
+    try:
+        headers = reloaded.create_internal_auth_headers(owner_user_id="owner-1")
+
+        assert headers[reloaded.INTERNAL_AUTH_HEADER_NAME] == "shared-token"
+        assert headers[reloaded.INTERNAL_OWNER_USER_ID_HEADER_NAME] == "owner-1"
+    finally:
+        monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", raising=False)
+        importlib.reload(reloaded)

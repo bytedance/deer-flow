@@ -95,6 +95,16 @@ DEERFLOW_ROOTS="$(
 # the ".../deer-flow" root.
 _is_deerflow_pid() {
     local pid=$1 files root
+
+    # Daemon children inherit DEERFLOW_DAEMON_ROOT from run_service. Checking
+    # it (Linux only — macOS has no /proc) identifies processes like
+    # next-server that lsof misses, so the name/port reaps in stop_all can
+    # claim them.
+    if [ -r "/proc/$pid/environ" ] &&
+        tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fxq "DEERFLOW_DAEMON_ROOT=$REPO_ROOT"; then
+        return 0
+    fi
+
     files=$(lsof -p "$pid" 2>/dev/null) || return 1
     while IFS= read -r root; do
         [ -n "$root" ] || continue
@@ -423,7 +433,10 @@ run_service() {
 
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        nohup sh -c "$cmd" > /dev/null 2>&1 &
+        # Tag the daemon so every descendant (pnpm → next → next-server)
+        # carries DEERFLOW_DAEMON_ROOT in its environment, letting
+        # _is_deerflow_pid recognize it at stop time.
+        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
     else
         sh -c "$cmd" &
     fi

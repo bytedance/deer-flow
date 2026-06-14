@@ -170,6 +170,7 @@ export const enUS: Translations = {
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
+    channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
@@ -257,6 +258,39 @@ export const enUS: Translations = {
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+  },
+
+  // Channels
+  channels: {
+    title: "Channels",
+    connect: "Connect",
+    modify: "Modify",
+    reconnect: "Reconnect",
+    disconnect: "Disconnect",
+    connected: "Connected",
+    notConnected: "Not connected",
+    pending: "Pending",
+    revoked: "Disconnected",
+    disabled: "Disabled",
+    unconfigured: "Not configured",
+    unavailable: "Channel connections are unavailable right now.",
+    unavailableShort: "Unavailable",
+    setupTitle: (name: string) => `Connect ${name}`,
+    setupEditTitle: (name: string) => `Modify ${name}`,
+    setupDescription:
+      "Enter the values needed by this server process. They are not written to config.yaml.",
+    saveAndConnect: "Save and connect",
+    saveChanges: "Save changes",
+    descriptions: {
+      telegram: "Telegram direct messages through your DeerFlow bot.",
+      slack: "Slack workspace messages and mentions.",
+      discord: "Discord server messages through your DeerFlow bot.",
+      feishu: "Feishu and Lark messages through your DeerFlow app.",
+      dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
+      wechat: "WeChat iLink messages through your DeerFlow bot.",
+      wecom: "WeCom messages through your DeerFlow AI bot.",
+    },
+    connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
@@ -359,6 +393,7 @@ export const enUS: Translations = {
     sections: {
       account: "Account",
       appearance: "Appearance",
+      channels: "Channels",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -460,6 +495,15 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      adminRequired: "Admin privileges are required to manage MCP tools.",
+      empty: "No MCP tools configured.",
+    },
+    channels: {
+      title: "Channels",
+      description:
+        "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
+      disabled:
+        "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
     skills: {
       title: "Agent Skills",

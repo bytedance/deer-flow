@@ -164,6 +164,7 @@ export const zhCN: Translations = {
   sidebar: {
     newChat: "新对话",
     chats: "对话",
+    channels: "渠道",
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
@@ -245,6 +246,39 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+  },
+
+  // Channels
+  channels: {
+    title: "渠道",
+    connect: "连接",
+    modify: "修改",
+    reconnect: "重新连接",
+    disconnect: "断开连接",
+    connected: "已连接",
+    notConnected: "未连接",
+    pending: "待完成",
+    revoked: "已断开",
+    disabled: "已停用",
+    unconfigured: "未配置",
+    unavailable: "当前无法使用渠道连接。",
+    unavailableShort: "不可用",
+    setupTitle: (name: string) => `连接 ${name}`,
+    setupEditTitle: (name: string) => `修改 ${name}`,
+    setupDescription:
+      "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
+    saveAndConnect: "保存并连接",
+    saveChanges: "保存修改",
+    descriptions: {
+      telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
+      slack: "接收 Slack 工作区消息和提及。",
+      discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
+      feishu: "通过 DeerFlow 应用接收飞书和 Lark 消息。",
+      dingtalk: "通过 DeerFlow Bot 接收钉钉 Stream Push 消息。",
+      wechat: "通过 DeerFlow Bot 接收微信 iLink 消息。",
+      wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
+    },
+    connectedAs: (name: string) => `已连接为 ${name}。`,
   },
 
   // Page titles (document title)
@@ -343,6 +377,7 @@ export const zhCN: Translations = {
     sections: {
       account: "账号",
       appearance: "外观",
+      channels: "渠道",
       memory: "记忆",
       tools: "工具",
       skills: "技能",
@@ -441,6 +476,14 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      adminRequired: "需要管理员权限才能管理 MCP 工具。",
+      empty: "暂无 MCP 工具。",
+    },
+    channels: {
+      title: "渠道",
+      description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
+      disabled:
+        "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
     skills: {
       title: "技能",

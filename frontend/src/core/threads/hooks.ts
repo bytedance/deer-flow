@@ -26,6 +26,11 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import {
+  buildThreadsSearchQueryOptions,
+  DEFAULT_THREAD_SEARCH_PARAMS,
+  type ThreadSearchParams,
+} from "./thread-search-query";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -392,6 +397,34 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+function getHttpStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+
+  const status = Reflect.get(error, "status");
+  if (typeof status === "number") {
+    return status;
+  }
+
+  const response = Reflect.get(error, "response");
+  if (typeof response === "object" && response !== null) {
+    const responseStatus = Reflect.get(response, "status");
+    if (typeof responseStatus === "number") {
+      return responseStatus;
+    }
+  }
+
+  return undefined;
+}
+
+function isThreadMissingError(error: unknown): boolean {
+  const status = getHttpStatus(error);
+  // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
+  // exists; callers redirect stale/inaccessible URLs back to a blank chat.
+  return status === 403 || status === 404;
 }
 
 export function useThreadStream({
@@ -1188,12 +1221,22 @@ export function useThreadHistory(
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
+  const hasThreadId = Boolean(threadId);
+  const hasUnloadedRuns = Boolean(
+    runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
+  );
+  const isRunsLoading =
+    enabled &&
+    hasThreadId &&
+    (runs.isLoading || (runs.isFetching && !runs.data));
+  const isRunsUnresolved =
+    enabled && hasThreadId && !runs.data && !runs.isError;
   const hasMore =
-    enabled && Boolean(threadId) && (indexRef.current >= 0 || !runs.data);
+    enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
   return {
     runs: runs.data,
     messages,
-    loading,
+    loading: loading || isRunsLoading || isRunsUnresolved,
     appendMessages,
     hasMore,
     loadMore: loadMessages,
@@ -1201,69 +1244,11 @@ export function useThreadHistory(
 }
 
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
-    limit: 50,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "metadata"],
-  },
+  params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params],
-    queryFn: async () => {
-      const maxResults = params.limit;
-      const initialOffset = params.offset ?? 0;
-      const DEFAULT_PAGE_SIZE = 50;
-
-      // Preserve prior semantics: if a non-positive limit is explicitly provided,
-      // delegate to a single search call with the original parameters.
-      if (maxResults !== undefined && maxResults <= 0) {
-        const response =
-          await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
-      }
-
-      const pageSize =
-        typeof maxResults === "number" && maxResults > 0
-          ? Math.min(DEFAULT_PAGE_SIZE, maxResults)
-          : DEFAULT_PAGE_SIZE;
-
-      const threads: AgentThread[] = [];
-      let offset = initialOffset;
-
-      while (true) {
-        if (typeof maxResults === "number" && threads.length >= maxResults) {
-          break;
-        }
-
-        const currentLimit =
-          typeof maxResults === "number"
-            ? Math.min(pageSize, maxResults - threads.length)
-            : pageSize;
-
-        if (typeof maxResults === "number" && currentLimit <= 0) {
-          break;
-        }
-
-        const response = (await apiClient.threads.search<AgentThreadState>({
-          ...params,
-          limit: currentLimit,
-          offset,
-        })) as AgentThread[];
-
-        threads.push(...response);
-
-        if (response.length < currentLimit) {
-          break;
-        }
-
-        offset += response.length;
-      }
-
-      return threads;
-    },
-    refetchOnWindowFocus: false,
+    ...buildThreadsSearchQueryOptions(apiClient, params),
   });
 }
 
@@ -1366,6 +1351,36 @@ export function useThreadRuns(
   });
 }
 
+export function useThreadMetadata(
+  threadId?: string | null,
+  {
+    enabled = true,
+    isMock = false,
+  }: { enabled?: boolean; isMock?: boolean } = {},
+) {
+  const apiClient = getAPIClient(isMock);
+  return useQuery<AgentThread | null>({
+    queryKey: ["thread", "metadata", threadId, isMock],
+    queryFn: async () => {
+      if (!threadId) {
+        return null;
+      }
+      try {
+        const response = await apiClient.threads.get(threadId);
+        return response as AgentThread;
+      } catch (error) {
+        if (isThreadMissingError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadTokenUsage(
   threadId?: string | null,
   { enabled = true }: { enabled?: boolean } = {},
@@ -1400,8 +1415,15 @@ export function useDeleteThread() {
   const queryClient = useQueryClient();
   const apiClient = getAPIClient();
   return useMutation({
-    mutationFn: async ({ threadId }: { threadId: string }) => {
+    mutationFn: async ({
+      threadId,
+      onRemoteDeleted,
+    }: {
+      threadId: string;
+      onRemoteDeleted?: () => void;
+    }) => {
       await apiClient.threads.delete(threadId);
+      onRemoteDeleted?.();
 
       const response = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,

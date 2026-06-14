@@ -44,6 +44,12 @@ class InboundMessage:
             Messages sharing the same ``topic_id`` within a ``chat_id`` will
             reuse the same DeerFlow thread.  When ``None``, each message
             creates a new thread (one-shot Q&A).
+        connection_id: Optional DeerFlow channel connection id. When present,
+            conversation mapping is scoped by the connection instead of the
+            legacy global ``channel_name:chat_id[:topic_id]`` key.
+        owner_user_id: DeerFlow user id that owns the channel connection.
+            Platform user ids stay in ``user_id``.
+        workspace_id: Optional external workspace/guild/team id.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -56,6 +62,9 @@ class InboundMessage:
     msg_type: InboundMessageType = InboundMessageType.CHAT
     thread_ts: str | None = None
     topic_id: str | None = None
+    connection_id: str | None = None
+    owner_user_id: str | None = None
+    workspace_id: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -95,6 +104,9 @@ class OutboundMessage:
         is_final: Whether this is the final message in the response stream.
         thread_ts: Optional platform thread identifier for threaded replies.
         metadata: Arbitrary extra data.
+        connection_id: Optional DeerFlow channel connection id used for
+            connection-specific outbound credentials.
+        owner_user_id: DeerFlow user id that owns the channel connection.
         created_at: Unix timestamp.
     """
 
@@ -106,6 +118,8 @@ class OutboundMessage:
     attachments: list[ResolvedAttachment] = field(default_factory=list)
     is_final: bool = True
     thread_ts: str | None = None
+    connection_id: str | None = None
+    owner_user_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
