@@ -1,5 +1,6 @@
 """Upload router for handling file uploads."""
 
+import asyncio
 import logging
 import os
 import stat
@@ -163,6 +164,28 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
+def _finalize_uploads_for_sandbox(
+    written_paths: list,
+    sandbox_sync_targets: list,
+    sandbox,
+    sync_to_sandbox: bool,
+) -> None:
+    """Grant sandbox-readable perms and optionally sync files into the sandbox.
+
+    Uploaded files are created 0o600; in Docker sandbox mode the sandbox process
+    runs as a non-root user and needs group/other read bits, and (when not
+    bind-mounted) the bytes must be pushed via ``sandbox.update_file``. The
+    ``lstat``/``chmod``, the ``read_bytes``, and the sandbox write are all
+    blocking filesystem IO, so the caller runs this whole step in a worker thread.
+    """
+    for file_path in written_paths:
+        _make_file_sandbox_readable(file_path)
+    if sync_to_sandbox:
+        for file_path, virtual_path in sandbox_sync_targets:
+            _make_file_sandbox_writable(file_path)
+            sandbox.update_file(virtual_path, file_path.read_bytes())
+
+
 async def _write_upload_file_with_limits(
     file: UploadFile,
     *,
@@ -173,7 +196,10 @@ async def _write_upload_file_with_limits(
     total_size: int,
 ) -> tuple[os.PathLike[str] | str, int, int]:
     file_size = 0
-    file_path, fh = open_upload_file_no_symlink(uploads_dir, display_filename)
+    # Open / per-chunk write / close / unlink are blocking filesystem IO and must
+    # stay off the event loop; the chunk read is genuinely async (UploadFile) and
+    # stays on the loop, so the size-limit checks still short-circuit mid-stream.
+    file_path, fh = await asyncio.to_thread(open_upload_file_no_symlink, uploads_dir, display_filename)
     try:
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
@@ -182,16 +208,16 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
             if total_size > max_total_size:
                 raise HTTPException(status_code=413, detail="Total upload size too large")
-            fh.write(chunk)
+            await asyncio.to_thread(fh.write, chunk)
     except Exception:
-        fh.close()
+        await asyncio.to_thread(fh.close)
         try:
-            os.unlink(file_path)
+            await asyncio.to_thread(os.unlink, file_path)
         except FileNotFoundError:
             pass
         raise
     else:
-        fh.close()
+        await asyncio.to_thread(fh.close)
     return file_path, file_size, total_size
 
 
@@ -308,7 +334,7 @@ async def upload_files(
             uploaded_files.append(file_info)
 
         except HTTPException as e:
-            _cleanup_uploaded_paths(written_paths)
+            await asyncio.to_thread(_cleanup_uploaded_paths, written_paths)
             raise e
         except UnsafeUploadPathError as e:
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -316,23 +342,13 @@ async def upload_files(
             continue
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
-            _cleanup_uploaded_paths(written_paths)
+            await asyncio.to_thread(_cleanup_uploaded_paths, written_paths)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    for file_path in written_paths:
-        _make_file_sandbox_readable(file_path)
-
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            _make_file_sandbox_writable(file_path)
-            sandbox.update_file(virtual_path, file_path.read_bytes())
+    # Grant sandbox-readable perms and (optionally) push bytes into the sandbox.
+    # All of this is blocking filesystem IO, so run it in a worker thread; see
+    # _finalize_uploads_for_sandbox for why the read bits / byte sync are needed.
+    await asyncio.to_thread(_finalize_uploads_for_sandbox, written_paths, sandbox_sync_targets, sandbox, sync_to_sandbox)
 
     message = f"Successfully uploaded {len(uploaded_files)} file(s)"
     if skipped_files:
