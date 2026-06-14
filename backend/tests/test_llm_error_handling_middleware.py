@@ -131,6 +131,20 @@ def test_async_model_call_retries_incomplete_chunked_read_then_succeeds(
     assert waits == [0.025]
 
 
+def test_project_read_error_name_without_http_module_is_not_transient() -> None:
+    middleware = _build_middleware()
+
+    class ReadError(Exception):
+        pass
+
+    ReadError.__module__ = "tests.project_errors"
+
+    retriable, reason = middleware._classify_error(ReadError("application validation failed"))
+
+    assert retriable is False
+    assert reason == "generic"
+
+
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = _build_middleware(
         retry_max_attempts=2,
@@ -351,7 +365,7 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     async def fake_sleep(d: float) -> None:
         waits.append(d)
 
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(SLEEP_PATCH_TARGET, fake_sleep)
 
     current_time = 1000.0
     monkeypatch.setattr("time.time", lambda: current_time)
