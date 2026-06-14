@@ -57,6 +57,7 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    MODELS_WRITE = "models:write"
 
 
 class AuthContext:
@@ -116,6 +117,7 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MODELS_WRITE,
 ]
 
 

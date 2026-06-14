@@ -23,6 +23,9 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
+    context_length: int | None = Field(default=None, description="Model context window size, when known")
+    modalities: list[str] = Field(default_factory=list, description="Model input/output modalities, when known")
+    system_prompt: str | None = Field(default=None, description="Optional UI-managed system prompt override")
     when_thinking_enabled: dict | None = Field(
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",
@@ -32,16 +35,6 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is disabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
-    stream_chunk_timeout: float | None = Field(
-        default=None,
-        description=(
-            "Maximum seconds to wait between successive streaming chunks before "
-            "langchain-openai raises StreamChunkTimeoutError. None means use the "
-            "factory default (240s for OpenAI-compatible clients). Tune higher for "
-            "reasoning models with long thinking pauses; lower for latency-sensitive "
-            "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
-        ),
-    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(
