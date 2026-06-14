@@ -377,7 +377,8 @@ class TestRegistryCustomAgentLookup:
         _reset_subagents_config()
         assert get_subagent_config("nonexistent") is None
 
-    def test_get_available_subagent_names_falls_back_when_subagents_app_config_lacks_sandbox(self, monkeypatch):
+    def test_get_available_subagent_names_passes_config_to_is_host_bash_allowed(self, monkeypatch):
+        """is_host_bash_allowed now always receives the app_config; fallback is internal."""
         from deerflow.subagents import registry as registry_module
         from deerflow.subagents.registry import get_available_subagent_names
 
@@ -389,9 +390,11 @@ class TestRegistryCustomAgentLookup:
 
         monkeypatch.setattr(registry_module, "is_host_bash_allowed", fake_is_host_bash_allowed)
 
-        get_available_subagent_names(app_config=SubagentsAppConfig())
+        sub_cfg = SubagentsAppConfig()
+        get_available_subagent_names(app_config=sub_cfg)
 
-        assert captured["args"] == ()
+        assert len(captured["args"]) == 1
+        assert captured["args"][0] is sub_cfg
 
     def test_builtin_takes_priority_over_custom(self):
         """If a custom agent has the same name as a builtin, builtin wins."""
