@@ -10,6 +10,7 @@ None and fall back to in-memory implementations.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -97,7 +98,11 @@ async def init_engine(
 
         from sqlalchemy import event
 
-        os.makedirs(sqlite_dir or ".", exist_ok=True)
+        # Offload the directory creation: ``init_engine`` runs on the FastAPI
+        # lifespan event loop, and a sync ``os.makedirs`` (a stat + mkdir
+        # syscall) blocks it during startup. Mirrors the #1912 fix for the
+        # checkpointer's ``ensure_sqlite_parent_dir``.
+        await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
         _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
