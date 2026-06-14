@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import yaml
 from wizard import ui as wizard_ui
-from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider
+from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
 from wizard.steps import channels as channels_step
 from wizard.steps import llm as llm_step
 from wizard.steps import search as search_step
@@ -368,6 +368,32 @@ class TestBuildMinimalConfig:
         assert all(not config["enabled"] for provider, config in channel_connections.items() if provider != "enabled")
 
 
+class TestThinkingSupport:
+    def test_other_provider_requests_thinking_prompt(self):
+        other = next(p for p in LLM_PROVIDERS if p.name == "other")
+        assert other.ask_thinking_support is True
+
+    def test_with_thinking_support_enabled_wires_toggles(self):
+        other = next(p for p in LLM_PROVIDERS if p.name == "other")
+        original = dict(other.extra_config)
+
+        updated = with_thinking_support(other, True)
+
+        assert updated.extra_config["supports_thinking"] is True
+        assert updated.extra_config["when_thinking_enabled"]["extra_body"]["thinking"]["type"] == "enabled"
+        assert updated.extra_config["when_thinking_disabled"]["extra_body"]["thinking"]["type"] == "disabled"
+        # The shared provider singleton must not be mutated.
+        assert other.extra_config == original
+
+    def test_with_thinking_support_disabled_marks_unsupported(self):
+        other = next(p for p in LLM_PROVIDERS if p.name == "other")
+
+        updated = with_thinking_support(other, False)
+
+        assert updated.extra_config["supports_thinking"] is False
+        assert "when_thinking_enabled" not in updated.extra_config
+
+
 class TestLLMStep:
     def test_model_selection_defaults_to_provider_default_model(self, monkeypatch):
         provider = LLMProvider(
@@ -422,6 +448,65 @@ class TestLLMStep:
         result = llm_step.run_llm_step()
 
         assert result.base_url == "https://gateway.example/v1"
+
+    def test_other_gateway_prompts_and_enables_thinking(self, monkeypatch):
+        provider = LLMProvider(
+            name="other",
+            display_name="Other OpenAI-compatible",
+            description="Custom gateway",
+            use="langchain_openai:ChatOpenAI",
+            models=["gpt-4o"],
+            default_model="gpt-4o",
+            env_var="OPENAI_API_KEY",
+            package="langchain-openai",
+            base_url_prompt="Base URL",
+            model_prompt="Model name",
+            ask_thinking_support=True,
+        )
+
+        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: "custom-thinking-model")
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
+        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        result = llm_step.run_llm_step()
+
+        assert result.model_name == "custom-thinking-model"
+        assert result.provider.extra_config["supports_thinking"] is True
+        assert result.provider.extra_config["when_thinking_enabled"]["extra_body"]["thinking"]["type"] == "enabled"
+
+    def test_other_gateway_declined_thinking_marks_unsupported(self, monkeypatch):
+        provider = LLMProvider(
+            name="other",
+            display_name="Other OpenAI-compatible",
+            description="Custom gateway",
+            use="langchain_openai:ChatOpenAI",
+            models=["gpt-4o"],
+            default_model="gpt-4o",
+            env_var="OPENAI_API_KEY",
+            package="langchain-openai",
+            base_url_prompt="Base URL",
+            model_prompt="Model name",
+            ask_thinking_support=True,
+        )
+
+        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: "plain-model")
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
+        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        result = llm_step.run_llm_step()
+
+        assert result.provider.extra_config["supports_thinking"] is False
+        assert "when_thinking_enabled" not in result.provider.extra_config
 
 
 class TestChannelsStep:
