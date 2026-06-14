@@ -77,7 +77,7 @@ async def test_scan_skill_content_passes_run_name_to_model(monkeypatch):
 
 @pytest.mark.anyio
 async def test_scan_skill_content_blocks_when_model_unavailable(monkeypatch):
-    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
+    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None, scanner_fail_open=False))
     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
     monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
@@ -139,3 +139,39 @@ async def test_scan_distinguishes_unparseable_executable(monkeypatch):
     # Even for executable content, unparseable uses the unparseable message
     assert result.decision == "block"
     assert "unparseable" in result.reason
+
+
+# --- scanner_fail_open tests ---
+
+
+def _make_unavailable_env(monkeypatch, *, fail_open: bool):
+    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None, scanner_fail_open=fail_open))
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("model down")))
+
+
+@pytest.mark.anyio
+async def test_fail_closed_blocks_non_executable_when_model_down(monkeypatch):
+    """Default fail-closed: non-executable content is blocked when model unavailable."""
+    _make_unavailable_env(monkeypatch, fail_open=False)
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "block"
+    assert "unavailable" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_open_warns_non_executable_when_model_down(monkeypatch):
+    """fail_open=True: non-executable content is warned (not blocked) when model unavailable."""
+    _make_unavailable_env(monkeypatch, fail_open=True)
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "warn"
+    assert "fail-open" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_open_still_blocks_executable_when_model_down(monkeypatch):
+    """fail_open=True still blocks executable content — executable is never allowed without scan."""
+    _make_unavailable_env(monkeypatch, fail_open=True)
+    result = await scan_skill_content(SKILL_CONTENT, executable=True)
+    assert result.decision == "block"
+    assert "unavailable" in result.reason
