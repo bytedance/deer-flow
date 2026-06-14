@@ -29,6 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.llm_io_trace_middleware import LLMIOTraceMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -42,6 +43,7 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.llm_io_trace_config import LLMIOTraceConfig
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
@@ -374,6 +376,12 @@ def build_middlewares(
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+
+    # LLM I/O trace - dev tool for printing model input/output. Gated by config
+    # + DEERFLOW_LLM_IO_TRACE_ENABLED env var. Disabled by default.
+    llm_io_config = LLMIOTraceConfig.with_env_override(resolved_app_config.llm_io_trace)
+    if llm_io_config.enabled:
+        middlewares.insert(0, LLMIOTraceMiddleware(llm_io_config))
     return middlewares
 
 
