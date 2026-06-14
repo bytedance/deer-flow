@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asuka</title>
+  <style>
+    @font-face {
+      font-family: 'Noto Color Emoji';
+      src: url('https://fonts.gstatic.com/s/notocoloremoji/v25/Yzyinc9s7QA__6yWRJbPkHdsO97fLOaFbL60D5ikDYoG7QYo7BuPqZ6g7BEoJgTYwL3ZsttsNgKi48jBg.woff2') format('woff2');
+      font-weight: normal;
+      font-style: normal;
+    }
+    
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+    /* Fallback for emojis */
+    :root {
+      font-family: 'Noto Color Emoji', 'Noto Sans CJK SC', system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <iframe id="app" src="http://localhost:2026/workspace"></iframe>
+</body>
+</html>
