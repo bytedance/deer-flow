@@ -33,6 +33,22 @@ token_usage:
   enabled: true
 
 # ============================================================================
+# Token Budget — Per-run token limits
+# ============================================================================
+# Prevents runaway API costs by enforcing hard token limits per run.
+# When warn_threshold is crossed, the agent receives an in-context warning.
+# When hard_stop_threshold is crossed, tool_calls are stripped and the agent
+# is forced to produce a final answer immediately.
+token_budget:
+  enabled: false                # Set to true to activate budget enforcement
+  max_tokens: 200000            # Total token limit (input + output) per run
+  max_input_tokens: null        # Optional separate input-only limit
+  max_output_tokens: null       # Optional separate output-only limit
+  warn_threshold: 0.8           # Warn at 80% of the budget
+  hard_stop_threshold: 1.0      # Force stop at 100% of the budget
+
+
+# ============================================================================
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
