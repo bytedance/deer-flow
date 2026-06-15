@@ -958,7 +958,10 @@ class ChannelManager:
             return False
         if _auth_disabled_owner_user_id():
             return False
-        return not (bool(msg.connection_id) and bool(msg.owner_user_id))
+
+        has_connection = bool(msg.connection_id)
+        has_owner = bool(msg.owner_user_id)
+        return not (has_connection and has_owner)
 
     async def _reject_unbound_channel_message(self, msg: InboundMessage) -> None:
         logger.info(
