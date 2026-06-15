@@ -47,8 +47,8 @@ const MOCK_SNAPSHOT = {
 
 const MOCK_VALIDATION_SUCCESS = {
   valid: true,
-  errors: [],
-  warnings: [],
+  errors: [] as { code: string; path: string; message: string }[],
+  warnings: [] as { code: string; path: string; message: string }[],
 };
 
 const MOCK_VALIDATION_ERROR = {

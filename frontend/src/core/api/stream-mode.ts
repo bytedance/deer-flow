@@ -10,6 +10,15 @@ const SUPPORTED_RUN_STREAM_MODES = new Set([
   "custom",
 ] as const);
 
+import type { StreamMode } from "@langchain/langgraph-sdk";
+
+export type StreamModeTier = "standard" | "full";
+
+export const STREAM_MODE_TIERS: Record<StreamModeTier, readonly StreamMode[]> = {
+  standard: ["messages-tuple", "updates", "custom"] as const,
+  full: ["values", "messages-tuple", "updates", "custom"] as const,
+};
+
 const warnedUnsupportedStreamModes = new Set<string>();
 
 export function warnUnsupportedStreamModes(

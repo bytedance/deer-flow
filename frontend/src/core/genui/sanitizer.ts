@@ -169,6 +169,9 @@ export function sanitizeProps(
     if ("direction" in trend) {
       trend.direction = normalizeDirection(trend.direction);
     }
+    if (!("value" in trend) || typeof trend.value !== "string") {
+      trend.value = "";
+    }
   }
 
   if (component === "metric" && typeof sanitized.delta === "object" && sanitized.delta !== null) {

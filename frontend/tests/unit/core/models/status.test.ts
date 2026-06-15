@@ -161,13 +161,9 @@ describe("ISSUE-02 spelling", () => {
     expect(RUN_STATUS_VALUES).not.toContain("canceled");
   });
 
-  it("report-templates RunStatus is the same type as status.ts RunStatus", async () => {
-    const { RunStatus: rtRunStatus } = await import(
-      "@/core/report-templates/types"
-    );
-    // Both should be the same type identity (TypeScript structural typing)
-    const status: RunStatus = "cancelled";
-    const rtStatus: typeof rtRunStatus = status;
+  it("report-templates RunStatus is the same type as status.ts RunStatus", () => {
+    const status: import("@/core/report-templates/types").RunStatus = "cancelled";
+    const rtStatus: RunStatus = status;
     expect(rtStatus).toBe("cancelled");
   });
 });

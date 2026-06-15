@@ -81,7 +81,7 @@ describe("Domain Memory API", () => {
     mockFetch.mockResolvedValue(mockJsonResponse([]));
 
     await searchDomainMemory("test", { domain: "equip", entityId: "p1" });
-    const url = mockFetch.mock.calls[0][0];
+    const url = mockFetch.mock.calls[0]![0];
     expect(url).toContain("domain=equip");
     expect(url).toContain("entity_id=p1");
   });
@@ -126,7 +126,7 @@ describe("Audit Logs API", () => {
 
     const result = await loadAuditLogs({ action: "create", userId: "u1" });
     expect(result).toEqual(logs);
-    const url = mockFetch.mock.calls[0][0];
+    const url = mockFetch.mock.calls[0]![0];
     expect(url).toContain("action=create");
     expect(url).toContain("user_id=u1");
   });

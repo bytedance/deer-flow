@@ -24,6 +24,7 @@ export function GenUIBlockList({ threadId, blockIds, excludeBlockIds, disableExp
 
   const filteredBlocks = useMemo(() => {
     const candidateBlocks = Array.from(blocks.values()).filter((block) => {
+      if (block.thread_id && block.thread_id !== threadId) return false;
       if (block.parent_id) return false;
       if (blockIds) return blockIds.includes(block.block_id);
       if (excludeBlockIds) return !excludeBlockIds.includes(block.block_id);

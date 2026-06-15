@@ -140,6 +140,112 @@ export function groupMessages<T>(
     .filter((result) => result !== undefined && result !== null) as T[];
 }
 
+function cloneGroups(groups: MessageGroup[]): MessageGroup[] {
+  return groups.map((group) => ({
+    ...group,
+    messages: [...group.messages],
+  }));
+}
+
+function isOpenGroupType(type: MessageGroup["type"]): boolean {
+  return (
+    type !== "human" &&
+    type !== "assistant" &&
+    type !== "assistant:clarification"
+  );
+}
+
+export function extendMessageGroups(
+  existingGroups: MessageGroup[],
+  newMessages: Message[],
+  isLoading?: boolean,
+): MessageGroup[] {
+  if (newMessages.length === 0) {
+    return existingGroups;
+  }
+  if (existingGroups.length === 0) {
+    return getMessageGroups(newMessages, isLoading);
+  }
+
+  const cloned = cloneGroups(existingGroups);
+
+  for (const message of newMessages) {
+    if (isHiddenFromUIMessage(message, isLoading)) {
+      continue;
+    }
+
+    if (message.name === "todo_reminder") {
+      continue;
+    }
+
+    if (message.type === "human") {
+      cloned.push({ id: message.id, type: "human", messages: [message] });
+      continue;
+    }
+
+    if (message.type === "tool") {
+      const currentLast = cloned[cloned.length - 1];
+      const currentOpen =
+        currentLast !== undefined && isOpenGroupType(currentLast.type);
+
+      if (isClarificationToolMessage(message)) {
+        if (currentOpen && currentLast) {
+          currentLast.messages.push(message);
+        }
+        cloned.push({
+          id: message.id,
+          type: "assistant:clarification",
+          messages: [message],
+        });
+      } else {
+        if (currentOpen && currentLast) {
+          currentLast.messages.push(message);
+        } else if (message.name || message.tool_call_id) {
+          cloned.push({
+            id: message.id,
+            type: "assistant:processing",
+            messages: [message],
+          });
+        }
+      }
+      continue;
+    }
+
+    if (message.type === "ai") {
+      if (hasPresentFiles(message)) {
+        cloned.push({
+          id: message.id,
+          type: "assistant:present-files",
+          messages: [message],
+        });
+      } else if (hasSubagent(message)) {
+        cloned.push({
+          id: message.id,
+          type: "assistant:subagent",
+          messages: [message],
+        });
+      } else if (hasReasoning(message) || hasToolCalls(message)) {
+        const last = cloned[cloned.length - 1];
+        if (last?.type === "assistant:processing") {
+          last.messages.push(message);
+        } else {
+          cloned.push({
+            id: message.id,
+            type: "assistant:processing",
+            messages: [message],
+          });
+        }
+      }
+
+      if (hasContent(message) && !hasToolCalls(message)) {
+        cloned.push({ id: message.id, type: "assistant", messages: [message] });
+      }
+    }
+  }
+
+  return cloned;
+}
+
 export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   const usageMessagesByGroupIndex: Array<Message[] | null> = Array.from(
     { length: groups.length },

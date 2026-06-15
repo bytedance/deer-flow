@@ -7,6 +7,8 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { GenUISSEManager } from "@/core/genui/sse-recovery";
 import { type UIBlock, useBlockStore } from "@/core/genui/store";
+import { useUIBlockExtractor } from "@/core/genui/use-ui-block-extractor";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
 
 import { fetchGateway, getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
@@ -21,6 +23,9 @@ import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { appendUniqueMessages } from "./message-history";
 import type { AgentThread, AgentThreadState, RunMessage } from "./types";
+import { useHasActiveRun } from "./use-has-active-run";
+import { useStreamModes } from "./use-stream-tier";
+import { useRegisterActiveStream } from "./use-active-stream-count";
 
 export type ToolEndEvent = {
   name: string;
@@ -172,6 +177,7 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const sseManagerRef = useRef<GenUISSEManager | null>(null);
+  const lastSequenceRef = useRef<number>(0);
   const listeners = useRef({
     onSend,
     onStart,
@@ -210,6 +216,7 @@ export function useThreadStream({
         useBlockStore.getState().reset();
       }
     }
+    useBlockStore.getState().setActiveThread(normalizedThreadId);
     threadIdRef.current = normalizedThreadId;
 
     sseManagerRef.current?.disconnect();
@@ -228,6 +235,10 @@ export function useThreadStream({
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
+    lastSequenceRef.current = 0;
+    setBackgroundPaused(false);
+    setBackgroundError(null);
+    backgroundErrorRef.current = null;
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -238,12 +249,34 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
 
+  function trackSequence(data: unknown): void {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+    const seq = (data as Record<string, unknown>)._seq;
+    if (typeof seq !== "number") return;
+    if (lastSequenceRef.current > 0 && seq > lastSequenceRef.current + 1) {
+      const tid = threadIdRef.current;
+      if (tid) {
+        void queryClient.invalidateQueries({ queryKey: ["thread", tid] });
+      }
+    }
+    lastSequenceRef.current = seq;
+  }
+
+  const isVisible = useDocumentVisible();
+  const hasActiveRun = useHasActiveRun(onStreamThreadId);
+  const streamModes = useStreamModes();
+  const reconnectOnMount = isVisible && hasActiveRun;
+
+  useEffect(() => {
+    sseManagerRef.current?.setVisibility(isVisible);
+  }, [isVisible]);
+
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
     throttle: 100,
-    reconnectOnMount: true,
+    reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
@@ -255,15 +288,94 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
-    onLangChainEvent(event) {
-      if (event.event === "on_tool_end") {
-        listeners.current.onToolEnd?.({
-          name: event.name,
-          data: event.data,
-        });
+    onCustomEvent(event: unknown) {
+      trackSequence(event);
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "state_patch"
+      ) {
+        const e = event as {
+          type: "state_patch";
+          patch: Partial<AgentThreadState>;
+        };
+        const patch = e.patch;
+        if (patch && threadIdRef.current) {
+          void queryClient.setQueriesData(
+            { queryKey: ["threads", "search"], exact: false },
+            (oldData: Array<AgentThread> | undefined) => {
+              return oldData?.map((t) => {
+                if (t.thread_id === threadIdRef.current) {
+                  return { ...t, values: { ...t.values, ...patch } };
+                }
+                return t;
+              });
+            },
+          );
+          void queryClient.setQueryData(
+            ["thread", threadIdRef.current],
+            (old: AgentThread | undefined) => {
+              if (!old) return old;
+              return { ...old, values: { ...old.values, ...patch } };
+            },
+          );
+        }
+        return;
+      }
+
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "tool_end"
+      ) {
+        const e = event as { type: "tool_end"; name: string; data: unknown };
+        listeners.current.onToolEnd?.({ name: e.name, data: e.data });
+        return;
+      }
+
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "ui_blocks_folded"
+      ) {
+        const e = event as { type: "ui_blocks_folded"; blocks: UIBlock[] };
+        useBlockStore.getState().replaceAllBlocks(threadIdRef.current ?? "", e.blocks);
+        return;
+      }
+
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "task_running"
+      ) {
+        const e = event as {
+          type: "task_running";
+          task_id: string;
+          message: AIMessage;
+        };
+        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        return;
+      }
+
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "llm_retry" &&
+        "message" in event &&
+        typeof event.message === "string" &&
+        event.message.trim()
+      ) {
+        const e = event as { type: "llm_retry"; message: string };
+        toast(e.message);
       }
     },
     onUpdateEvent(data) {
+      trackSequence(data);
       if (data["SummarizationMiddleware.before_model"]) {
         const _messages = [
           ...(data["SummarizationMiddleware.before_model"].messages ?? []),
@@ -296,7 +408,7 @@ export function useThreadStream({
         data || {},
       );
       for (const update of updates) {
-        if (update && "title" in update && update.title) {
+        if (update && typeof update === "object" && "title" in update && update.title) {
           void queryClient.setQueriesData(
             {
               queryKey: ["threads", "search"],
@@ -320,48 +432,13 @@ export function useThreadStream({
         }
       }
     },
-    onCustomEvent(event: unknown) {
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "ui_blocks_folded"
-      ) {
-        const e = event as { type: "ui_blocks_folded"; blocks: UIBlock[] };
-        useBlockStore.getState().replaceAllBlocks(e.blocks);
-        return;
-      }
-
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "task_running"
-      ) {
-        const e = event as {
-          type: "task_running";
-          task_id: string;
-          message: AIMessage;
-        };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
-        return;
-      }
-
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "llm_retry" &&
-        "message" in event &&
-        typeof event.message === "string" &&
-        event.message.trim()
-      ) {
-        const e = event as { type: "llm_retry"; message: string };
-        toast(e.message);
-      }
-    },
     onError(error) {
       setOptimisticMessages([]);
+      if (backgroundPaused) {
+        backgroundErrorRef.current = error;
+        sseManagerRef.current?.scheduleReconnect();
+        return;
+      }
       const quotaError = extractQuotaError(error);
       if (quotaError) {
         const message =
@@ -381,6 +458,7 @@ export function useThreadStream({
       sseManagerRef.current?.scheduleReconnect();
     },
     onFinish(state) {
+      onFinishFiredRef.current = true;
       appendMessages(messagesRef.current);
       listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -391,6 +469,45 @@ export function useThreadStream({
       }
     },
   });
+
+  useRegisterActiveStream(thread.isLoading);
+
+  const wasVisibleRef = useRef(true);
+  const wasLoadingBeforeHideRef = useRef(false);
+  const onFinishFiredRef = useRef(false);
+  const backgroundErrorRef = useRef<unknown | null>(null);
+  const [backgroundPaused, setBackgroundPaused] = useState(false);
+  const [backgroundError, setBackgroundError] = useState<unknown | null>(null);
+
+  useEffect(() => {
+    if (!isVisible && wasVisibleRef.current) {
+      wasLoadingBeforeHideRef.current = thread.isLoading;
+      onFinishFiredRef.current = false;
+      if (thread.isLoading) {
+        setBackgroundPaused(true);
+      }
+    }
+    if (isVisible && !wasVisibleRef.current) {
+      setBackgroundPaused(false);
+      const bgError = backgroundErrorRef.current;
+      backgroundErrorRef.current = null;
+      if (bgError !== null) {
+        setBackgroundError(bgError);
+      }
+      if (wasLoadingBeforeHideRef.current && !thread.isLoading && !onFinishFiredRef.current) {
+        onFinishFiredRef.current = true;
+        appendMessages(messagesRef.current);
+        listeners.current.onFinish?.(thread.messages as unknown as AgentThreadState);
+        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        if (threadIdRef.current) {
+          void queryClient.invalidateQueries({
+            queryKey: ["thread", threadIdRef.current],
+          });
+        }
+      }
+    }
+    wasVisibleRef.current = isVisible;
+  }, [isVisible, thread.isLoading, appendMessages, queryClient, thread.messages]);
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
@@ -413,6 +530,9 @@ export function useThreadStream({
     messagesRef.current = [];
     summarizedRef.current = new Set();
     prevMsgCountRef.current = 0;
+    setBackgroundPaused(false);
+    setBackgroundError(null);
+    backgroundErrorRef.current = null;
   }, [threadId]);
 
   // Clear optimistic when server messages arrive (count increases)
@@ -579,7 +699,8 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            streamSubgraphs: true,
+            streamMode: [...streamModes],
+            streamSubgraphs: context.mode === "ultra",
             streamResumable: true,
             config: {
               recursion_limit: 1000,
@@ -622,6 +743,16 @@ export function useThreadStream({
     messagesRef.current = thread.messages;
   }
 
+  // Retain the last non-empty values across thread switches so that fields like
+  // `todos` don't flash empty while the SDK reloads history for the new thread.
+  // The ref is cleared once the new thread's history finishes loading.
+  const lastValuesRef = useRef<Record<string, unknown>>({});
+  if (thread.values && Object.keys(thread.values).length > 0 && !thread.isThreadLoading) {
+    lastValuesRef.current = thread.values;
+  } else if (!thread.isThreadLoading) {
+    lastValuesRef.current = {};
+  }
+
   const isThreadSwitchPending =
     requestedThreadId !== onStreamThreadId &&
     !(requestedThreadId === null && prevThreadIdRef.current === null);
@@ -637,14 +768,24 @@ export function useThreadStream({
     visibleOptimisticMessages,
   );
 
+  useUIBlockExtractor(onStreamThreadId, mergedMessages, thread.isLoading);
+
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
+  const valuesForDisplay =
+    thread.values && Object.keys(thread.values).length > 0
+      ? thread.values
+      : lastValuesRef.current;
+
   const mergedThread = {
     ...thread,
+    values: valuesForDisplay,
     isLoading: isThreadSwitchPending ? false : thread.isLoading,
-    error: isThreadSwitchPending ? null : thread.error,
+    error: isThreadSwitchPending ? null : (thread.error ?? backgroundError),
     messages: mergedMessages,
-  } as typeof thread;
+    backgroundPaused: isThreadSwitchPending ? false : backgroundPaused,
+    backgroundError: isThreadSwitchPending ? null : backgroundError,
+  } as typeof thread & { backgroundPaused: boolean; backgroundError: unknown | null };
 
   return {
     thread: mergedThread,

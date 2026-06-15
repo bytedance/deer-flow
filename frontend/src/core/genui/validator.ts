@@ -25,7 +25,7 @@ const trendSchema = z.object({
   value: z.string(),
 });
 
-const chartDataPointSchema = z.record(z.union([z.string(), z.number()]));
+const chartDataPointSchema = z.record(z.string(), z.union([z.string(), z.number()]));
 
 const chartSeriesSchema = z.object({
   key: z.string(),
@@ -58,7 +58,7 @@ const tableColumnSchema = z.object({
 
 export const tablePropsSchema = z.object({
   columns: z.array(tableColumnSchema).max(100),
-  data: z.array(z.record(z.unknown())).max(10000),
+  data: z.array(z.record(z.string(), z.unknown())).max(10000),
   title: z.string().max(200).optional(),
   sortable: z.boolean().optional(),
   paginated: z.boolean().optional(),
@@ -113,7 +113,7 @@ export const formPropsSchema = z.object({
   fields: z.array(formFieldSchema).max(50),
   submit_label: z.string().max(100).optional(),
   cancel_label: z.string().max(100).optional(),
-  default_values: z.record(z.unknown()).optional(),
+  default_values: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const confirmPropsSchema = z.object({
@@ -154,12 +154,12 @@ export const layoutPropsSchema = z.object({
 });
 
 export const markdownPropsSchema = z.object({
-  content: z.string().max(100000),
+  content: z.string().max(100000).optional(),
   title: z.string().max(200).optional(),
 });
 
 export const echartPropsSchema = z.object({
-  option: z.record(z.unknown()).refine(
+  option: z.record(z.string(), z.unknown()).refine(
     (val) => JSON.stringify(val).length <= 500_000,
     { message: "option object exceeds 500KB size limit" },
   ),
@@ -345,7 +345,7 @@ const agentHandoffPropsSchema = z.object({
   target_display_name: z.string().max(200),
   target_icon: z.string().max(10).optional(),
   message: z.string().max(2000),
-  handoff_data: z.record(z.unknown()),
+  handoff_data: z.record(z.string(), z.unknown()),
 });
 
 const propsSchemas: Record<string, z.ZodType> = {

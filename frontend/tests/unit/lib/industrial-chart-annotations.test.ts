@@ -92,19 +92,19 @@ describe("generateOperatingStatusMarkAreas", () => {
 
   it("should create zones from 0 to normal, normal to warning, warning to alarm", () => {
     const areas = generateOperatingStatusMarkAreas("temperature");
-    expect(areas[0]![0].yAxis).toBe(0);
-    expect(areas[0]![1].yAxis).toBe(65); // normal
-    expect(areas[1]![0].yAxis).toBe(65); // normal
-    expect(areas[1]![1].yAxis).toBe(85); // warning
-    expect(areas[2]![0].yAxis).toBe(85); // warning
-    expect(areas[2]![1].yAxis).toBe(95); // alarm
+    expect(areas[0]![0]!.yAxis).toBe(0);
+    expect(areas[0]![1]!.yAxis).toBe(65); // normal
+    expect(areas[1]![0]!.yAxis).toBe(65); // normal
+    expect(areas[1]![1]!.yAxis).toBe(85); // warning
+    expect(areas[2]![0]!.yAxis).toBe(85); // warning
+    expect(areas[2]![1]!.yAxis).toBe(95); // alarm
   });
 
   it("should apply color coding to zones", () => {
     const areas = generateOperatingStatusMarkAreas("vibration");
-    expect(areas[0]![0].itemStyle?.color).toContain("16, 185, 129"); // green
-    expect(areas[1]![0].itemStyle?.color).toContain("245, 158, 11"); // yellow
-    expect(areas[2]![0].itemStyle?.color).toContain("239, 68, 68"); // red
+    expect(areas[0]![0]!.itemStyle?.color).toContain("16, 185, 129"); // green
+    expect(areas[1]![0]!.itemStyle?.color).toContain("245, 158, 11"); // yellow
+    expect(areas[2]![0]!.itemStyle?.color).toContain("239, 68, 68"); // red
   });
 
   it("should work for all supported metrics", () => {

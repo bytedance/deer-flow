@@ -15,6 +15,7 @@ export interface UIBlock {
   sequence?: number;
   functional_interaction?: boolean;
   interaction_status?: "submitted" | "idle";
+  thread_id?: string;
 }
 
 export interface InteractionState {
@@ -31,10 +32,13 @@ export function getInteractionKey(block: {
 }
 
 interface BlockStoreState {
+  activeThreadId: string | null;
   blocks: Map<string, UIBlock>;
   interactions: Map<string, InteractionState>;
 
-  replaceAllBlocks: (newBlocks: UIBlock[]) => void;
+  setActiveThread: (threadId: string | null) => void;
+  replaceAllBlocks: (threadId: string, newBlocks: UIBlock[]) => void;
+  upsertBlock: (threadId: string, block: UIBlock) => void;
   updateBlockProps: (blockId: string, props: Record<string, unknown>) => void;
   getChildBlocks: (parentId: string) => UIBlock[];
   setInteractionLoading: (callbackId: string) => void;
@@ -45,14 +49,25 @@ interface BlockStoreState {
 }
 
 export const useBlockStore = create<BlockStoreState>((set, get) => ({
+  activeThreadId: null,
   blocks: new Map(),
   interactions: new Map(),
 
-  replaceAllBlocks: (newBlocks: UIBlock[]) =>
+  setActiveThread: (threadId: string | null) =>
+    set({ activeThreadId: threadId }),
+
+  replaceAllBlocks: (threadId: string, newBlocks: UIBlock[]) =>
     set((state) => {
       const blocks = new Map<string, UIBlock>();
+      // Preserve blocks from OTHER threads
+      for (const [key, block] of state.blocks) {
+        if (block.thread_id !== threadId) {
+          blocks.set(key, block);
+        }
+      }
+      // Add new blocks, tagged with the correct thread
       for (const block of newBlocks) {
-        blocks.set(block.block_id, block);
+        blocks.set(block.block_id, { ...block, thread_id: threadId });
       }
 
       const interactions = new Map(state.interactions);
@@ -70,6 +85,13 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       }
 
       return { blocks, interactions };
+    }),
+
+  upsertBlock: (threadId: string, block: UIBlock) =>
+    set((state) => {
+      const blocks = new Map(state.blocks);
+      blocks.set(block.block_id, { ...block, thread_id: threadId });
+      return { blocks };
     }),
 
   updateBlockProps: (blockId: string, props: Record<string, unknown>) =>
@@ -125,5 +147,5 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       return { interactions };
     }),
 
-  reset: () => set({ blocks: new Map(), interactions: new Map() }),
+  reset: () => set({ activeThreadId: null, blocks: new Map(), interactions: new Map() }),
 }));

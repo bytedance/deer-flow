@@ -31,6 +31,10 @@ vi.mock("@/core/api", () => ({
   getAPIClient: vi.fn(() => mocks.apiClient),
 }));
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/workspace/chats/test-thread",
+}));
+
 vi.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
@@ -40,6 +44,7 @@ vi.mock("@/core/genui/sse-recovery", () => ({
     recoverBlocks = vi.fn().mockResolvedValue(undefined);
     scheduleReconnect = vi.fn();
     disconnect = vi.fn();
+    setVisibility = vi.fn();
 
     get connected() {
       return false;

@@ -74,6 +74,16 @@ export async function fetchResolvedBlockHistory(
   };
 }
 
+export async function extractBlocksIncremental(
+  threadId: string,
+  newMessages: Message[],
+): Promise<ResolvedBlockHistory> {
+  if (newMessages.length === 0) {
+    return { blocks: [], blockIdsByMessageKey: new Map(), duplicatedRawBlockIds: new Set() };
+  }
+  return fetchResolvedBlockHistory(threadId, newMessages);
+}
+
 export function extractResolvedBlockIdsFromMessages(
   messages: Message[],
   blockIdsByMessageKey: Map<string, string[]>,

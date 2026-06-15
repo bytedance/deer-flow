@@ -15,7 +15,7 @@ import {
   extractResolvedBlockIdsFromMessages,
   getHistoryMessageKey,
 } from "@/core/genui/history";
-import { useBlockStore, type UIBlock } from "@/core/genui/store";
+import { useBlockStore, type UIBlock, type InteractionState } from "@/core/genui/store";
 import { partitionStandaloneBlockIds, isSubmittedBlock, filterSupersededInteractiveBlockIds } from "@/core/genui/visibility";
 import { useI18n } from "@/core/i18n/hooks";
 import { useAgent } from "@/core/agents";
@@ -24,6 +24,7 @@ import {
   extractPresentFilesFromMessage,
   extractReasoningContentFromMessage,
   extractTextFromMessage,
+  extendMessageGroups,
   getMessageGroups,
   hasContent,
   hasPresentFiles,
@@ -47,6 +48,7 @@ import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import { RetrievalSources } from "./retrieval-sources";
 import { MessageListSkeleton } from "./skeleton";
+import { StreamTierNoticeBanner } from "./stream-tier-notice-banner";
 import { SubtaskCard } from "./subtask-card";
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 160;
@@ -54,6 +56,9 @@ export const MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM = 80;
 const DUPLICATE_MARKDOWN_MIN_LENGTH = 20;
 
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
+
+const EMPTY_BLOCK_MAP = new Map<string, UIBlock>();
+const EMPTY_INTERACTION_MAP = new Map<string, InteractionState>();
 
 const getMessageKey = getHistoryMessageKey;
 
@@ -232,7 +237,9 @@ export function MessageList({
     () => `${messages.length}:${messages[messages.length - 1]?.id ?? "none"}`,
     [messages.length, messages[messages.length - 1]?.id],
   );
-  const blocks = useBlockStore((state) => state.blocks);
+  const blocks = useBlockStore((state) =>
+    state.activeThreadId === threadId ? state.blocks : EMPTY_BLOCK_MAP,
+  );
   const [resolvedBlockHistory, setResolvedBlockHistory] = useState<
     Awaited<ReturnType<typeof fetchResolvedBlockHistory>>
   >(createEmptyResolvedBlockHistory);
@@ -373,10 +380,29 @@ export function MessageList({
       thread.isLoading,
     ],
   );
-  const groupedMessages = useMemo(
-    () => getMessageGroups(visibleMessages, thread.isLoading),
-    [visibleMessages, thread.isLoading],
-  );
+  const prevVisibleMessagesRef = useRef<Message[]>([]);
+  const prevGroupedMessagesRef = useRef<ReturnType<typeof getMessageGroups>>([]);
+  const groupedMessages = useMemo(() => {
+    const prev = prevVisibleMessagesRef.current;
+    const prevGroups = prevGroupedMessagesRef.current;
+    const isAppend =
+      prev.length > 0 &&
+      visibleMessages.length > prev.length &&
+      prev[prev.length - 1] === visibleMessages[prev.length - 1];
+
+    if (isAppend) {
+      const newMessages = visibleMessages.slice(prev.length);
+      const extended = extendMessageGroups(prevGroups, newMessages, thread.isLoading);
+      prevVisibleMessagesRef.current = visibleMessages;
+      prevGroupedMessagesRef.current = extended;
+      return extended;
+    }
+
+    const groups = getMessageGroups(visibleMessages, thread.isLoading);
+    prevVisibleMessagesRef.current = visibleMessages;
+    prevGroupedMessagesRef.current = groups;
+    return groups;
+  }, [visibleMessages, thread.isLoading]);
   const claimedBlockIds = useMemo(() => {
     const ids: string[] = [];
     for (const group of groupedMessages) {
@@ -401,7 +427,9 @@ export function MessageList({
     }
     return next;
   }, [blocks, resolvedBlockHistory.blocks]);
-  const interactions = useBlockStore((state) => state.interactions);
+  const interactions = useBlockStore((state) =>
+    state.activeThreadId === threadId ? state.interactions : EMPTY_INTERACTION_MAP,
+  );
   const guidanceGroupIndices = useMemo(() => {
     const indices = new Set<number>();
     for (let i = 0; i < groupedMessages.length; i++) {
@@ -868,6 +896,7 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+        <StreamTierNoticeBanner />
         <LoadMoreHistoryIndicator
           isLoading={isHistoryLoading}
           hasMore={hasMoreHistory}

@@ -38,7 +38,13 @@ type Snapshot = {
   isNewThread: boolean;
 };
 
-type HookValue = ReturnType<typeof useThreadChat>;
+type HookValue = {
+  threadId: string;
+  setThreadId: (value: string) => void;
+  isNewThread: boolean;
+  setIsNewThread: (value: boolean) => void;
+  isMock: boolean;
+};
 
 function Probe({
   snapshots,
@@ -125,15 +131,15 @@ describe("useThreadChat", () => {
       root.render(
         React.createElement(Probe, {
           snapshots,
-          onChange: (value) => {
+          onChange: (value: HookValue) => {
             latestValue = value;
           },
         }),
       );
     });
 
-    expect(latestValue?.threadId).toBe("draft-thread-id");
-    expect(latestValue?.isNewThread).toBe(true);
+    expect(latestValue!.threadId).toBe("draft-thread-id");
+    expect(latestValue!.isNewThread).toBe(true);
 
     await React.act(async () => {
       latestValue?.setThreadId("created-thread-id");
@@ -147,14 +153,14 @@ describe("useThreadChat", () => {
       root.render(
         React.createElement(Probe, {
           snapshots,
-          onChange: (value) => {
+          onChange: (value: HookValue) => {
             latestValue = value;
           },
         }),
       );
     });
 
-    expect(latestValue?.threadId).toBe("created-thread-id");
-    expect(latestValue?.isNewThread).toBe(false);
+    expect(latestValue!.threadId).toBe("created-thread-id");
+    expect(latestValue!.isNewThread).toBe(false);
   });
 });

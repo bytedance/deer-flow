@@ -3,9 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
-import type { Skill } from "@/core/skills/type";
 
-const mockSkills: Skill[] = [
+const mockSkills = [
   {
     id: "skill-1",
     name: "vibration-fault-diagnosis",

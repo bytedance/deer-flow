@@ -31,6 +31,7 @@ export type MockAgent = {
   name: string;
   description?: string;
   system_prompt?: string;
+  [key: string]: unknown;
 };
 
 export type MockAPIOptions = {

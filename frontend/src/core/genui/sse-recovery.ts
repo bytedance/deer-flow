@@ -20,13 +20,30 @@ export class GenUISSEManager {
   private abortController: AbortController | null = null;
   private isConnected = false;
   private disposed = false;
+  private visible = true;
+  private pendingRecovery = false;
 
   constructor(threadId: string) {
     this.threadId = threadId;
   }
 
+  setVisibility(isVisible: boolean): void {
+    this.visible = isVisible;
+    if (isVisible && this.pendingRecovery) {
+      this.pendingRecovery = false;
+      void this.recoverBlocks();
+    }
+    if (!isVisible && this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   async recoverBlocks(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || !this.visible) {
+      this.pendingRecovery = true;
+      return;
+    }
 
     const baseUrl = getBackendBaseUrl();
     const url = `${baseUrl}/api/threads/${this.threadId}/ui-blocks`;
@@ -42,7 +59,7 @@ export class GenUISSEManager {
       const blocks: UIBlock[] = await response.json();
       if (this.disposed) return;
 
-      useBlockStore.getState().replaceAllBlocks(blocks);
+      useBlockStore.getState().replaceAllBlocks(this.threadId, blocks);
 
       this.resetBackoff();
     } catch {
@@ -53,7 +70,8 @@ export class GenUISSEManager {
   }
 
   scheduleReconnect(): void {
-    if (this.reconnectTimer) {
+    if (this.reconnectTimer || !this.visible) {
+      this.pendingRecovery = true;
       return;
     }
 
