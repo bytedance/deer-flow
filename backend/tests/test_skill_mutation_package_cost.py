@@ -1,11 +1,14 @@
 """Reproducible local capture measurements; not a model/provider benchmark."""
 
+import os
 import statistics
 import time
 
 import pytest
 
 from deerflow.skills.mutations.assets import capture_package
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Skill publication requires POSIX local storage")
 
 
 @pytest.mark.parametrize("files,size", [(4, 1024), (256, 65535)])
