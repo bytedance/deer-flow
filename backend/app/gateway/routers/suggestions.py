@@ -126,9 +126,13 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     return "\n".join(parts).strip()
 
 
-@router.get("/suggestions/config", response_model=SuggestionsConfigResponse, summary="Get Suggestions Configuration", description="Returns the global configuration for follow-up suggestions.")
+@router.get(
+    "/suggestions/config",
+    response_model=SuggestionsConfigResponse,
+    summary="Get Suggestions Configuration",
+    description="Returns the global configuration for follow-up suggestions.",
+)
 async def get_suggestions_config(
-    request: Request,
     config: AppConfig = Depends(get_config),
 ) -> SuggestionsConfigResponse:
     return SuggestionsConfigResponse(enabled=config.suggestions.enabled)

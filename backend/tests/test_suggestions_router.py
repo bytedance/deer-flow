@@ -192,3 +192,17 @@ def test_generate_suggestions_returns_empty_when_disabled(monkeypatch):
 
     assert result.suggestions == []
     fake_model.ainvoke.assert_not_called()
+
+
+def test_get_suggestions_config():
+    """Ensure the GET /config endpoint correctly returns the boolean state."""
+
+    # Test when enabled
+    mock_config_true = SimpleNamespace(suggestions=SimpleNamespace(enabled=True))
+    result_true = asyncio.run(suggestions.get_suggestions_config(config=mock_config_true))
+    assert result_true.enabled is True
+
+    # Test when disabled
+    mock_config_false = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+    result_false = asyncio.run(suggestions.get_suggestions_config(config=mock_config_false))
+    assert result_false.enabled is False

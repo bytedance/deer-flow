@@ -1,6 +1,5 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
@@ -63,7 +62,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
-import { loadSuggestionsConfig } from "@/core/suggestions/api";
+import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -205,11 +204,7 @@ export function InputBox({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
-  const { data: suggestionsConfig } = useQuery({
-    queryKey: ["suggestionsConfig"],
-    queryFn: loadSuggestionsConfig,
-    staleTime: Infinity,
-  });
+  const { data: suggestionsConfig } = useSuggestionsConfig();
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [textareaFocused, setTextareaFocused] = useState(false);
@@ -531,6 +526,9 @@ export function InputBox({
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
+    if (suggestionsConfig === undefined) {
+      return;
+    }
     lastGeneratedForAiIdRef.current = lastAiId;
 
     const recent = messagesRef.current
@@ -547,7 +545,7 @@ export function InputBox({
       return;
     }
 
-    if (suggestionsConfig && !suggestionsConfig.enabled) {
+    if (!suggestionsConfig?.enabled) {
       setFollowups([]);
       return;
     }
@@ -594,7 +592,7 @@ export function InputBox({
     isMock,
     status,
     threadId,
-    suggestionsConfig,
+    suggestionsConfig?.enabled,
   ]);
 
   return (
