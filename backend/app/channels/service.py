@@ -134,7 +134,11 @@ class ChannelService:
             channels_config = dict(extra["channels"] or {})
         _merge_channel_connection_runtime_config(channels_config, app_config)
         connection_config = getattr(app_config, "channel_connections", None)
-        require_bound_identity = bool(connection_config is not None and getattr(connection_config, "enabled", False) and getattr(connection_config, "require_bound_identity", True))
+        connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
+        require_bound_identity = bool(
+            connections_enabled
+            and getattr(connection_config, "require_bound_identity", True)
+        )
         return cls(
             channels_config=channels_config,
             connection_repo=_make_connection_repo(connection_config),
