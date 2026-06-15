@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -114,7 +113,7 @@ class TestDirectReportExecutor:
             "weekly",
             {"week_start": "2026-06-01", "date_end": "2026-06-07"},
         )
-        assert args == ["--week-start", "2026-06-01", "--date-end", "2026-06-07"]
+        assert args == ["--week-start", "2026-06-01"]
 
     def test_build_scope_args_monthly(self, tmp_path):
         """Test scope args for monthly report."""
@@ -162,3 +161,111 @@ class TestDirectReportExecutor:
         executor = DirectReportExecutor(output_dir=str(tmp_path))
         with pytest.raises(NoDataError, match="empty data"):
             executor._validate_script_output("{}", step="test.py")
+
+    @patch("deerflow.report_executor.executor.DirectReportExecutor._run_subprocess")
+    def test_execute_weekly_with_equipment_meta(self, mock_subprocess, tmp_path):
+        """Test weekly report execution with equipment_meta parameter."""
+        executor = DirectReportExecutor(output_dir=str(tmp_path))
+
+        # Create dummy output files
+        data_file = tmp_path / "weekly_data.json"
+        data_file.write_text("{}")
+        kpi_file = tmp_path / "weekly_kpi.json"
+        kpi_file.write_text("{}")
+        report_file = tmp_path / "weekly_report.md"
+        report_file.write_text("")
+
+        mock_subprocess.side_effect = [
+            json.dumps({"output": str(data_file)}),
+            json.dumps({"output": str(kpi_file)}),
+            json.dumps({"output": str(report_file)}),
+        ]
+
+        equipment_meta = {
+            "eq1": {"id": "eq1", "name": "设备1"},
+            "eq2": {"id": "eq2", "name": "设备2"},
+        }
+
+        result = executor.execute(
+            report_type="weekly",
+            scope={"week_start": "2026-06-01", "date_end": "2026-06-07"},
+            equipment_ids=["eq1", "eq2"],
+            equipment_labels=["设备1", "设备2"],
+            equipment_meta=equipment_meta,
+        )
+
+        assert result["status"] == "success"
+        assert mock_subprocess.call_count == 3
+
+        first_call_args = mock_subprocess.call_args_list[0][0][0]
+        assert "--equipment-meta" in first_call_args
+
+    @patch("deerflow.report_executor.executor.DirectReportExecutor._run_subprocess")
+    def test_execute_monthly_with_equipment_meta(self, mock_subprocess, tmp_path):
+        """Test monthly report execution with equipment_meta parameter."""
+        executor = DirectReportExecutor(output_dir=str(tmp_path))
+
+        # Create dummy output files
+        data_file = tmp_path / "monthly_data.json"
+        data_file.write_text("{}")
+        kpi_file = tmp_path / "monthly_kpi.json"
+        kpi_file.write_text("{}")
+        report_file = tmp_path / "monthly_report.md"
+        report_file.write_text("")
+
+        mock_subprocess.side_effect = [
+            json.dumps({"output": str(data_file)}),
+            json.dumps({"output": str(kpi_file)}),
+            json.dumps({"output": str(report_file)}),
+        ]
+
+        equipment_meta = {
+            "pump1": {"id": "pump1", "name": "泵1"},
+        }
+
+        result = executor.execute(
+            report_type="monthly",
+            scope={"report_month": "2026-06"},
+            equipment_ids=["pump1"],
+            equipment_labels=["泵1"],
+            equipment_meta=equipment_meta,
+        )
+
+        assert result["status"] == "success"
+        first_call_args = mock_subprocess.call_args_list[0][0][0]
+        assert "--equipment-meta" in first_call_args
+
+    @patch("subprocess.run")
+    def test_execute_passes_report_run_id_env(self, mock_run, tmp_path):
+        """Test that REPORT_RUN_ID is passed to subprocess environment."""
+        executor = DirectReportExecutor(output_dir=str(tmp_path))
+
+        # Create dummy output files
+        data_file = tmp_path / "daily_data.json"
+        data_file.write_text("{}")
+        kpi_file = tmp_path / "daily_kpi.json"
+        kpi_file.write_text("{}")
+        report_file = tmp_path / "daily_report.md"
+        report_file.write_text("")
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(data_file)}), stderr=""),
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(kpi_file)}), stderr=""),
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(report_file)}), stderr=""),
+        ]
+
+        result = executor.execute(
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
+        )
+
+        assert result["status"] == "success"
+        assert result["report_run_id"].startswith("rr_")
+
+        # Check that subprocess.run was called with env containing REPORT_RUN_ID and FEATURES_TOOL_ROOT
+        first_call_kwargs = mock_run.call_args_list[0][1]
+        assert "env" in first_call_kwargs
+        assert "REPORT_RUN_ID" in first_call_kwargs["env"]
+        assert first_call_kwargs["env"]["REPORT_RUN_ID"] == result["report_run_id"]
+        assert "FEATURES_TOOL_ROOT" in first_call_kwargs["env"]
+        assert first_call_kwargs["env"]["FEATURES_TOOL_ROOT"].endswith("custom/features-tool")

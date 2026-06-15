@@ -2,8 +2,6 @@
 
 from unittest.mock import Mock, patch
 
-import pytest
-
 from deerflow.agents.memory.retrieval import (
     _cache_key,
     _format_session_context,
@@ -66,7 +64,7 @@ class TestFormatSessionContext:
             ],
         }
         result = _format_session_context(data, max_tokens=2000)
-        lines = [l for l in result.split("\n") if l.startswith("- [")]
+        lines = [line for line in result.split("\n") if line.startswith("- [")]
         assert len(lines) == 3
         assert "High" in lines[0]
         assert "Medium" in lines[1]

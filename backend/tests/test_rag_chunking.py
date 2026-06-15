@@ -1,9 +1,7 @@
 """Tests for RAG chunking strategies."""
 
-import pytest
 
 from deerflow.rag.chunking import (
-    Chunk,
     MarkdownChunkStrategy,
     RecursiveChunkStrategy,
     SemanticChunkStrategy,

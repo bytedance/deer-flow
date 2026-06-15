@@ -4,23 +4,24 @@ E2E tests for integration tools with mock adapters.
 Tests the full flow from tool invocation through mock adapters to formatted output.
 """
 
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.models import (
-    TrendSeries,
-    TrendPoint,
-    TrendStatistics,
+    AlarmEvent,
     Asset,
     AssetOverview,
     HealthAssessment,
-    AlarmEvent,
+    TrendPoint,
+    TrendSeries,
+    TrendStatistics,
 )
-from deerflow.integrations.services import MonitoringService, AssetService
-from deerflow.integrations.tools.monitoring_tools import MonitoringTools
+from deerflow.integrations.services import AssetService, MonitoringService
 from deerflow.integrations.tools.asset_tools import AssetTools
+from deerflow.integrations.tools.monitoring_tools import MonitoringTools
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def auth_context():
 @pytest.fixture
 def mock_trend_series():
     """Create a mock TrendSeries response."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return TrendSeries(
         series_id="test-series-001",
         asset_id="asset-001",
@@ -83,14 +84,14 @@ def mock_health_assessment():
             "temperature": 82.0,
             "bearing": 86.5,
         },
-        assessed_at=datetime.now(timezone.utc),
+        assessed_at=datetime.now(UTC),
     )
 
 
 @pytest.fixture
 def mock_alarm_events():
     """Create mock alarm events."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return tuple([
         AlarmEvent(
             event_id="alarm-001",
@@ -193,8 +194,8 @@ class TestE2E_EquipmentGetOverview:
         mock_alarm_events,
     ):
         """Test composite orchestration: asset + health + alarms → AssetOverview."""
-        from deerflow.integrations.routing import ServiceResult
         from deerflow.integrations.models.asset import AssetContext
+        from deerflow.integrations.routing import ServiceResult
 
         # Create AssetContext for the first call
         asset_context = AssetContext(
@@ -259,8 +260,8 @@ class TestE2E_EquipmentGetOverview:
         mock_asset,
     ):
         """Test equipment_get_overview without health assessment."""
-        from deerflow.integrations.routing import ServiceResult
         from deerflow.integrations.models.asset import AssetContext
+        from deerflow.integrations.routing import ServiceResult
 
         asset_context = AssetContext(
             asset=mock_asset,
@@ -306,8 +307,8 @@ class TestE2E_EnrichScenario:
         mock_health_assessment,
     ):
         """Test enrich scenario: primary from Ins + enrich from Sms."""
-        from deerflow.integrations.routing import ServiceResult
         from deerflow.integrations.models.asset import AssetContext
+        from deerflow.integrations.routing import ServiceResult
 
         asset_context = AssetContext(
             asset=mock_asset,
@@ -364,11 +365,8 @@ class TestE2E_CapabilitiesEndpoint:
     async def test_integration_models_importable(self):
         """Test that integration models are importable."""
         from deerflow.integrations.models import (
-            TrendSeries,
-            TrendPoint,
             Asset,
-            AssetOverview,
-            HealthAssessment,
+            TrendSeries,
         )
 
         # Verify models can be instantiated
@@ -379,8 +377,8 @@ class TestE2E_CapabilitiesEndpoint:
     @pytest.mark.asyncio
     async def test_integration_tools_importable(self):
         """Test that integration tools are importable."""
-        from deerflow.integrations.tools.monitoring_tools import MonitoringTools
         from deerflow.integrations.tools.asset_tools import AssetTools
+        from deerflow.integrations.tools.monitoring_tools import MonitoringTools
 
         assert MonitoringTools is not None
         assert AssetTools is not None

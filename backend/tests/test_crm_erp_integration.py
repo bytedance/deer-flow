@@ -9,9 +9,8 @@ Covers:
 - Registry factory includes all 4 adapter types
 """
 
-import time
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,9 +25,8 @@ from deerflow.integrations.adapters.erp.transform import (
     transform_work_orders,
 )
 from deerflow.integrations.config import (
-    CapabilityRouteConfig,
-    IntegrationSystemConfig,
     IntegrationsConfig,
+    IntegrationSystemConfig,
 )
 from deerflow.integrations.models.crm import Contract, CustomerProfile, ServiceObject
 from deerflow.integrations.models.erp import (
@@ -300,14 +298,9 @@ class TestRegistryFactory:
     """Test that the registry factory includes CRM/ERP adapter types."""
 
     def test_factory_includes_all_adapter_types(self):
-        from deerflow.integrations.adapters.crm import CrmAdapter
-        from deerflow.integrations.adapters.erp import ErpAdapter
-        from deerflow.integrations.adapters.ins import InsAdapter
-        from deerflow.integrations.adapters.sms import SmsAdapter
-        from deerflow.integrations.registry import initialize_registry, get_integration_registry
-
         # Reset singleton
         from deerflow.integrations import registry as reg_mod
+        from deerflow.integrations.registry import initialize_registry
         reg_mod.IntegrationRegistry._instance = None
         reg_mod.IntegrationRegistry._initialized = False
 
@@ -469,7 +462,7 @@ class TestCrmServiceRouting:
         service = CrmService(mock_router)
         query = CustomerProfileQuery(tenant_id="t1", search_text="ACME")
         auth = AuthContext(tenant_id="t1", user_id="u1")
-        result = await service.search_customers(query, auth)
+        await service.search_customers(query, auth)
 
         mock_router.route.assert_called_once_with(
             capability_key="customer.search",
@@ -748,10 +741,8 @@ class TestEndToEndCrmErp:
 
     @pytest.mark.asyncio
     async def test_crm_end_to_end_customer_search(self):
-        from deerflow.integrations.adapters.base import AuthContext
         from deerflow.integrations.adapters.crm import CrmAdapter
         from deerflow.integrations.config import IntegrationSystemConfig
-        from deerflow.integrations.models.queries import CustomerProfileQuery
         from deerflow.integrations.routing import CapabilityRouter, ServiceResult
         from deerflow.integrations.services.crm_service import CrmService
         from deerflow.integrations.tools.crm_tools import CrmTools
@@ -763,7 +754,7 @@ class TestEndToEndCrmErp:
             base_url="http://crm.test",
             auth_type="api_key",
         )
-        adapter = CrmAdapter(config)
+        CrmAdapter(config)
 
         raw_response = {
             "data": [
@@ -789,10 +780,8 @@ class TestEndToEndCrmErp:
 
     @pytest.mark.asyncio
     async def test_erp_end_to_end_inventory_check(self):
-        from deerflow.integrations.adapters.base import AuthContext
         from deerflow.integrations.adapters.erp import ErpAdapter
         from deerflow.integrations.config import IntegrationSystemConfig
-        from deerflow.integrations.models.queries import InventoryQuery
         from deerflow.integrations.routing import CapabilityRouter, ServiceResult
         from deerflow.integrations.services.erp_service import ErpService
         from deerflow.integrations.tools.erp_tools import ErpTools
@@ -804,7 +793,7 @@ class TestEndToEndCrmErp:
             base_url="http://erp.test",
             auth_type="api_key",
         )
-        adapter = ErpAdapter(config)
+        ErpAdapter(config)
 
         raw_response = {
             "data": [

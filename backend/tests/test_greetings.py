@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import patch
-
-import pytest
-
 from app.gateway.routers.greetings import (
+    _CLOSED_RECENT_DAYS,
     _DEFAULT_SUGGESTIONS,
     _GREETING_TEMPLATES,
-    _TICKET_STALE_DAYS,
     _MAINTENANCE_WINDOW_DAYS,
-    _CLOSED_RECENT_DAYS,
+    _TICKET_STALE_DAYS,
     _build_suggestions,
     _detect_language,
     _sort_suggestions_by_priority,

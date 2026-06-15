@@ -7,8 +7,6 @@ between scripts and verifies the integration boundary (sprint plan M7).
 from __future__ import annotations
 
 import importlib.util
-import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -25,7 +23,7 @@ def _load(name: str):
     return module
 
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock  # noqa: E402
 
 
 def _fake_fetch_month(report_month, equipment_ids, kpi_keys, eq_type="all", aggregate=False, equipment_meta=None):
@@ -206,7 +204,7 @@ def test_fetch_month_batch_30_day(pipeline, monkeypatch):
     qm = pipeline["qm"]
 
     fake_daily = [
-        _build_fake_daily_entry("2026-04-%02d" % d, ["runtime_rate"]) for d in range(1, 31)
+        _build_fake_daily_entry(f"2026-04-{d:02d}", ["runtime_rate"]) for d in range(1, 31)
     ]
     fake_provider = MagicMock()
     fake_provider.fetch.return_value = qm.load_sibling_module("_data_providers").ProviderResult(
@@ -237,7 +235,7 @@ def test_fetch_month_batch_leap_year_february(pipeline, monkeypatch):
     qm = pipeline["qm"]
 
     fake_daily = [
-        _build_fake_daily_entry("2024-02-%02d" % d, ["runtime_rate"]) for d in range(1, 30)
+        _build_fake_daily_entry(f"2024-02-{d:02d}", ["runtime_rate"]) for d in range(1, 30)
     ]
     fake_provider = MagicMock()
     fake_provider.fetch.return_value = qm.load_sibling_module("_data_providers").ProviderResult(

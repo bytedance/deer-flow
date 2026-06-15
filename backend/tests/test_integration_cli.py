@@ -12,7 +12,7 @@ Covers:
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,7 +25,6 @@ from deerflow.integrations.cli import (
     _run,
     main,
 )
-
 
 # ---------------------------------------------------------------------------
 # Argument Parsing Tests
@@ -168,7 +167,7 @@ class TestJSONEncoder:
     """Test _IntegrationJSONEncoder handles datetimes, dataclasses, tuples."""
 
     def test_datetime_encoding(self):
-        dt = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        dt = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         result = json.dumps({"ts": dt}, cls=_IntegrationJSONEncoder)
         assert "2026-01-01T12:00:00" in result
 
@@ -259,14 +258,14 @@ class TestRunSuccess:
     @pytest.mark.asyncio
     async def test_run_success_outputs_json(self, capsys):
         """Successful capability call outputs result JSON."""
-        from deerflow.integrations.routing import ServiceResult
         from deerflow.integrations.models.monitoring import (
-            TrendSeries,
             TrendPoint,
+            TrendSeries,
             TrendStatistics,
         )
+        from deerflow.integrations.routing import ServiceResult
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         mock_series = TrendSeries(
             series_id="s1",
             asset_id="a1",
@@ -551,15 +550,15 @@ class TestPartialFailures:
     @pytest.mark.asyncio
     async def test_partial_failures_included(self, capsys):
         """Partial failures are included in output."""
-        from deerflow.integrations.routing import ServiceResult
         from deerflow.integrations.models.provenance import PartialFailure
+        from deerflow.integrations.routing import ServiceResult
 
         pf = PartialFailure(
             system_key="sms",
             capability_key="health.assessment",
             error_type="IntegrationTimeoutError",
             error_message="timeout after 15s",
-            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
         mock_result = ServiceResult(
@@ -647,7 +646,6 @@ class TestActionModeExecution:
     @pytest.mark.asyncio
     async def test_aggregate_kpi_success(self, capsys):
         """aggregate_kpi action returns KPI data."""
-        from deerflow.integrations.adapters.ins import kpi_aggregator
 
         mock_app_config = _make_mock_config()
         mock_registry = _make_mock_registry_with_aggregator()

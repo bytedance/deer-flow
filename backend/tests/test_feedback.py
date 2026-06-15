@@ -11,7 +11,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from deerflow.config.tenant import set_current_tenant_id
 from deerflow.feedback.storage import FeedbackEntry, FeedbackStorage
 
 
@@ -115,9 +114,8 @@ class TestFeedbackStorage:
         tenant_a_dir.mkdir(parents=True)
         tenant_b_dir.mkdir(parents=True)
 
-        storage_a = FeedbackStorage(base_dir=base)
+        FeedbackStorage(base_dir=base)
         # Write directly to the per-tenant files
-        import json, os
         def _write(path, entries):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump([e.to_dict() for e in entries], f)
@@ -211,9 +209,9 @@ class TestFeedbackRouter:
 Uses temp SQLite DB for ORM tests.
 """
 
-import pytest
+import pytest  # noqa: E402
 
-from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.feedback import FeedbackRepository  # noqa: E402
 
 
 async def _make_feedback_repo(tmp_path):

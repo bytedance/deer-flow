@@ -13,15 +13,13 @@ from __future__ import annotations
 
 import time
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import industrial_skills_telemetry as telemetry_mod
 from app.gateway.routers.industrial_skills_telemetry import (
-    IndustrialSkillTelemetryEvent,
     IndustrialSkillsMetrics,
-    _metrics,
+    IndustrialSkillTelemetryEvent,
 )
 
 

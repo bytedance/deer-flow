@@ -10,7 +10,7 @@ Tests the full pipeline:
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -23,9 +23,6 @@ from deerflow.insights.kb_candidate_store import KBCandidateStore
 from deerflow.insights.knowledge_extractor import ClosureKnowledgeExtractor
 from deerflow.insights.memory_integration import FeedbackMemoryIntegration
 from deerflow.insights.models import (
-    ClosureMetrics,
-    FeedbackTrend,
-    ImprovementEvidence,
     ImprovementSuggestion,
     KBCandidate,
 )
@@ -424,7 +421,7 @@ class TestE2EAPIIntegration:
 
     def test_api_enforces_read_permission(self, e2e_cache):
         """Test that GET endpoints require insights:read permission."""
-        from fastapi import FastAPI, Request, Response
+        from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.types import ASGIApp
@@ -470,7 +467,7 @@ class TestE2EAPIIntegration:
 
     def test_api_enforces_write_permission(self, e2e_cache):
         """Test that POST endpoints require insights:write permission."""
-        from fastapi import FastAPI, Request, Response
+        from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.types import ASGIApp
@@ -519,7 +516,7 @@ class TestE2EAPIIntegration:
 
     def test_api_returns_404_for_cross_tenant_access(self, e2e_cache, e2e_temp_dir):
         """Test that API prevents cross-tenant access to KB candidates."""
-        from fastapi import FastAPI, Request, Response
+        from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
         from starlette.middleware.base import BaseHTTPMiddleware
         from starlette.types import ASGIApp

@@ -319,7 +319,7 @@ async def test_scanner_loop_recovers_from_transient_error(scanner_ctx) -> None:
     stop_event.set()
     try:
         await asyncio.wait_for(task, timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         task.cancel()
         with pytest.raises((asyncio.CancelledError, Exception)):
             await task

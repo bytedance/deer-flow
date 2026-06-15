@@ -9,7 +9,6 @@ Covers tasks from the industrial-intelligence-primary-track change:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,15 +16,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.deps import get_config
 from app.gateway.routers.tenant_industrial_migration import (
-    DeclineMigrationResponse,
-    IndustrialMigrationResponse,
-    MigrationStatusResponse,
     _load_migration_state,
     _save_migration_state,
     router,
 )
-from app.gateway.deps import get_config
 
 
 @pytest.fixture

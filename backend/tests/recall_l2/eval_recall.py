@@ -34,7 +34,7 @@ import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -424,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     token = set_current_tenant_id(TENANT_ID)
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     t0 = time.time()
     exit_code = 0
     try:

@@ -18,7 +18,6 @@ from deerflow.knowledge_base.telemetry import (
     init_kb_telemetry,
 )
 
-
 # ---------------------------------------------------------------------------
 # Counters
 # ---------------------------------------------------------------------------
@@ -142,7 +141,7 @@ class TestEventRecording:
 
         lines = log_file.read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 3
-        types = [json.loads(l)["type"] for l in lines]
+        types = [json.loads(line)["type"] for line in lines]
         assert types == ["a", "b", "c"]
 
     def test_record_event_no_log_path_does_not_crash(self):

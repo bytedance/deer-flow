@@ -1,15 +1,10 @@
 """Tests for tenant-scoped path resolution."""
 
-import os
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.tenant import (
-    _DEFAULT_TENANT_ID,
-    get_current_tenant_id,
     reset_tenant_id,
     set_current_tenant_id,
 )

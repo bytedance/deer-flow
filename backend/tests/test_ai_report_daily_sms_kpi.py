@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -167,51 +166,83 @@ def test_overall_status_sms_empty_by_severity(kpi_module):
     assert result["level"] == "ok"
 
 
-# ── _load_sms_abnormal ──────────────────────────────────────────────────────
+# ── _fetch_sms_direct ───────────────────────────────────────────────────────
 
 
-def test_load_sms_abnormal_file_not_found(kpi_module):
-    assert kpi_module._load_sms_abnormal() is None
+def test_fetch_sms_direct_returns_none_without_date(kpi_module):
+    assert kpi_module._fetch_sms_direct({}) is None
 
 
-def test_load_sms_abnormal_invalid_json(kpi_module, tmp_path):
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text("not json", encoding="utf-8")
-    assert kpi_module._load_sms_abnormal() is None
+def test_fetch_sms_direct_returns_none_without_equipment_ids(kpi_module):
+    assert kpi_module._fetch_sms_direct({"report_date": "2026-06-11"}) is None
 
 
-def test_load_sms_abnormal_error_key(kpi_module, tmp_path):
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text(json.dumps({"sms_abnormal": {"error": "timeout"}}), encoding="utf-8")
-    assert kpi_module._load_sms_abnormal() is None
+def test_fetch_sms_direct_returns_none_on_import_error(kpi_module):
+    """If query_sms_abnormal is not importable, returns None."""
+    payload = {"report_date": "2026-06-11", "equipment_ids": ["EQ1"]}
+    with patch.dict(sys.modules, {"query_sms_abnormal": None}):
+        assert kpi_module._fetch_sms_direct(payload) is None
 
 
-def test_load_sms_abnormal_zero_total(kpi_module, tmp_path):
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text(json.dumps({"sms_abnormal": {"total_count": 0}}), encoding="utf-8")
-    assert kpi_module._load_sms_abnormal() is None
+def test_fetch_sms_direct_returns_none_on_exception(kpi_module):
+    """If fetch_sms_abnormal raises, returns None."""
+    payload = {"report_date": "2026-06-11", "equipment_ids": ["EQ1"]}
+    mock_fetch = pytest.importorskip("unittest.mock").MagicMock(side_effect=RuntimeError("boom"))
+    mock_mod = pytest.importorskip("unittest.mock").MagicMock()
+    mock_mod.fetch_sms_abnormal = mock_fetch
+    with patch.dict(sys.modules, {"query_sms_abnormal": mock_mod}):
+        assert kpi_module._fetch_sms_direct(payload) is None
 
 
-def test_load_sms_abnormal_sms_abnormal_not_dict(kpi_module, tmp_path):
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text(json.dumps({"sms_abnormal": "not a dict"}), encoding="utf-8")
-    assert kpi_module._load_sms_abnormal() is None
+def test_fetch_sms_direct_returns_none_on_error_key(kpi_module):
+    payload = {"report_date": "2026-06-11", "equipment_ids": ["EQ1"]}
+    mock_mod = pytest.importorskip("unittest.mock").MagicMock()
+    mock_mod.fetch_sms_abnormal.return_value = {"sms_abnormal": {"error": "timeout"}}
+    with patch.dict(sys.modules, {"query_sms_abnormal": mock_mod}):
+        assert kpi_module._fetch_sms_direct(payload) is None
 
 
-def test_load_sms_abnormal_valid_data(kpi_module, tmp_path):
-    sms_file = tmp_path / "sms_abnormal.json"
-    data = {
-        "sms_abnormal": {
-            "total_count": 3,
-            "by_severity": {"critical": 1, "high": 2},
-            "top_events": [],
-        }
+def test_fetch_sms_direct_returns_none_on_zero_total(kpi_module):
+    payload = {"report_date": "2026-06-11", "equipment_ids": ["EQ1"]}
+    mock_mod = pytest.importorskip("unittest.mock").MagicMock()
+    mock_mod.fetch_sms_abnormal.return_value = {"sms_abnormal": {"total_count": 0}}
+    with patch.dict(sys.modules, {"query_sms_abnormal": mock_mod}):
+        assert kpi_module._fetch_sms_direct(payload) is None
+
+
+def test_fetch_sms_direct_returns_sms_data(kpi_module):
+    payload = {
+        "report_date": "2026-06-11",
+        "equipment_ids": ["EQ1", "EQ2"],
+        "equipment_type": "rotating_machinery",
+        "equipment_names": {"EQ1": "泵A"},
     }
-    sms_file.write_text(json.dumps(data), encoding="utf-8")
-    result = kpi_module._load_sms_abnormal()
+    sms_data = {"total_count": 3, "by_severity": {"critical": 1}}
+    mock_mod = pytest.importorskip("unittest.mock").MagicMock()
+    mock_mod.fetch_sms_abnormal.return_value = {"sms_abnormal": sms_data}
+    with patch.dict(sys.modules, {"query_sms_abnormal": mock_mod}):
+        result = kpi_module._fetch_sms_direct(payload)
     assert result is not None
     assert result["total_count"] == 3
-    assert result["by_severity"]["critical"] == 1
+    mock_mod.fetch_sms_abnormal.assert_called_once()
+
+
+# ── _sms_kpi ────────────────────────────────────────────────────────────────
+
+
+def test_sms_kpi_builds_entry(kpi_module):
+    entry = kpi_module._sms_kpi("sms_abnormal_count", 5)
+    assert entry["key"] == "sms_abnormal_count"
+    assert entry["current"] == 5
+    assert entry["unit"] == "条"
+    assert entry["previous"] is None
+    assert entry["delta"] is None
+    assert entry["better_when_higher"] is False
+
+
+def test_sms_kpi_uses_display_name(kpi_module):
+    entry = kpi_module._sms_kpi("sms_abnormal_pending", 0)
+    assert entry["name"] == kpi_module.KPI_DISPLAY_NAMES.get("sms_abnormal_pending", "sms_abnormal_pending")
 
 
 # ── compute() SMS integration ───────────────────────────────────────────────
@@ -232,20 +263,19 @@ def _base_payload():
     }
 
 
-@patch.object(sys.modules[__name__], "_load_kpi_module")
-def test_compute_injects_sms_kpis(_, kpi_module, tmp_path):
-    """When sms_abnormal.json exists with data, inject SMS KPI cards."""
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text(json.dumps({
-        "sms_abnormal": {
-            "total_count": 5,
-            "by_severity": {"critical": 2, "high": 3},
-            "by_status": {"待处理": 3, "已处理": 2},
-            "top_events": [],
-        }
-    }), encoding="utf-8")
+def _sms_payload(total=5, critical=2, high=3, pending=3):
+    return {
+        "total_count": total,
+        "by_severity": {"critical": critical, "high": high},
+        "by_status": {"待处理": pending, "已处理": total - pending},
+        "top_events": [],
+    }
 
-    result = kpi_module.compute(_base_payload())
+
+def test_compute_injects_sms_kpis(kpi_module):
+    """When _fetch_sms_direct returns data, inject SMS KPI cards."""
+    with patch.object(kpi_module, "_fetch_sms_direct", return_value=_sms_payload()):
+        result = kpi_module.compute(_base_payload())
 
     sms_keys = {item["key"] for item in result["kpi_summary"]}
     assert "sms_abnormal_count" in sms_keys
@@ -262,9 +292,10 @@ def test_compute_injects_sms_kpis(_, kpi_module, tmp_path):
     assert "sms_abnormal" in result
 
 
-def test_compute_no_sms_file_no_injection(kpi_module):
-    """When sms_abnormal.json does not exist, no SMS KPIs are injected."""
-    result = kpi_module.compute(_base_payload())
+def test_compute_no_sms_returns_none_no_injection(kpi_module):
+    """When _fetch_sms_direct returns None, no SMS KPIs are injected."""
+    with patch.object(kpi_module, "_fetch_sms_direct", return_value=None):
+        result = kpi_module.compute(_base_payload())
 
     sms_keys = {item["key"] for item in result["kpi_summary"]}
     assert "sms_abnormal_count" not in sms_keys
@@ -275,28 +306,22 @@ def test_compute_no_sms_file_no_injection(kpi_module):
 
 def test_compute_sms_does_not_break_detail_mode(kpi_module):
     """SMS data is compatible with detail mode (≤20 equipment)."""
-    result = kpi_module.compute(_base_payload())
+    with patch.object(kpi_module, "_fetch_sms_direct", return_value=None):
+        result = kpi_module.compute(_base_payload())
     assert result["aggregation_mode"] == "detail"
     assert result["overall_status"]["level"] == "ok"
 
 
-def test_compute_sms_table_has_rows(kpi_module, tmp_path):
+def test_compute_sms_table_has_rows(kpi_module):
     """When SMS has top_events, sms_abnormal_table is populated."""
-    sms_file = tmp_path / "sms_abnormal.json"
-    sms_file.write_text(json.dumps({
-        "sms_abnormal": {
-            "total_count": 2,
-            "by_severity": {"critical": 1, "high": 1},
-            "by_status": {"待处理": 1, "已处理": 1},
-            "top_events": [
-                {"rank": 1, "mac_name": "Pump A", "component_name": "Bearing",
-                 "latest_health": 70, "latest_level": 65, "severity": "critical",
-                 "event_count": 3, "process_status": "待处理", "run_status": "运行"},
-            ],
-        }
-    }), encoding="utf-8")
-
-    result = kpi_module.compute(_base_payload())
+    sms_data = _sms_payload(total=2, critical=1, high=1, pending=1)
+    sms_data["top_events"] = [
+        {"rank": 1, "mac_name": "Pump A", "component_name": "Bearing",
+         "latest_health": 70, "latest_level": 65, "severity": "critical",
+         "event_count": 3, "process_status": "待处理", "run_status": "运行"},
+    ]
+    with patch.object(kpi_module, "_fetch_sms_direct", return_value=sms_data):
+        result = kpi_module.compute(_base_payload())
     assert len(result["sms_abnormal_table"]) == 1
     assert result["sms_abnormal_table"][0]["equipment"] == "Pump A"
     assert result["sms_abnormal_table"][0]["severity"] == "严重"

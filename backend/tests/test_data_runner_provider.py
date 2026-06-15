@@ -7,7 +7,6 @@ Verifies that ``run_script`` injects ``USE_PLATFORM=true`` (or
 
 from __future__ import annotations
 
-import json
 import sys
 import types
 from pathlib import Path
@@ -164,7 +163,6 @@ class TestRunDataStepsProviderPassthrough:
 
         captured_providers = []
 
-        original_run_script = data_runner.run_script
 
         def spy_run_script(**kwargs):
             captured_providers.append(kwargs.get("provider"))

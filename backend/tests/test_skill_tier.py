@@ -114,7 +114,7 @@ def test_list_skills_no_filter_returns_all():
 
 
 def test_update_skill_tier(monkeypatch, tmp_path):
-    skill = _make_skill("my-skill", tier=SkillTier.FOUNDATION)
+    _make_skill("my-skill", tier=SkillTier.FOUNDATION)
     config = _base_config()
     app = _make_test_app(config)
 
@@ -122,7 +122,7 @@ def test_update_skill_tier(monkeypatch, tmp_path):
     config_file.write_text(json.dumps({"mcpServers": {}, "skills": {"my-skill": {"enabled": True, "tier": "foundation"}}}), encoding="utf-8")
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", lambda *a: config_file)
 
-    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
 
     def _make_reload_storage():
         """Storage that re-reads tier from config file on each load_skills call."""
@@ -136,7 +136,7 @@ def test_update_skill_tier(monkeypatch, tmp_path):
         return TierAwareStorage()
 
     skills_router.get_or_new_skill_storage = lambda **kw: _make_reload_storage()
-    injected = ExtensionsConfig.from_file(str(config_file))
+    ExtensionsConfig.from_file(str(config_file))
     monkeypatch.setattr(skills_router, "get_extensions_config", lambda: ExtensionsConfig.from_file(str(config_file)))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda *a: None)
 

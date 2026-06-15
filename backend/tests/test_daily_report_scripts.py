@@ -290,7 +290,7 @@ class TestKpiAggregatorEdgeCases:
 
 class TestSelectPointsBySeries:
     def test_selects_matching_series(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             f = m["_ins_client"]._select_points_by_series
             components = [
                 {"id": "p1", "endpoint_series": "8k"},
@@ -301,7 +301,7 @@ class TestSelectPointsBySeries:
             assert sorted(p["id"] for p in selected) == ["p1", "p3"]
 
     def test_skips_children_when_series_set(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             f = m["_ins_client"]._select_points_by_series
             components = [
                 {
@@ -314,7 +314,7 @@ class TestSelectPointsBySeries:
             assert [p["id"] for p in selected] == ["parent"]
 
     def test_traverses_nested_children(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             f = m["_ins_client"]._select_points_by_series
             components = [
                 {
@@ -336,7 +336,7 @@ class TestSelectPointsBySeries:
             assert "p1" in ids
 
     def test_handles_non_dict_nodes(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             f = m["_ins_client"]._select_points_by_series
             components = ["not_a_dict", 42, None]
             selected = f(components, "8k")
@@ -345,13 +345,13 @@ class TestSelectPointsBySeries:
 
 class TestInsClientAvailability:
     def test_is_available_returns_bool(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             # Without features-tool installed, should return False
             result = m["_ins_client"].is_available()
             assert isinstance(result, bool)
 
     def test_get_availability_reason_returns_string(self):
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             result = m["_ins_client"].get_availability_reason()
             assert isinstance(result, str)
 
@@ -368,7 +368,7 @@ class TestInsClientFetchTrendData:
         ]
         mock_client.get_trend_data.return_value = mock_rows
 
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             with patch.object(m["_ins_client"], "_get_client", return_value=mock_client):
                 result = m["_ins_client"].fetch_trend_data(
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59", "rotating_machinery",
@@ -380,7 +380,7 @@ class TestInsClientFetchTrendData:
         mock_client = MagicMock()
         mock_client.get_slim_components.side_effect = RuntimeError("API down")
 
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             with patch.object(m["_ins_client"], "_get_client", return_value=mock_client):
                 result = m["_ins_client"].fetch_trend_data(
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59",
@@ -393,7 +393,7 @@ class TestInsClientFetchTrendData:
             {"id": "pt1", "endpoint_series": "2k"},  # wrong series for rotating
         ]
 
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             with patch.object(m["_ins_client"], "_get_client", return_value=mock_client):
                 result = m["_ins_client"].fetch_trend_data(
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59", "rotating_machinery",
@@ -408,7 +408,7 @@ class TestInsClientFetchAlarms:
             {"types": [1], "datatime": 1717459200000, "posName": "压缩机轴承", "posId": "PT-001"},
         ]
 
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             with patch.object(m["_ins_client"], "_get_client", return_value=mock_client):
                 result = m["_ins_client"].fetch_alarm_events(
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59",
@@ -423,7 +423,7 @@ class TestInsClientFetchAlarms:
         mock_client = MagicMock()
         mock_client.get_machine_drops.side_effect = RuntimeError("API down")
 
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             with patch.object(m["_ins_client"], "_get_client", return_value=mock_client):
                 result = m["_ins_client"].fetch_alarm_events(
                     ["EQ1"], "2026-05-15T00:00:00", "2026-05-15T23:59:59",
@@ -432,7 +432,7 @@ class TestInsClientFetchAlarms:
 
     def test_event_type_map_coverage(self):
         """All event types in the map have valid labels and levels."""
-        with _script_sandbox("_ins_client") as m:
+        with _script_sandbox("_perf", "_ins_client") as m:
             event_map = m["_ins_client"]._EVENT_TYPE_MAP
             assert event_map[1] == ("主报警", "high")
             assert event_map[2] == ("预报警", "warning")
@@ -440,3 +440,127 @@ class TestInsClientFetchAlarms:
             assert event_map[15] == ("偏差报警", "high")
             # Unknown type falls back to default in _format_machine_drop_entry
             assert 99 not in event_map
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Concurrency tests (Semaphore + cache + ThreadPoolExecutor)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestInsClientConcurrency:
+    """Tests for semaphore-based concurrency and slim_components cache."""
+
+    def test_semaphore_limits_concurrency(self):
+        """Multiple devices are fetched with semaphore limiting in-flight calls."""
+        import asyncio
+
+        max_inflight = 0
+        inflight = 0
+
+        async def slow_get_trend_data(*args, **kwargs):
+            nonlocal inflight, max_inflight
+            inflight += 1
+            max_inflight = max(max_inflight, inflight)
+            await asyncio.sleep(0.05)
+            inflight -= 1
+            return [{"time_ms": 1000, "values": {"speed": 10}}]
+
+        mock_client = MagicMock()
+        mock_client.get_slim_components.return_value = [
+            {"id": "pt1", "endpoint_series": "8k"},
+        ]
+        mock_client.get_trend_data = slow_get_trend_data
+
+        with _script_sandbox("_perf", "_ins_client") as m:
+            m["_ins_client"].INS_CONCURRENCY_LIMIT = 2
+            m["_ins_client"]._slim_components_cache.clear()
+            result = asyncio.run(
+                m["_ins_client"].fetch_trend_data_async(
+                    mock_client,
+                    ["EQ1", "EQ2", "EQ3", "EQ4"],
+                    "2026-05-15T00:00:00",
+                    "2026-05-15T23:59:59",
+                    "rotating_machinery",
+                )
+            )
+        assert len(result) == 4
+        assert max_inflight <= 2
+
+    def test_slim_components_cache_hit(self):
+        """get_slim_components is called once per equipment_id; subsequent fetches use cache."""
+        import asyncio
+
+        mock_client = MagicMock()
+        mock_client.get_slim_components.return_value = [
+            {"id": "pt1", "endpoint_series": "8k"},
+        ]
+        mock_client.get_trend_data.return_value = [{"time_ms": 1000, "values": {"speed": 10}}]
+
+        with _script_sandbox("_perf", "_ins_client") as m:
+            m["_ins_client"]._slim_components_cache.clear()
+            asyncio.run(
+                m["_ins_client"].fetch_trend_data_async(
+                    mock_client,
+                    ["EQ1", "EQ2"],
+                    "2026-05-15T00:00:00",
+                    "2026-05-15T23:59:59",
+                    "rotating_machinery",
+                )
+            )
+            asyncio.run(
+                m["_ins_client"].fetch_trend_data_async(
+                    mock_client,
+                    ["EQ1", "EQ3"],
+                    "2026-05-15T00:00:00",
+                    "2026-05-15T23:59:59",
+                    "rotating_machinery",
+                )
+            )
+        # EQ1 fetched in first call, cached for second; EQ2 and EQ3 fetched once each
+        assert mock_client.get_slim_components.call_count == 3
+        calls = [c.args[0] for c in mock_client.get_slim_components.call_args_list]
+        assert calls.count("EQ1") == 1
+        assert calls.count("EQ2") == 1
+        assert calls.count("EQ3") == 1
+
+    def test_alarm_concurrency_gathers_results(self):
+        """Alarm fetches across multiple devices are gathered into a single list."""
+        import asyncio
+
+        def make_machine_drops(eq_id, start, end, event_types, **kwargs):
+            return [{"types": [1], "datatime": 1717459200000, "posName": f"设备{eq_id}", "posId": eq_id}]
+
+        mock_client = MagicMock()
+        mock_client.get_machine_drops.side_effect = make_machine_drops
+
+        with _script_sandbox("_perf", "_ins_client") as m:
+            result = asyncio.run(
+                m["_ins_client"].fetch_alarm_events_async(
+                    mock_client,
+                    ["EQ1", "EQ2", "EQ3"],
+                    "2026-05-15T00:00:00",
+                    "2026-05-15T23:59:59",
+                    "rotating_machinery",
+                )
+            )
+        assert len(result) == 3
+        equipments = {a["equipment"] for a in result}
+        assert equipments == {"设备EQ1", "设备EQ2", "设备EQ3"}
+
+    def test_alarm_6k_returns_empty(self):
+        """Static equipment (6k) does not support alarm endpoint."""
+        import asyncio
+
+        mock_client = MagicMock()
+        with _script_sandbox("_perf", "_ins_client") as m:
+            result = asyncio.run(
+                m["_ins_client"].fetch_alarm_events_async(
+                    mock_client,
+                    ["EQ1"],
+                    "2026-05-15T00:00:00",
+                    "2026-05-15T23:59:59",
+                    "static_equipment",
+                )
+            )
+        assert result == []
+        mock_client.get_machine_drops.assert_not_called()

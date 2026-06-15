@@ -4,7 +4,6 @@ import pytest
 
 from deerflow.config.cost_config import (
     BudgetConfigModel,
-    CostConfig,
     ModelPricing,
     get_cost_config,
     load_cost_config_from_dict,

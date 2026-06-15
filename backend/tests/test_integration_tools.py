@@ -6,34 +6,31 @@ Covers:
 - Prompt scoping: data_sources section generation with wildcards and specific tools
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
-from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.models import (
+    AlarmEvent,
     Asset,
     AssetContext,
-    MeasurementPoint,
     HealthAssessment,
-    TrendSeries,
     TrendPoint,
+    TrendSeries,
     TrendStatistics,
-    AlarmEvent,
 )
-from deerflow.integrations.models.provenance import PartialFailure
 from deerflow.integrations.routing import ServiceResult
 from deerflow.integrations.services import (
+    AssessmentService,
     AssetService,
     MonitoringService,
-    AssessmentService,
 )
+from deerflow.integrations.tools.assessment_tools import AssessmentTools
 from deerflow.integrations.tools.asset_tools import AssetTools
 from deerflow.integrations.tools.monitoring_tools import MonitoringTools
-from deerflow.integrations.tools.assessment_tools import AssessmentTools
 from deerflow.integrations.tools.tool_builder import build_integration_tools
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

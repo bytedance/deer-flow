@@ -228,7 +228,7 @@ def test_batch_promote_to_industrial_allowed(monkeypatch, tmp_path):
 
 
 def test_individual_tier_change_audit_log(monkeypatch, tmp_path, caplog):
-    skill = _make_skill("my-skill", tier=SkillTier.CORE_INDUSTRIAL)
+    _make_skill("my-skill", tier=SkillTier.CORE_INDUSTRIAL)
     config = _base_config()
     app = _make_test_app(config)
 

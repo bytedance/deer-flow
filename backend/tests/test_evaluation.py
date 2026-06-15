@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.config.evaluation_config import (
-    EvaluationConfig,
     get_evaluation_config,
     load_evaluation_config_from_dict,
     reset_evaluation_config,

@@ -3,8 +3,8 @@
 import pytest
 
 from deerflow.config.tenant import (
-    TENANT_ID_PATTERN,
     _DEFAULT_TENANT_ID,
+    TENANT_ID_PATTERN,
     get_current_tenant_id,
     reset_tenant_id,
     set_current_tenant_id,

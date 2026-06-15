@@ -242,7 +242,7 @@ class TestDocumentOperations:
         doc_repo.get = AsyncMock(return_value={**doc, "index_status": "indexed"})
 
         with patch.object(svc, "_run_index_job", new_callable=AsyncMock) as mock_index:
-            result = await svc.create_document(
+            await svc.create_document(
                 "kb-1",
                 tenant_id="t1",
                 owner_user_id="u1",

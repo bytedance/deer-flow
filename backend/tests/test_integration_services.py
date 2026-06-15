@@ -57,10 +57,11 @@ class TestAssetService:
     @pytest.mark.asyncio
     async def test_get_overview_composite(self):
         from datetime import datetime
+
         from deerflow.integrations.models.asset import Asset, AssetContext
         from deerflow.integrations.models.provenance import Provenance
 
-        prov = Provenance(
+        Provenance(
             source_system_key="ins", source_system_type="ins",
             capability_key="asset.context", fetched_at=datetime.now(),
         )
@@ -93,10 +94,11 @@ class TestAssetService:
     @pytest.mark.asyncio
     async def test_get_overview_health_failure(self):
         from datetime import datetime
+
         from deerflow.integrations.models.asset import Asset, AssetContext
         from deerflow.integrations.models.provenance import Provenance
 
-        prov = Provenance(
+        Provenance(
             source_system_key="ins", source_system_type="ins",
             capability_key="asset.context", fetched_at=datetime.now(),
         )

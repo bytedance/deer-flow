@@ -1,17 +1,12 @@
 """Tests for tenant-isolated memory storage."""
 
 import json
-import threading
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from deerflow.agents.memory.storage import FileMemoryStorage, create_empty_memory
+from deerflow.agents.memory.storage import FileMemoryStorage
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.tenant import (
     _DEFAULT_TENANT_ID,
-    get_current_tenant_id,
     reset_tenant_id,
     set_current_tenant_id,
 )

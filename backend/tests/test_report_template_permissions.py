@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from deerflow.report_templates.permissions import (
-    Decision,
     Principal,
     check_permission,
 )
@@ -14,7 +11,6 @@ from deerflow.report_templates.records import (
     new_template_id,
     now_iso,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

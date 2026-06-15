@@ -329,7 +329,7 @@ class TestDefaultDependencies:
         mock_embed_fn.return_value = _mock_embedder()
         mock_store_fn.return_value = _mock_store()
 
-        ingestor = DocumentIngestor()
+        DocumentIngestor()
 
         mock_embed_fn.assert_called_once()
         mock_store_fn.assert_called_once()

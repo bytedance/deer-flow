@@ -1,22 +1,17 @@
 """Tests for tenant-isolated agent CRUD operations."""
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from deerflow.config.agents_config import (
     AGENT_NAME_PATTERN,
-    AgentConfig,
+    list_custom_agents,
     load_agent_config,
     load_agent_soul,
-    list_custom_agents,
 )
 from deerflow.config.paths import Paths
 from deerflow.config.tenant import (
-    _DEFAULT_TENANT_ID,
-    get_current_tenant_id,
     reset_tenant_id,
     set_current_tenant_id,
 )

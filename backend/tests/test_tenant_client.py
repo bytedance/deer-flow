@@ -1,7 +1,5 @@
 """Tests for DeerFlowClient multi-tenant isolation."""
 
-import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,8 +8,6 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.tenant import (
     _DEFAULT_TENANT_ID,
     get_current_tenant_id,
-    reset_tenant_id,
-    set_current_tenant_id,
 )
 
 

@@ -18,7 +18,6 @@ from deerflow.insights.kb_candidate_store import KBCandidateStore
 from deerflow.insights.knowledge_extractor import ClosureKnowledgeExtractor
 from deerflow.insights.memory_integration import FeedbackMemoryIntegration
 from deerflow.insights.models import (
-    ClosureMetrics,
     FeedbackTrend,
     ImprovementEvidence,
     ImprovementSuggestion,

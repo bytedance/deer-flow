@@ -18,13 +18,11 @@ from deerflow.report_templates.repository import (
     EtagMismatchError,
     FileSystemReportTemplateRepository,
     ImmutablePublishedError,
-    PathTraversalError,
     RepositoryError,
     Scope,
     TemplateNotFoundError,
     VersionNotFoundError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -125,14 +123,14 @@ class TestCreate:
         assert repo.list_templates(Scope.private("alice"))[0].id == a.id
 
     def test_isolates_by_tenant(self, repo):
-        a = repo.create_template(
+        repo.create_template(
             scope=Scope.tenant("ten_a"),
             name="a",
             display_name="A",
             owner_user_id="u1",
             tenant_id="ten_a",
         )
-        b = repo.create_template(
+        repo.create_template(
             scope=Scope.tenant("ten_b"),
             name="b",
             display_name="B",

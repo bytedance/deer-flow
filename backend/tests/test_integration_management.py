@@ -9,23 +9,22 @@ Covers:
 - Degradation strategy: _record_health_failure(), _record_health_success(), is_system_degraded()
 """
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock
 from fastapi import HTTPException
 
-from app.gateway.routers import integrations
 from app.gateway.routers.integrations import (
-    _require_tenant_admin,
+    _AUDIT_LOG_MAX,
+    _audit_log,
+    _degradation_tracker,
+    _degraded_systems,
     _record_audit,
     _record_health_failure,
     _record_health_success,
+    _require_tenant_admin,
     is_system_degraded,
-    _degradation_tracker,
-    _degraded_systems,
-    _audit_log,
-    _AUDIT_LOG_MAX,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

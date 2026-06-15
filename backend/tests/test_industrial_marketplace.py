@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from deerflow.report_templates.records import (
-    ReportTemplateRecord,
     IndexEntry,
+    ReportTemplateRecord,
 )
 from deerflow.report_templates.repository import (
     FileSystemReportTemplateRepository,
@@ -37,8 +37,9 @@ class TestFeaturedField:
 
     def test_template_record_has_is_featured_field(self):
         """ReportTemplateRecord should have is_featured boolean field."""
-        from deerflow.report_templates.records import now_iso
         import uuid
+
+        from deerflow.report_templates.records import now_iso
 
         record = ReportTemplateRecord(
             id="tpl_TEST000000000000000001",
@@ -55,8 +56,9 @@ class TestFeaturedField:
 
     def test_template_record_default_not_featured(self):
         """Templates are not featured by default."""
-        from deerflow.report_templates.records import now_iso
         import uuid
+
+        from deerflow.report_templates.records import now_iso
 
         record = ReportTemplateRecord(
             id="tpl_TEST000000000000000002",
@@ -139,8 +141,9 @@ class TestUsageTracking:
 
     def test_template_record_has_usage_fields(self):
         """ReportTemplateRecord should have install_count and run_count."""
-        from deerflow.report_templates.records import now_iso
         import uuid
+
+        from deerflow.report_templates.records import now_iso
 
         record = ReportTemplateRecord(
             id="tpl_TEST000000000000000004",
@@ -159,8 +162,9 @@ class TestUsageTracking:
 
     def test_template_record_default_usage_zero(self):
         """Usage counters should default to zero."""
-        from deerflow.report_templates.records import now_iso
         import uuid
+
+        from deerflow.report_templates.records import now_iso
 
         record = ReportTemplateRecord(
             id="tpl_TEST000000000000000005",

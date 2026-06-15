@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from deerflow.config.webhook_config import (
-    WebhookConfig,
     get_webhook_config,
     load_webhook_config_from_dict,
     reset_webhook_config,
 )
-from deerflow.events.bus import EventBus, get_event_bus, reset_event_bus
+from deerflow.events.bus import get_event_bus, reset_event_bus
 from deerflow.events.models import Event, EventType
 from deerflow.events.webhook import WebhookDispatcher
 

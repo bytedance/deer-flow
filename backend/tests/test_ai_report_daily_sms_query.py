@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -75,7 +74,7 @@ def test_day_range_ms(sms_module):
     assert end - start == 24 * 60 * 60 * 1000 - 1
     # verify round-trip via known value (2026-06-04T00:00:00Z)
     import datetime
-    dt = datetime.datetime.fromtimestamp(start / 1000, tz=datetime.timezone.utc)
+    dt = datetime.datetime.fromtimestamp(start / 1000, tz=datetime.UTC)
     assert dt.strftime("%Y-%m-%d") == "2026-06-04"
 
 

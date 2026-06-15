@@ -1,7 +1,7 @@
 """Tests for BudgetChecker."""
 
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -65,7 +65,7 @@ class TestBudgetChecker:
         assert status.alert_triggered is False
 
     def test_check_budget_exceeded(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=100000, output_tokens=50000, total_tokens=150000, cost_usd=60.0,
@@ -76,7 +76,7 @@ class TestBudgetChecker:
         assert status.is_exceeded is True
 
     def test_check_budget_alert_triggered(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=45.0,
@@ -88,7 +88,7 @@ class TestBudgetChecker:
         assert status.is_exceeded is False
 
     def test_would_exceed_budget_block_mode(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=48.0,
@@ -110,7 +110,7 @@ class TestBudgetChecker:
         assert status.monthly_pct == 0.0
 
     def test_check_budget_with_tenant_specific_daily_limit(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=45.0,
@@ -124,7 +124,7 @@ class TestBudgetChecker:
         assert status.is_exceeded is True
 
     def test_check_budget_with_tenant_specific_monthly_limit(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=100000, output_tokens=50000, total_tokens=150000, cost_usd=500.0,
@@ -146,7 +146,7 @@ class TestBudgetChecker:
         assert status.monthly_remaining == 5000.0
 
     def test_would_exceed_budget_with_tenant_limit(self, storage, budget_config):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="test-tenant", thread_id=None,
             model_name="gpt-4", input_tokens=10000, output_tokens=5000, total_tokens=15000, cost_usd=18.0,

@@ -2,7 +2,7 @@
 
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -151,7 +151,7 @@ class TestUsageStorage:
         assert total == 0.01
 
     def test_get_total_tokens_today(self, storage):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         storage.add_record(UsageRecord(
             timestamp=f"{today}T10:30:00", tenant_id="t1", thread_id=None,
             model_name="gpt-4", input_tokens=100, output_tokens=50, total_tokens=150, cost_usd=0.01,
@@ -160,7 +160,7 @@ class TestUsageStorage:
         assert tokens == 150
 
     def test_get_total_tokens_month(self, storage):
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        month = datetime.now(UTC).strftime("%Y-%m")
         storage.add_record(UsageRecord(
             timestamp=f"{month}-15T10:30:00", tenant_id="t1", thread_id=None,
             model_name="gpt-4", input_tokens=100, output_tokens=50, total_tokens=150, cost_usd=0.01,
