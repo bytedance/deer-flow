@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -162,23 +161,23 @@ class UsageStorage:
 
     def get_today_total(self) -> float:
         """Get total cost for today."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         return self.get_daily_total(today)
 
     def get_current_month_total(self) -> float:
         """Get total cost for the current month."""
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        month = datetime.now(UTC).strftime("%Y-%m")
         return self.get_monthly_total(month)
 
     def get_total_tokens_today(self) -> int:
         """Get total tokens used today."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         records = self.query(start_date=today)
         return sum(r.total_tokens for r in records)
 
     def get_total_tokens_month(self) -> int:
         """Get total tokens used this month."""
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        month = datetime.now(UTC).strftime("%Y-%m")
         records = self.query(start_date=f"{month}-01")
         return sum(r.total_tokens for r in records)
 

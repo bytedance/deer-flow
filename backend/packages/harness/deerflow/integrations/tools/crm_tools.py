@@ -268,7 +268,7 @@ class CrmTools:
 
             lines: list[str] = []
             for obj in objects:
-                lines.append(f"## 服务对象详情\n")
+                lines.append("## 服务对象详情\n")
                 lines.append(f"**ID**: {obj.id}")
                 lines.append(f"**客户ID**: {obj.customer_id}")
                 lines.append(f"**资产ID**: {obj.asset_id or '未关联'}")

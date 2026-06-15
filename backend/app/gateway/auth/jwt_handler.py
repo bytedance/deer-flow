@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from jose import JWTError, jwt
 
@@ -24,7 +24,7 @@ def create_access_token(tenant_id: str, username: str, role: str = "admin") -> s
         Encoded JWT string.
     """
     config = get_auth_config()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": username,
         "tenant_id": tenant_id,
@@ -39,7 +39,7 @@ def create_access_token(tenant_id: str, username: str, role: str = "admin") -> s
 def create_refresh_token(tenant_id: str, username: str) -> str:
     """Create a longer-lived refresh token."""
     config = get_auth_config()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": username,
         "tenant_id": tenant_id,

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
 from langgraph.store.base import BaseStore
 
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
@@ -168,7 +169,7 @@ class FileMemoryStorage(MemoryStorage):
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Load memory data (cached with file modification time check)."""
         file_path = self._get_memory_file_path(agent_name, user_id=user_id)
-        cache_key = self._cache_key(agent_name, user_id=user_id)
+        self._cache_key(agent_name, user_id=user_id)
 
         try:
             current_mtime = file_path.stat().st_mtime if file_path.exists() else None
@@ -191,7 +192,7 @@ class FileMemoryStorage(MemoryStorage):
         """Reload memory data from file, forcing cache invalidation."""
         file_path = self._get_memory_file_path(agent_name, user_id=user_id)
         memory_data = self._load_memory_from_file(agent_name, user_id=user_id)
-        cache_key = self._cache_key(agent_name, user_id=user_id)
+        self._cache_key(agent_name, user_id=user_id)
 
         try:
             mtime = file_path.stat().st_mtime if file_path.exists() else None
@@ -205,20 +206,19 @@ class FileMemoryStorage(MemoryStorage):
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
         """Save memory data to file and update cache."""
         file_path = self._get_memory_file_path(agent_name, user_id=user_id)
-        cache_key = self._cache_key(agent_name, user_id=user_id)
+        self._cache_key(agent_name, user_id=user_id)
 
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            # Shallow-copy before adding lastUpdated so the caller's dict is not
-            # mutated as a side-effect, and the cache reference is not silently
-            # updated before the file write succeeds.
             memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
 
-            temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(memory_data, f, indent=2, ensure_ascii=False)
+            lock = FileLock(str(file_path) + ".lock")
+            with lock:
+                temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
-            temp_path.replace(file_path)
+                temp_path.replace(file_path)
 
             try:
                 mtime = file_path.stat().st_mtime
@@ -358,7 +358,8 @@ def set_gateway_store(store: BaseStore | None) -> None:
     global _gateway_store, _store_factory
     _gateway_store = store
     if store is not None:
-        _store_factory = lambda: _gateway_store
+        def _store_factory():
+            return _gateway_store
     else:
         _store_factory = None
 

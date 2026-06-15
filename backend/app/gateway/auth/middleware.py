@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import HTTPException, Request, Response
+from fastapi import Request
 from starlette.responses import JSONResponse
 
 from app.gateway.auth.api_key_handler import verify_and_track_api_key
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 _AUTH_WHITELIST = {
     "/health",
+    "/health/live",
+    "/health/ready",
+    "/health/metrics",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -271,7 +274,7 @@ def create_auth_middleware():
                                 return response
                             finally:
                                 reset_tenant_id(ctx_token)
-                except AuthProviderUnavailableError as exc:
+                except AuthProviderUnavailableError:
                     logger.exception(
                         "InsBase auth provider unavailable for path=%s — translated_code=%s",
                         request.url.path, AuthErrorCode.PROVIDER_UNAVAILABLE.value,

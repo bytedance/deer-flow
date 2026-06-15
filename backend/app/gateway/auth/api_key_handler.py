@@ -7,12 +7,10 @@ import json
 import logging
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.config.auth_config import get_auth_config
 from deerflow.config.paths import get_paths
-from deerflow.config.tenant import get_current_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +66,7 @@ def save_api_keys(keys: dict[str, dict]) -> None:
     file_path = _api_keys_file()
     file_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = file_path.with_suffix(".tmp")
-    payload = {"keys": keys, "updated_at": datetime.now(timezone.utc).isoformat()}
+    payload = {"keys": keys, "updated_at": datetime.now(UTC).isoformat()}
     temp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     temp_path.replace(file_path)
 
@@ -85,7 +83,7 @@ def create_api_key(name: str) -> dict:
     raw_key = generate_api_key()
     key_hash = hash_key(raw_key)
     key_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     keys = load_api_keys()
     keys[key_hash] = {
@@ -132,7 +130,7 @@ def revoke_api_key(key_id: str) -> bool:
     keys = load_api_keys()
     for key_hash, meta in keys.items():
         if meta["id"] == key_id:
-            meta["revoked_at"] = datetime.now(timezone.utc).isoformat()
+            meta["revoked_at"] = datetime.now(UTC).isoformat()
             save_api_keys(keys)
             return True
     return False
@@ -152,6 +150,6 @@ def verify_and_track_api_key(raw_key: str) -> dict | None:
     if meta.get("revoked_at") is not None:
         return None
     # Update last_used_at
-    meta["last_used_at"] = datetime.now(timezone.utc).isoformat()
+    meta["last_used_at"] = datetime.now(UTC).isoformat()
     save_api_keys(keys)
     return meta

@@ -42,7 +42,7 @@ class Asset:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "Asset":
+    def with_provenance(self, provenance: Provenance) -> Asset:
         """Return new Asset with provenance."""
         return Asset(
             asset_id=self.asset_id,
@@ -75,7 +75,7 @@ class AssetContext:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "AssetContext":
+    def with_provenance(self, provenance: Provenance) -> AssetContext:
         """Return new AssetContext with provenance."""
         return AssetContext(
             asset=self.asset,

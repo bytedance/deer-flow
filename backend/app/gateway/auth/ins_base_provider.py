@@ -165,7 +165,7 @@ class InsBaseAuthProvider(AuthProvider):
             raise AuthProviderUnavailableError("ins-base organization service unavailable") from e
         except Exception as e:
             logger.exception("getAllParentOrg RPC call failed for orgId=%s", org_id)
-            raise RuntimeError(f"获取组织信息失败，无法完成登录") from e
+            raise RuntimeError("获取组织信息失败，无法完成登录") from e
 
         factory_org_id = None
         factory_org_name = None
@@ -177,7 +177,7 @@ class InsBaseAuthProvider(AuthProvider):
 
         if not factory_org_id:
             raise RuntimeError(
-                f"未找到所属工厂（orgType=13），无法确定租户，请联系管理员"
+                "未找到所属工厂（orgType=13），无法确定租户，请联系管理员"
             )
 
         if self._tenant_repo is None and self._session_factory is not None:
@@ -443,7 +443,7 @@ class InsBaseAuthProvider(AuthProvider):
 
         try:
             response = await self._auth_service.refresh(refresh_token)
-        except Exception as e:
+        except Exception:
             logger.exception("ins-base-rpc /auth/refresh call failed")
             return None
 

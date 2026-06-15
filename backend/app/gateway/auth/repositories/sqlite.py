@@ -138,13 +138,6 @@ class SQLiteUserRepository(UserRepository):
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
 
-    async def count_users(self, tenant_id: str | None = None) -> int:
-        stmt = select(func.count()).select_from(UserRow)
-        if tenant_id is not None:
-            stmt = stmt.where(UserRow.tenant_id == tenant_id)
-        async with self._sf() as session:
-            return await session.scalar(stmt) or 0
-
     async def list_users(self, tenant_id: str, limit: int = 100, offset: int = 0) -> list[User]:
         stmt = select(UserRow).where(UserRow.tenant_id == tenant_id).order_by(UserRow.created_at.desc()).offset(offset).limit(limit)
         async with self._sf() as session:

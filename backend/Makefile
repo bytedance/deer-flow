@@ -1,11 +1,11 @@
 install:
-	uv sync
+	uv sync --extra postgres
 
 dev:
-	PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	PYTHONUTF8=1 PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
 gateway:
-	PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PYTHONUTF8=1 PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
 
 test:
 	PYTHONPATH=. uv run pytest tests/ -v --ignore=tests/recall_l2

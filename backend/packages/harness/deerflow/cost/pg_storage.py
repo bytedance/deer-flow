@@ -7,10 +7,9 @@ Falls back gracefully to JSON storage when the driver is not installed.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.config.paths import get_paths
 from deerflow.cost.storage import UsageRecord, UsageStorage
 
 logger = logging.getLogger(__name__)
@@ -194,26 +193,26 @@ class PgUsageStorage:
     def get_today_total(self) -> float:
         if not self.available:
             return self._fallback.get_today_total()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         return self.get_daily_total(today)
 
     def get_current_month_total(self) -> float:
         if not self.available:
             return self._fallback.get_current_month_total()
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        month = datetime.now(UTC).strftime("%Y-%m")
         return self.get_monthly_total(month)
 
     def get_total_tokens_today(self) -> int:
         if not self.available:
             return self._fallback.get_total_tokens_today()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         records = self.query(start_date=today)
         return sum(r.total_tokens for r in records)
 
     def get_total_tokens_month(self) -> int:
         if not self.available:
             return self._fallback.get_total_tokens_month()
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        month = datetime.now(UTC).strftime("%Y-%m")
         records = self.query(start_date=f"{month}-01")
         return sum(r.total_tokens for r in records)
 

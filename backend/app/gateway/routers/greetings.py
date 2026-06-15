@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
 
 from deerflow.agents.memory.updater import aget_memory_data
-from deerflow.runtime.user_context import get_current_user, get_effective_user_id
 from deerflow.rpc.machine_service import MachineServiceClient
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +98,7 @@ async def _get_active_alerts(user_id: int, org_id: int) -> list[dict[str, Any]]:
         if isinstance(result, dict) and "records" in result:
             return result["records"][:5]
         return []
-    except (asyncio.TimeoutError, Exception) as e:
+    except (TimeoutError, Exception) as e:
         logger.debug("Alert query failed: %s", e)
         return []
 
@@ -111,7 +110,7 @@ async def _get_recent_closure_tickets(user_id: int, org_id: int) -> list[dict[st
     """
     try:
         client = MachineServiceClient()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_TICKET_STALE_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=_TICKET_STALE_DAYS)
         result = await asyncio.wait_for(
             client.get_machine_detail_info(
                 user_id=user_id,
@@ -128,13 +127,13 @@ async def _get_recent_closure_tickets(user_id: int, org_id: int) -> list[dict[st
                 if closed_at:
                     try:
                         closed_dt = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
-                        if closed_dt.replace(tzinfo=timezone.utc) >= cutoff:
+                        if closed_dt.replace(tzinfo=UTC) >= cutoff:
                             recent.append(record)
                     except (ValueError, TypeError):
                         pass
             return recent[:5]
         return []
-    except (asyncio.TimeoutError, Exception) as e:
+    except (TimeoutError, Exception) as e:
         logger.debug("Closure ticket query failed: %s", e)
         return []
 
@@ -153,7 +152,7 @@ async def _get_upcoming_maintenance(user_id: int, org_id: int) -> list[dict[str,
             timeout=_MAINTENANCE_QUERY_TIMEOUT_SECONDS,
         )
         if isinstance(result, dict) and "records" in result:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             window = now + timedelta(days=_MAINTENANCE_WINDOW_DAYS)
             upcoming = []
             for record in result["records"]:
@@ -161,13 +160,13 @@ async def _get_upcoming_maintenance(user_id: int, org_id: int) -> list[dict[str,
                 if maint_date:
                     try:
                         maint_dt = datetime.fromisoformat(str(maint_date).replace("Z", "+00:00"))
-                        if now <= maint_dt.replace(tzinfo=timezone.utc) <= window:
+                        if now <= maint_dt.replace(tzinfo=UTC) <= window:
                             upcoming.append(record)
                     except (ValueError, TypeError):
                         pass
             return upcoming[:5]
         return []
-    except (asyncio.TimeoutError, Exception) as e:
+    except (TimeoutError, Exception) as e:
         logger.debug("Maintenance query failed: %s", e)
         return []
 
@@ -243,7 +242,7 @@ async def _generate_greeting(thread_id: str) -> dict[str, Any]:
             break
 
     if pending_followup and lang == "zh-CN":
-        greeting_text = f"上次您分析了相关内容，需要我继续跟进吗？"
+        greeting_text = "上次您分析了相关内容，需要我继续跟进吗？"
     elif pending_followup and lang == "en-US":
         greeting_text = "Last time you analyzed some data. Would you like me to follow up?"
 
@@ -313,7 +312,7 @@ async def get_greeting(thread_id: str) -> dict[str, Any]:
             _generate_greeting(thread_id),
             timeout=_GREETING_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Greeting generation timed out for thread %s, using default", thread_id)
         lang = "zh-CN"
         time_key = _time_of_day_key()

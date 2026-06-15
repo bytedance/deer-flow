@@ -104,7 +104,7 @@ def list_known_tenants(config: AppConfig) -> list[str]:
 
     # From tenant-level agents
     try:
-        from deerflow.config.agents_config import scan_builtin_agents, scan_tenant_agents
+        from deerflow.config.agents_config import scan_builtin_agents
 
         # Tenant agents require a tenant_id; we list builtin as global,
         # and infer tenants from connectors (already added above).
@@ -451,7 +451,6 @@ def _resolve_agent_for_tenant(tenant_id: str, agent_name: str) -> dict[str, Any]
     """Resolve agent for a specific tenant, considering override layers."""
     try:
         from deerflow.config.agents_config import (
-            load_agent_config,
             list_available_agents,
         )
 

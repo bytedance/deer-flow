@@ -24,7 +24,7 @@ class OutboundDetail:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "OutboundDetail":
+    def with_provenance(self, provenance: Provenance) -> OutboundDetail:
         """Return new instance with provenance attached."""
         return OutboundDetail(
             id=self.id,
@@ -47,7 +47,7 @@ class ServiceEventDetail:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "ServiceEventDetail":
+    def with_provenance(self, provenance: Provenance) -> ServiceEventDetail:
         """Return new instance with provenance attached."""
         return ServiceEventDetail(
             id=self.id,

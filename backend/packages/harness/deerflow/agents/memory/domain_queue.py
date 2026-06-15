@@ -58,7 +58,7 @@ class DomainMemoryUpdateQueue:
             return
 
         with self._lock:
-            existing_context = next(
+            next(
                 (context for context in self._queue if context.thread_id == thread_id),
                 None,
             )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -68,7 +68,7 @@ async def submit_feedback(req: SubmitFeedbackRequest, request: Request) -> dict:
         rating=req.rating,
         categories=req.categories,
         comment=req.comment,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )
     storage = FeedbackStorage()
     storage.add(entry)

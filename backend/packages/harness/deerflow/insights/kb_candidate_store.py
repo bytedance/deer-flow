@@ -10,10 +10,9 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from deerflow.insights.models import KBCandidate
 from deerflow.config.paths import Paths
+from deerflow.insights.models import KBCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ class KBCandidateStore:
         if not path.exists():
             return None
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         return KBCandidate.model_validate(data)
@@ -66,7 +65,7 @@ class KBCandidateStore:
         candidates = []
         for path in candidate_dir.glob("*.json"):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 candidate = KBCandidate.model_validate(data)
 

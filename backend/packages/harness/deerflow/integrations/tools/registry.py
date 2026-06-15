@@ -27,7 +27,7 @@ from deerflow.integrations.tools.monitoring_tools import MonitoringTools
 from deerflow.integrations.tools.xsy_tools import XsyTools
 
 if TYPE_CHECKING:
-    from deerflow.integrations.adapters.base import BaseAdapter
+    pass
 
 logger = logging.getLogger(__name__)
 

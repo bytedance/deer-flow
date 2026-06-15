@@ -230,6 +230,8 @@ class LocalContainerBackend(SandboxBackend):
                     ["container", "--version"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                     timeout=5,
                 )
@@ -399,6 +401,8 @@ class LocalContainerBackend(SandboxBackend):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -460,6 +464,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "inspect", *container_names],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
@@ -569,7 +575,7 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             container_id = result.stdout.strip()
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
             return container_id
@@ -584,6 +590,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "stop", container_id],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
             logger.info(f"Stopped container {container_id} using {self._runtime}")
@@ -601,6 +609,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "inspect", "-f", "{{.State.Running}}", container_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             return result.returncode == 0 and result.stdout.strip().lower() == "true"
@@ -621,6 +631,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "port", container_name, "8080"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():

@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from deerflow.rag.embeddings import get_embedding_provider
@@ -21,7 +21,7 @@ from deerflow.rag.vector_store import VectorStore, get_vector_store
 logger = logging.getLogger(__name__)
 
 
-class DecayPolicy(str, Enum):
+class DecayPolicy(StrEnum):
     """Decay policy for domain fact aging."""
 
     NEVER = "never"

@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from enum import Enum
+from enum import StrEnum
 from typing import override
 
 from langchain.agents import AgentState
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 
 
-class ErrorCategory(str, Enum):
+class ErrorCategory(StrEnum):
     """User-friendly error categories for empathetic error messages."""
 
     network_issue = "network_issue"
@@ -178,6 +178,10 @@ def _build_runtime_middlewares(
 
     middlewares.append(SandboxAuditMiddleware())
     middlewares.append(ToolErrorHandlingMiddleware())
+
+    from deerflow.agents.middlewares.tool_end_emit_middleware import ToolEndEmitMiddleware
+
+    middlewares.append(ToolEndEmitMiddleware())
     return middlewares
 
 

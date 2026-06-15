@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import override
 
 from langchain.agents import AgentState
@@ -94,7 +94,7 @@ class InputGuardMiddleware(AgentMiddleware[AgentState]):
             from deerflow.content_safety.log_storage import AuditLogEntry
 
             entry = AuditLogEntry(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 tenant_id=tenant_id,
                 thread_id=thread_id,
                 actor_user_id=actor_user_id,

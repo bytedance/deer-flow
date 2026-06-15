@@ -71,7 +71,7 @@ class DatabaseConfig(BaseModel):
         description="Echo all SQL statements to log (debug only).",
     )
     pool_size: int = Field(
-        default=5,
+        default=10,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
     max_overflow: int = Field(

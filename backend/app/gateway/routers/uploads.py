@@ -28,7 +28,6 @@ from deerflow.uploads.manager import (
 )
 from deerflow.utils.file_conversion import (
     CONVERTIBLE_EXTENSIONS,
-    ConversionErrorCode,
     convert_file_to_markdown,
 )
 

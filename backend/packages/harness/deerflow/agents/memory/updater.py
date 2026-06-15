@@ -16,14 +16,13 @@ from deerflow.agents.memory.prompt import (
     SESSION_MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
+from deerflow.agents.memory.session_storage import (
+    get_session_storage,
+)
 from deerflow.agents.memory.storage import (
     create_empty_memory,
     get_memory_storage,
     utc_now_iso_z,
-)
-from deerflow.agents.memory.session_storage import (
-    create_empty_session_memory,
-    get_session_storage,
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
@@ -66,6 +65,9 @@ def reload_memory_data(agent_name: str | None = None, *, user_id: str | None = N
 def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
     """Persist imported memory data via storage provider.
 
+    Merges facts with current storage to avoid losing facts that other
+    workers may have added concurrently.
+
     Args:
         memory_data: Full memory payload to persist.
         agent_name: If provided, imports into per-agent memory.
@@ -78,7 +80,9 @@ def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = Non
         OSError: If persisting the imported memory fails.
     """
     storage = get_memory_storage()
-    if not storage.save(memory_data, agent_name, user_id=user_id):
+    current = storage.reload(agent_name, user_id=user_id)
+    merged = _merge_facts(current, memory_data)
+    if not storage.save(merged, agent_name, user_id=user_id):
         raise OSError("Failed to save imported memory data")
     return storage.load(agent_name, user_id=user_id)
 
@@ -413,6 +417,41 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+def _merge_facts(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Optimistic merge: combine facts from *current* storage and *incoming* update.
+
+    Deduplicates by casefold content key (same as ``_fact_content_key``).
+    When duplicate facts have different confidence, the higher value wins.
+    Text sections (user, history) are taken from *incoming* — the LLM has
+    already produced fresh summaries based on the latest conversation.
+    """
+    merged = copy.deepcopy(current)
+
+    current_facts = current.get("facts", [])
+    incoming_facts = incoming.get("facts", [])
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for fact in current_facts:
+        key = _fact_content_key(fact.get("content"))
+        if key is not None:
+            by_key[key] = fact
+    for fact in incoming_facts:
+        key = _fact_content_key(fact.get("content"))
+        if key is None:
+            continue
+        existing = by_key.get(key)
+        if existing is None or fact.get("confidence", 0) > existing.get("confidence", 0):
+            by_key[key] = fact
+
+    merged["facts"] = list(by_key.values())
+
+    for section in ("user", "history"):
+        if section in incoming:
+            merged[section] = copy.deepcopy(incoming[section])
+
+    return merged
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -504,7 +543,11 @@ class MemoryUpdater:
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return get_memory_storage().save(updated_memory, agent_name, user_id=user_id)
+
+        storage = get_memory_storage()
+        latest = storage.reload(agent_name, user_id=user_id)
+        merged = _merge_facts(latest, updated_memory)
+        return storage.save(merged, agent_name, user_id=user_id)
 
     async def aupdate_memory(
         self,

@@ -64,7 +64,7 @@ def _load_or_generate_jwt_secret() -> str:
     """Load a persisted JWT secret, or generate and persist a new one."""
     secret_path = _jwt_secret_file()
     try:
-        with open(secret_path, "r") as f:
+        with open(secret_path) as f:
             existing = f.read().strip()
             if existing:
                 logger.info("Loaded persisted JWT secret from %s", secret_path)

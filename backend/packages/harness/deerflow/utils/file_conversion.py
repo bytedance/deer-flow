@@ -28,7 +28,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
@@ -36,7 +36,7 @@ from deerflow.config.app_config import get_app_config
 logger = logging.getLogger(__name__)
 
 
-class ConversionErrorCode(str, Enum):
+class ConversionErrorCode(StrEnum):
     """Stable error codes for document conversion failures.
 
     The string values are the contract with the API/frontend — they show up
@@ -88,11 +88,11 @@ class ConversionResult:
         return self.error is not None
 
     @classmethod
-    def success(cls, md_path: Path) -> "ConversionResult":
+    def success(cls, md_path: Path) -> ConversionResult:
         return cls(md_path=md_path)
 
     @classmethod
-    def failure(cls, code: ConversionErrorCode, detail: str | None = None) -> "ConversionResult":
+    def failure(cls, code: ConversionErrorCode, detail: str | None = None) -> ConversionResult:
         return cls(error=code, error_detail=detail)
 
 

@@ -357,7 +357,7 @@ async def publish_to_marketplace(
     creates a pending listing that needs approval.
     """
     principal = _principal_from_request(request)
-    template_repo = get_repository()
+    get_repository()
     marketplace_repo = MarketplaceRepository(get_session_factory())
 
     # Resolve template
@@ -367,7 +367,6 @@ async def publish_to_marketplace(
         raise
 
     # Check permission to publish
-    from deerflow.report_templates.permissions import check_permission
 
     decision = check_permission(principal=principal, operation="publish", template=record)
     if not decision.allowed:
@@ -387,7 +386,6 @@ async def publish_to_marketplace(
         raise HTTPException(status_code=409, detail=f"template {template_id!r} is already in marketplace")
 
     # Create listing
-    status = "pending_approval" if needs_approval else "active"
     listing = await marketplace_repo.create_listing(
         tenant_id=principal.tenant_id,
         template_id=template_id,
@@ -439,7 +437,7 @@ async def approve_listing(
         raise HTTPException(status_code=403, detail="cannot approve listings from other tenants")
 
     new_status = "active" if body.approved else "rejected"
-    updated = await marketplace_repo.update_listing(listing_id, status=new_status)
+    await marketplace_repo.update_listing(listing_id, status=new_status)
 
     return {
         "listing_id": listing_id,

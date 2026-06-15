@@ -138,18 +138,51 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config["tags"] = [*(config.get("tags") or []), "middleware:title"]
         return config
 
-    def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    def _resolve_agent_display_name(self, runtime: Runtime) -> str | None:
+        """Return the agent's configured ``display_name`` when available.
+
+        When an agent has an explicit display_name (e.g. report agents like
+        "设备运行日报"), using it directly avoids LLM non-determinism and
+        produces a stable, predictable title for every run.
+        """
+        try:
+            context = getattr(runtime, "context", None)
+            if not isinstance(context, dict):
+                return None
+            agent_name = context.get("agent_name")
+            if not agent_name:
+                return None
+            from deerflow.config.agents_config import load_agent_config
+
+            config = load_agent_config(agent_name)
+            if config and config.display_name:
+                return config.display_name
+        except Exception:
+            logger.debug("Failed to resolve agent display_name for title", exc_info=True)
+        return None
+
+    def _generate_title_result(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Generate a local fallback title without blocking on an LLM call."""
         if not self._should_generate_title(state):
             return None
 
+        # Use agent display_name when available (stable, deterministic).
+        display_name = self._resolve_agent_display_name(runtime)
+        if display_name:
+            return {"title": display_name}
+
         _, user_msg = self._build_title_prompt(state)
         return {"title": self._fallback_title(user_msg)}
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    async def _agenerate_title_result(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Generate a title asynchronously and fall back locally on failure."""
         if not self._should_generate_title(state):
             return None
+
+        # Use agent display_name when available — skips LLM entirely for stability.
+        display_name = self._resolve_agent_display_name(runtime)
+        if display_name:
+            return {"title": display_name}
 
         config = self._get_title_config()
         prompt, user_msg = self._build_title_prompt(state)
@@ -172,8 +205,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     def after_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return self._generate_title_result(state)
+        return self._generate_title_result(state, runtime)
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        return await self._agenerate_title_result(state, runtime)

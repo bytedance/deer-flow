@@ -22,10 +22,8 @@ from deerflow.integrations.adapters.ins.transform import (
 )
 from deerflow.integrations.config import IntegrationSystemConfig
 from deerflow.integrations.errors import (
-    IntegrationAuthError,
     IntegrationError,
     IntegrationTimeoutError,
-    IntegrationUnavailableError,
 )
 
 logger = logging.getLogger(__name__)

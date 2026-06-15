@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -29,8 +28,8 @@ class BudgetNotifier:
         self._webhook_url = getattr(budget_config, "webhook_url", "")
 
     def _alert_key(self, tenant_id: str, period: str) -> str:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        month = datetime.now(UTC).strftime("%Y-%m")
         period_value = today if period == "daily" else month
         return f"{tenant_id}:{period}:{period_value}"
 
@@ -60,7 +59,7 @@ class BudgetNotifier:
         payload = {
             "event": "budget_alert",
             "tenant_id": tenant_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "daily": {
                 "cost": status.daily_cost,
                 "limit": status.daily_limit,
@@ -104,7 +103,7 @@ class BudgetNotifier:
         payload = {
             "event": "budget_alert",
             "tenant_id": tenant_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "daily": {
                 "cost": status.daily_cost,
                 "limit": status.daily_limit,

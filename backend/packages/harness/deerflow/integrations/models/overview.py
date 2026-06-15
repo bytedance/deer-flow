@@ -23,7 +23,7 @@ class AssetOverview:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "AssetOverview":
+    def with_provenance(self, provenance: Provenance) -> AssetOverview:
         """Return new AssetOverview with provenance."""
         return AssetOverview(
             asset=self.asset,

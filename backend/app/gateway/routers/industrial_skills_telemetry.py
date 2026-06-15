@@ -16,7 +16,7 @@ import logging
 import statistics
 import threading
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -114,7 +114,7 @@ class IndustrialSkillsMetrics:
                     self.invocations_by_skill[event.skill_name] += 1
 
                 # Track daily
-                day = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                day = datetime.fromtimestamp(event.timestamp / 1000, tz=UTC).strftime("%Y-%m-%d")
                 tier_key = event.skill_tier or "unknown"
                 self.daily_invocations[day][tier_key] += 1
 

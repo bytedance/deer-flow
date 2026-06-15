@@ -301,7 +301,7 @@ class CapabilityRouter:
 
             # If primary is a dataclass, attach enrich as metadata
             if hasattr(primary_data, "source_metadata"):
-                enrich_metadata = {
+                {
                     system_key: data for system_key, data in enrich_data
                 }
                 # Create new instance with enriched metadata

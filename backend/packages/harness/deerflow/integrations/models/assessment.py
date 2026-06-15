@@ -40,7 +40,7 @@ class HealthAssessment:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "HealthAssessment":
+    def with_provenance(self, provenance: Provenance) -> HealthAssessment:
         """Return new HealthAssessment with provenance."""
         return HealthAssessment(
             assessment_id=self.assessment_id,
@@ -72,7 +72,7 @@ class AnomalyStats:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "AnomalyStats":
+    def with_provenance(self, provenance: Provenance) -> AnomalyStats:
         """Return new AnomalyStats with provenance."""
         return AnomalyStats(
             stats_id=self.stats_id,
@@ -112,7 +112,7 @@ class RiskRanking:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "RiskRanking":
+    def with_provenance(self, provenance: Provenance) -> RiskRanking:
         """Return new RiskRanking with provenance."""
         return RiskRanking(
             ranking_id=self.ranking_id,

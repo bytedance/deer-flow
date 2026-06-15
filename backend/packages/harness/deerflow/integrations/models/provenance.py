@@ -19,7 +19,7 @@ class Provenance:
     transform_steps: tuple[str, ...] = ()
     source_metadata: dict[str, Any] = field(default_factory=dict)
 
-    def with_transform(self, step: str) -> "Provenance":
+    def with_transform(self, step: str) -> Provenance:
         """Return new Provenance with added transform step."""
         return Provenance(
             source_system_key=self.source_system_key,

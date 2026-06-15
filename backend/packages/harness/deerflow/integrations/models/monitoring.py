@@ -51,7 +51,7 @@ class TrendSeries:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "TrendSeries":
+    def with_provenance(self, provenance: Provenance) -> TrendSeries:
         """Return new TrendSeries with provenance."""
         return TrendSeries(
             series_id=self.series_id,
@@ -84,7 +84,7 @@ class WaveformPayload:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "WaveformPayload":
+    def with_provenance(self, provenance: Provenance) -> WaveformPayload:
         """Return new WaveformPayload with provenance."""
         return WaveformPayload(
             waveform_id=self.waveform_id,
@@ -120,7 +120,7 @@ class OrbitPayload:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "OrbitPayload":
+    def with_provenance(self, provenance: Provenance) -> OrbitPayload:
         """Return new OrbitPayload with provenance."""
         return OrbitPayload(
             orbit_id=self.orbit_id,
@@ -156,7 +156,7 @@ class AlarmEvent:
     source_metadata: dict[str, Any] = field(default_factory=dict)
     provenance: Provenance | None = None
 
-    def with_provenance(self, provenance: Provenance) -> "AlarmEvent":
+    def with_provenance(self, provenance: Provenance) -> AlarmEvent:
         """Return new AlarmEvent with provenance."""
         return AlarmEvent(
             event_id=self.event_id,

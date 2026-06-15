@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.config.paths import get_paths
@@ -104,7 +104,7 @@ class TenantStorage:
             if d.get("tenant_id") == config.tenant_id:
                 raise ValueError(f"Tenant {config.tenant_id!r} already exists")
         if not config.created_at:
-            config.created_at = datetime.now(timezone.utc).isoformat()
+            config.created_at = datetime.now(UTC).isoformat()
         tenants.append(config.to_dict())
         self._write_atomic(tenants)
         return config
@@ -135,7 +135,7 @@ class TenantStorage:
         config = TenantConfig(
             tenant_id="default",
             name="Default Tenant",
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
         self.create(config)
         return config

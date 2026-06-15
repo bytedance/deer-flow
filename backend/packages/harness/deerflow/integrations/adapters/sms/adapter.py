@@ -26,7 +26,6 @@ from deerflow.integrations.errors import (
     IntegrationDataShapeError,
     IntegrationError,
     IntegrationTimeoutError,
-    IntegrationUnavailableError,
 )
 
 logger = logging.getLogger(__name__)

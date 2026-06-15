@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Unified capability configuration view API.
 
 Aggregates Models, Skills, MCPs, Connectors, and Agents into a single
@@ -8,7 +7,6 @@ list + detail read-only view per ISSUE-10 and ISSUE-09 governance model.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -22,16 +20,12 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.capability_scope import (
-    get_affected_tenants,
     impact_summary,
     propagate_deactivation,
     read_audit_log,
-    record_audit,
     resolve_capability_for_tenant,
 )
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config
-from deerflow.config.http_connector_config import HttpConnectorConfig
-from deerflow.config.skills_config import SkillsConfig
 from deerflow.skills import get_or_new_skill_storage
 
 logger = logging.getLogger(__name__)
@@ -547,10 +541,7 @@ def load_agent_config_from_any(name: str) -> AgentConfig | None:
     """Try to load an agent config from any source (user -> tenant -> builtin)."""
     from deerflow.config.agents_config import (
         load_agent_config,
-        load_builtin_agent_soul,
-        load_tenant_agent_soul,
         scan_builtin_agents,
-        scan_tenant_agents,
     )
 
     # Try user scope

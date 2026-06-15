@@ -10,14 +10,8 @@ import socket
 from urllib.parse import urlencode
 
 import httpx
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from deerflow.config.nacos_config import NacosConfig, get_nacos_config
+from deerflow.config.nacos_config import NacosConfig
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +168,7 @@ class NacosRegistry:
             "port": str(svc.port),
             "namespaceId": self._config.namespace,
             "ephemeral": "true",
-            "beat": '{"ip":"%s","port":%d,"weight":%s}' % (ip, svc.port, svc.weight),
+            "beat": f'{{"ip":"{ip}","port":{svc.port},"weight":{svc.weight}}}',
         })
         auth_params = await self._get_auth_params()
         if auth_params:
