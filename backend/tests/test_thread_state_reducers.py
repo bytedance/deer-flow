@@ -16,6 +16,7 @@ from deerflow.agents.thread_state import (
     merge_todos,
     merge_viewed_images,
 )
+from deerflow.sandbox.middleware import SandboxMiddlewareState
 
 
 class TestMergeSandbox:
@@ -142,3 +143,62 @@ class TestThreadStateAnnotations:
         """
         hints = get_type_hints(ThreadState, include_extras=True)
         assert merge_sandbox in hints["sandbox"].__metadata__
+
+
+class TestSandboxMiddlewareStateAnnotation:
+    """Regression tests for the #3518 follow-up.
+
+    langchain's ``create_agent`` calls ``_resolve_schemas`` to merge every
+    middleware's ``state_schema`` together with the user-supplied
+    ``state_schema`` (``ThreadState``). The merge uses last-write-wins
+    semantics on the field name, so when ``SandboxMiddlewareState.sandbox``
+    is declared without the ``merge_sandbox`` reducer annotation, the
+    reducer wired on ``ThreadState.sandbox`` is silently dropped from the
+    resolved schema. The graph then builds a ``LastValueChannel`` for
+    ``sandbox`` instead of a reducer channel, and concurrent tool-call
+    sandbox writes raise ``INVALID_CONCURRENT_GRAPH_UPDATE``.
+
+    Tests here guard both ends of that merge:
+      1. The middleware's ``state_schema`` carries the reducer binding.
+      2. The resolved schema (what the runtime actually consumes) preserves
+         the reducer binding.
+    """
+
+    def test_sandbox_middleware_state_sandbox_is_wired_to_merge_sandbox(self):
+        """``SandboxMiddlewareState.sandbox`` must carry the same reducer
+        binding as ``ThreadState.sandbox`` so it survives the langchain
+        schema merge.
+        """
+        hints = get_type_hints(SandboxMiddlewareState, include_extras=True)
+        sandbox_hint = hints["sandbox"]
+        assert hasattr(sandbox_hint, "__metadata__"), "SandboxMiddlewareState.sandbox must be Annotated with a reducer so the langchain schema merge does not silently drop the ThreadState.sandbox reducer (regression for #3518 follow-up)"
+        assert merge_sandbox in sandbox_hint.__metadata__, "SandboxMiddlewareState.sandbox must be wired to merge_sandbox to survive the langchain schema merge (regression for #3518 follow-up)"
+
+    def test_resolved_schema_preserves_sandbox_reducer_when_middleware_merged_last(self):
+        """End-to-end regression test that exercises the actual langchain
+        merge path. The merge in ``_resolve_schema`` is
+        ``last-write-wins`` over ``schema_hints.values()``, so the bug
+        only manifests when the middleware's ``state_schema`` is processed
+        after ``ThreadState`` (which is non-deterministic in the runtime
+        because langchain passes a ``set``). This test pins down the bug
+        condition by ordering the dict explicitly with
+        ``SandboxMiddlewareState`` last, which is the same condition that
+        triggered the production ``INVALID_CONCURRENT_GRAPH_UPDATE`` in
+        the user's reported run.
+        """
+        from langchain.agents.factory import _resolve_schema
+
+        # Order matters: SandboxMiddlewareState is inserted LAST so its
+        # ``sandbox`` field overwrites ThreadState's. This is the
+        # iteration order that triggers the bug.
+        schema_hints = {
+            ThreadState: get_type_hints(ThreadState, include_extras=True),
+            SandboxMiddlewareState: get_type_hints(SandboxMiddlewareState, include_extras=True),
+        }
+        resolved = _resolve_schema(schema_hints, "StateSchema", None)
+        hints = get_type_hints(resolved, include_extras=True)
+        sandbox_hint = hints["sandbox"]
+        assert hasattr(sandbox_hint, "__metadata__"), (
+            "Resolved schema's sandbox lost its Annotated metadata during the langchain schema merge — concurrent tool-call sandbox writes will raise INVALID_CONCURRENT_GRAPH_UPDATE (regression for #3518 follow-up)"
+        )
+        assert merge_sandbox in sandbox_hint.__metadata__, "Resolved schema's sandbox must preserve the merge_sandbox reducer so the graph channel is a reducer channel rather than LastValueChannel (regression for #3518 follow-up)"
