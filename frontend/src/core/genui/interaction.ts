@@ -63,6 +63,17 @@ export async function submitInteraction(
 
       if (!response.ok) {
         const detail = await response.text();
+        // 404 "Unknown callback" is a race condition: the backend may still be
+        // registering the callback from the render_ui tool call that created
+        // this block. Retry with a longer delay to give the server time to
+        // finish the registration before giving up.
+        const isUnknownCallback =
+          response.status === 404 && detail.includes("Unknown callback");
+        if (isUnknownCallback && attempt < MAX_RETRIES) {
+          lastError = new Error(`HTTP ${response.status}: ${detail}`);
+          await delay(RETRY_DELAY_MS * 3 * (attempt + 1));
+          continue;
+        }
         throw new Error(`HTTP ${response.status}: ${detail}`);
       }
 
