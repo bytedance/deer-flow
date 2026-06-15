@@ -350,6 +350,11 @@ def _select_fact_lines(
     and any inter-section ``"\\n\\n"`` separator *before* calling this
     function, and passing the remaining capacity as *token_budget*.
 
+    Stops at the first fact that would exceed the budget so the caller's
+    pre-sorted order (typically confidence-descending) is preserved strictly:
+    a shorter lower-ranked fact can never slip ahead of a skipped
+    higher-ranked one.
+
     Args:
         ranked_facts: Facts pre-sorted by the caller's preferred ranking.
         token_budget: Maximum tokens available for fact lines only.
@@ -368,10 +373,10 @@ def _select_fact_lines(
             continue
         line_text = ("\n" + formatted) if lines else formatted
         line_tokens = _count_tokens(line_text, use_tiktoken=use_tiktoken)
-        if consumed + line_tokens <= token_budget:
-            lines.append(formatted)
-            consumed += line_tokens
-        # Keep scanning — a shorter fact later might still fit.
+        if consumed + line_tokens > token_budget:
+            break
+        lines.append(formatted)
+        consumed += line_tokens
     return lines, consumed
 
 
@@ -426,6 +431,12 @@ def format_memory_for_injection(
             separate *guaranteed_token_budget*. When ``None`` or empty, all
             facts compete for the same budget (original behaviour).
         guaranteed_token_budget: Token ceiling for the guaranteed section.
+            In the common case the guaranteed lines *displace* regular lines
+            within *max_tokens* (the total output stays ≤ ``max_tokens``);
+            the budget becomes truly additive only when the guaranteed lines
+            alone would push the assembled output past *max_tokens*, at which
+            point the safety-truncation ceiling is raised to
+            ``max_tokens + guaranteed_actual_usage`` to protect them.
             Ignored when *guaranteed_categories* is ``None`` or empty.
 
     Returns:
@@ -484,9 +495,13 @@ def format_memory_for_injection(
     # Design notes
     # ~~~~~~~~~~~~
     # • A single ``"Facts:\\n"`` header is emitted at most once.
-    # • Guaranteed-category facts draw from *guaranteed_token_budget* (an
-    #   **additional** allowance on top of *max_tokens*), so they cannot be
-    #   evicted by regular facts.
+    # • Guaranteed-category facts are selected first from their own
+    #   *guaranteed_token_budget* and placed at the front of the Facts block,
+    #   so they cannot be evicted by regular facts.  In the common case the
+    #   total output still fits within *max_tokens* (guaranteed lines displace
+    #   regular ones); the budget becomes truly additive only when the
+    #   guaranteed lines alone push the output past *max_tokens*, in which
+    #   case the safety-truncation ceiling is raised accordingly.
     # • Regular facts draw from *max_tokens* only.
     # • All token accounting (header, separators, lines) is performed here
     #   in the caller; the ``_select_fact_lines`` helper is header-agnostic.
@@ -539,10 +554,13 @@ def format_memory_for_injection(
             # ── Phase 2: select regular lines ────────────────────────────
             # Regular facts compete for *max_tokens* (the main budget).
             # Subtract everything already accounted for:
-            #   base sections + inter-section separator + header + guaranteed lines
+            #   base sections + inter-section separator + header
+            #   + guaranteed lines + the inter-group ``\n`` that joins the
+            #   regular block to the guaranteed block (when both are present).
             regular_lines: list[str] = []
             if regular:
-                used_before_regular = base_tokens + header_cost + guaranteed_line_tokens
+                inter_group_newline_tokens = _count_tokens("\n", use_tiktoken=use_tiktoken) if guaranteed_lines else 0
+                used_before_regular = base_tokens + header_cost + guaranteed_line_tokens + inter_group_newline_tokens
                 regular_line_budget = max_tokens - used_before_regular
                 if regular_line_budget > 0:
                     regular_lines, _ = _select_fact_lines(

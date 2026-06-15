@@ -426,3 +426,35 @@ def test_single_facts_header_when_both_guaranteed_and_regular() -> None:
     assert "Knowledge fact" in result
     # Guaranteed fact comes first (higher confidence + guaranteed).
     assert result.index("Correction fact") < result.index("Knowledge fact")
+
+
+def test_strict_confidence_order_when_high_confidence_fact_overflows(monkeypatch) -> None:
+    """Within a single budget, a higher-confidence fact that exceeds the
+    remaining budget must NOT be skipped in favour of a shorter, lower-
+    confidence fact ranked after it.
+
+    This locks in the strict confidence-ordered selection semantics.
+    """
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            # Higher-confidence but long enough to exceed the remaining budget.
+            {"content": "Long high-confidence fact " + "x" * 50, "category": "knowledge", "confidence": 0.95},
+            # Lower-confidence but short — would fit if we kept scanning past
+            # the over-budget high-confidence fact above.
+            {"content": "Short low", "category": "knowledge", "confidence": 0.50},
+        ],
+    }
+
+    # Budget large enough only for ~one short fact, not the long one.
+    result = format_memory_for_injection(memory_data, max_tokens=70, guaranteed_categories=None)
+
+    # The high-confidence fact does not fit, and the low-confidence fact
+    # MUST NOT slip in ahead of it.
+    assert "Short low" not in result, "Lower-confidence fact should not be selected when a higher-confidence fact ranked before it was skipped (strict ordering)."

@@ -87,7 +87,16 @@ class MemoryConfig(BaseModel):
         default=500,
         ge=50,
         le=2000,
-        description=("Maximum tokens reserved for guaranteed-category facts. Guaranteed facts are allocated from this budget first; regular facts then use the remaining ``max_injection_tokens``."),
+        description=(
+            "Token ceiling for guaranteed-category facts. "
+            "Guaranteed facts are selected first from this budget and placed at "
+            "the front of the Facts block so they cannot be evicted by regular "
+            "facts. In the common case the total output still fits within "
+            "``max_injection_tokens`` (guaranteed lines displace regular ones); "
+            "the budget becomes additive only when guaranteed lines alone push "
+            "the output past ``max_injection_tokens``, in which case the "
+            "safety-truncation ceiling is raised accordingly."
+        ),
     )
 
 
