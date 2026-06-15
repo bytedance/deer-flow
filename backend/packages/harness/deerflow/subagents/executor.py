@@ -351,6 +351,7 @@ class SubagentExecutor:
             middleware=middlewares,
             system_prompt=None,
             state_schema=ThreadState,
+            checkpointer=False,
         )
 
     async def _load_skills(self) -> list[Skill]:

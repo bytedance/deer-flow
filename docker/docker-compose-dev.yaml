@@ -99,6 +99,11 @@ services:
       # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
       # host directories, which causes startup-time `uv sync` to crash.
       - gateway-uv-cache:/root/.cache/uv
+# raidery fork deviation: upstream moved these mounts to opt-in overlays
+# (docker-compose.dood.yaml / docker-compose.cli-auth.yaml, see upstream
+# commits 5d61718c / 474c89ba). We keep them inline because DooD +
+# Claude CLI auto-auth are core dev workflow here. Revisit if the
+# opt-in pattern lands cleanly via scripts/docker.sh.
       # DooD: AioSandboxProvider runs inside the Gateway process.
       - /var/run/docker.sock:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)

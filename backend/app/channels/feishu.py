@@ -11,7 +11,8 @@ import time
 from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
@@ -71,6 +72,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
+        self._connection_repo = config.get("connection_repo")
 
     @staticmethod
     def _non_empty_str(value: Any) -> str | None:
@@ -85,6 +87,23 @@ class FeishuChannel(Channel):
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    @property
+    def is_running(self) -> bool:
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
+    def _build_event_handler(self, lark):
+        return (
+            lark.EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(self._on_message)
+            .register_p2_im_message_message_read_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_created_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_deleted_v1(self._on_ignored_message_event)
+            .register_p2_im_message_recalled_v1(self._on_ignored_message_event)
+            .build()
+        )
 
     async def start(self) -> None:
         if self._running:
@@ -179,7 +198,7 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            event_handler = self._build_event_handler(lark)
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -191,6 +210,10 @@ class FeishuChannel(Channel):
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            self._running = False
+
+    def _on_ignored_message_event(self, event) -> None:
+        logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
 
     async def stop(self) -> None:
         self._running = False
@@ -726,10 +749,46 @@ class FeishuChannel(Channel):
 
     async def _prepare_inbound(self, msg_id: str, inbound) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
+        inbound = await self._attach_connection_identity(inbound)
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="feishu",
+            workspace_id=inbound.chat_id,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
+        if state is None:
+            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+            return True
+
+        if not user_id or not chat_id:
+            await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="feishu",
+            external_account_id=user_id,
+            workspace_id=chat_id,
+            metadata={
+                "chat_id": chat_id,
+                "message_id": message_id,
+            },
+            status="connected",
+        )
+        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        return True
 
     def _on_message(self, event) -> None:
         """Called by lark-oapi when a message is received (runs in lark thread)."""
@@ -817,6 +876,23 @@ class FeishuChannel(Channel):
 
             if not (text or files_list):
                 logger.info("[Feishu] empty text, ignoring message")
+                return
+
+            connect_code = extract_connect_code(text)
+            if connect_code and self._connection_repo is not None:
+                if self._main_loop and self._main_loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._bind_connection_from_connect_code(
+                            message_id=msg_id,
+                            chat_id=chat_id,
+                            user_id=sender_id,
+                            code=connect_code,
+                        ),
+                        self._main_loop,
+                    )
+                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                else:
+                    logger.warning("[Feishu] main loop not running, cannot bind channel connection")
                 return
 
             # Only treat known slash commands as commands; absolute paths and

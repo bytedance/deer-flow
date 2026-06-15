@@ -49,6 +49,11 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+# Stream modes requested from the runtime, and the SSE event names under which
+# the message-tuple stream may arrive: the embedded runtime (and LangGraph
+# Platform) deliver the requested "messages-tuple" mode as event "messages".
+STREAM_MODES = ["messages-tuple", "values"]
+MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
@@ -56,7 +61,7 @@ CHANNEL_CAPABILITIES = {
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
     "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": False},
+    "telegram": {"supports_streaming": True},
     "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }
@@ -274,6 +279,22 @@ def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: 
     return metadata
 
 
+def _thread_channel_metadata(msg: InboundMessage) -> dict[str, Any]:
+    channel_source: dict[str, Any] = {
+        "type": "im_channel",
+        "provider": msg.channel_name,
+        "chat_id": msg.chat_id,
+    }
+    if msg.topic_id:
+        channel_source["topic_id"] = msg.topic_id
+    if msg.thread_ts:
+        channel_source["thread_ts"] = msg.thread_ts
+    if msg.connection_id:
+        channel_source["connection_id"] = msg.connection_id
+
+    return {"channel_source": channel_source}
+
+
 def _extract_text_content(content: Any) -> str:
     """Extract text from a streaming payload content field."""
     if isinstance(content, str):
@@ -440,6 +461,43 @@ def _human_input_message(content: str, *, original_content: str | None = None) -
     return message
 
 
+def _auth_disabled_owner_user_id() -> str | None:
+    try:
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
+    except Exception:
+        logger.debug("Unable to inspect auth-disabled mode for channel owner fallback", exc_info=True)
+        return None
+    return AUTH_DISABLED_USER_ID if is_auth_disabled() else None
+
+
+def _effective_owner_user_id(msg: InboundMessage) -> str | None:
+    return _auth_disabled_owner_user_id() or msg.owner_user_id
+
+
+def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
+    owner_user_id = _effective_owner_user_id(msg)
+    if owner_user_id:
+        msg.owner_user_id = owner_user_id
+    return msg
+
+
+def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
+    owner_user_id = _effective_owner_user_id(msg)
+    if not owner_user_id:
+        return None
+    return create_internal_auth_headers(owner_user_id=owner_user_id)
+
+
+def _safe_user_id_for_run(raw_user_id: str) -> str:
+    from deerflow.config.paths import get_paths
+
+    try:
+        return get_paths().prepare_user_dir_for_raw_id(raw_user_id)
+    except Exception:
+        logger.exception("Failed to prepare channel run user directory")
+        return make_safe_user_id(raw_user_id)
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
@@ -555,8 +613,14 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
-    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+    def _prepare_uploads_dir() -> tuple[Path, set[str]]:
+        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
+        # blocking filesystem IO that must stay off the event loop.
+        target = ensure_uploads_dir(thread_id)
+        existing = {entry.name for entry in target.iterdir() if entry.is_file()}
+        return target, existing
+
+    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -604,7 +668,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
             dest = uploads_dir / safe_name
             try:
-                dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
@@ -670,6 +734,7 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        connection_repo: Any | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -679,7 +744,9 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._connection_repo = connection_repo
         self._client = None  # lazy init — langgraph_sdk async client
+        self._channel_metadata_synced: set[str] = set()
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -728,12 +795,17 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
-        # ``user_id`` drives user-scoped filesystem buckets that only accept
-        # ``[A-Za-z0-9_-]``, so normalize the channel id and keep the raw value
-        # under ``channel_user_id`` for platform-facing lookups.
+        # ``user_id`` drives DeerFlow-owned memory, files, and thread buckets.
+        # For browser-connected IM channels, prefer the DeerFlow account that
+        # owns the connection. Preserve the raw platform user under
+        # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
+        owner_user_id = _effective_owner_user_id(msg)
+        if owner_user_id:
+            run_context_identity["user_id"] = _safe_user_id_for_run(owner_user_id)
+        elif msg.user_id:
+            run_context_identity["user_id"] = _safe_user_id_for_run(msg.user_id)
         if msg.user_id:
-            run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
             run_context_identity["channel_user_id"] = msg.user_id
 
         run_context = _merge_dicts(
@@ -845,6 +917,7 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
+        msg = _apply_effective_owner(msg)
         async with self._semaphore:
             try:
                 if msg.msg_type == InboundMessageType.COMMAND:
@@ -877,10 +950,27 @@ class ChannelManager:
 
     # -- chat handling -----------------------------------------------------
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread through Gateway and store the mapping."""
-        thread = await client.threads.create()
-        thread_id = thread["thread_id"]
+    async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
+        if msg.connection_id and self._connection_repo is not None:
+            return await self._connection_repo.get_thread_id(
+                msg.connection_id,
+                msg.chat_id,
+                msg.topic_id,
+            )
+        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+
+    async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
+        if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
+            await self._connection_repo.set_thread_id(
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                provider=msg.channel_name,
+                external_conversation_id=msg.chat_id,
+                external_topic_id=msg.topic_id,
+                thread_id=thread_id,
+            )
+            return
+
         self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
@@ -888,8 +978,38 @@ class ChannelManager:
             topic_id=msg.topic_id,
             user_id=msg.user_id,
         )
+
+    async def _create_thread(self, client, msg: InboundMessage) -> str:
+        """Create a new thread through Gateway and store the mapping."""
+        metadata = _thread_channel_metadata(msg)
+        owner_headers = _owner_headers(msg)
+        if owner_headers:
+            thread = await client.threads.create(metadata=metadata, headers=owner_headers)
+        else:
+            thread = await client.threads.create(metadata=metadata)
+        thread_id = thread["thread_id"]
+        await self._store_thread_id(msg, thread_id)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
+
+    async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
+        """Best-effort source metadata backfill for existing IM-created threads."""
+        # The metadata (provider/chat/topic) is constant for a thread, so one
+        # successful backfill per manager lifetime is enough — skip the
+        # redundant PATCH on every subsequent inbound message.
+        if thread_id in self._channel_metadata_synced:
+            return
+        update_kwargs: dict[str, Any] = {"metadata": _thread_channel_metadata(msg)}
+        if owner_headers := _owner_headers(msg):
+            update_kwargs["headers"] = owner_headers
+        try:
+            await client.threads.update(thread_id, **update_kwargs)
+        except Exception:
+            logger.debug("[Manager] failed to update channel metadata for thread_id=%s", thread_id, exc_info=True)
+            return
+        if len(self._channel_metadata_synced) > 4096:
+            self._channel_metadata_synced.clear()
+        self._channel_metadata_synced.add(thread_id)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
@@ -897,9 +1017,10 @@ class ChannelManager:
         # Look up existing DeerFlow thread.
         # topic_id may be None (e.g. Telegram private chats) — the store
         # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        thread_id = await self._lookup_thread_id(msg)
         if thread_id:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+            await self._update_thread_channel_metadata(client, msg, thread_id)
 
         # No existing thread found — create a new one
         if thread_id is None:
@@ -940,14 +1061,19 @@ class ChannelManager:
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        run_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            run_kwargs["headers"] = owner_headers
         try:
             result = await client.runs.wait(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message]},
-                config=run_config,
-                context=run_context,
-                multitask_strategy="reject",
+                **run_kwargs,
             )
         except Exception as exc:
             if _is_thread_busy_error(exc):
@@ -984,6 +1110,8 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
@@ -1008,21 +1136,26 @@ class ChannelManager:
         last_published_text = ""
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        stream_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "stream_mode": list(STREAM_MODES),
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            stream_kwargs["headers"] = owner_headers
 
         try:
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-                multitask_strategy="reject",
+                **stream_kwargs,
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
-                if event == "messages-tuple":
+                if event in MESSAGE_STREAM_EVENTS:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
@@ -1047,6 +1180,8 @@ class ChannelManager:
                         text=latest_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
                         metadata=_response_metadata(msg.metadata),
                     )
                 )
@@ -1093,6 +1228,8 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    connection_id=msg.connection_id,
+                    owner_user_id=msg.owner_user_id,
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
@@ -1124,18 +1261,10 @@ class ChannelManager:
         if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
-            thread = await client.threads.create()
-            new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
-                msg.channel_name,
-                msg.chat_id,
-                new_thread_id,
-                topic_id=msg.topic_id,
-                user_id=msg.user_id,
-            )
+            await self._create_thread(client, msg)
             reply = "New conversation started."
         elif reply is None and command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+            thread_id = await self._lookup_thread_id(msg)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif reply is None and command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
@@ -1174,9 +1303,11 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
@@ -1212,9 +1343,11 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

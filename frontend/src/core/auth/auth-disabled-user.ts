@@ -1,8 +1,8 @@
 import type { User } from "./types";
 
 export const AUTH_DISABLED_USER: User = {
-  id: "e2e-user",
-  email: "e2e@test.local",
+  id: "default",
+  email: "default@test.local",
   system_role: "admin",
   needs_setup: false,
 };
