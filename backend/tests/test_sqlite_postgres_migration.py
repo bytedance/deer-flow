@@ -6,10 +6,10 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from deerflow.persistence.base import Base
 import deerflow.persistence.models  # noqa: F401 — import all ORM models
-from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.base import Base
 from deerflow.persistence.tenant.model import TenantRow
+from deerflow.persistence.user.model import UserRow
 
 
 @pytest.fixture

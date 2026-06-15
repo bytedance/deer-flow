@@ -1,6 +1,5 @@
 """Unit tests for index_error_classifier."""
 
-import pytest
 
 from deerflow.knowledge_base.index_error_classifier import (
     classify_failures,

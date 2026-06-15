@@ -245,15 +245,14 @@ def test_unknown_endpoint_with_junk_cookie_rejected(client):
 
 """Tests for AuthMiddleware — whitelist, disabled mode, JWT, API Key, tenant context."""
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import pytest  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402, F811
 
-from app.gateway.auth.jwt_handler import create_access_token
-from app.gateway.auth.middleware import create_auth_middleware
-from deerflow.config.auth_config import load_auth_config_from_dict, reset_auth_config
-from deerflow.config.tenant import get_current_tenant_id
-from deerflow.config.tenant_storage import TenantConfig
+from app.gateway.auth.jwt_handler import create_access_token  # noqa: E402
+from app.gateway.auth.middleware import create_auth_middleware  # noqa: E402
+from deerflow.config.tenant import get_current_tenant_id  # noqa: E402
+from deerflow.config.tenant_storage import TenantConfig  # noqa: E402
 
 
 class _FakeTenantStore:

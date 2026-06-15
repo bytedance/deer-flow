@@ -6,9 +6,8 @@ Applies decay policies and token budgeting.
 
 import logging
 import time
-from typing import Any
 
-from deerflow.agents.memory.domain_storage import DomainFact, apply_decay, DecayPolicy
+from deerflow.agents.memory.domain_storage import DecayPolicy, DomainFact, apply_decay
 from deerflow.agents.memory.prompt import _count_tokens
 from deerflow.config.domain_memory_config import get_domain_memory_config
 from deerflow.config.tenant import get_current_tenant_id

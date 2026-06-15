@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deerflow.integrations.adapters.base import AuthContext, HealthStatus
+from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.adapters.ins.adapter import InsAdapter
 from deerflow.integrations.config import IntegrationSystemConfig
 from deerflow.integrations.errors import (
@@ -414,6 +414,7 @@ class TestInsAdapterBatchQueries:
     async def test_batch_trend_empty_equipment_ids_falls_back_to_single(self):
         """Empty equipment_ids uses single-asset query (backward compatible)."""
         from datetime import datetime
+
         from deerflow.integrations.models.monitoring import TrendSeries
 
         adapter, bridge = _make_adapter_with_bridge()

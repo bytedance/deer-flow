@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
 import bcrypt
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.gateway.auth.api_key_handler import create_api_key, list_api_keys, revoke_api_key
-from app.gateway.auth.dependencies import get_current_user, require_admin
-from app.gateway.auth.jwt_handler import create_access_token, create_refresh_token, decode_token
+from app.gateway.auth.dependencies import require_admin
+from app.gateway.auth.jwt_handler import create_access_token, decode_token
 from app.gateway.auth.models import (
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,

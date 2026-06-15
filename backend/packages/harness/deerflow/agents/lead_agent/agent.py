@@ -21,8 +21,6 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import get_memory_config
-from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -455,8 +453,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_co
     tenant_id = cfg.get("tenant_id", "default")
 
     # Enforce tenant exists and is_active — LangGraph Server requests bypass Gateway auth middleware
-    from deerflow.persistence.engine import get_engine
     from deerflow.config.tenant_storage import TenantConfig
+    from deerflow.persistence.engine import get_engine
 
     _engine = get_engine()
     if _engine is not None:
@@ -466,7 +464,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_co
         _db_url = _engine.url.render_as_string(hide_password=False)
 
         def _check_tenant():
-            from sqlalchemy import create_engine as _create_sync_engine, text
+            from sqlalchemy import create_engine as _create_sync_engine
+            from sqlalchemy import text
 
             # Use a synchronous engine on a worker thread to avoid the
             # "Future attached to a different loop" error that asyncpg

@@ -1,6 +1,5 @@
 """Tests for JWT token creation, decoding, and validation."""
 
-import time
 
 import pytest
 

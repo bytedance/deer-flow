@@ -4,13 +4,12 @@ Tests the full login/refresh/authenticate API endpoints with
 a mocked ins-base-rpc backend.
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
 

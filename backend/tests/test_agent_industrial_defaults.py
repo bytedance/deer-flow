@@ -9,12 +9,8 @@ Covers tasks from the industrial-intelligence-primary-track change:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
-import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -22,7 +18,6 @@ from fastapi.testclient import TestClient
 from app.gateway.routers import agents as agents_router
 from deerflow.config.agents_config import AgentConfig
 from deerflow.skills.types import Skill, SkillCategory, SkillTier
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -109,7 +104,6 @@ class TestForkAgentSkillsInheritance:
         source_config = AgentConfig(name="source-agent", skills=["deep-research", "code-review"])
         monkeypatch.setattr(agents_router, "load_agent_config", lambda name, **kw: source_config)
 
-        from deerflow.config.agents_config import load_builtin_agent_soul
         monkeypatch.setattr(agents_router, "load_builtin_agent_soul", lambda name: "You are helpful.")
         monkeypatch.setattr(agents_router, "load_tenant_agent_soul", lambda tid, name: None)
 
@@ -240,7 +234,6 @@ class TestCreateAgentIndustrialDefaults:
             lambda **kw: _fake_storage(industrial_skills),
         )
 
-        from deerflow.config.agents_config import load_agent_config as real_load
         def mock_load(name, **kw):
             config_path = paths.user_agent_dir("default", name) / "config.yaml"
             if config_path.exists():
@@ -342,8 +335,8 @@ class TestIndustrialAgentTelemetry:
         monkeypatch.setattr(agents_router, "load_agent_config", mock_load)
 
         # Reset telemetry metrics
-        from app.gateway.routers.industrial_skills_telemetry import IndustrialSkillsMetrics
         import app.gateway.routers.industrial_skills_telemetry as telemetry_mod
+        from app.gateway.routers.industrial_skills_telemetry import IndustrialSkillsMetrics
         telemetry_mod._metrics = IndustrialSkillsMetrics()
 
         app = FastAPI()

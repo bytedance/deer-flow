@@ -19,10 +19,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
-from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
-from app.gateway.auth.models import User
 from app.gateway.auth.dependencies import get_current_user
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.jwt import decode_token
+from app.gateway.auth.models import User
 from app.gateway.csrf_middleware import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,

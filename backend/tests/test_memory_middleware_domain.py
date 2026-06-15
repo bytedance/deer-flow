@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.config.domain_memory_config import DomainMemoryConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.session_memory_config import SessionMemoryConfig
-from deerflow.config.domain_memory_config import DomainMemoryConfig
 
 
 def _make_state(messages):

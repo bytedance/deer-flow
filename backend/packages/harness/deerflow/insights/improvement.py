@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any
 
 from deerflow.insights.models import (
     ClosureMetrics,

@@ -49,8 +49,8 @@ def _stub_script_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     Synthesises a tiny registry with one ``stub/noop`` script the test DSL
     references so the validator's section-source ``$.steps.x.y`` checks pass.
     """
-    from deerflow.report_templates import script_registry as sr
     from app.gateway.routers import report_templates as rt_routes
+    from deerflow.report_templates import script_registry as sr
 
     skill_dir = tmp_path / "stub-skill"
     skill_dir.mkdir(exist_ok=True)

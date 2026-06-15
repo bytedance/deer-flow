@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import get_auth_context, require_permission
+from app.gateway.authz import require_permission
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.insights.improvement import ImprovementEngine
 from deerflow.insights.kb_candidate_store import KBCandidateStore

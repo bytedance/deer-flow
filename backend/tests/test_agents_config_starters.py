@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import yaml
-import pytest
 
-from deerflow.config.agents_config import AgentConfig, AgentInfo, StarterConfig, to_agent_info
+from deerflow.config.agents_config import AgentConfig, StarterConfig, to_agent_info
 
 
 class TestStarterConfig:

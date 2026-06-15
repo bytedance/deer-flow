@@ -1,10 +1,8 @@
 """Tests for tenant auto-detection in login flow."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
-
-import pytest
 
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.models import User

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from deerflow.report_templates.blueprint_schema import BlueprintDefinition
-from deerflow.report_templates.schema import ReportTemplateDSL
 
 
 class TestBlueprintExecutorType:

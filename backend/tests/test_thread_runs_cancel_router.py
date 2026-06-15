@@ -31,6 +31,7 @@ if "on_startup" not in inspect.signature(StarletteRouter.__init__).parameters:
 
 from app.gateway.routers import thread_runs
 
+
 def _make_request(run_manager: RunManager):
     """Create a minimal request-like object for direct route invocation."""
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=run_manager)))

@@ -3,7 +3,6 @@
 Run with: PYTHONPATH=. uv run python tests/smoke_test_tenant.py
 """
 
-import json
 import tempfile
 from pathlib import Path
 

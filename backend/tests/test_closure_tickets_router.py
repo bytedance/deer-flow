@@ -37,7 +37,6 @@ from deerflow.closed_loop.permissions import (
 from deerflow.closed_loop.repository import ClosureRepository
 from deerflow.closed_loop.service import ClosureService
 
-
 # ---------------------------------------------------------------------------
 # Test infrastructure
 # ---------------------------------------------------------------------------

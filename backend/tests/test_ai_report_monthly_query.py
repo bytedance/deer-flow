@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest

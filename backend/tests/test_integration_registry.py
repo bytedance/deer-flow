@@ -1,11 +1,10 @@
 """Unit tests for IntegrationRegistry (Tasks 1.3.11, 1.3.12)."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from deerflow.integrations.adapters.base import AuthContext, HealthStatus
+from deerflow.integrations.adapters.base import HealthStatus
 from deerflow.integrations.registry import IntegrationRegistry, get_integration_registry
 
 

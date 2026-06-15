@@ -2,10 +2,8 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import sys
-
-import pytest
+from pathlib import Path
 
 
 def _load_module(module_name: str, relative_path: str):

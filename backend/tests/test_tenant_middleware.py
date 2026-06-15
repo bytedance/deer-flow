@@ -1,6 +1,5 @@
 """Tests for tenant middleware in the Gateway app."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 

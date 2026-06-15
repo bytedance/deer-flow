@@ -3,9 +3,9 @@
 from unittest.mock import Mock, patch
 
 from deerflow.agents.memory.retrieval import compose_memory_for_prompt
+from deerflow.config.domain_memory_config import DomainMemoryConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.session_memory_config import SessionMemoryConfig
-from deerflow.config.domain_memory_config import DomainMemoryConfig
 
 
 class TestComposeMemoryForPrompt:

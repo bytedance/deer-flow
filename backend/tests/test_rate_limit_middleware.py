@@ -1,6 +1,5 @@
 """Tests for rate limiting middleware — enabled, disabled, exceeded, window reset."""
 
-import time
 
 import pytest
 from fastapi import FastAPI

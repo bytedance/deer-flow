@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FEATURES_TOOL_DIR = REPO_ROOT / "docker" / "sandbox" / "features-tool"
 SCRIPT_DIR = REPO_ROOT / "skills" / "custom" / "pump-fault-diagnosis" / "scripts"

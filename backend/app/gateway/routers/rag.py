@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from deerflow.config.rag_config import get_rag_config
 from deerflow.rag.ingestion import DocumentIngestor

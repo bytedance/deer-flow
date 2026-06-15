@@ -19,7 +19,6 @@ from deerflow.report_templates.records import (
     validate_user_tenant_id,
 )
 
-
 # ---------------------------------------------------------------------------
 # ID generators and validators
 # ---------------------------------------------------------------------------

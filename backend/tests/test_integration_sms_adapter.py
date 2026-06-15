@@ -1,11 +1,11 @@
 """Unit tests for SmsAdapter (Task 1.6.10)."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from deerflow.integrations.adapters.base import AuthContext, HealthStatus
+from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.adapters.sms.adapter import SmsAdapter
 from deerflow.integrations.config import IntegrationSystemConfig
 from deerflow.integrations.errors import (

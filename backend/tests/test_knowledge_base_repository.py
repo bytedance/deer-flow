@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from deerflow.persistence.base import Base
 from deerflow.persistence.knowledge_base.document_repository import DocumentRepository
 from deerflow.persistence.knowledge_base.index_job_repository import IndexJobRepository
-from deerflow.persistence.knowledge_base.model import IndexJobRow, KnowledgeBaseDocumentRow, KnowledgeBaseRow
 from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
 from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
 

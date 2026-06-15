@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.errors import IntegrationError

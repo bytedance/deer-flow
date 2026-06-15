@@ -153,9 +153,9 @@ def get_tenant_mcp_tools(tenant_mcp_configs: dict[str, dict]) -> list[BaseTool]:
         return []
 
     try:
-        from deerflow.mcp.tools import get_mcp_tools_from_configs
-
         import concurrent.futures
+
+        from deerflow.mcp.tools import get_mcp_tools_from_configs
 
         try:
             asyncio.get_running_loop()

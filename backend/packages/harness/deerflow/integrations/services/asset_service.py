@@ -8,7 +8,7 @@ from typing import Any
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.errors import IntegrationError
-from deerflow.integrations.models.asset import Asset, AssetContext
+from deerflow.integrations.models.asset import AssetContext
 from deerflow.integrations.models.overview import AssetOverview
 from deerflow.integrations.models.queries import (
     AssetCatalogQuery,

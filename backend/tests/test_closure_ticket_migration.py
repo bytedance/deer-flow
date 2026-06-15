@@ -22,7 +22,6 @@ from sqlalchemy import create_engine, inspect, text
 from deerflow.persistence.base import Base
 from deerflow.persistence.models import ClosureSlaConfigRow, ClosureTicketEventRow, ClosureTicketRow  # noqa: F401 — register tables on Base.metadata
 
-
 _HARNESS_ROOT = Path(__file__).resolve().parents[1] / "packages" / "harness" / "deerflow"
 _ALEMBIC_DIR = _HARNESS_ROOT / "persistence" / "migrations"
 

@@ -1,7 +1,6 @@
 """Unit tests for SessionStorage."""
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 from deerflow.agents.memory.session_storage import (
     SessionStorage,

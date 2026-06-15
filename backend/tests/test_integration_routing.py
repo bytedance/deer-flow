@@ -1,11 +1,10 @@
 """Unit tests for CapabilityRouter and EntityLinkResolver (Tasks 1.4.8, 1.4.9)."""
 
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from deerflow.integrations.adapters.base import AuthContext, HealthStatus
+from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.config import CapabilityRouteConfig
 from deerflow.integrations.entity_link import EntityLinkResolver
 from deerflow.integrations.errors import (

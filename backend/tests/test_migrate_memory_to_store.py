@@ -8,8 +8,6 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from scripts.migrate_memory_to_store import (
     find_memory_files,
     load_memory_file,

@@ -1,6 +1,5 @@
 """Tests for RateLimitConfig — defaults, loading, and singleton lifecycle."""
 
-import pytest
 
 from deerflow.config.rate_limit_config import (
     RateLimitConfig,

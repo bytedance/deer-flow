@@ -28,7 +28,6 @@ from deerflow.report_templates.script_registry import (
 )
 from deerflow.tools.builtins import report_template_tools as rt
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

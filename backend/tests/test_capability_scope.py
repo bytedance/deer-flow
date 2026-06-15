@@ -6,10 +6,9 @@ Deactivation impact verification (Task 3.2)
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -23,7 +22,6 @@ from deerflow.config.capability_scope import (
     record_audit,
     resolve_capability_for_tenant,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 

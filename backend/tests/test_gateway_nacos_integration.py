@@ -1,6 +1,5 @@
 """Integration tests for Gateway lifespan Nacos hooks."""
 
-import pytest
 
 from deerflow.config.nacos_config import NacosConfig, load_nacos_config_from_dict
 

@@ -4,7 +4,6 @@ Tests all 6 derivation methods with representative data to ensure
 output matches legacy _ins_provider.py behavior.
 """
 
-import math
 from datetime import datetime
 
 import pytest
@@ -20,8 +19,6 @@ from deerflow.integrations.adapters.ins.kpi_aggregator import (
     hourly_runtime_rate,
 )
 from deerflow.integrations.adapters.ins.kpi_map import select_points_for_kpi
-
-
 
 # ---------------------------------------------------------------------------
 # Helper function tests

@@ -1,8 +1,7 @@
 """Unit tests for domain memory storage."""
 
-import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

@@ -13,8 +13,7 @@ Xiaoshouyi SQL limitationsations:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from deerflow.integrations.models.queries import OutboundDetailQuery, ServiceEventQuery
 

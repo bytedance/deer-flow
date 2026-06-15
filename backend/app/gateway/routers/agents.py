@@ -8,13 +8,12 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import get_agent_usage_repo
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, load_builtin_agent_soul, load_tenant_agent_soul, scan_builtin_agents, scan_tenant_agents
 from deerflow.config.paths import get_paths
 from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id
-
-from app.gateway.deps import get_agent_usage_repo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -23,8 +22,9 @@ router = APIRouter(prefix="/api", tags=["agents"])
 def _emit_industrial_agent_created(user_id: str | None = None, tenant_id: str | None = None) -> None:
     """Emit an industrial_agent_created telemetry event (best-effort)."""
     try:
-        from app.gateway.routers.industrial_skills_telemetry import IndustrialSkillTelemetryEvent, _metrics
         import time
+
+        from app.gateway.routers.industrial_skills_telemetry import IndustrialSkillTelemetryEvent, _metrics
 
         _metrics.record(
             IndustrialSkillTelemetryEvent(

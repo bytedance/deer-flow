@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from deerflow.integrations.config import IntegrationsConfig
 
 if TYPE_CHECKING:
-    from deerflow.integrations.adapters.base import IntegrationAdapter
-    from deerflow.integrations.adapters.base import HealthStatus
+    from deerflow.integrations.adapters.base import HealthStatus, IntegrationAdapter
 
 logger = logging.getLogger(__name__)
 

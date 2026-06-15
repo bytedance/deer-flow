@@ -74,12 +74,10 @@ class TestAuthConfigSingleton:
 
 """Tests for AuthConfig typed configuration."""
 
-import os
-from unittest.mock import patch
+import os  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
-import pytest
-
-from app.gateway.auth.config import AuthConfig as GatewayAuthConfig
+from app.gateway.auth.config import AuthConfig as GatewayAuthConfig  # noqa: E402
 
 
 def test_auth_config_defaults():

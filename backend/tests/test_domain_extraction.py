@@ -1,9 +1,7 @@
 """Unit tests for domain fact extraction."""
 
 import json
-from unittest.mock import MagicMock, Mock, patch
-
-import pytest
+from unittest.mock import Mock, patch
 
 from deerflow.agents.memory.updater import extract_domain_facts, update_domain_from_conversation
 

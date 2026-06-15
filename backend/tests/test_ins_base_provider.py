@@ -303,7 +303,6 @@ class TestInsBaseAuthProvider:
     @pytest.mark.asyncio
     async def test_get_user_cache_expires(self, provider, mock_rpc_client):
         """Cache entries past TTL are evicted and trigger a fresh RPC."""
-        from app.gateway.auth import ins_base_provider as mod
 
         mock_rpc_client.call_raw.return_value = {
             "code": 200,

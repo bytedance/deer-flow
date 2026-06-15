@@ -16,10 +16,7 @@ Coverage:
 
 from __future__ import annotations
 
-import json
-import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -30,9 +27,8 @@ from deerflow.report_templates.runtime.payload_builder import (
     assemble_payload,
 )
 from deerflow.report_templates.runtime.state import RuntimeState
-from deerflow.report_templates.schema import ReportTemplateDSL, Section
+from deerflow.report_templates.schema import Section
 from deerflow.report_templates.validator import validate_dsl
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -145,7 +141,6 @@ def stub_closure_service(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     list_for_report = AsyncMock(return_value=rows)
     fake_service = type("S", (), {"list_for_report": list_for_report})()
 
-    from deerflow.report_templates.runtime import payload_builder as pb_module
 
     def _fake_get_default_service():
         return fake_service

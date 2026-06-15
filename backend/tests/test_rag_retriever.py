@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deerflow.rag.retrieval import DocumentRetriever, RetrievalResult
 from deerflow.rag.vector_store import SearchResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers

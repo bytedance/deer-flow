@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from deerflow.report_templates.records import (
     ReportRunErrorCode,
     ReportRunRecord,
@@ -29,7 +27,6 @@ from deerflow.report_templates.runtime.state import (
     read_state,
     write_state,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

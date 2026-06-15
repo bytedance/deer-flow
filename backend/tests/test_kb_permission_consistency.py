@@ -11,7 +11,6 @@ import pytest
 from deerflow.knowledge_base.access_control import KbAccessControl, UserContext
 from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

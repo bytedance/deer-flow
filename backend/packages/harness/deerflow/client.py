@@ -39,7 +39,7 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
-from deerflow.config.tenant import _DEFAULT_TENANT_ID, get_current_tenant_id, reset_tenant_id, set_current_tenant_id, validate_tenant_id
+from deerflow.config.tenant import _DEFAULT_TENANT_ID, reset_tenant_id, set_current_tenant_id, validate_tenant_id
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage

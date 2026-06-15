@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from deerflow.knowledge_base.index_error_classifier import classify_index_error
 from deerflow.knowledge_base.service import KnowledgeBaseService
 from deerflow.knowledge_base.telemetry import KbTelemetryCollector
 from deerflow.persistence.base import Base
@@ -71,7 +69,6 @@ class TestCountDocsByStatus:
     @pytest.mark.asyncio
     async def test_mixed_statuses(self, doc_repo, kb, session_factory):
         # Directly insert docs with different statuses to avoid indexing side effects
-        import hashlib
         from datetime import UTC, datetime
 
         from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow
@@ -204,7 +201,7 @@ class TestGetIndexStats:
     async def test_stats_includes_failure_classification(self, service, kb, session_factory):
         from datetime import UTC, datetime
 
-        from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow, IndexJobRow
+        from deerflow.persistence.knowledge_base.model import IndexJobRow, KnowledgeBaseDocumentRow
 
         now = datetime.now(UTC)
         doc = KnowledgeBaseDocumentRow(
@@ -343,6 +340,7 @@ class TestHealthSummary:
     @pytest.mark.asyncio
     async def test_summary_aggregates_across_kbs(self, service, kb, kb_repo, doc_repo, session_factory):
         from datetime import UTC, datetime
+
         from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow
 
         # Create a second KB
@@ -414,7 +412,8 @@ class TestHealthSummary:
     @pytest.mark.asyncio
     async def test_summary_includes_failure_by_type(self, service, kb, session_factory):
         from datetime import UTC, datetime
-        from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow, IndexJobRow
+
+        from deerflow.persistence.knowledge_base.model import IndexJobRow, KnowledgeBaseDocumentRow
 
         now = datetime.now(UTC)
         doc = KnowledgeBaseDocumentRow(

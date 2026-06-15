@@ -14,7 +14,6 @@ import pytest
 
 from deerflow.knowledge_base.access_control import KbAccessControl, UserContext
 
-
 # ---------------------------------------------------------------------------
 # Boundary scenario: index status transitions
 # ---------------------------------------------------------------------------

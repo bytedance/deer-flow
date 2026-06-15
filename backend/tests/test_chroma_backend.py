@@ -12,8 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deerflow.rag.backends.chroma import ChromaVectorStore, CHROMA_COSINE_METADATA
-
+from deerflow.rag.backends.chroma import CHROMA_COSINE_METADATA, ChromaVectorStore
 
 # ---------------------------------------------------------------------------
 # Helpers

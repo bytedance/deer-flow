@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.auth.models import UserResponse
 from app.gateway.auth.ins_base_provider import InsBaseAuthProvider
+from app.gateway.auth.models import UserResponse
 
 logger = logging.getLogger(__name__)
 

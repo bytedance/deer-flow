@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import sys
 import types
-
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Mock langchain_core

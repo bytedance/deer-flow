@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from deerflow.knowledge_base.access_control import KbAccessControl, UserContext
 from deerflow.persistence.base import Base
-from deerflow.persistence.knowledge_base.model import KbPermissionRow, KnowledgeBaseDocumentRow, KnowledgeBaseRow
 from deerflow.persistence.knowledge_base.permission_repository import KbPermissionRepository
 from deerflow.persistence.knowledge_base.repository import KnowledgeBaseRepository
 

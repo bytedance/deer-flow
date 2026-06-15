@@ -10,7 +10,6 @@ Includes a smoke test for the §5.2 "重点机泵日报" full DSL.
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,6 @@ from deerflow.report_templates.script_registry import (
     _build_registry_from_skills,
 )
 from deerflow.report_templates.validator import validate_dsl
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

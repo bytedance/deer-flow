@@ -10,8 +10,8 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.gateway.auth.ins_base_provider import AuthProviderUnavailableError, RpcNotConfiguredError
-from app.gateway.deps import get_ins_base_provider
 from app.gateway.csrf_middleware import is_secure_request
+from app.gateway.deps import get_ins_base_provider
 from deerflow.config.auth_config import get_auth_config
 
 logger = logging.getLogger(__name__)

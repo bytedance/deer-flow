@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 import threading
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 
 
 @dataclass

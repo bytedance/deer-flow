@@ -11,12 +11,10 @@ into dicts, moving successfully parsed calls from ``invalid_tool_calls`` to
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 

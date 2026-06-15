@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from deerflow.tools.builtins.report_direct_tools import report_direct_execute
 

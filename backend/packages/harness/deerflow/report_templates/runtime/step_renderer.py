@@ -31,7 +31,6 @@ from deerflow.report_templates.runtime.state import RuntimeState
 from deerflow.report_templates.script_registry import ScriptRegistry
 from deerflow.report_templates.source_resolver import parse
 
-
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import type { Element, Root, ElementContent } from "hast";
+import type { Element, ElementContent, Root } from "hast";
 import { useMemo } from "react";
 import { visit } from "unist-util-visit";
 import type { BuildVisitor } from "unist-util-visit";

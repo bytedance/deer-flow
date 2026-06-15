@@ -41,8 +41,8 @@ class InsClientBridge:
 
         # Load features-tool client — required for all data capabilities
         try:
-            import sys
             import os
+            import sys
 
             features_root = os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool")
             if features_root and features_root not in sys.path:

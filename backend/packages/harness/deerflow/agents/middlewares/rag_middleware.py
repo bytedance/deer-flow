@@ -20,8 +20,8 @@ from deerflow.knowledge_base.retrieval import (
     build_selection_snapshot,
     resolve_runtime_kb_selection,
 )
-from deerflow.rag.job_context import kb_context
 from deerflow.rag.decisions import KB_DECISION_KEY, RagDecisionEvent
+from deerflow.rag.job_context import kb_context
 from deerflow.rag.prompt import format_chunks_for_injection, format_multi_kb_context
 from deerflow.rag.retrieval import DocumentRetriever
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id

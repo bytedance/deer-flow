@@ -3,13 +3,11 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deerflow.agents.memory.domain_retrieval import (
     _format_domain_facts,
     get_domain_context,
 )
-from deerflow.agents.memory.domain_storage import DecayPolicy, DomainFact
+from deerflow.agents.memory.domain_storage import DomainFact
 from deerflow.config.domain_memory_config import DomainDecayConfig, DomainMemoryConfig
 
 

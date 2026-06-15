@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 def _collect_all_models():
     """Import all ORM models and return (table_name -> ORM class) mapping."""
+    from deerflow.persistence.agent.model import AgentPermissionRow, AgentRow
+    from deerflow.persistence.agent.usage_model import AgentUsageRow
+    from deerflow.persistence.http_connector.model import TenantHttpConnectorRow
+    from deerflow.persistence.knowledge_base.model import KbPermissionRow
+    from deerflow.persistence.mcp_server.model import TenantMcpServerRow
     from deerflow.persistence.models import (
         ClosureSlaConfigRow,
         ClosureTicketEventRow,
@@ -49,11 +54,6 @@ def _collect_all_models():
         ThreadMetaRow,
         UserRow,
     )
-    from deerflow.persistence.agent.model import AgentPermissionRow, AgentRow
-    from deerflow.persistence.agent.usage_model import AgentUsageRow
-    from deerflow.persistence.http_connector.model import TenantHttpConnectorRow
-    from deerflow.persistence.knowledge_base.model import KbPermissionRow
-    from deerflow.persistence.mcp_server.model import TenantMcpServerRow
 
     models = [
         UserRow,

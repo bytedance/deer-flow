@@ -23,8 +23,8 @@ def alembic_cfg(tmp_path: Path) -> tuple[Config, str]:
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
 
-    from deerflow.persistence.base import Base
     import deerflow.persistence.models  # noqa: F401  — register all tables
+    from deerflow.persistence.base import Base
 
     sync_engine = create_engine(sync_url, future=True)
     try:

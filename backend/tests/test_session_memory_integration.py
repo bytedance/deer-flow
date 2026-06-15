@@ -116,10 +116,9 @@ class TestSessionMemoryIntegration:
 
     def test_session_memory_write_failure_does_not_affect_user_memory(self):
         """Session memory failure is isolated from user memory writes."""
-        from deerflow.agents.memory.queue import get_memory_queue
-        from deerflow.agents.memory.session_queue import get_session_memory_queue
-        from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
         from langchain_core.messages import AIMessage, HumanMessage
+
+        from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 
         mw = MemoryMiddleware()
         state = {"messages": [HumanMessage(content="hello"), AIMessage(content="hi")]}

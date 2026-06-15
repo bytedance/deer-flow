@@ -1,6 +1,5 @@
 """Tests for built-in content safety providers."""
 
-import pytest
 
 from deerflow.content_safety.builtin import OpenAIModerationProvider, RegexPIIProvider
 from deerflow.content_safety.provider import ContentSafetyRequest

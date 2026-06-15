@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from deerflow.config.rpc_config import RpcConfig, RpcServiceConfig
+from deerflow.config.rpc_config import RpcServiceConfig
 from deerflow.rpc.rpc_client import RpcClient, RpcError
 
 

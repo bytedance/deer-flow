@@ -33,10 +33,10 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.registry import initialize_registry

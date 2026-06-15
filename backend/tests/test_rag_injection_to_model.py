@@ -6,11 +6,9 @@
 
 from __future__ import annotations
 
-import pytest
 from langchain_core.messages import SystemMessage
 
 from deerflow.rag.vector_store import SearchResult
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

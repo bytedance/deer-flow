@@ -825,7 +825,6 @@ class KnowledgeBaseService:
         Aggregates index success rates, retrieval latency, and failure
         distributions across all knowledge bases accessible to the user.
         """
-        from deerflow.knowledge_base.index_error_classifier import classify_failures
         from deerflow.knowledge_base.telemetry import get_kb_telemetry
 
         kbs = await self._kb_repo.list_accessible(
@@ -961,8 +960,8 @@ class KnowledgeBaseService:
         retrieval path can skip it with a clear ``vector_metric_stale``
         reason rather than serve garbage.
         """
-        from deerflow.rag.backends.chroma import ChromaVectorStore
         from deerflow.config.tenant import reset_tenant_id, set_current_tenant_id, validate_tenant_id
+        from deerflow.rag.backends.chroma import ChromaVectorStore
 
         store = ChromaVectorStore()
         try:

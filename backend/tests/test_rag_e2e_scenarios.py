@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.rag.backends.chroma import ChromaVectorStore
-from deerflow.rag.chunking import RecursiveChunkStrategy
 from deerflow.rag.embeddings import EmbeddingProvider
 from deerflow.rag.errors import EmbeddingDimensionMismatchError
 from deerflow.rag.ingestion import DocumentIngestor
 from deerflow.rag.retrieval import DocumentRetriever
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures

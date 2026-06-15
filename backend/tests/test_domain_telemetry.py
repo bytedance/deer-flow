@@ -4,10 +4,8 @@ import logging
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from deerflow.agents.memory.domain_storage import DomainStorage, DomainFact
 from deerflow.agents.memory.domain_retrieval import get_domain_context
+from deerflow.agents.memory.domain_storage import DomainFact, DomainStorage
 from deerflow.config.domain_memory_config import DomainMemoryConfig
 
 

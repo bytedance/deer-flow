@@ -1,14 +1,13 @@
 """Unit tests for session memory updater."""
 
 import json
-import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
+from deerflow.agents.memory.session_storage import create_empty_session_memory
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     update_session_from_conversation,
 )
-from deerflow.agents.memory.session_storage import create_empty_session_memory
 from deerflow.config.session_memory_config import SessionMemoryConfig
 
 

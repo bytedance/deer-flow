@@ -1,9 +1,5 @@
 """Tests for API Key generation, hashing, verification, and storage."""
 
-import json
-import tempfile
-from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -19,7 +15,6 @@ from app.gateway.auth.api_key_handler import (
     verify_key,
 )
 from deerflow.config.auth_config import load_auth_config_from_dict, reset_auth_config
-from deerflow.config.tenant import _current_tenant_id
 
 
 @pytest.fixture(autouse=True)

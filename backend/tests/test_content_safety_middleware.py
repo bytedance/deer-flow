@@ -1,6 +1,5 @@
 """Tests for InputGuardMiddleware and OutputGuardMiddleware."""
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.content_safety.builtin import RegexPIIProvider

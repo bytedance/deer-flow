@@ -4,7 +4,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import httpx
 
 from deerflow.config.nacos_config import NacosConfig
 from deerflow.rpc.nacos_registry import NacosRegistry

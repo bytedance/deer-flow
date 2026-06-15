@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from deerflow.evaluation.dataset import EvalCase
 from deerflow.evaluation.judge import LLMJudge

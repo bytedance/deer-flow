@@ -6,7 +6,6 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 from deerflow.config.paths import get_paths

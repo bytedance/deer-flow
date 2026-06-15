@@ -110,7 +110,7 @@ class TestDirectInsMonthlyProvider:
     def test_fetch_returns_provider_result_with_data_source(self, monkeypatch):
         _load_fresh("_data_providers")
         _load_fresh("_data_provider_impls")
-        from _data_providers import get_provider, ProviderResult, INS_SUCCESS
+        from _data_providers import INS_SUCCESS, ProviderResult, get_provider
 
         provider = get_provider("monthly")
 
@@ -133,7 +133,7 @@ class TestDirectInsMonthlyProvider:
     def test_fetch_raises_http_provider_error_on_ins_failure(self, monkeypatch):
         _load_fresh("_data_providers")
         _load_fresh("_data_provider_impls")
-        from _data_providers import get_provider, HttpProviderError
+        from _data_providers import HttpProviderError, get_provider
 
         provider = get_provider("monthly")
 
@@ -148,7 +148,7 @@ class TestDirectInsMonthlyProvider:
     def test_fetch_wraps_unexpected_errors(self, monkeypatch):
         _load_fresh("_data_providers")
         _load_fresh("_data_provider_impls")
-        from _data_providers import get_provider, HttpProviderError
+        from _data_providers import HttpProviderError, get_provider
 
         provider = get_provider("monthly")
 

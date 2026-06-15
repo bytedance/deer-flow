@@ -3,7 +3,6 @@
 import io
 import json
 import zipfile
-from unittest.mock import Mock
 
 import pytest
 import yaml

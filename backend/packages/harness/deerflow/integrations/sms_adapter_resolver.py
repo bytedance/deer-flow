@@ -11,7 +11,7 @@ import logging
 import yaml
 
 from deerflow.integrations.adapters.sms import SmsAdapter
-from deerflow.integrations.config import IntegrationSystemConfig, IntegrationsConfig
+from deerflow.integrations.config import IntegrationSystemConfig
 
 logger = logging.getLogger(__name__)
 

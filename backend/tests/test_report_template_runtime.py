@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,6 @@ from deerflow.report_templates.runtime.payload_builder import (
     PayloadBuildError,
     assemble_payload,
 )
-from deerflow.report_templates.runtime.step_renderer import build_form_props
 from deerflow.report_templates.runtime.state import (
     RuntimeState,
     StateNotFoundError,
@@ -27,11 +25,11 @@ from deerflow.report_templates.runtime.state import (
     transition,
     write_state,
 )
+from deerflow.report_templates.runtime.step_renderer import build_form_props
 from deerflow.report_templates.runtime.step_submitter import (
     SubmitStepError,
     submit_step,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

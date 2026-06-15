@@ -3,14 +3,14 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import pytest
 import httpx
+import pytest
 
 from deerflow.config.nacos_config import load_nacos_config_from_dict
 from deerflow.config.rpc_config import (
     load_rpc_config_from_dict,
 )
-from deerflow.rpc.rpc_client import RpcClient, RpcError, RpcConnectionError, RpcTimeoutError
+from deerflow.rpc.rpc_client import RpcClient, RpcConnectionError, RpcError, RpcTimeoutError
 
 
 @pytest.fixture(autouse=True)

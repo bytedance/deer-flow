@@ -6,12 +6,9 @@ Covers:
 - Prompt scoping integration with agent factory
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.config.agents_config import load_agent_config
-
 
 # ---------------------------------------------------------------------------
 # Pilot Agent Configuration Tests (1.11.2-1.11.3)

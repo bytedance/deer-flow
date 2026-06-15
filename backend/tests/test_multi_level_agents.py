@@ -1065,7 +1065,7 @@ class TestAgentUsageTokenTracking:
 
     def test_repository_record_accepts_new_fields(self):
         """Verify record() signature accepts all new parameters without error."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         from deerflow.persistence.agent.usage_repository import AgentUsageRepository
 

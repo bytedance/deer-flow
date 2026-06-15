@@ -1,7 +1,5 @@
 """Unit tests for domain memory update queue."""
 
-import threading
-import time
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.domain_queue import (

@@ -7,7 +7,6 @@ to query external systems for asset information.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from deerflow.integrations.adapters.base import AuthContext
 from deerflow.integrations.errors import IntegrationError

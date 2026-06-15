@@ -1,6 +1,7 @@
 """启动脚本：在 uvicorn 之前设置 WindowsSelectorEventLoopPolicy"""
-import sys
 import asyncio
+import sys
+
 import uvicorn
 
 if sys.platform == "win32":

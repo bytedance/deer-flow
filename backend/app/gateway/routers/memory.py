@@ -1,13 +1,12 @@
 """Memory API router for retrieving and managing memory data across User, Session, and Domain layers."""
 
-import asyncio
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.domain_storage import DomainFact, get_domain_storage
+from deerflow.agents.memory.domain_storage import get_domain_storage
 from deerflow.agents.memory.session_storage import get_session_storage
 from deerflow.agents.memory.updater import (
     aclear_memory_data,
@@ -842,9 +841,10 @@ async def get_audit_logs_endpoint(
     limit: int = Query(default=100, ge=1, le=1000, description="Max entries"),
 ) -> list[AuditEntryResponse]:
     """Query memory audit logs."""
+    from sqlalchemy import select
+
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.models.memory_audit import MemoryAuditRow
-    from sqlalchemy import select
 
     session_factory = get_session_factory()
     if session_factory is None:

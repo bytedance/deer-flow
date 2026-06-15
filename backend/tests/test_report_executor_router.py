@@ -1,6 +1,5 @@
 """Tests for report executor router."""
 
-import pytest
 
 from deerflow.report_executor.router import (
     get_executor_type_from_config,
