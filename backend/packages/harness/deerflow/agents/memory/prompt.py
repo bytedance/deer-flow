@@ -316,7 +316,103 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000, *, use_tiktoken: bool = True) -> str:
+def _format_fact_line(fact: dict[str, Any]) -> str | None:
+    """Build a single formatted fact line, or return ``None`` for invalid facts.
+
+    Extracted as a shared helper so the guaranteed-injection and regular-injection
+    paths produce identical line formatting.
+    """
+    content_value = fact.get("content")
+    if not isinstance(content_value, str):
+        return None
+    content = content_value.strip()
+    if not content:
+        return None
+    category = str(fact.get("category", "context")).strip() or "context"
+    confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+    source_error = fact.get("sourceError")
+    if category == "correction" and isinstance(source_error, str) and source_error.strip():
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+    return f"- [{category} | {confidence:.2f}] {content}"
+
+
+def _select_fact_lines(
+    ranked_facts: list[dict[str, Any]],
+    *,
+    token_budget: int,
+    use_tiktoken: bool,
+) -> tuple[list[str], int]:
+    """Greedily select formatted fact lines within a *line-only* token budget.
+
+    This function is intentionally **header-agnostic**: it counts only the
+    fact lines themselves (including ``\\n`` separators between lines).  The
+    caller is responsible for reserving tokens for the ``"Facts:\\n"`` header
+    and any inter-section ``"\\n\\n"`` separator *before* calling this
+    function, and passing the remaining capacity as *token_budget*.
+
+    Args:
+        ranked_facts: Facts pre-sorted by the caller's preferred ranking.
+        token_budget: Maximum tokens available for fact lines only.
+        use_tiktoken: Whether to use tiktoken for counting.
+
+    Returns:
+        ``(selected_lines, consumed_tokens)`` — *consumed_tokens* is the
+        exact token cost of the returned lines (including inter-line
+        ``\\n`` separators, but *not* a leading header).
+    """
+    lines: list[str] = []
+    consumed = 0
+    for fact in ranked_facts:
+        formatted = _format_fact_line(fact)
+        if formatted is None:
+            continue
+        line_text = ("\n" + formatted) if lines else formatted
+        line_tokens = _count_tokens(line_text, use_tiktoken=use_tiktoken)
+        if consumed + line_tokens <= token_budget:
+            lines.append(formatted)
+            consumed += line_tokens
+        # Keep scanning — a shorter fact later might still fit.
+    return lines, consumed
+
+
+def _fallback_format_facts(
+    facts_data: list[Any],
+    *,
+    preceding_section_cost: int,
+    max_tokens: int,
+    use_tiktoken: bool,
+) -> str | None:
+    """Confidence-only ranking used when the primary path raises an exception.
+
+    Returns the formatted ``"Facts:\\n..."`` section string, or ``None`` if
+    no facts survive.  *preceding_section_cost* is the tokens already consumed
+    by user-context / history sections (used to derive the remaining budget).
+    """
+    valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
+    ranked = sorted(valid_facts, key=lambda f: _coerce_confidence(f.get("confidence"), default=0.0), reverse=True)
+
+    has_preceding = preceding_section_cost > 0
+    header = "Facts:\n"
+    sep = "\n\n" if has_preceding else ""
+    overhead = _count_tokens(sep + header, use_tiktoken=use_tiktoken)
+    line_budget = max_tokens - preceding_section_cost - overhead
+    if line_budget <= 0:
+        return None
+
+    lines, _ = _select_fact_lines(ranked, token_budget=line_budget, use_tiktoken=use_tiktoken)
+    if not lines:
+        return None
+    return sep + header + "\n".join(lines)
+
+
+def format_memory_for_injection(
+    memory_data: dict[str, Any],
+    max_tokens: int = 2000,
+    *,
+    use_tiktoken: bool = True,
+    guaranteed_categories: list[str] | None = None,
+    guaranteed_token_budget: int = 500,
+) -> str:
     """Format memory data for injection into system prompt.
 
     Args:
@@ -325,6 +421,12 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         use_tiktoken: When ``False``, all token counting uses the network-free
             character-based estimate instead of tiktoken (see
             ``memory.token_counting`` config). Defaults to ``True``.
+        guaranteed_categories: Fact categories that must always be injected
+            regardless of the regular token budget. These facts draw from a
+            separate *guaranteed_token_budget*. When ``None`` or empty, all
+            facts compete for the same budget (original behaviour).
+        guaranteed_token_budget: Token ceiling for the guaranteed section.
+            Ignored when *guaranteed_categories* is ``None`` or empty.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -332,7 +434,10 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
     if not memory_data:
         return ""
 
-    sections = []
+    # Normalise guaranteed_categories so callers can pass None/[] safely.
+    effective_guaranteed: frozenset[str] = frozenset(c.strip() for c in guaranteed_categories if isinstance(c, str) and c.strip()) if guaranteed_categories else frozenset()
+
+    sections: list[str] = []
 
     # Format user context
     user_data = memory_data.get("user", {})
@@ -374,66 +479,121 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
 
-    # Format facts (sorted by confidence; include as many as token budget allows)
+    # ── Facts ────────────────────────────────────────────────────────────────
+    #
+    # Design notes
+    # ~~~~~~~~~~~~
+    # • A single ``"Facts:\\n"`` header is emitted at most once.
+    # • Guaranteed-category facts draw from *guaranteed_token_budget* (an
+    #   **additional** allowance on top of *max_tokens*), so they cannot be
+    #   evicted by regular facts.
+    # • Regular facts draw from *max_tokens* only.
+    # • All token accounting (header, separators, lines) is performed here
+    #   in the caller; the ``_select_fact_lines`` helper is header-agnostic.
+    # • When the primary path raises any exception, ``_fallback_format_facts``
+    #   performs a single-pass confidence-only ranking.
     facts_data = memory_data.get("facts", [])
+    guaranteed_line_tokens = 0  # used later for the effective truncation limit
     if isinstance(facts_data, list) and facts_data:
-        ranked_facts = sorted(
-            (f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content").strip()),
-            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
-            reverse=True,
-        )
-
-        # Compute token count for existing sections once, then account
-        # incrementally for each fact line to avoid full-string re-tokenization.
+        # Token cost of sections built above (user context, history).
         base_text = "\n\n".join(sections)
         base_tokens = _count_tokens(base_text, use_tiktoken=use_tiktoken) if base_text else 0
-        # Account for the separator between existing sections and the facts section.
-        facts_header = "Facts:\n"
-        separator_tokens = _count_tokens("\n\n" + facts_header, use_tiktoken=use_tiktoken) if base_text else _count_tokens(facts_header, use_tiktoken=use_tiktoken)
-        running_tokens = base_tokens + separator_tokens
 
-        fact_lines: list[str] = []
-        for fact in ranked_facts:
-            content_value = fact.get("content")
-            if not isinstance(content_value, str):
-                continue
-            content = content_value.strip()
-            if not content:
-                continue
-            category = str(fact.get("category", "context")).strip() or "context"
-            confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
-            source_error = fact.get("sourceError")
-            if category == "correction" and isinstance(source_error, str) and source_error.strip():
-                line = f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+        try:
+            # Collect valid facts and partition into guaranteed vs regular.
+            valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
+
+            def _confidence_key(fact: dict[str, Any]) -> float:
+                return _coerce_confidence(fact.get("confidence"), default=0.0)
+
+            if effective_guaranteed:
+                guaranteed = sorted(
+                    [f for f in valid_facts if (str(f.get("category", "")).strip() or "context") in effective_guaranteed],
+                    key=_confidence_key,
+                    reverse=True,
+                )
+                regular = sorted(
+                    [f for f in valid_facts if (str(f.get("category", "")).strip() or "context") not in effective_guaranteed],
+                    key=_confidence_key,
+                    reverse=True,
+                )
             else:
-                line = f"- [{category} | {confidence:.2f}] {content}"
+                guaranteed = []
+                regular = sorted(valid_facts, key=_confidence_key, reverse=True)
 
-            # Each additional line is preceded by a newline (except the first).
-            line_text = ("\n" + line) if fact_lines else line
-            line_tokens = _count_tokens(line_text, use_tiktoken=use_tiktoken)
+            # ── Phase 1: select guaranteed lines ──────────────────────────
+            has_preceding = bool(sections)
+            facts_header = "Facts:\n"
+            sep = "\n\n" if has_preceding else ""
+            header_cost = _count_tokens(sep + facts_header, use_tiktoken=use_tiktoken)
 
-            if running_tokens + line_tokens <= max_tokens:
-                fact_lines.append(line)
-                running_tokens += line_tokens
-            else:
-                break
+            guaranteed_lines: list[str] = []
+            if guaranteed:
+                guaranteed_line_budget = guaranteed_token_budget
+                guaranteed_lines, guaranteed_line_tokens = _select_fact_lines(
+                    guaranteed,
+                    token_budget=guaranteed_line_budget,
+                    use_tiktoken=use_tiktoken,
+                )
 
-        if fact_lines:
-            sections.append("Facts:\n" + "\n".join(fact_lines))
+            # ── Phase 2: select regular lines ────────────────────────────
+            # Regular facts compete for *max_tokens* (the main budget).
+            # Subtract everything already accounted for:
+            #   base sections + inter-section separator + header + guaranteed lines
+            regular_lines: list[str] = []
+            if regular:
+                used_before_regular = base_tokens + header_cost + guaranteed_line_tokens
+                regular_line_budget = max_tokens - used_before_regular
+                if regular_line_budget > 0:
+                    regular_lines, _ = _select_fact_lines(
+                        regular,
+                        token_budget=regular_line_budget,
+                        use_tiktoken=use_tiktoken,
+                    )
+
+            # ── Emit a single "Facts:" section ───────────────────────────
+            all_fact_lines = guaranteed_lines + regular_lines
+            if all_fact_lines:
+                section_text = sep + facts_header + "\n".join(all_fact_lines)
+                sections.append(section_text)
+
+        except Exception:
+            # ── Fallback: confidence-only ranking, single budget ─────────
+            # Any unexpected error in the partition / guaranteed path must
+            # not prevent memory injection entirely.  Fall back to the
+            # original single-pass confidence ranking.
+            logger.warning(
+                "Memory injection: guaranteed-category path failed, falling back to confidence-only ranking",
+                exc_info=True,
+            )
+            fallback = _fallback_format_facts(
+                facts_data,
+                preceding_section_cost=base_tokens,
+                max_tokens=max_tokens,
+                use_tiktoken=use_tiktoken,
+            )
+            if fallback:
+                sections.append(fallback)
 
     if not sections:
         return ""
 
     result = "\n\n".join(sections)
 
+    # The effective ceiling accounts for the additional headroom granted to
+    # guaranteed-category facts.  Without this adjustment the safety truncation
+    # below could silently discard the very facts the guaranteed path worked to
+    # preserve.
+    effective_limit = max_tokens + guaranteed_line_tokens
+
     # Use accurate token counting with tiktoken (or the char-based estimate
     # when use_tiktoken is False).
     token_count = _count_tokens(result, use_tiktoken=use_tiktoken)
-    if token_count > max_tokens:
+    if token_count > effective_limit:
         # Truncate to fit within token limit
         # Estimate characters to remove based on token ratio
         char_per_token = len(result) / token_count
-        target_chars = int(max_tokens * char_per_token * 0.95)  # 95% to leave margin
+        target_chars = int(effective_limit * char_per_token * 0.95)  # 95% to leave margin
         result = result[:target_chars] + "\n..."
 
     return result

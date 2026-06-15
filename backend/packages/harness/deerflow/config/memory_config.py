@@ -73,6 +73,22 @@ class MemoryConfig(BaseModel):
             "CJK-aware character-based estimate and never touches tiktoken."
         ),
     )
+    guaranteed_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=(
+            "Fact categories that are always injected into the prompt regardless "
+            "of the regular token budget. These facts are allocated from a "
+            "separate reserved budget (``guaranteed_token_budget``). "
+            "This ensures high-value facts such as explicit user corrections "
+            "are never silently dropped when the token budget is tight."
+        ),
+    )
+    guaranteed_token_budget: int = Field(
+        default=500,
+        ge=50,
+        le=2000,
+        description=("Maximum tokens reserved for guaranteed-category facts. Guaranteed facts are allocated from this budget first; regular facts then use the remaining ``max_injection_tokens``."),
+    )
 
 
 # Global configuration instance

@@ -173,3 +173,256 @@ def test_format_memory_includes_long_term_background() -> None:
     assert "Background: Core expertise in distributed systems" in result
     assert "Recent: Recent activity summary" in result
     assert "Earlier: Earlier context summary" in result
+
+
+# ---------------------------------------------------------------------------
+# Guaranteed-category injection tests
+# ---------------------------------------------------------------------------
+
+
+def test_guaranteed_correction_injected_when_budget_tight(monkeypatch) -> None:
+    """Correction facts must be injected even when the regular budget is exhausted."""
+    # Deterministic char-based counting.
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            # Many high-confidence regular facts that will eat the budget.
+            {"content": "Regular fact A " * 20, "category": "knowledge", "confidence": 0.95},
+            {"content": "Regular fact B " * 20, "category": "knowledge", "confidence": 0.90},
+            {"content": "Regular fact C " * 20, "category": "knowledge", "confidence": 0.85},
+            # A correction fact with lower confidence.
+            {"content": "Use make dev, not npm start", "category": "correction", "confidence": 0.7},
+        ],
+    }
+
+    # Tight budget that cannot fit all facts.
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=200,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=100,
+    )
+
+    # The correction fact MUST appear regardless of budget pressure.
+    assert "Use make dev, not npm start" in result
+
+
+def test_guaranteed_facts_sorted_by_confidence() -> None:
+    """Guaranteed facts should be sorted by confidence descending."""
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "Low conf correction", "category": "correction", "confidence": 0.6},
+            {"content": "High conf correction", "category": "correction", "confidence": 0.95},
+            {"content": "Regular fact", "category": "knowledge", "confidence": 0.8},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    assert "High conf correction" in result
+    assert "Low conf correction" in result
+    assert result.index("High conf correction") < result.index("Low conf correction")
+
+
+def test_guaranteed_budget_isolation() -> None:
+    """Guaranteed facts draw from their own budget, not the regular budget."""
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "Correction one", "category": "correction", "confidence": 0.9},
+            {"content": "Regular knowledge", "category": "knowledge", "confidence": 0.8},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    # Both facts should appear (separate budgets).
+    assert "Correction one" in result
+    assert "Regular knowledge" in result
+
+
+def test_no_guaranteed_categories_backward_compatible() -> None:
+    """When guaranteed_categories is None, behaviour matches the original."""
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "High conf", "category": "knowledge", "confidence": 0.95},
+            {"content": "Low conf", "category": "context", "confidence": 0.4},
+        ],
+    }
+
+    # No guaranteed_categories passed → original behaviour.
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "High conf" in result
+    assert result.index("High conf") < result.index("Low conf")
+
+
+def test_empty_guaranteed_list_backward_compatible() -> None:
+    """An empty guaranteed_categories list should behave like None."""
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "Correction fact", "category": "correction", "confidence": 0.9},
+            {"content": "Regular fact", "category": "knowledge", "confidence": 0.8},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=[],
+    )
+
+    assert "Correction fact" in result
+    assert "Regular fact" in result
+
+
+def test_fallback_on_ranking_error(monkeypatch) -> None:
+    """If the guaranteed path raises, fall back to confidence-only ranking."""
+
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "Fact A", "category": "knowledge", "confidence": 0.9},
+            {"content": "Fact B", "category": "correction", "confidence": 0.8},
+        ],
+    }
+
+    # Force _select_fact_lines to raise on the *first* call (the guaranteed
+    # path) but succeed on subsequent calls (the fallback path).
+    call_count = {"n": 0}
+    prompt_module = __import__("deerflow.agents.memory.prompt", fromlist=["_select_fact_lines"])
+    original_select = prompt_module._select_fact_lines
+
+    def flaky_select(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated error in guaranteed path")
+        return original_select(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._select_fact_lines",
+        flaky_select,
+    )
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    # Both facts should still appear via the fallback path.
+    assert "Fact A" in result
+    assert "Fact B" in result
+
+
+def test_guaranteed_respects_its_own_budget_limit(monkeypatch) -> None:
+    """Even guaranteed facts are capped by guaranteed_token_budget."""
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    # Many correction facts that together exceed the guaranteed budget.
+    # Formatted line example: "- [correction | 0.95] CorrA xxxxxxxxxxxxxxxx"
+    # Each line is ~50 chars; with "Facts:\n" header (7 chars), two lines
+    # need ~107 chars, exceeding the 80-char guaranteed budget.
+    memory_data = {
+        "user": {},
+        "history": {},
+        "facts": [
+            {"content": "CorrA " + "x" * 20, "category": "correction", "confidence": 0.95},
+            {"content": "CorrB " + "x" * 20, "category": "correction", "confidence": 0.90},
+            {"content": "CorrC " + "x" * 20, "category": "correction", "confidence": 0.85},
+            {"content": "Short regular", "category": "knowledge", "confidence": 0.8},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=80,  # Small guaranteed budget — fits 1 fact line only.
+    )
+
+    # At least the highest-confidence correction should appear.
+    assert "CorrA" in result
+    # The regular fact should also appear (it has its own budget).
+    assert "Short regular" in result
+
+
+def test_guaranteed_fact_with_source_error_rendered() -> None:
+    """Guaranteed correction facts should still render sourceError."""
+    memory_data = {
+        "facts": [
+            {
+                "content": "Use uv, not pip.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": "Agent suggested pip install.",
+            },
+            {"content": "Likes Python", "category": "preference", "confidence": 0.8},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    assert "Use uv, not pip." in result
+    assert "avoid: Agent suggested pip install." in result
+    assert "Likes Python" in result
+
+
+def test_single_facts_header_when_both_guaranteed_and_regular() -> None:
+    """When both guaranteed and regular facts exist, emit exactly one 'Facts:' header."""
+    memory_data = {
+        "user": {"workContext": {"summary": "Dev"}},  # non-empty preceding section
+        "history": {},
+        "facts": [
+            {"content": "Correction fact", "category": "correction", "confidence": 0.95},
+            {"content": "Knowledge fact", "category": "knowledge", "confidence": 0.80},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+    )
+
+    # Exactly one "Facts:" header.
+    assert result.count("Facts:") == 1, f"Expected exactly one 'Facts:' header, got:\n{result}"
+    # Both facts appear under the single header.
+    assert "Correction fact" in result
+    assert "Knowledge fact" in result
+    # Guaranteed fact comes first (higher confidence + guaranteed).
+    assert result.index("Correction fact") < result.index("Knowledge fact")
