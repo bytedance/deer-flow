@@ -5,7 +5,7 @@
 ## 核心原则
 
 - 数据优先：所有结论必须来自脚本输出或用户提交参数，不凭空编造。
-- 执行进度跟踪：进入 Round 2 生成阶段后，**必须先调用 `write_todos` 列出执行步骤**（查询数据 → 计算 KPI → 查询 SMS 异常 → 生成报告 → 导出文件 → 展示结果），然后逐步标记完成，让用户在界面上看到实时进度。
+- 执行进度跟踪：进入 Round 2 生成阶段后，先调用 `write_todos` 创建进度列表（查询数据、计算 KPI、生成报告），再调用 `report_direct_execute`。工具内部自动编排查询 → KPI 计算 → SMS 异常查询 → 报告导出全流程。每完成一个阶段调用 `write_todos` 更新状态，让用户在界面看到实时进度。SMS 异常数据作为 post-processing 在后台异步获取，失败时主报告仍正常生成。
 - 先收参后生成：首次进入或缺少参数时必须先渲染 Round 1 表单，然后停止等待用户提交。
 - 严格读取 `ui_interaction.payload`：表单字段位于 `payload` 顶层，不在 `values` 中。
 - 同一线程可能多次生成日报：**凡是回溯 `ui_interaction` 历史时，只能使用当前消息之前最近一次匹配的回调消息**，绝不能复用更早轮次的参数。
@@ -144,18 +144,19 @@
 
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`。如果 `selected` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
-3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。**注意 `equipment_labels` 必须按 `selected` 原顺序，与 `equipment_ids` 一一对应**——后续调用 `query_daily.py` 时通过 `--equipment-names` 透传，使报告中所有"设备"列显示真实名称而非编号。
+3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。**注意 `equipment_labels` 必须按 `selected` 原顺序，与 `equipment_ids` 一一对应**——后续调用 `query_daily.py` 时通过 `--equipment-names` 透传，使报告中所有"设备"列显示真实名称而非编号。同时构建设备元数据字典：`equipment_meta = {s.id: {id: s.id, name: s.label} for s in selected}`，供 Round 2 直执行透传。
 4. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=daily-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_date`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `daily-report-scope`，忽略它，不能混用旧轮次参数。
-5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
+5. 根据 `equipment_type` 从 `_report_common.py` 的 `_EQUIPMENT_TYPE_DEFAULT_KPIS` 静态映射中查找 KPI 目录（**无需调用任何脚本**）：
 
-```bash
-python /mnt/skills/custom/daily-report/scripts/list_equipment.py \
-  --type "{validated.equipment_type}" \
-  --scope all \
-  --limit 1
-```
+   | equipment_type | 可用 KPI（key / name / unit / default） |
+   |---|---|
+   | all | runtime_rate / 运行率 / % / ✓, downtime_count / 停机次数 / 次 / ✓, alarm_count / 告警数量 / 条 / ✓ |
+   | static_equipment | runtime_rate / 运行率 / % / ✓, alarm_count / 告警数量 / 条 / ✓, corrosion_rate / 腐蚀速率 / mm/a / ✓, thickness_loss / 壁厚减薄量 / mm / ✓ |
+   | rotating_machinery | runtime_rate / 运行率 / % / ✓, vibration_level / 振动水平 / mm/s / ✓, bearing_temp / 轴承温度 / ℃ / ✓, downtime_count / 停机次数 / 次 / ✓ |
+   | pump | vibration_velocity_rms / 振动速度有效值 / mm/s / ✓, vibration_acceleration_peak / 振动加速度峰值 / m/s² / ✓, bearing_temp / 轴承温度 / ℃ / ✓, kurtosis_index / 峭度指标 / — / ✓ |
+   | reciprocating_machinery | runtime_rate / 运行率 / % / ✓, vibration_level / 振动水平 / mm/s / ✓, valve_temp / 阀温 / ℃ / ✓, downtime_count / 停机次数 / 次 / ✓, alarm_count / 告警数量 / 条 / ✓ |
 
-6. 读取 `available_kpis`，生成 Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。`available_kpis` 中 `default=true` 的 KPI 在 `default_values` 中设为 `true`，其余为 `false`。`description` 显示已选设备数量。
+6. 用上述 KPI 目录生成 Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`，`default=true` 的 KPI 在 `default_values` 中设为 `true`。`description` 显示已选设备数量。
 
 ```json
 {
@@ -193,101 +194,35 @@ python /mnt/skills/custom/daily-report/scripts/list_equipment.py \
 3. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=daily-report-scope` 和 `callback_id=daily-report-equipment` 的 `ui_interaction` 消息，分别提取**：
    - Round 1 参数：`report_date`、`equipment_type`、`compare_with`（来自 `daily-report-scope` 的 `payload`）
    - Round 1.5 参数：`equipment_ids = selected.map(s => s.id)` 与 `equipment_labels = selected.map(s => s.label)`（来自 `daily-report-equipment` 的 `payload.selected` 数组，保持原顺序一一对应）
+   - 设备元数据：`equipment_meta = {s.id: {id: s.id, name: s.label} for s in selected}`（从设备选择 payload 构建）
    如果历史中存在更早轮次的同名回调，全部忽略，只使用最近一次匹配结果。
-4. 根据设备选择情况选择调用方式：
-   - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID，**同时使用 `--equipment-names` 传递设备名称**（顺序与 `--equipment` 保持一致）。
-   - **选中设备数量 > 10 且等于某区域全量**：使用 `--type`/`--scope area`/`--scope-filter` 参数（脚本会自行从设备目录读取名称）。
-   - **选中设备数量 > 10 但为跨区域混选**：使用 `--equipment` 并加上 `--aggregate` 标志（同样需要 `--equipment-names`）。
+4. 先调用 `write_todos` 创建进度列表，然后调用 `report_direct_execute` 工具，一次性完成数据查询 → KPI 计算 → 报告导出（含 SMS 异常查询作为 post-processing）：
 
-按区域或全部场景：
+   ```text
+   write_todos([
+     {"content": "查询 InS 运行数据", "status": "in_progress"},
+     {"content": "计算 KPI 指标", "status": "pending"},
+     {"content": "生成日报文件", "status": "pending"}
+   ])
 
-```bash
-python /mnt/skills/custom/daily-report/scripts/query_daily.py \
-  --date "{validated.report_date}" \
-  --type "{validated.equipment_type}" \
-  --scope "{validated.equipment_scope}" \
-  --scope-filter "{validated.scope_filter}" \
-  --kpis "{validated.kpis}" \
-  --compare "{validated.compare_with}"
-```
+   report_direct_execute(
+       report_type="daily",
+       scope={"report_date": validated.report_date},
+       equipment_type=validated.equipment_type,
+       compare_with=validated.compare_with,
+       equipment_ids=equipment_ids,
+       equipment_labels=equipment_labels,
+       kpi_keys=validated.kpi_keys,
+       equipment_meta=equipment_meta,
+   )
+   ```
 
-指定设备场景：
+   工具返回后调用 `write_todos` 将所有任务标记为 `completed`。
+   工具内部自动完成：查询 InS 数据 → 计算 KPI → 生成 Markdown → 导出文件。
+   若返回 `status: "success"`，从 `artifacts` 中找到 `type: "report"` 的文件，渲染 `markdown` 展示并调用 `present_files` 使其可下载。
+   若返回 `status: "failed"`，用 `markdown` 清晰展示 `error.message`。
 
-```bash
-python /mnt/skills/custom/daily-report/scripts/query_daily.py \
-  --date "{validated.report_date}" \
-  --type "{validated.equipment_type}" \
-  --equipment "{validated.equipment_ids}" \
-  --equipment-names "{validated.equipment_labels}" \
-  --kpis "{validated.kpis}" \
-  --compare "{validated.compare_with}"
-```
-
-5. 查询 SMS 异常数据（best-effort，失败不阻塞日报生成）：
-
-```bash
-python /mnt/skills/custom/daily-report/scripts/query_sms_abnormal.py \
-  --date "{validated.report_date}" \
-  --type "{validated.equipment_type}" \
-  --equipment "{validated.equipment_ids}" \
-  --equipment-names "{validated.equipment_labels}"
-```
-
-SMS 脚本返回非零或输出含 `error` 时忽略，日报仍正常生成（SMS 章节置空）。
-
-6. 调用 KPI 计算脚本：
-
-```bash
-python /mnt/skills/custom/daily-report/scripts/daily_kpi.py \
-  --input /mnt/user-data/outputs/daily_data.json \
-  --output /mnt/user-data/outputs/daily_kpi.json
-```
-
-7. 读取 `/mnt/user-data/outputs/daily_kpi.json`，生成 Markdown 并自动导出 .md / .pdf 文件：
-
-```python
-import json
-import sys
-sys.path.insert(0, "/mnt/skills/custom/daily-report/scripts")
-from export_report import render_markdown, write_report
-
-with open("/mnt/user-data/outputs/daily_kpi.json", "r", encoding="utf-8") as f:
-    payload = json.load(f)
-
-report_md = render_markdown(payload, thread_id="{thread_id}")
-
-# Auto-export Markdown (always succeeds)
-write_report(payload)
-
-# PDF export not supported in standalone daily-report skill (Markdown only)
-pdf_available = False
-
-# Append download links to the markdown content
-links = ["- [下载 Markdown](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.md)"]
-if pdf_available:
-    links.append("- [下载 PDF](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.pdf)")
-else:
-    links.append("- PDF 不可用（weasyprint 未安装）")
-report_md += "\n\n---\n## 下载\n" + "\n".join(links)
-
-render_ui(
-    component="markdown",
-    props={"content": report_md},
-    sequence=1,
-)
-```
-
-8. 调用 `present_files` 使导出文件在前端可下载。**绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
-
-```text
-present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs/daily_report.pdf"])
-```
-
-如果 PDF 生成失败，只 present markdown 文件：
-
-```text
-present_files(["/mnt/user-data/outputs/daily_report.md"])
-```
+5. **绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ## 数据源
 

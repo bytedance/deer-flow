@@ -10,10 +10,17 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Any
 
+from _perf import get_tracer
+
 logger = logging.getLogger(__name__)
+
+INS_CONCURRENCY_LIMIT = int(os.environ.get("INS_CONCURRENCY_LIMIT", "4"))
+
+_slim_components_cache: dict[str, Any] = {}
 
 # ---------------------------------------------------------------------------
 # Endpoint series / event type routing (self-contained, no integrations import)
@@ -163,6 +170,67 @@ def _select_points_by_series(
 # ---------------------------------------------------------------------------
 
 
+async def _get_slim_components_cached(client: Any, eq_id: str) -> Any:
+    """Fetch slim components with single-run caching by equipment_id."""
+    if eq_id in _slim_components_cache:
+        return _slim_components_cache[eq_id]
+    maybe_coro = client.get_slim_components(eq_id)
+    result = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+    _slim_components_cache[eq_id] = result
+    return result
+
+
+async def _fetch_trend_device(
+    client: Any, eq_id: str, target_series: str, features: list[str],
+    start_ms: str, end_ms: str,
+) -> list[dict[str, Any]]:
+    """Fetch trend data for a single device (used with asyncio.gather)."""
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span(f"ins_trend_device:{eq_id}")
+    try:
+        components = await _get_slim_components_cached(client, eq_id)
+    except Exception as e:
+        logger.warning("Failed to get components for %s: %s", eq_id, e)
+        tracer.end_span(record_count=0)
+        return []
+
+    points = _select_points_by_series(components or [], target_series)
+    if not points:
+        logger.warning("No %s points found for equipment %s", target_series, eq_id)
+        tracer.end_span(record_count=0)
+        return []
+
+    point_ids = [str(p["id"]) for p in points if p.get("id")]
+    if not point_ids:
+        tracer.end_span(record_count=0)
+        return []
+
+    try:
+        maybe_coro = client.get_trend_data(
+            ",".join(point_ids), start_ms, end_ms, features,
+            endpoint_series=target_series,
+        )
+        rows = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+        if isinstance(rows, str):
+            import json as _json
+            try:
+                rows = _json.loads(rows)
+            except (ValueError, TypeError):
+                logger.warning("get_trend_data returned unparsable string for %s", eq_id)
+                rows = []
+        if not isinstance(rows, list):
+            logger.warning("get_trend_data returned %s for %s, expected list", type(rows).__name__, eq_id)
+            rows = []
+        # Filter out non-dict elements (InS API may return strings mixed in the list)
+        rows = [r for r in rows if isinstance(r, dict)]
+        tracer.end_span(record_count=len(rows))
+        return rows
+    except Exception as e:
+        logger.warning("Failed to get trend data for %s: %s", eq_id, e)
+        tracer.end_span(record_count=0)
+        return []
+
+
 async def fetch_trend_data_async(
     client: Any,
     equipment_ids: list[str],
@@ -170,7 +238,7 @@ async def fetch_trend_data_async(
     end_time: str,
     eq_type: str = "rotating_machinery",
 ) -> dict[str, list[dict[str, Any]]]:
-    """Async version of fetch_trend_data. Uses provided client.
+    """Async version of fetch_trend_data with semaphore-based concurrency.
 
     Supports both real async client methods and mock methods that return plain values.
     """
@@ -180,44 +248,17 @@ async def fetch_trend_data_async(
     start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
     end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
 
-    results: dict[str, list[dict[str, Any]]] = {}
+    semaphore = asyncio.Semaphore(INS_CONCURRENCY_LIMIT)
 
-    for eq_id in equipment_ids:
+    async def _limited(eq_id: str) -> tuple[str, list[dict[str, Any]]]:
         print(f"[数据查询] 趋势数据 -> {eq_id}...", file=sys.stderr)
-        try:
-            maybe_coro = client.get_slim_components(eq_id)
-            components = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
-        except Exception as e:
-            logger.warning("Failed to get components for %s: %s", eq_id, e)
-            results[eq_id] = []
-            continue
-
-        points = _select_points_by_series(components or [], target_series)
-        if not points:
-            logger.warning("No %s points found for equipment %s", target_series, eq_id)
-            results[eq_id] = []
-            continue
-
-        point_ids = [str(p["id"]) for p in points if p.get("id")]
-        if not point_ids:
-            results[eq_id] = []
-            continue
-
-        try:
-            maybe_coro = client.get_trend_data(
-                ",".join(point_ids),
-                start_ms,
-                end_ms,
-                features,
-                endpoint_series=target_series,
+        async with semaphore:
+            return eq_id, await _fetch_trend_device(
+                client, eq_id, target_series, features, start_ms, end_ms
             )
-            rows = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
-            results[eq_id] = rows or []
-        except Exception as e:
-            logger.warning("Failed to get trend data for %s: %s", eq_id, e)
-            results[eq_id] = []
 
-    return results
+    fetched = await asyncio.gather(*[_limited(eq_id) for eq_id in equipment_ids])
+    return dict(fetched)
 
 
 def fetch_trend_data(
@@ -275,6 +316,45 @@ def _format_machine_drop_entry(
     }
 
 
+async def _fetch_alarm_device(
+    client: Any, eq_id: str, target_series: str, event_types: list[int],
+    start_ms: str, end_ms: str,
+) -> list[dict[str, Any]]:
+    """Fetch alarm events for a single device (used with asyncio.gather)."""
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span(f"ins_alarm_device:{eq_id}")
+    try:
+        maybe_coro = client.get_machine_drops(
+            eq_id, start_ms, end_ms, event_types,
+            endpoint_series=target_series,
+        )
+        raw_events = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
+        if isinstance(raw_events, str):
+            import json as _json
+            try:
+                raw_events = _json.loads(raw_events)
+            except (ValueError, TypeError):
+                logger.warning("get_machine_drops returned unparsable string for %s", eq_id)
+                raw_events = []
+        if not isinstance(raw_events, list):
+            logger.warning("get_machine_drops returned %s for %s, expected list", type(raw_events).__name__, eq_id)
+            raw_events = []
+        # Filter out non-dict elements (InS API may return strings mixed in the list)
+        raw_events = [e for e in raw_events if isinstance(e, dict)]
+    except Exception as e:
+        logger.warning("Failed to get machine drops for %s: %s", eq_id, e)
+        tracer.end_span(record_count=0)
+        return []
+
+    alarms: list[dict[str, Any]] = []
+    for event in raw_events:
+        formatted = _format_machine_drop_entry(event, eq_id)
+        if formatted is not None:
+            alarms.append(formatted)
+    tracer.end_span(record_count=len(alarms))
+    return alarms
+
+
 async def fetch_alarm_events_async(
     client: Any,
     equipment_ids: list[str],
@@ -282,7 +362,7 @@ async def fetch_alarm_events_async(
     end_time: str,
     eq_type: str = "rotating_machinery",
 ) -> list[dict[str, Any]]:
-    """Async version of fetch_alarm_events. Uses provided client.
+    """Async version of fetch_alarm_events with semaphore-based concurrency.
 
     Supports both real async client methods and mock methods that return plain values.
     """
@@ -297,28 +377,17 @@ async def fetch_alarm_events_async(
     start_ms = str(int(datetime.fromisoformat(start_time).timestamp() * 1000))
     end_ms = str(int(datetime.fromisoformat(end_time).timestamp() * 1000))
 
-    alarms: list[dict[str, Any]] = []
-    for eq_id in equipment_ids:
+    semaphore = asyncio.Semaphore(INS_CONCURRENCY_LIMIT)
+
+    async def _limited(eq_id: str) -> list[dict[str, Any]]:
         print(f"[数据查询] 告警事件 -> {eq_id}...", file=sys.stderr)
-        try:
-            maybe_coro = client.get_machine_drops(
-                eq_id,
-                start_ms,
-                end_ms,
-                event_types,
-                endpoint_series=target_series,
+        async with semaphore:
+            return await _fetch_alarm_device(
+                client, eq_id, target_series, event_types, start_ms, end_ms
             )
-            raw_events = await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro
-        except Exception as e:
-            logger.warning("Failed to get machine drops for %s: %s", eq_id, e)
-            continue
 
-        for event in raw_events or []:
-            formatted = _format_machine_drop_entry(event, eq_id)
-            if formatted is not None:
-                alarms.append(formatted)
-
-    return alarms
+    per_device = await asyncio.gather(*[_limited(eq_id) for eq_id in equipment_ids])
+    return [alarm for alarms in per_device for alarm in alarms]
 
 
 _MACHINE_DROPS_SUPPORTED_SERIES: frozenset[str] = frozenset({"8k", "9k"})

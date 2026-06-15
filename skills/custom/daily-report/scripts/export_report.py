@@ -16,6 +16,12 @@ import sys
 import uuid
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _perf import get_tracer
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "daily_kpi.json"
 
@@ -371,6 +377,33 @@ def render_markdown(payload: dict, chart_images: list[str] | None = None, thread
         lines.append("今日无异常事件。")
     lines.append("")
 
+    sms_data = payload.get("sms_abnormal")
+    if sms_data and isinstance(sms_data, dict):
+        lines.append("## SMS 异常监测")
+        lines.append("")
+        total = sms_data.get("total_count", 0)
+        by_sev = sms_data.get("by_severity") or {}
+        lines.append(f"- 异常总数：{total}")
+        if by_sev:
+            parts = [f"{sev}: {cnt}" for sev, cnt in by_sev.items() if cnt]
+            if parts:
+                lines.append(f"- 等级分布：{', '.join(parts)}")
+        top_events = sms_data.get("top_events") or []
+        if top_events:
+            lines.append("")
+            lines.append("| 时间 | 设备 | 等级 | 描述 |")
+            lines.append("| --- | --- | --- | --- |")
+            for ev in top_events[:10]:
+                lines.append(
+                    "| {time} | {eq} | {sev} | {desc} |".format(
+                        time=_table_cell(ev.get("time", "")),
+                        eq=_table_cell(ev.get("equipment", "")),
+                        sev=_table_cell(ev.get("severity", "")),
+                        desc=_table_cell(ev.get("description", "")),
+                    )
+                )
+        lines.append("")
+
     lines.append("## 建议")
     lines.append("")
     for rec in payload.get("recommendations") or []:
@@ -429,7 +462,15 @@ def main() -> int:
         return 0
 
     try:
+        tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+        tracer.start_span("report_export")
         result = build_export_result(payload, path=Path(args.output) if args.output else None)
+        section_count = 0
+        if isinstance(payload, dict):
+            for key in ("summary", "kpi_details", "sms_abnormal", "trend_charts"):
+                if key in payload:
+                    section_count += 1
+        tracer.end_span(record_count=section_count)
     except ValueError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0

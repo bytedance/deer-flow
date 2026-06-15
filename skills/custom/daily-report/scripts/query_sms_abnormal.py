@@ -30,6 +30,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _perf import get_tracer
 from _report_common import SMS_SEVERITY_MAP
 
 DEFAULT_OUTPUT_DIR = os.environ.get("DAILY_REPORT_OUTPUT_DIR", "/mnt/user-data/outputs")
@@ -336,7 +337,15 @@ def main() -> int:
         }
 
     try:
+        tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+        tracer.start_span("sms_fetch")
         payload = fetch_sms_abnormal(args.date, equipment_ids, args.type, equipment_meta)
+        sms_count = 0
+        sms_data = payload.get("sms_abnormal") if isinstance(payload.get("sms_abnormal"), dict) else {}
+        top_events = sms_data.get("top_events") if isinstance(sms_data, dict) else []
+        if isinstance(top_events, list):
+            sms_count = len(top_events)
+        tracer.end_span(record_count=sms_count)
         out_path = write_output(payload, Path(args.output) if args.output else None)
         print(json.dumps({"output": str(out_path), "report_date": payload["report_date"]}, ensure_ascii=False))
         return 0

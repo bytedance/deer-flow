@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _SCRIPT_DIR = str(Path(__file__).resolve().parent)
@@ -42,11 +43,11 @@ from _report_common import (
     direction as _direction,
     safe_pct as _safe_pct,
 )
+from _perf import get_tracer
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "monthly_data.json"
 OUTPUT_FILENAME = "monthly_kpi.json"
-SMS_ABNORMAL_FILENAME = "sms_abnormal.json"
 
 # MTTR / downtime_count / alarm_count are lower-is-better
 # by virtue of NOT being in KPI_BETTER_WHEN_HIGHER.
@@ -423,31 +424,53 @@ def _build_critical_events(events: list[dict]) -> list[dict]:
     return out
 
 
-def _load_sms_abnormal() -> tuple[dict | None, str | None]:
-    """Try loading SMS abnormal data from output directory.
+def _sms_kpi(key: str, value: int) -> dict:
+    """Build a KPI summary entry for an SMS metric (no comparison/delta)."""
+    return {
+        "key": key,
+        "name": KPI_DISPLAY_NAMES.get(key, key),
+        "unit": "条",
+        "current_mean": value, "current_peak": None, "current_trough": None,
+        "current_volatility": None, "current_in_target_ratio": None,
+        "previous_month_mean": None, "delta_mom": None, "delta_mom_pct": None,
+        "direction_mom": "flat",
+        "previous_year_month_mean": None, "delta_yoy": None, "delta_yoy_pct": None,
+        "direction_yoy": "flat",
+        "better_when_higher": False,
+    }
 
-    Returns (sms_abnormal_dict, diagnostic_note).
-    sms_abnormal_dict is None when data is unavailable.
-    diagnostic_note explains why — useful for data_notes in the report.
-    """
-    sms_path = _output_dir() / SMS_ABNORMAL_FILENAME
+
+def _fetch_sms_direct(payload: dict) -> dict | None:
+    """Fetch SMS abnormal data directly via API using payload parameters."""
+    period = payload.get("report_period") or {}
+    report_month = period.get("report_month")
+    equipment_ids = payload.get("equipment_ids") or []
+    eq_type = payload.get("equipment_type", "all")
+    equipment_names = payload.get("equipment_names") or {}
+
+    if not report_month or not equipment_ids:
+        return None
+
+    equipment_meta = (
+        {eid: {"name": name} for eid, name in equipment_names.items()}
+        if equipment_names
+        else None
+    )
+
     try:
-        raw = json.loads(sms_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None, "SMS 异常数据文件未生成（query_sms_abnormal 步骤可能未执行）"
-    except json.JSONDecodeError:
-        return None, "SMS 异常数据文件格式错误"
-    except OSError:
-        return None, "SMS 异常数据文件读取失败"
-    data = raw.get("sms_abnormal")
-    if not isinstance(data, dict):
-        return None, "SMS 异常数据格式异常"
-    if "error" in data:
-        err_msg = data.get("error", "")
-        return None, f"SMS 异常查询接口返回错误：{err_msg[:200]}"
-    if data.get("total_count", 0) == 0:
-        return None, "该月份内 SMS 系统无匹配的异常记录"
-    return data, None
+        from query_sms_abnormal import fetch_sms_abnormal
+        result = fetch_sms_abnormal(report_month, equipment_ids, eq_type, equipment_meta)
+    except Exception:
+        return None
+
+    sms_data = result.get("sms_abnormal")
+    if not isinstance(sms_data, dict):
+        return None
+    if "error" in sms_data:
+        return None
+    if sms_data.get("total_count", 0) == 0:
+        return None
+    return sms_data
 
 
 def _build_sms_anomaly_table(sms_abnormal: dict | None) -> list[dict]:
@@ -631,6 +654,9 @@ def _build_next_month_plan(
 
 
 def compute(payload: dict) -> dict:
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span("kpi_compute")
+
     period = payload.get("report_period") or {}
     current = payload.get("current") or {}
     compare = payload.get("compare") or None
@@ -647,53 +673,33 @@ def compute(payload: dict) -> dict:
         kpi_units.setdefault(k, u)
 
     notes: list[str] = []
-    kpi_summary = _build_kpi_summary(
-        kpi_keys=kpi_keys,
-        current_agg=current_agg,
-        maintenance=maintenance,
-        compare_block=compare,
-        kpi_units=kpi_units,
-        note_accumulator=notes,
-    )
-    weekly_trend_chart = _build_weekly_trend_chart(current.get("weekly") or [], kpi_keys, kpi_units)
-    anomaly_top_n = _build_anomaly_top_n(current.get("alarms") or [])
-    critical_events = _build_critical_events(current.get("critical_events") or [])
-    improvement_tracking = _build_improvement_tracking(current.get("improvement_tracking") or [])
 
-    # SMS integration
-    sms_abnormal, sms_diag = _load_sms_abnormal()
+    with ThreadPoolExecutor(max_workers=1) as sms_pool:
+        sms_future = sms_pool.submit(_fetch_sms_direct, payload)
+
+        kpi_summary = _build_kpi_summary(
+            kpi_keys=kpi_keys,
+            current_agg=current_agg,
+            maintenance=maintenance,
+            compare_block=compare,
+            kpi_units=kpi_units,
+            note_accumulator=notes,
+        )
+        weekly_trend_chart = _build_weekly_trend_chart(current.get("weekly") or [], kpi_keys, kpi_units)
+        anomaly_top_n = _build_anomaly_top_n(current.get("alarms") or [])
+        critical_events = _build_critical_events(current.get("critical_events") or [])
+        improvement_tracking = _build_improvement_tracking(current.get("improvement_tracking") or [])
+
+        sms_abnormal = sms_future.result()
+
     sms_abnormal_table = _build_sms_anomaly_table(sms_abnormal)
-    if sms_diag:
-        notes.append(f"[SMS] {sms_diag}")
     if sms_abnormal:
         sms_total = sms_abnormal.get("total_count", 0)
-        sms_pending = sms_abnormal.get("by_status", {}).get("待处理", 0)
-        kpi_summary.extend([
-            {
-                "key": "sms_abnormal_count",
-                "name": KPI_DISPLAY_NAMES.get("sms_abnormal_count", "SMS异常数"),
-                "unit": "条",
-                "current_mean": sms_total, "current_peak": None, "current_trough": None,
-                "current_volatility": None, "current_in_target_ratio": None,
-                "previous_month_mean": None, "delta_mom": None, "delta_mom_pct": None,
-                "direction_mom": "flat",
-                "previous_year_month_mean": None, "delta_yoy": None, "delta_yoy_pct": None,
-                "direction_yoy": "flat",
-                "better_when_higher": False,
-            },
-            {
-                "key": "sms_abnormal_pending",
-                "name": KPI_DISPLAY_NAMES.get("sms_abnormal_pending", "待处理异常"),
-                "unit": "条",
-                "current_mean": sms_pending, "current_peak": None, "current_trough": None,
-                "current_volatility": None, "current_in_target_ratio": None,
-                "previous_month_mean": None, "delta_mom": None, "delta_mom_pct": None,
-                "direction_mom": "flat",
-                "previous_year_month_mean": None, "delta_yoy": None, "delta_yoy_pct": None,
-                "direction_yoy": "flat",
-                "better_when_higher": False,
-            },
-        ])
+        sms_pending = (sms_abnormal.get("by_status") or {}).get("待处理", 0)
+        kpi_summary = list(kpi_summary) + [
+            _sms_kpi("sms_abnormal_count", sms_total),
+            _sms_kpi("sms_abnormal_pending", sms_pending),
+        ]
 
     overall = _build_overall_status(kpi_summary, critical_events, notes, sms_abnormal)
     monthly_review = _build_monthly_review(
@@ -712,6 +718,8 @@ def compute(payload: dict) -> dict:
 
     data_source = payload["data_source"]
     data_notes = list(payload.get("data_notes") or [])
+
+    tracer.end_span(record_count=len(kpi_summary))
 
     return {
         "report_period": report_period,

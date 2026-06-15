@@ -154,22 +154,38 @@
 1. 从 `payload.selected` 提取设备列表（`Array<{id: string, label: string, type: number, path: string}>`）。
 2. 校验：`selected` 至少 1 个，每个设备 `id` 必须匹配 `[A-Za-z0-9_-]+`，最长 64 字符。如果 `selected` 为空数组，渲染 `markdown` 提示"请至少选择一台设备"并停止。
 3. 将设备信息记入内存（`equipment_ids = selected.map(s => s.id)`，`equipment_labels = selected.map(s => s.label)`），后续步骤使用。**注意 `equipment_labels` 必须按 `selected` 原顺序，与 `equipment_ids` 一一对应**——后续调用 `query_monthly.py` 时通过 `--equipment-names` 透传，使报告中所有"设备"列显示真实名称而非编号。
-4. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=monthly-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_month`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `monthly-report-scope`，忽略它，不能混用旧轮次参数。
-5. 调用设备目录查询脚本获取可用 KPI（**仅用于拉取 KPI 元数据**，不再用于设备列表）：
+4. **构建 `equipment_meta` 字典**（用于透传给 `report_direct_execute`，避免脚本重复查询组织树）：
 
-```bash
-python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
-  --type "{validated.equipment_type}" \
-  --scope all \
-  --limit 1
+```python
+equipment_meta = {
+    "equipment_type": "{validated.equipment_type}",
+    "records": [
+        {"id": s["id"], "name": s["label"], "org_type": s.get("type")}
+        for s in payload["selected"]
+    ]
+}
 ```
 
-6. 读取 `available_kpis`，生成 Round 2 KPI 选择表单。每个 `available_kpis[i]` 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。**月报必须始终额外追加三个固定项**（无论 `available_kpis` 是否返回）：
+将此字典序列化后保存到内存，Round 2 回调时通过 `--equipment-meta` 参数透传。
+5. **从对话历史中回溯找到"当前消息之前最近一次" `callback_id=monthly-report-scope` 的 `ui_interaction` 消息，从其 `payload` 提取 Round 1 参数**：`report_month`、`equipment_type`、`compare_with`。如果历史中存在更早一次 `monthly-report-scope`，忽略它，不能混用旧轮次参数。
+6. 调用静态 KPI 目录函数获取可用 KPI（无需查询脚本，直接使用映射表）：
+
+```python
+import sys
+sys.path.insert(0, "/mnt/skills/custom/monthly-report/scripts")
+from _report_common import get_kpi_catalog
+
+available_kpis = get_kpi_catalog("{validated.equipment_type}")
+```
+
+7. 读取 `available_kpis`，生成 Round 2 KPI 选择表单。每个 `available_kpis[i]` 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。**月报必须始终额外追加三个固定项**（无论 `available_kpis` 是否返回）：
    - `kpi_mtbf` — MTBF（平均故障间隔，小时）
    - `kpi_mttr` — MTTR（平均修复时间，小时）
    - `kpi_target_rate` — 达标率（%）
 
    **默认勾选契约**：通过 `default_values` 顶层 dict 注入。三个固定项始终设为 `true`，同时把 `available_kpis[i].is_primary == true` 的 KPI 一并设为 `true`（若 `is_primary` 元数据缺失，则默认勾选回退为只勾固定 3 项）。三个固定项是 checkbox 而非只读，用户有权取消。
+
+> ⚠️ **严禁照搬下方 JSON 示例中的字段。** 示例仅为格式演示，实际字段必须从 `available_kpis` 逐项生成（再追加三个固定项）。不同 `equipment_type` 返回的 KPI 列表不同——`static_equipment` 不含 `vibration_level`，`rotating_machinery` 不含 `corrosion_rate`。照搬示例会导致静设备展示振动指标、旋转设备展示腐蚀指标等错误。
 
 ```json
 {
@@ -184,7 +200,8 @@ python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
     "fields": [
       {"name": "kpi_runtime_rate", "label": "运行率 (%)", "type": "checkbox", "required": false},
       {"name": "kpi_alarm_count", "label": "告警数量 (条)", "type": "checkbox", "required": false},
-      {"name": "kpi_vibration_level", "label": "振动水平 (mm/s)", "type": "checkbox", "required": false},
+      {"name": "kpi_corrosion_rate", "label": "腐蚀速率 (mm/a)", "type": "checkbox", "required": false},
+      {"name": "kpi_thickness_loss", "label": "壁厚减薄量 (mm)", "type": "checkbox", "required": false},
       {"name": "kpi_mtbf", "label": "MTBF（平均故障间隔，小时）", "type": "checkbox", "required": false},
       {"name": "kpi_mttr", "label": "MTTR（平均修复时间，小时）", "type": "checkbox", "required": false},
       {"name": "kpi_target_rate", "label": "达标率 (%)", "type": "checkbox", "required": false}
@@ -217,59 +234,40 @@ python /mnt/skills/custom/monthly-report/scripts/list_equipment.py \
 5. 把校验后的 `compare_with` 拼装为命令行 CSV：
    - 含 `none` → 传空串 `""`
    - 否则传 `previous_month` / `previous_year_month` / `previous_month,previous_year_month`（保持顺序）
-6. **执行 query_monthly.py 拉取月度原始数据**（输出 `/mnt/user-data/outputs/monthly_data.json`）——根据设备选择情况选择以下命令之一执行：
+6. **调用 `report_direct_execute` 工具**（单次调用完成 query → kpi → sms → export 全流程）：
 
-   - **选中设备数量 ≤ 10**：使用 `--equipment` 直接传递设备 ID，**同时使用 `--equipment-names` 传递设备名称**（顺序与 `--equipment` 保持一致）。
-   - **选中设备数量 > 10 且等于某区域全量**：使用 `--type` / `--scope area` / `--scope-filter` 参数（脚本会自行从设备目录读取名称）。
-   - **选中设备数量 > 10 但为跨区域混选**：使用 `--equipment` 并加上 `--aggregate` 标志（同样需要 `--equipment-names`）。
-   - **选中设备数量 > 50**：强制 `--aggregate`，覆盖上述路径（同样需要 `--equipment-names`）。
+```python
+import json
 
-   按区域或全部场景执行：
+# 构建 equipment_meta（从 Round 1.5 内存中获取）
+equipment_meta = {
+    "equipment_type": "{validated.equipment_type}",
+    "records": [
+        {"id": eid, "name": elabel}
+        for eid, elabel in zip(equipment_ids, equipment_labels)
+    ]
+}
 
-   ```bash
-   python /mnt/skills/custom/monthly-report/scripts/query_monthly.py \
-     --report-month "{validated.report_month}" \
-     --type "{validated.equipment_type}" \
-     --scope "{validated.equipment_scope}" \
-     --scope-filter "{validated.scope_filter}" \
-     --kpis "{validated.kpi_keys}" \
-     --compare "{csv_compare_basis}"
-   ```
+result = report_direct_execute(
+    report_type="monthly",
+    scope={"report_month": "{validated.report_month}"},
+    equipment_type="{validated.equipment_type}",
+    equipment_ids=equipment_ids,
+    equipment_labels=equipment_labels,
+    kpi_keys=validated_kpis,
+    compare_with="{csv_compare_basis}",
+    equipment_meta=equipment_meta,
+)
+```
 
-   指定设备场景执行：
+`report_direct_execute` 内部自动完成：
+- 查询 InS 数据（`query_monthly.py`）
+- 计算 KPI + 并发获取 SMS 异常（`monthly_kpi.py`）
+- 导出 Markdown 报告（`export_report.py`）
 
-   ```bash
-   python /mnt/skills/custom/monthly-report/scripts/query_monthly.py \
-     --report-month "{validated.report_month}" \
-     --type "{validated.equipment_type}" \
-     --equipment "{validated.equipment_ids}" \
-     --equipment-names "{validated.equipment_labels}" \
-     --kpis "{validated.kpi_keys}" \
-     --compare "{csv_compare_basis}"
-   ```
+返回的 `result` 包含 `kpi_json_path` 指向 `/mnt/user-data/outputs/monthly_kpi.json`。
 
-   **执行完毕后必须验证**：检查标准输出是否包含 `"output"` 字段且不含 `"error"` 字段。若含 `error`，渲染 markdown 说明错误并停止，不要继续后续步骤。
-
-7. 查询 SMS 异常数据（best-effort，失败不阻塞月报生成）：
-
-   ```bash
-   python /mnt/skills/custom/monthly-report/scripts/query_sms_abnormal.py \
-     --report-month "{validated.report_month}" \
-     --type "{validated.equipment_type}" \
-     --equipment "{validated.equipment_ids}" \
-     --equipment-names "{validated.equipment_labels}"
-   ```
-
-   SMS 脚本返回非零或输出含 `error` 时忽略，月报仍正常生成（SMS 章节置空）。
-8. 执行 monthly_kpi.py 计算月度 KPI（依赖上一步输出的 `monthly_data.json`）：
-
-   ```bash
-   python /mnt/skills/custom/monthly-report/scripts/monthly_kpi.py \
-     --input /mnt/user-data/outputs/monthly_data.json \
-     --output /mnt/user-data/outputs/monthly_kpi.json
-   ```
-
-9. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后导出 .md / .pdf：
+7. 读取 `/mnt/user-data/outputs/monthly_kpi.json`，先把章节作为 GenUI Block 渲染，然后展示下载链接：
 
 ```python
 import json

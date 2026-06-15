@@ -63,6 +63,7 @@ except Exception:
 
 # Optional INS_FACTORY_ID — every ``get_trend_data`` call passes it through.
 _INS_FACTORY_ID: str | None = os.environ.get("INS_FACTORY_ID") or None
+INS_CONCURRENCY_LIMIT: int = int(os.environ.get("INS_CONCURRENCY_LIMIT", "4"))
 
 # ---------------------------------------------------------------------------
 # KPI feature map — declares HOW each report KPI is sourced from InS
@@ -444,6 +445,8 @@ def _row_value(row: dict[str, Any], feature: str) -> float | None:
     Unified row shape (post-wrappers): ``{component_id, time_ms, time, values}``.
     Some 2k/6k flat rows may still have feature at top level — handle both.
     """
+    if not isinstance(row, dict):
+        return None
     values = row.get("values")
     if isinstance(values, dict) and feature in values:
         v = values[feature]
@@ -465,6 +468,8 @@ def _row_first_value(row: dict[str, Any], features: list[str]) -> float | None:
 
 
 def _row_time_ms(row: dict[str, Any]) -> int | None:
+    if not isinstance(row, dict):
+        return None
     raw = row.get("time_ms") or row.get("datatime") or row.get("time")
     if isinstance(raw, (int, float)):
         return int(raw)
@@ -646,9 +651,11 @@ async def _fetch_kpi_for_equipment(
             features,
             **kwargs,
         )
+        # Filter out non-dict elements (InS API may return strings mixed in the list)
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
         # Demux combined response back to per-point rows.
         for point_id in point_ids:
-            point_rows = [r for r in (rows or []) if r.get("component_id") == point_id]
+            point_rows = [r for r in rows if r.get("component_id") == point_id]
             trend_rows[(point_id, series)] = point_rows
 
     # Reduce per-KPI: pick the rows from the matched points and aggregate.
@@ -711,18 +718,20 @@ async def _async_fetch_daily_series_payload(
             date_str = (start_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
             start_ms, end_ms = _date_to_ms_range(date_str)
 
+            semaphore = asyncio.Semaphore(INS_CONCURRENCY_LIMIT)
+
+            async def _fetch_one(eid: str) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+                async with semaphore:
+                    kpis, speed_rows = await _fetch_kpi_for_equipment(
+                        client, eid, kpi_keys, start_ms, end_ms,
+                        components_cache, eq_type=eq_type,
+                    )
+                    return eid, kpis, speed_rows
+
+            fetched = await asyncio.gather(*[_fetch_one(eid) for eid in equipment_ids])
             per_equipment_kpis: dict[str, dict[str, Any]] = {}
             per_equipment_speed_rows: dict[str, list[dict[str, Any]]] = {}
-            for eid in equipment_ids:
-                kpis, speed_rows = await _fetch_kpi_for_equipment(
-                    client,
-                    eid,
-                    kpi_keys,
-                    start_ms,
-                    end_ms,
-                    components_cache,
-                    eq_type=eq_type,
-                )
+            for eid, kpis, speed_rows in fetched:
                 per_equipment_kpis[eid] = kpis
                 per_equipment_speed_rows[eid] = speed_rows
 
@@ -864,6 +873,8 @@ async def _fetch_machine_drops(
 
     alarms: list[dict[str, Any]] = []
     for entry in raw_events:
+        if not isinstance(entry, dict):
+            continue
         formatted = _format_machine_drop_entry(entry)
         if formatted is not None:
             alarms.append(formatted)

@@ -54,6 +54,7 @@ from _report_common import (
     validate_equipment_ids,
     validate_kpi_keys,
 )
+from _perf import get_tracer
 
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 OUTPUT_FILENAME = "weekly_data.json"
@@ -178,9 +179,12 @@ def build_result(
 
     week_end = _week_range(week_start)[1]
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span("ins_fetch")
     current, current_src, current_notes = fetch_week_with_provenance(
         week_start, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
     )
+    tracer.end_span(record_count=len(current.get("daily", [])))
 
     compare_period: dict | None = None
     compare_block: dict | None = None
@@ -193,9 +197,11 @@ def build_result(
             compare_warning = "去年同期数据不可用，已跳过同比"
         else:
             compare_period = {"start": prev_range[0], "end": prev_range[1]}
+            tracer.start_span("ins_fetch_compare")
             compare_block, compare_src, compare_notes = fetch_week_with_provenance(
                 prev_range[0], equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
             )
+            tracer.end_span(record_count=len(compare_block.get("daily", [])))
 
     notes: list[str] = list(current_notes)
     if compare_src is not None:
@@ -277,7 +283,14 @@ def main() -> int:
         default=None,
         help="Optional runtime output root; payload is written under <output-dir>/data/",
     )
+    parser.add_argument(
+        "--equipment-meta",
+        default=None,
+        help="JSON string or @file path with equipment metadata (equipment_type, records, etc.)",
+    )
     args = parser.parse_args()
+
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
 
     try:
         try:
@@ -291,10 +304,23 @@ def main() -> int:
 
         scope = args.scope
 
+        cli_meta: dict | None = None
+        if args.equipment_meta:
+            raw = args.equipment_meta
+            if raw.startswith("@"):
+                raw = Path(raw[1:]).read_text(encoding="utf-8")
+            cli_meta = json.loads(raw)
+
         if scope is not None:
             if scope not in VALID_SCOPES:
                 return error_output(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
-            equipment_records = resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+            tracer.start_span("org_tree")
+            resolved_records = (cli_meta or {}).get("records")
+            equipment_records = resolve_equipment_by_scope(
+                eq_type, scope, getattr(args, "scope_filter", ""),
+                resolved_records=resolved_records,
+            )
+            tracer.end_span(record_count=len(equipment_records))
             if not equipment_records:
                 return error_output("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
@@ -302,21 +328,27 @@ def main() -> int:
             is_scope_mode = True
         else:
             equipment_ids = dedupe_preserve_order(parse_csv(args.equipment))
+            if cli_meta and not equipment_ids:
+                records = cli_meta.get("records") or []
+                equipment_ids = [r["id"] for r in records if r.get("id")]
             equipment_error = validate_equipment_ids(equipment_ids)
             if equipment_error:
                 return error_output(equipment_error)
             equipment_names = parse_csv(args.equipment_names)
             equipment_meta = None
-            if equipment_names:
+            if cli_meta and cli_meta.get("records"):
+                equipment_meta = {r["id"]: r for r in cli_meta["records"] if r.get("id")}
+            elif equipment_names:
                 equipment_meta = {
                     eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
                     for i, eid in enumerate(equipment_ids)
                 }
             is_scope_mode = False
-            # When --type is not explicitly overridden, derive it from the org
-            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
             if getattr(args, "type") == "all":
-                detected = detect_equipment_type(equipment_ids)
+                resolved_type = (cli_meta or {}).get("equipment_type")
+                tracer.start_span("org_tree")
+                detected = detect_equipment_type(equipment_ids, resolved_type=resolved_type)
+                tracer.end_span()
                 if detected != "all":
                     eq_type = detected
 

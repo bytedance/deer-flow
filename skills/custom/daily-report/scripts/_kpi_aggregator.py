@@ -92,6 +92,8 @@ KPI_FEATURE_MAP: dict[str, dict[str, Any]] = {
 
 def _row_value(row: dict[str, Any], feature: str) -> float | None:
     """Pull one numeric ``feature`` from a unified trend row."""
+    if not isinstance(row, dict):
+        return None
     values = row.get("values")
     if isinstance(values, dict) and feature in values:
         v = values[feature]
@@ -115,6 +117,8 @@ def _row_first_value(row: dict[str, Any], features: list[str]) -> float | None:
 
 def _row_time_ms(row: dict[str, Any]) -> int | None:
     """Extract timestamp in milliseconds from a trend row."""
+    if not isinstance(row, dict):
+        return None
     raw = row.get("time_ms") or row.get("datatime") or row.get("time")
     if isinstance(raw, (int, float)):
         return int(raw)

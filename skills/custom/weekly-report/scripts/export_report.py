@@ -15,6 +15,12 @@ import sys
 import uuid
 from pathlib import Path
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from _perf import get_tracer
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "weekly_kpi.json"
 
@@ -415,7 +421,10 @@ def main() -> int:
         return 0
 
     try:
+        tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+        tracer.start_span("export")
         result = build_export_result(payload, path=Path(args.output) if args.output else None)
+        tracer.end_span()
     except ValueError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0

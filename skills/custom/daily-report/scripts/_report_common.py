@@ -106,6 +106,19 @@ _EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
 
 _ARGPARSE_DEFAULT_KPIS = ["runtime_rate", "downtime_count", "alarm_count"]
 
+
+def get_kpi_catalog(eq_type: str) -> list[dict[str, str]]:
+    """返回指定设备类型的 KPI 目录（含 key、name、unit），供 Round 2 表单生成使用。"""
+    keys = _EQUIPMENT_TYPE_DEFAULT_KPIS.get(eq_type, _EQUIPMENT_TYPE_DEFAULT_KPIS["all"])
+    return [
+        {
+            "key": key,
+            "name": KPI_DISPLAY_NAMES.get(key, key),
+            "unit": KPI_UNITS.get(key, ""),
+        }
+        for key in keys
+    ]
+
 # ---------------------------------------------------------------------------
 # SMS 异常等级映射
 # ---------------------------------------------------------------------------
@@ -220,11 +233,14 @@ def load_sibling_module(name: str):
 # ---------------------------------------------------------------------------
 
 
-def detect_equipment_type(equipment_ids: list[str]) -> str:
+def detect_equipment_type(equipment_ids: list[str], *, resolved_type: str | None = None) -> str:
     """通过 Organize API 查询设备真实类型，所有设备同类型时返回该类型。
 
     用于在 --type=all 时自动推导正确的逐类型 KPI 映射（如泵 → 2K）。
+    若 ``resolved_type`` 已提供（由前端表单透传），直接返回，不再查组织树。
     """
+    if resolved_type:
+        return resolved_type
     if not equipment_ids:
         return "all"
     module = load_sibling_module("list_equipment")
@@ -248,8 +264,19 @@ def detect_equipment_type(equipment_ids: list[str]) -> str:
     return "all"
 
 
-def resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
-    """按设备类型和范围解析设备列表，返回设备记录列表。"""
+def resolve_equipment_by_scope(
+    eq_type: str,
+    scope: str,
+    scope_filter: str,
+    *,
+    resolved_records: list[dict] | None = None,
+) -> list[dict]:
+    """按设备类型和范围解析设备列表，返回设备记录列表。
+
+    若 ``resolved_records`` 已提供（由前端表单透传），直接返回，不再查组织树。
+    """
+    if resolved_records is not None:
+        return resolved_records
     list_eq = load_sibling_module("list_equipment")
     if list_eq is None:
         return []

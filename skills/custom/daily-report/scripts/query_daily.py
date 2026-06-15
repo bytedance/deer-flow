@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -39,6 +40,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _perf import PerfTracer, get_tracer
 from _report_common import (
     KPI_UNITS,
     VALID_SCOPES,
@@ -131,6 +133,28 @@ def _compare_date(date_str: str, compare: str) -> str | None:
     return None
 
 
+def _count_records(day_data: dict | None) -> int:
+    """统计单日数据中的记录总数（KPI 数 + 告警数 + 小时运行率条数）。"""
+    if not day_data or not isinstance(day_data, dict):
+        return 0
+    count = 0
+    kpis = day_data.get("kpis")
+    if isinstance(kpis, dict):
+        count += len(kpis)
+    alarms = day_data.get("alarms")
+    if isinstance(alarms, list):
+        count += len(alarms)
+    hourly = day_data.get("hourly_runtime_rate")
+    if isinstance(hourly, list):
+        count += len(hourly)
+    per_eq = day_data.get("per_equipment")
+    if isinstance(per_eq, dict):
+        for eq_data in per_eq.values():
+            if isinstance(eq_data, dict):
+                count += _count_records(eq_data)
+    return count
+
+
 def build_result(
     date_str: str,
     equipment_ids: list[str],
@@ -140,18 +164,33 @@ def build_result(
     include_per_equipment: bool = False,
     is_scope_mode: bool = False,
     equipment_meta: dict[str, dict] | None = None,
+    tracer: PerfTracer | None = None,
 ) -> dict:
     """构建完整的日报数据字典（current + compare 双块结构）。"""
     compare = compare or "none"
-    current, current_src, current_notes = fetch_day_with_provenance(
-        date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
-    )
+    tracer = tracer or get_tracer()
+
     compare_date_str = _compare_date(date_str, compare)
     if compare_date_str:
-        compare_block, compare_src, compare_notes = fetch_day_with_provenance(
-            compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta
-        )
+        tracer.start_span("ins_fetch_both")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            current_future = pool.submit(
+                fetch_day_with_provenance,
+                date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta,
+            )
+            compare_future = pool.submit(
+                fetch_day_with_provenance,
+                compare_date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta,
+            )
+            current, current_src, current_notes = current_future.result()
+            compare_block, compare_src, compare_notes = compare_future.result()
+        tracer.end_span(record_count=_count_records(current) + _count_records(compare_block))
     else:
+        tracer.start_span("ins_fetch_current")
+        current, current_src, current_notes = fetch_day_with_provenance(
+            date_str, equipment_ids, kpi_keys, eq_type, include_per_equipment, equipment_meta,
+        )
+        tracer.end_span(record_count=_count_records(current))
         compare_block, compare_src, compare_notes = None, None, []
 
     notes: list[str] = list(current_notes)
@@ -218,6 +257,12 @@ def main() -> int:
         default=None,
         help="Optional runtime output root; payload is written under <output-dir>/data/",
     )
+    parser.add_argument(
+        "--equipment-meta",
+        dest="equipment_meta",
+        default=None,
+        help="JSON string or @file path with equipment metadata from form passthrough",
+    )
     args = parser.parse_args()
 
     try:
@@ -226,46 +271,81 @@ def main() -> int:
         except ValueError as exc:
             return error_output(f"invalid --date: {exc}")
 
+        tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+
         eq_type = getattr(args, "type")
         if eq_type not in VALID_TYPES:
             return error_output(f"--type must be one of {sorted(VALID_TYPES)}, got: {eq_type}")
 
         scope = args.scope
 
+        parsed_meta: dict[str, dict] | None = None
+        if args.equipment_meta:
+            raw_meta = args.equipment_meta
+            try:
+                if raw_meta.startswith("@"):
+                    raw_meta = Path(raw_meta[1:]).read_text(encoding="utf-8")
+                parsed = json.loads(raw_meta)
+                if not isinstance(parsed, dict):
+                    return error_output("--equipment-meta must be a JSON object")
+                parsed_meta = parsed
+            except (json.JSONDecodeError, OSError) as exc:
+                return error_output(f"failed to parse --equipment-meta: {exc}")
+
         if scope is not None:
             if scope not in VALID_SCOPES:
                 return error_output(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
-            equipment_records = resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+            tracer.start_span("org_tree")
+            equipment_records = resolve_equipment_by_scope(
+                eq_type, scope, getattr(args, "scope_filter", ""),
+                resolved_records=parsed_meta.get("records") if parsed_meta else None,
+            )
+            tracer.end_span(record_count=len(equipment_records or []))
             if not equipment_records:
                 return error_output("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
             equipment_meta = {e["id"]: e for e in equipment_records}
             include_per_equipment = len(equipment_ids) > 20
             is_scope_mode = True
+            resolved_type = parsed_meta.get("equipment_type") if parsed_meta else None
             # 当 --type=all 时，从实际设备中推导统一类型，确保逐类型 KPI 映射生效
             if eq_type == "all" and equipment_records:
                 org_types = {e.get("org_type") for e in equipment_records if e.get("org_type")}
                 if len(org_types) == 1:
                     eq_type = org_types.pop()
+                elif resolved_type and resolved_type in VALID_TYPES:
+                    eq_type = resolved_type
         else:
             equipment_ids = dedupe_preserve_order(parse_csv(args.equipment))
             equipment_error = validate_equipment_ids(equipment_ids)
             if equipment_error:
                 return error_output(equipment_error)
-            equipment_names = parse_csv(args.equipment_names)
-            equipment_meta = None
-            if equipment_names:
-                equipment_meta = {
-                    eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
-                    for i, eid in enumerate(equipment_ids)
-                }
+            if parsed_meta:
+                records = parsed_meta.get("records")
+                if records:
+                    equipment_meta = {r["id"]: r for r in records}
+                else:
+                    equipment_meta = parsed_meta
+            else:
+                equipment_names = parse_csv(args.equipment_names)
+                equipment_meta = None
+                if equipment_names:
+                    equipment_meta = {
+                        eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
+                        for i, eid in enumerate(equipment_ids)
+                    }
             include_per_equipment = False
             is_scope_mode = False
+            resolved_type = parsed_meta.get("equipment_type") if parsed_meta else None
             # 当 --type 未显式覆盖时，从 Organize Tree 推导设备类型
-            if getattr(args, "type") == "all":
+            if getattr(args, "type") == "all" and not resolved_type:
+                tracer.start_span("org_tree")
                 detected = detect_equipment_type(equipment_ids)
+                tracer.end_span(record_count=len(equipment_ids))
                 if detected != "all":
                     eq_type = detected
+            elif resolved_type and resolved_type in VALID_TYPES:
+                eq_type = resolved_type
 
         kpi_keys = dedupe_preserve_order(parse_csv(args.kpis) or ["runtime_rate", "downtime_count", "alarm_count"])
         # 当 --kpis 保持默认值且 eq_type 为具体类型时，替换为类型对应的默认 KPI。
@@ -277,7 +357,7 @@ def main() -> int:
         if kpi_error:
             return error_output(kpi_error)
 
-        result = build_result(args.date, equipment_ids, kpi_keys, args.compare, eq_type, include_per_equipment, is_scope_mode, equipment_meta)
+        result = build_result(args.date, equipment_ids, kpi_keys, args.compare, eq_type, include_per_equipment, is_scope_mode, equipment_meta, tracer=tracer)
         out_path = write_payload(result, _runtime_data_dir(args.output_dir))
         print(json.dumps({"output": str(out_path), "report_date": result["report_date"]}, ensure_ascii=False))
         return 0

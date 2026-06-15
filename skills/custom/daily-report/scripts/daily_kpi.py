@@ -15,12 +15,14 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _perf import get_tracer
 from _report_common import (
     KPI_BETTER_WHEN_HIGHER,
     KPI_DISPLAY_NAMES,
@@ -334,25 +336,56 @@ def _recommendations(kpi_summary: list[dict], alarms: list[dict]) -> list[str]:
 SMS_ABNORMAL_FILENAME = "sms_abnormal.json"
 
 
-def _load_sms_abnormal() -> dict | None:
-    """Try loading SMS abnormal data from the output directory.
+def _sms_kpi(key: str, value: int) -> dict:
+    """Build a KPI summary entry for an SMS metric (no comparison/delta)."""
+    return {
+        "key": key,
+        "name": KPI_DISPLAY_NAMES.get(key, key),
+        "current": value,
+        "previous": None,
+        "delta": None,
+        "unit": "条",
+        "direction": None,
+        "better_when_higher": False,
+    }
 
-    Returns the sms_abnormal sub-dict on success, or None if the file
-    does not exist, is unreadable, or contains an error.
+
+def _fetch_sms_direct(payload: dict) -> dict | None:
+    """Fetch SMS abnormal data directly via API using payload parameters.
+
+    Uses ``query_sms_abnormal.fetch_sms_abnormal`` to fetch SMS data
+    without relying on a pre-written ``sms_abnormal.json`` file.
+
+    Returns the sms_abnormal sub-dict on success, or None on failure/empty.
     """
-    sms_path = _output_dir() / SMS_ABNORMAL_FILENAME
+    report_date = payload.get("report_date")
+    equipment_ids = payload.get("equipment_ids") or []
+    eq_type = payload.get("equipment_type", "all")
+    equipment_names = payload.get("equipment_names") or {}
+
+    if not report_date or not equipment_ids:
+        return None
+
+    equipment_meta = (
+        {eid: {"name": name} for eid, name in equipment_names.items()}
+        if equipment_names
+        else None
+    )
+
     try:
-        raw = json.loads(sms_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        from query_sms_abnormal import fetch_sms_abnormal
+        result = fetch_sms_abnormal(report_date, equipment_ids, eq_type, equipment_meta)
+    except Exception:
         return None
-    data = raw.get("sms_abnormal")
-    if not isinstance(data, dict):
+
+    sms_data = result.get("sms_abnormal")
+    if not isinstance(sms_data, dict):
         return None
-    if "error" in data:
+    if "error" in sms_data:
         return None
-    if data.get("total_count", 0) == 0:
+    if sms_data.get("total_count", 0) == 0:
         return None
-    return data
+    return sms_data
 
 
 def compute(payload: dict) -> dict:
@@ -361,6 +394,8 @@ def compute(payload: dict) -> dict:
     自动判断 detail/grouped 模式：
     - per_equipment 存在且 >20 台 → grouped（聚合统计 + 异常排行）
     - 否则 → detail（直接对比）
+
+    SMS 异常数据通过后台线程直接获取，与 KPI 计算并发执行。
     """
     current = payload.get("current") or {}
     compare = payload.get("compare")
@@ -368,60 +403,58 @@ def compute(payload: dict) -> dict:
     per_equipment = current.get("per_equipment")
     equipment_count = payload.get("equipment_count")
 
-    is_aggregated = per_equipment is not None and isinstance(per_equipment, dict) and len(per_equipment) > 20
+    # 启动 SMS 获取线程（与 KPI 计算并发）
+    with ThreadPoolExecutor(max_workers=1) as sms_pool:
+        sms_future = sms_pool.submit(_fetch_sms_direct, payload)
 
-    current_kpis = current.get("kpis") or {}
-    previous_kpis = (compare or {}).get("kpis") if compare else None
+        is_aggregated = per_equipment is not None and isinstance(per_equipment, dict) and len(per_equipment) > 20
 
-    if is_aggregated:
-        kpi_keys = list(current_kpis.keys())
-        kpi_summary = _build_aggregated_kpi_summary(per_equipment, previous_kpis, units, kpi_keys)
-        trend_chart = _build_trend_chart(
-            current.get("hourly_runtime_rate") or [],
-            (compare or {}).get("hourly_runtime_rate") if compare else None,
-            payload.get("report_date", ""),
-            payload.get("compare_date"),
-            equipment_count=equipment_count or len(per_equipment),
-            per_equipment=per_equipment,
-        )
-        top_anomalies = _build_top_anomalies(per_equipment)
-    else:
-        kpi_summary = _build_kpi_summary(current_kpis, previous_kpis, units)
-        trend_chart = _build_trend_chart(
-            current.get("hourly_runtime_rate") or [],
-            (compare or {}).get("hourly_runtime_rate") if compare else None,
-            payload.get("report_date", ""),
-            payload.get("compare_date"),
-        )
-        top_anomalies = []
+        current_kpis = current.get("kpis") or {}
+        previous_kpis = (compare or {}).get("kpis") if compare else None
 
-    alarms = current.get("alarms") or []
-    alarm_table = [
-        {
-            "time": a.get("time", ""),
-            "equipment": a.get("equipment", ""),
-            "event_type": a.get("event_label", ""),
-            "level": a.get("level", "info"),
-            "message": a.get("message", ""),
-        }
-        for a in alarms
-    ]
+        if is_aggregated:
+            kpi_keys = list(current_kpis.keys())
+            kpi_summary = _build_aggregated_kpi_summary(per_equipment, previous_kpis, units, kpi_keys)
+            trend_chart = _build_trend_chart(
+                current.get("hourly_runtime_rate") or [],
+                (compare or {}).get("hourly_runtime_rate") if compare else None,
+                payload.get("report_date", ""),
+                payload.get("compare_date"),
+                equipment_count=equipment_count or len(per_equipment),
+                per_equipment=per_equipment,
+            )
+            top_anomalies = _build_top_anomalies(per_equipment)
+        else:
+            kpi_summary = _build_kpi_summary(current_kpis, previous_kpis, units)
+            trend_chart = _build_trend_chart(
+                current.get("hourly_runtime_rate") or [],
+                (compare or {}).get("hourly_runtime_rate") if compare else None,
+                payload.get("report_date", ""),
+                payload.get("compare_date"),
+            )
+            top_anomalies = []
 
-    # Load SMS abnormal data if available
-    sms_abnormal = _load_sms_abnormal()
+        alarms = current.get("alarms") or []
+        alarm_table = [
+            {
+                "time": a.get("time", ""),
+                "equipment": a.get("equipment", ""),
+                "event_type": a.get("event_label", ""),
+                "level": a.get("level", "info"),
+                "message": a.get("message", ""),
+            }
+            for a in alarms
+        ]
+
+        # 收集 SMS 结果（等待线程完成）
+        sms_abnormal = sms_future.result()
     if sms_abnormal:
         sms_total = sms_abnormal.get("total_count", 0)
         sms_pending = (sms_abnormal.get("by_status") or {}).get("待处理", 0)
-        # Inject SMS KPI cards into kpi_summary
-        sms_kpis = [
-            {"key": "sms_abnormal_count", "name": KPI_DISPLAY_NAMES.get("sms_abnormal_count", "SMS异常数"),
-             "current": sms_total, "previous": None, "delta": None, "unit": "条",
-             "direction": None, "better_when_higher": False},
-            {"key": "sms_abnormal_pending", "name": KPI_DISPLAY_NAMES.get("sms_abnormal_pending", "待处理异常"),
-             "current": sms_pending, "previous": None, "delta": None, "unit": "条",
-             "direction": None, "better_when_higher": False},
+        kpi_summary = list(kpi_summary) + [
+            _sms_kpi("sms_abnormal_count", sms_total),
+            _sms_kpi("sms_abnormal_pending", sms_pending),
         ]
-        kpi_summary = list(kpi_summary) + sms_kpis
     else:
         sms_abnormal = None
 
@@ -484,7 +517,17 @@ def main() -> int:
         print(json.dumps({"error": f"invalid input JSON: {exc}"}, ensure_ascii=False))
         return 0
 
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span("kpi_compute")
     result = compute(payload)
+    kpi_count = 0
+    for block_key in ("current", "compare"):
+        block = result.get(block_key)
+        if isinstance(block, dict):
+            kpis = block.get("kpis")
+            if isinstance(kpis, dict):
+                kpi_count += len(kpis)
+    tracer.end_span(record_count=kpi_count)
     out_path = write_output(result, Path(args.output) if args.output else None)
     print(json.dumps({"output": str(out_path), "report_date": result["report_date"]}, ensure_ascii=False))
     return 0

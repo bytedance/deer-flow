@@ -30,6 +30,29 @@ KPI_KEY_PATTERN = re.compile(r"^[a-z_]+$")
 VALID_TYPES = {"all", "static_equipment", "rotating_machinery", "pump", "reciprocating_machinery"}
 VALID_SCOPES = {"all", "area", "specific"}
 # ---------------------------------------------------------------------------
+# KPI units
+# ---------------------------------------------------------------------------
+
+KPI_UNITS: dict[str, str] = {
+    "runtime_rate": "%",
+    "downtime_count": "次",
+    "alarm_count": "条",
+    "output": "—",
+    "corrosion_rate": "mm/a",
+    "thickness_loss": "mm",
+    "vibration_level": "mm/s",
+    "bearing_temp": "℃",
+    "flow_rate": "m³/h",
+    "outlet_pressure": "MPa",
+    "valve_temp": "℃",
+    "vibration_velocity_rms": "mm/s",
+    "vibration_acceleration_peak": "m/s²",
+    "kurtosis_index": "—",
+    "sms_abnormal_count": "条",
+    "sms_abnormal_pending": "条",
+}
+
+# ---------------------------------------------------------------------------
 # KPI display names
 # ---------------------------------------------------------------------------
 
@@ -84,6 +107,31 @@ SMS_SEVERITY_RANK: dict[str, int] = {
 KPI_BETTER_WHEN_HIGHER: set[str] = {
     "runtime_rate", "output", "flow_rate", "outlet_pressure",
 }
+
+# ---------------------------------------------------------------------------
+# Per-equipment-type default KPI keys
+# ---------------------------------------------------------------------------
+
+_EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
+    "all": ["runtime_rate", "downtime_count", "alarm_count"],
+    "static_equipment": ["runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss"],
+    "rotating_machinery": ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count"],
+    "pump": ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index"],
+    "reciprocating_machinery": ["runtime_rate", "vibration_level", "valve_temp", "downtime_count", "alarm_count"],
+}
+
+
+def get_kpi_catalog(eq_type: str) -> list[dict[str, str]]:
+    """返回指定设备类型的 KPI 目录（含 key、name、unit），供 Round 1.5 表单生成使用。"""
+    keys = _EQUIPMENT_TYPE_DEFAULT_KPIS.get(eq_type, _EQUIPMENT_TYPE_DEFAULT_KPIS["all"])
+    return [
+        {
+            "key": key,
+            "name": KPI_DISPLAY_NAMES.get(key, key),
+            "unit": KPI_UNITS.get(key, ""),
+        }
+        for key in keys
+    ]
 
 # ---------------------------------------------------------------------------
 # CSV / validation utilities
@@ -186,7 +234,13 @@ def load_sibling_module(name: str):
 # ---------------------------------------------------------------------------
 
 
-def detect_equipment_type(equipment_ids: list[str]) -> str:
+def detect_equipment_type(equipment_ids: list[str], *, resolved_type: str | None = None) -> str:
+    """通过 Organize API 查询设备真实类型。
+
+    若 ``resolved_type`` 已提供（由前端表单透传），直接返回，不再查组织树。
+    """
+    if resolved_type:
+        return resolved_type
     if not equipment_ids:
         return "all"
     module = load_sibling_module("list_equipment")
@@ -210,7 +264,19 @@ def detect_equipment_type(equipment_ids: list[str]) -> str:
     return "all"
 
 
-def resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
+def resolve_equipment_by_scope(
+    eq_type: str,
+    scope: str,
+    scope_filter: str,
+    *,
+    resolved_records: list[dict] | None = None,
+) -> list[dict]:
+    """按设备类型和范围解析设备列表。
+
+    若 ``resolved_records`` 已提供（由前端表单透传），直接返回，不再查组织树。
+    """
+    if resolved_records is not None:
+        return resolved_records
     list_eq = load_sibling_module("list_equipment")
     if list_eq is None:
         return []

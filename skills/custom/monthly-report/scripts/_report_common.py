@@ -122,6 +122,31 @@ KPI_BETTER_WHEN_HIGHER: set[str] = {
     "runtime_rate", "output", "flow_rate", "outlet_pressure",
 }
 
+# ---------------------------------------------------------------------------
+# Per-equipment-type default KPI keys (monthly includes mtbf/mttr/target_rate)
+# ---------------------------------------------------------------------------
+
+_EQUIPMENT_TYPE_DEFAULT_KPIS: dict[str, list[str]] = {
+    "all": ["runtime_rate", "downtime_count", "alarm_count", "mtbf", "mttr", "target_rate"],
+    "static_equipment": ["runtime_rate", "alarm_count", "corrosion_rate", "thickness_loss", "mtbf", "mttr", "target_rate"],
+    "rotating_machinery": ["runtime_rate", "vibration_level", "bearing_temp", "downtime_count", "mtbf", "mttr", "target_rate"],
+    "pump": ["vibration_velocity_rms", "vibration_acceleration_peak", "bearing_temp", "kurtosis_index", "mtbf", "mttr", "target_rate"],
+    "reciprocating_machinery": ["runtime_rate", "vibration_level", "valve_temp", "downtime_count", "alarm_count", "mtbf", "mttr", "target_rate"],
+}
+
+
+def get_kpi_catalog(eq_type: str) -> list[dict[str, str]]:
+    """返回指定设备类型的 KPI 目录（含 key、name、unit），供 Round 1.5 表单生成使用。"""
+    keys = _EQUIPMENT_TYPE_DEFAULT_KPIS.get(eq_type, _EQUIPMENT_TYPE_DEFAULT_KPIS["all"])
+    return [
+        {
+            "key": key,
+            "name": KPI_DISPLAY_NAMES_MONTHLY.get(key, key),
+            "unit": KPI_UNITS.get(key, ""),
+        }
+        for key in keys
+    ]
+
 KPI_BETTER_WHEN_HIGHER_MONTHLY: set[str] = (
     KPI_BETTER_WHEN_HIGHER | {"mtbf", "target_rate"}
 )
@@ -238,7 +263,13 @@ def load_sibling_module_required(name: str):
 # ---------------------------------------------------------------------------
 
 
-def detect_equipment_type(equipment_ids: list[str]) -> str:
+def detect_equipment_type(equipment_ids: list[str], *, resolved_type: str | None = None) -> str:
+    """通过 Organize API 查询设备真实类型。
+
+    若 ``resolved_type`` 已提供（由前端表单透传），直接返回，不再查组织树。
+    """
+    if resolved_type:
+        return resolved_type
     if not equipment_ids:
         return "all"
     module = load_sibling_module("list_equipment")
@@ -262,7 +293,19 @@ def detect_equipment_type(equipment_ids: list[str]) -> str:
     return "all"
 
 
-def resolve_equipment_by_scope(eq_type: str, scope: str, scope_filter: str) -> list[dict]:
+def resolve_equipment_by_scope(
+    eq_type: str,
+    scope: str,
+    scope_filter: str,
+    *,
+    resolved_records: list[dict] | None = None,
+) -> list[dict]:
+    """按设备类型和范围解析设备列表。
+
+    若 ``resolved_records`` 已提供（由前端表单透传），直接返回，不再查组织树。
+    """
+    if resolved_records is not None:
+        return resolved_records
     list_eq = load_sibling_module("list_equipment")
     if list_eq is None:
         return []

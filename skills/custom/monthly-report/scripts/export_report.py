@@ -15,6 +15,12 @@ import sys
 import uuid
 from pathlib import Path
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from _perf import get_tracer
+
 DEFAULT_OUTPUT_DIR = "/mnt/user-data/outputs"
 INPUT_FILENAME = "monthly_kpi.json"
 
@@ -488,6 +494,7 @@ def load_payload(path: Path | None = None) -> dict:
 
 
 def main() -> int:
+    tracer = get_tracer("export_report")
     parser = argparse.ArgumentParser(description="Export monthly report")
     parser.add_argument("--input", default=None, help="Input KPI JSON path")
     parser.add_argument("--output", default=None, help="Output file path")
@@ -502,11 +509,14 @@ def main() -> int:
         print(json.dumps({"error": f"invalid input JSON: {exc}"}, ensure_ascii=False))
         return 0
 
+    tracer.start_span("export")
     try:
         result = build_export_result(payload, path=Path(args.output) if args.output else None)
     except ValueError as exc:
+        tracer.end_span(error=str(exc))
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 0
+    tracer.end_span()
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

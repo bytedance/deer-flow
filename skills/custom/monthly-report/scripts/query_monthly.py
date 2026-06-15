@@ -53,6 +53,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _perf import get_tracer
 from _report_common import (
     KPI_UNITS,
     VALID_SCOPES,
@@ -448,9 +449,12 @@ def build_result(
     week_buckets = _build_week_buckets(month_start, day_count)
 
     auto_aggregate = aggregate or (is_scope_mode and len(equipment_ids) > 50)
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
+    tracer.start_span("ins_fetch_batch")
     current, current_src, current_notes = fetch_month_with_provenance(
         report_month, equipment_ids, kpi_keys, eq_type, auto_aggregate, equipment_meta
     )
+    tracer.end_span(record_count=current.get("day_count", day_count))
 
     # Resolve comparison periods and per-basis payloads.
     effective_bases = [b for b in compare_bases if b != "none"]
@@ -572,7 +576,14 @@ def main() -> int:
         default=None,
         help="Optional runtime output root; payload is written under <output-dir>/data/",
     )
+    parser.add_argument(
+        "--equipment-meta",
+        default=None,
+        help="JSON string or @file path with equipment metadata (equipment_type, records, etc.)",
+    )
     args = parser.parse_args()
+
+    tracer = get_tracer(trace_id=os.environ.get("REPORT_RUN_ID"))
 
     try:
         try:
@@ -590,10 +601,24 @@ def main() -> int:
             return error_output(str(exc))
 
         scope = args.scope
+
+        cli_meta: dict | None = None
+        if args.equipment_meta:
+            raw = args.equipment_meta
+            if raw.startswith("@"):
+                raw = Path(raw[1:]).read_text(encoding="utf-8")
+            cli_meta = json.loads(raw)
+
         if scope is not None:
             if scope not in VALID_SCOPES:
                 return error_output(f"--scope must be one of {sorted(VALID_SCOPES)}, got: {scope}")
-            equipment_records = resolve_equipment_by_scope(eq_type, scope, getattr(args, "scope_filter", ""))
+            tracer.start_span("org_tree")
+            resolved_records = (cli_meta or {}).get("records")
+            equipment_records = resolve_equipment_by_scope(
+                eq_type, scope, getattr(args, "scope_filter", ""),
+                resolved_records=resolved_records,
+            )
+            tracer.end_span(record_count=len(equipment_records))
             if not equipment_records:
                 return error_output("no equipment matched for the given --type/--scope/--scope-filter")
             equipment_ids = [e["id"] for e in equipment_records]
@@ -601,21 +626,27 @@ def main() -> int:
             is_scope_mode = True
         else:
             equipment_ids = dedupe_preserve_order(parse_csv(args.equipment))
+            if cli_meta and not equipment_ids:
+                records = cli_meta.get("records") or []
+                equipment_ids = [r["id"] for r in records if r.get("id")]
             equipment_error = validate_equipment_ids_length(equipment_ids)
             if equipment_error:
                 return error_output(equipment_error)
             equipment_names = parse_csv(args.equipment_names)
             equipment_meta = None
-            if equipment_names:
+            if cli_meta and cli_meta.get("records"):
+                equipment_meta = {r["id"]: r for r in cli_meta["records"] if r.get("id")}
+            elif equipment_names:
                 equipment_meta = {
                     eid: {"id": eid, "name": (equipment_names[i] if i < len(equipment_names) else eid)}
                     for i, eid in enumerate(equipment_ids)
                 }
             is_scope_mode = False
-            # When --type is not explicitly overridden, derive it from the org
-            # tree so per-type KPI mappings (e.g. pump bearing_temp → 2k) apply.
             if getattr(args, "type") == "all":
-                detected = detect_equipment_type(equipment_ids)
+                resolved_type = (cli_meta or {}).get("equipment_type")
+                tracer.start_span("org_tree")
+                detected = detect_equipment_type(equipment_ids, resolved_type=resolved_type)
+                tracer.end_span()
                 if detected != "all":
                     eq_type = detected
 
