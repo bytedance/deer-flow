@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -36,7 +35,6 @@ except ImportError:
     _resource_module = None  # type: ignore[assignment]
 
 from deerflow.report_templates.script_registry import (
-    ArgSpec,
     ScriptDescriptor,
     ScriptRegistry,
     UnknownScriptError,

@@ -14,7 +14,7 @@ from langchain.tools import tool
 from langgraph.config import get_config
 from pydantic import BaseModel, Field
 
-from deerflow.report_executor import DirectReportExecutor, DirectExecutionError
+from deerflow.report_executor import DirectExecutionError, DirectReportExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,16 @@ class ReportDirectExecuteInput(BaseModel):
             description="List of KPI keys to compute. None uses template defaults.",
         ),
     ]
+    equipment_meta: Annotated[
+        dict[str, Any] | None,
+        Field(
+            default=None,
+            description=(
+                "Equipment metadata for org tree passthrough: {id: {id, name, ...}}. "
+                "Skips internal org tree queries when provided."
+            ),
+        ),
+    ]
 
 
 @tool("report_direct_execute", args_schema=ReportDirectExecuteInput)
@@ -88,6 +98,7 @@ def report_direct_execute(
     equipment_ids: list[str] | None = None,
     equipment_labels: list[str] | None = None,
     kpi_keys: list[str] | None = None,
+    equipment_meta: dict[str, Any] | None = None,
 ) -> str:
     """Execute a builtin report (daily/weekly/monthly) directly.
 
@@ -123,6 +134,7 @@ def report_direct_execute(
             equipment_ids=equipment_ids,
             equipment_labels=equipment_labels,
             kpi_keys=kpi_keys,
+            equipment_meta=equipment_meta,
         )
 
         return json.dumps(result, ensure_ascii=False)

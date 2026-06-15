@@ -419,7 +419,7 @@ def _run_async(coro: Any) -> Any:
     already-running event loop (e.g. tests), we delegate to a worker thread.
     """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
 

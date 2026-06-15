@@ -8,9 +8,12 @@ from langgraph.config import get_config, get_stream_writer
 
 from deerflow.tools.render_ui_metrics import get_render_ui_metrics
 
-ALLOWED_COMPONENTS = frozenset(
-    {"chart", "echart", "table", "card", "form", "confirm", "code", "timeline", "markdown", "layout", "image", "device-selector", "device-selector-multi", "sub-device-selector", "point-selector", "point-selector-multi", "abnormal-list-selector", "agent_handoff"}
-)
+ALLOWED_COMPONENTS = frozenset({
+    "chart", "echart", "table", "card", "form", "confirm", "code", "timeline",
+    "markdown", "layout", "image", "device-selector", "device-selector-multi",
+    "sub-device-selector", "point-selector", "point-selector-multi",
+    "abnormal-list-selector", "agent_handoff",
+})
 
 ALLOWED_ACTIONS = frozenset({"create", "update", "delete"})
 
@@ -36,7 +39,10 @@ def render_ui_tool(
     cards, forms, and more. The component will be rendered in the chat interface.
 
     Args:
-        component: Component type. One of: chart, echart, table, card, form, confirm, code, timeline, markdown, layout, image, device-selector, device-selector-multi, sub-device-selector, point-selector, point-selector-multi, abnormal-list-selector, agent_handoff.
+        component: Component type. One of: chart, echart, table, card, form,
+            confirm, code, timeline, markdown, layout, image, device-selector,
+            device-selector-multi, sub-device-selector, point-selector,
+            point-selector-multi, abnormal-list-selector, agent_handoff.
         props: Component properties object. Structure depends on the component type.
         interactive: Whether the component accepts user interaction (e.g., form submission).
         callback_id: Required if interactive=True. Used to route interaction callbacks back to the agent.
@@ -84,7 +90,7 @@ def render_ui_tool(
                     f"Do NOT create a duplicate. Wait for the user to submit the existing form."
                 )
 
-        from deerflow.agents.genui_persistence import persist_block, resolve_create_block_id, clear_on_new_run
+        from deerflow.agents.genui_persistence import clear_on_new_run, persist_block, resolve_create_block_id
 
         clear_on_new_run(thread_id, checkpoint_id)
 

@@ -57,9 +57,9 @@ def get_report_tools_for_agent(agent_config: Any) -> list[Any]:
     from deerflow.tools.builtins import (
         REPORT_TEMPLATE_LIFECYCLE_TOOLS,
         REPORT_TEMPLATE_RUNTIME_TOOLS,
+        report_template_record_fallback_tool,
     )
     from deerflow.tools.builtins.report_direct_tools import report_direct_execute
-    from deerflow.tools.builtins import report_template_record_fallback_tool
 
     if is_direct_executor_agent(agent_config):
         # Direct execution path

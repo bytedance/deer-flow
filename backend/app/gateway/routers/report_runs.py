@@ -25,16 +25,14 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from deerflow.report_templates.records import validate_report_run_id
-from deerflow.report_templates.repository import (
-    Scope,
-    TemplateNotFoundError,
-)
-from deerflow.report_templates.service import get_repository
-
 # Reuse the principal helper from the templates router to keep auth resolution
 # in one place.
 from app.gateway.routers.report_templates import _principal_from_request
+from deerflow.report_templates.records import validate_report_run_id
+from deerflow.report_templates.repository import (
+    Scope,
+)
+from deerflow.report_templates.service import get_repository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/report-runs", tags=["report-runs"])

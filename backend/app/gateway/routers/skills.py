@@ -363,7 +363,7 @@ async def batch_update_skill_tier(request: SkillBatchTierRequest, config: AppCon
         updated = [s for s in skills if s.name in set(request.skill_names)]
         logger.info("Batch tier update: %d skills → %s", len(updated), request.tier.value)
         logger.info(
-            f"Batch skill tier changed",
+            "Batch skill tier changed",
             extra={
                 "skill_count": len(updated),
                 "skill_names": list(request.skill_names),
@@ -425,7 +425,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
             )
             raise HTTPException(
                 status_code=409,
-                detail=f"Industrial skills cannot be disabled. Change tier to foundation first.",
+                detail="Industrial skills cannot be disabled. Change tier to foundation first.",
             )
 
         config_path = ExtensionsConfig.resolve_config_path()
@@ -498,7 +498,7 @@ async def update_skill_tier(skill_name: str, request: SkillTierUpdateRequest, co
 
         logger.info("Skill '%s' tier updated to %s", skill_name, request.tier.value)
         logger.info(
-            f"Skill tier changed",
+            "Skill tier changed",
             extra={
                 "skill_name": skill_name,
                 "old_tier": skill.tier.value if skill.tier else None,

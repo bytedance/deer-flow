@@ -29,6 +29,7 @@ from langchain.tools import tool
 from langgraph.config import get_config
 
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_base.retrieval import normalize_kb_selection
 from deerflow.report_templates.records import (
     ReportRunErrorCode,
     ReportRunRecord,
@@ -64,7 +65,6 @@ from deerflow.report_templates.runtime.state import (
     StateNotFoundError,
     StateTransitionError,
     expect_status,
-    mark_cancelled,
     mark_failed,
     read_state,
     transition,
@@ -80,6 +80,8 @@ from deerflow.report_templates.runtime.step_renderer import (
 )
 from deerflow.report_templates.runtime.step_submitter import (
     SubmitStepError,
+)
+from deerflow.report_templates.runtime.step_submitter import (
     submit_step as _submit_step,
 )
 from deerflow.report_templates.script_registry import (
@@ -91,7 +93,6 @@ from deerflow.report_templates.service import (
     principal_from_runnable_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.knowledge_base.retrieval import normalize_kb_selection
 
 logger = logging.getLogger(__name__)
 

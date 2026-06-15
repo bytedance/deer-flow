@@ -17,20 +17,17 @@ Top-level entry: ``validate_dsl(dsl_dict, *, registry=None) -> ValidationReport`
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
-logger = logging.getLogger(__name__)
-
 from deerflow.report_templates.schema import (
-    DataStep,
     FormStep,
     OptionsSource,
     ReportTemplateDSL,
     Section,
-    TransformStep,
 )
 from deerflow.report_templates.script_registry import (
     ArgSpec,
@@ -42,6 +39,8 @@ from deerflow.report_templates.source_resolver import (
     extract_expressions,
     parse,
 )
+
+logger = logging.getLogger(__name__)
 
 Severity = Literal["error", "warning"]
 
@@ -151,7 +150,7 @@ def validate_dsl(
             implicit = form_field_names.setdefault(fs.id, set())
             implicit.add("equipment_ids")
             implicit.add("equipment_labels")
-    form_ids = list(form_field_names.keys())
+    list(form_field_names.keys())
 
     # ── Pass 1: Static cross-references ────────────────────────────────
     _check_next_graph(dsl.form_steps, errors)

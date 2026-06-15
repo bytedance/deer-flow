@@ -98,7 +98,7 @@ class FormField(BaseModel):
     validation: FieldValidation | None = None
 
     @model_validator(mode="after")
-    def _check_options_for_select(self) -> "FormField":
+    def _check_options_for_select(self) -> FormField:
         if self.type in ("select", "multi-select"):
             has_static = bool(self.options)
             has_dynamic = self.options_source is not None
@@ -172,7 +172,7 @@ class FormStep(BaseModel):
     max_select: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def _check_fields_for_component(self) -> "FormStep":
+    def _check_fields_for_component(self) -> FormStep:
         if self.component == "device-selector-multi":
             if self.fields:
                 raise ValueError(
@@ -190,7 +190,7 @@ class FormStep(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_unique_field_names(self) -> "FormStep":
+    def _check_unique_field_names(self) -> FormStep:
         seen: set[str] = set()
         for f in self.fields:
             if f.name in seen:
@@ -285,7 +285,7 @@ class Section(BaseModel):
     filters: ClosureSectionFilters | None = None
 
     @model_validator(mode="after")
-    def _check_component_payload(self) -> "Section":
+    def _check_component_payload(self) -> Section:
         if self.component == "closure_section":
             if self.source is not None:
                 raise ValueError(
@@ -313,7 +313,7 @@ class ExportConfig(BaseModel):
     renderer: str = "generic_report"
 
     @model_validator(mode="after")
-    def _require_markdown(self) -> "ExportConfig":
+    def _require_markdown(self) -> ExportConfig:
         if "md" not in self.formats:
             raise ValueError("export.formats must contain 'md' — Markdown is mandatory")
         return self
@@ -344,7 +344,7 @@ class ReportTemplateDSL(BaseModel):
     export: ExportConfig = Field(default_factory=ExportConfig)
 
     @model_validator(mode="after")
-    def _check_dsl_version(self) -> "ReportTemplateDSL":
+    def _check_dsl_version(self) -> ReportTemplateDSL:
         if self.dsl_version != DSL_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported dsl_version {self.dsl_version!r}; expected {DSL_SCHEMA_VERSION!r}"
@@ -352,7 +352,7 @@ class ReportTemplateDSL(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _unique_top_level_ids(self) -> "ReportTemplateDSL":
+    def _unique_top_level_ids(self) -> ReportTemplateDSL:
         # form_step ids must be unique among themselves; same for data_steps,
         # transforms, and sections. Cross-bucket collisions are also disallowed
         # because all step IDs share a single namespace in JSONPath context.

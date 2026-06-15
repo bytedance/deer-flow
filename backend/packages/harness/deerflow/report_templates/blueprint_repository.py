@@ -14,10 +14,9 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
-from deerflow.report_templates.blueprint_schema import BlueprintDefinition
 from deerflow.report_templates.blueprint_generator import generate_all_blueprints
+from deerflow.report_templates.blueprint_schema import BlueprintDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ class BlueprintRepository:
     _lock: threading.RLock
 
     @classmethod
-    def initialize(cls) -> "BlueprintRepository":
+    def initialize(cls) -> BlueprintRepository:
         """Generate blueprints from all builtin templates and cache them."""
         repo = cls(_blueprints={}, _lock=threading.RLock())
         repo._refresh()
@@ -60,7 +59,7 @@ class BlueprintRepository:
 
     def list_blueprints(
         self,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[BlueprintDefinition]:
         """Return all blueprints, optionally filtered by category."""
         with self._lock:

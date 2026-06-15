@@ -162,7 +162,7 @@ class RuntimeState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RuntimeState":
+    def from_dict(cls, data: dict[str, Any]) -> RuntimeState:
         return cls(
             schema_version=data.get("schema_version", STATUS_SCHEMA_VERSION),
             report_run_id=data["report_run_id"],

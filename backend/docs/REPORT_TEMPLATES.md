@@ -194,6 +194,28 @@ Agent 通过 `config.yaml` 的 `executor_type` 字段声明执行策略：
 | `report_direct_execute` 工具 | LangChain 工具包装器，返回 `{report_run_id, artifacts, status}` 或 `{error: {code, message, step}, status: "failed"}` |
 | `router.py` | `get_report_tools_for_agent(agent_config)` 读取 `executor_type`，返回对应工具 |
 
+### stdout 契约
+
+每个脚本将实际数据写入自己的输出文件（例如 `daily_data.json`、`daily_kpi.json`、`daily_report.md`），并仅向 stdout 打印一条元数据信封：
+
+```json
+{"output": "/mnt/user-data/outputs/daily_data.json", "report_date": "2026-06-11"}
+```
+
+`DirectReportExecutor._resolve_output_path` 解析该 `output` 字段定位真实数据文件，**不会**将 stdout 内容覆写到数据文件。若 `output` 字段缺失或指向的文件不存在，则使用回退路径或抛出 `ScriptFailedError`。
+
+### SMS 异步 Post-Processing
+
+日报（`daily`）执行流程中，`query_sms_abnormal.py` 在后台线程运行，与主流程（query → kpi → export）并发。SMS 数据写入 `sms_abnormal.json`，`daily_kpi.py` 在 KPI 计算时读取并合并到最终报告中。SMS 查询失败不会阻塞主报告生成。
+
+### 组织树透传
+
+为避免重复查询，前端表单将设备元数据（`equipment_type`、`equipment_ids`、`equipment_labels`、`equipment_meta`）通过 `report_direct_execute` 工具透传到脚本。`query_daily.py` 通过 `--equipment-meta` 参数接收，跳过内部组织树查询。
+
+### 性能埋点
+
+七段计时（表单交互、组织树查询、当天 InS、对比日 InS、SMS、KPI 计算、导出）输出到 `<output_dir>/.perf/<trace_id>.jsonl`。通过 `PerfTracer` 类（`_perf.py`）控制，`REPORT_RUN_ID` 环境变量提供 trace_id。
+
 ### 错误处理
 
 `DirectExecutionError` 层级:

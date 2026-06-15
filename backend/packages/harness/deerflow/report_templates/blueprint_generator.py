@@ -53,7 +53,7 @@ def load_builtin_template(name: str) -> dict[str, Any]:
     path = BUILTIN_TEMPLATES_DIR / name / "default.yaml"
     if not path.exists():
         raise FileNotFoundError(f"builtin template not found: {name}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

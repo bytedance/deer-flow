@@ -12,7 +12,7 @@ only; creating from blueprint requires template write access.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -39,7 +39,7 @@ class BlueprintSummaryResponse(BaseModel):
     name: str
     description: str
     category: str
-    icon: Optional[str] = None
+    icon: str | None = None
     tags: list[str] = []
     executor_type: str = "direct"
 
@@ -49,7 +49,7 @@ class BlueprintDetailResponse(BaseModel):
     name: str
     description: str
     category: str
-    icon: Optional[str] = None
+    icon: str | None = None
     tags: list[str] = []
     executor_type: str = "direct"
     base_dsl: dict[str, Any]
@@ -74,7 +74,7 @@ class CreateFromBlueprintResponse(BaseModel):
 @router.get("", response_model=list[BlueprintSummaryResponse])
 async def list_blueprints(
     request: Request,
-    category: Optional[str] = Query(None, description="Filter by category"),
+    category: str | None = Query(None, description="Filter by category"),
 ) -> list[BlueprintSummaryResponse]:
     """List all available blueprints."""
     try:

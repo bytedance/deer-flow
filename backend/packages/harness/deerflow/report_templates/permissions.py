@@ -34,7 +34,6 @@ from typing import Literal
 
 from deerflow.report_templates.records import (
     ReportTemplateRecord,
-    Visibility,
 )
 
 Operation = Literal[
@@ -68,11 +67,11 @@ class Decision:
     reason: str
 
     @classmethod
-    def allow(cls) -> "Decision":
+    def allow(cls) -> Decision:
         return cls(True, "allowed")
 
     @classmethod
-    def deny(cls, reason: str) -> "Decision":
+    def deny(cls, reason: str) -> Decision:
         return cls(False, reason)
 
 
