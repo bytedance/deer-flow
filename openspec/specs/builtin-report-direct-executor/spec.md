@@ -25,6 +25,18 @@ The system SHALL provide a `report_direct_execute` tool that bypasses the DSL te
 - **WHEN** the agent calls `report_direct_execute(report_type="monthly", scope={report_month: "2026-06"}, ...)`
 - **THEN** the tool SHALL execute `query_monthly.py` -> `monthly_kpi.py` -> `export_report.py` and return the same result structure
 
+#### Scenario: Equipment metadata passthrough
+
+- **WHEN** the agent calls `report_direct_execute` with `equipment_meta={id: {id, name}}` dict
+- **THEN** the executor SHALL construct `--equipment-meta` CLI argument as JSON `{"equipment_type": ..., "records": [...], **equipment_meta}` and pass it to the query script
+- **AND** the query script SHALL consume the metadata for equipment name resolution and type detection without querying the org tree API
+
+#### Scenario: REPORT_RUN_ID propagated to subprocesses
+
+- **WHEN** `report_direct_execute` is called
+- **THEN** the executor SHALL set the `REPORT_RUN_ID` environment variable (using the generated `report_run_id`) for all subprocess invocations
+- **AND** scripts SHALL use this env var to initialize `PerfTracer` for performance instrumentation
+
 ### Requirement: Direct executor skips DSL state machine
 
 The `report_direct_execute` tool SHALL NOT create or update any `status.json` file, SHALL NOT invoke `render_step` or `submit_step`, and SHALL NOT trigger any `before_step` scripts.
