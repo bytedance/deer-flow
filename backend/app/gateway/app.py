@@ -10,6 +10,7 @@ if sys.platform == "win32":
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 
 from app.gateway.auth.middleware import create_auth_middleware
 from app.gateway.auth_middleware import AuthMiddleware
@@ -24,8 +25,8 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     audio,
-    auth_router,
     auth,
+    auth_router,
     blueprints,
     capabilities,
     channels,
@@ -41,11 +42,11 @@ from app.gateway.routers import (
     knowledge_bases,
     machine,
     marketplace,
-    point,
     mcp,
     memory,
     models,
     organize,
+    point,
     rag,
     report_runs,
     report_template_telemetry,
@@ -73,9 +74,13 @@ get_app_config = deerflow_app_config.get_app_config
 # Default logging; lifespan overrides from config.yaml log_level.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(worker_id)s] %(name)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+from deerflow.config.worker_id import apply_worker_id_filter  # noqa: E402
+
+apply_worker_id_filter()
 
 logger = logging.getLogger(__name__)
 
@@ -806,7 +811,121 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
 
+    @app.get("/health/live", tags=["health"])
+    async def liveness_probe() -> dict:
+        """Kubernetes liveness probe — no external dependency checks, no caching."""
+        return {"status": "alive"}
+
+    _readiness_cache: dict | None = None
+    _readiness_cache_time: float = 0
+    _READINESS_CACHE_TTL = 10.0
+
+    @app.get("/health/ready", tags=["health"])
+    async def readiness_probe() -> dict:
+        """Kubernetes readiness probe — checks PostgreSQL, Redis, vector store.
+
+        Results are cached for 10 seconds to avoid excessive probe load.
+        Returns 503 if any critical backend is unreachable.
+        """
+        import time
+
+        nonlocal _readiness_cache, _readiness_cache_time
+
+        now = time.monotonic()
+        if _readiness_cache is not None and (now - _readiness_cache_time) < _READINESS_CACHE_TTL:
+            result = {**_readiness_cache, "cached": True}
+            status_code = 200 if _readiness_cache.get("status") == "ready" else 503
+            from fastapi.responses import JSONResponse
+            return JSONResponse(content=result, status_code=status_code)
+
+        checks: dict[str, dict] = {}
+
+        # PostgreSQL check
+        pg_ok, pg_detail = await _check_postgres()
+        checks["postgres"] = pg_detail
+
+        # Redis check
+        redis_ok, redis_detail = await _check_redis()
+        checks["redis"] = redis_detail
+
+        overall_ready = pg_ok and redis_ok
+        status_text = "ready" if overall_ready else "not_ready"
+        result = {"status": status_text, "checks": checks, "cached": False}
+
+        _readiness_cache = result
+        _readiness_cache_time = now
+
+        from fastapi.responses import JSONResponse
+        return JSONResponse(content=result, status_code=200 if overall_ready else 503)
+
+    @app.get("/health/metrics")
+    async def health_metrics() -> Response:
+        """Expose health-check counters in Prometheus text-exposition format."""
+        from app.gateway.health_metrics import format_prometheus
+        return Response(content=format_prometheus(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
     return app
+
+
+async def _check_postgres() -> tuple[bool, dict]:
+    """Check PostgreSQL connectivity."""
+    from app.gateway.health_metrics import record_health_check
+    try:
+        from deerflow.config.app_config import get_app_config
+        config = get_app_config()
+        if config.database.backend != "postgres":
+            return True, {"status": "skipped", "message": "database.backend is not postgres"}
+        import asyncio
+        import time
+        start = time.monotonic()
+        import psycopg
+        loop = asyncio.get_running_loop()
+
+        def _pg_check() -> None:
+            with psycopg.connect(config.database.postgres_url, autocommit=True) as conn:
+                conn.execute("SELECT 1")
+
+        await asyncio.wait_for(loop.run_in_executor(None, _pg_check), timeout=5.0)
+        latency = round((time.monotonic() - start) * 1000)
+        record_health_check("postgres", "ok")
+        return True, {"status": "ok", "latency_ms": latency}
+    except TimeoutError:
+        record_health_check("postgres", "timeout")
+        return False, {"status": "timeout", "message": "PostgreSQL did not respond within 5s"}
+    except Exception as e:
+        record_health_check("postgres", "error")
+        return False, {"status": "error", "message": str(e)[:200]}
+
+
+async def _check_redis() -> tuple[bool, dict]:
+    """Check Redis connectivity."""
+    from app.gateway.health_metrics import record_health_check
+    try:
+        from deerflow.config.app_config import get_app_config
+        config = get_app_config()
+        sb = config.stream_bridge
+        sb_type = sb.type if sb else "memory"
+        if sb_type != "redis":
+            return True, {"status": "skipped", "message": "stream_bridge.type is not redis"}
+        import asyncio
+        import time
+
+        import redis as redis_lib
+        start = time.monotonic()
+        redis_url = (sb.redis_url if sb else "") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        loop = asyncio.get_running_loop()
+        client = redis_lib.from_url(redis_url, socket_connect_timeout=5)
+        await asyncio.wait_for(loop.run_in_executor(None, client.ping), timeout=5.0)
+        client.close()
+        latency = round((time.monotonic() - start) * 1000)
+        record_health_check("redis", "ok")
+        return True, {"status": "ok", "latency_ms": latency}
+    except TimeoutError:
+        record_health_check("redis", "timeout")
+        return False, {"status": "timeout", "message": "Redis did not respond within 5s"}
+    except Exception as e:
+        record_health_check("redis", "error")
+        return False, {"status": "error", "message": str(e)[:200]}
 
 
 # Create app instance for uvicorn

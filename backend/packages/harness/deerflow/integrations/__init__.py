@@ -12,8 +12,8 @@ from deerflow.integrations.config import (
     CapabilityRouteConfig,
     EntityLinkConfig,
     EntityLinkEntry,
-    IntegrationSystemConfig,
     IntegrationsConfig,
+    IntegrationSystemConfig,
     RetryPolicy,
 )
 from deerflow.integrations.errors import (

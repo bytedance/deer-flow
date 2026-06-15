@@ -42,7 +42,7 @@ DEFAULT_SLA_HOURS: Mapping[str, int] = {
 }
 
 
-class ClosureStatus(str, enum.Enum):
+class ClosureStatus(enum.StrEnum):
     """All legal lifecycle states of a closure ticket."""
 
     PENDING = "pending"
@@ -54,7 +54,7 @@ class ClosureStatus(str, enum.Enum):
     REOPENED = "reopened"
 
 
-class ClosureAction(str, enum.Enum):
+class ClosureAction(enum.StrEnum):
     """All legal actions a caller can request through :func:`transition`."""
 
     CREATE = "create"

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -79,7 +79,7 @@ def validate_user_tenant_id(value: str) -> str:
 
 def now_iso() -> str:
     """Generate an ISO-8601 timestamp with timezone."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def iso_to_epoch(iso_str: str) -> float:
@@ -90,7 +90,7 @@ def iso_to_epoch(iso_str: str) -> float:
     """
     dt = datetime.fromisoformat(iso_str)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.timestamp()
 
 
@@ -154,6 +154,8 @@ def _resolve_git_sha() -> str | None:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=2,
                 check=False,
             )

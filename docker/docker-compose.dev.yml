@@ -1,0 +1,55 @@
+# DeerFlow Development Environment with PostgreSQL + Redis
+# Usage: docker compose -f docker-compose.dev.yml up -d
+#
+# Provides PostgreSQL and Redis for local multi-worker development.
+# Sets DEER_FLOW_DEV_MODE=1 to force all backends to memory/file/chroma
+# unless explicitly overridden.
+#
+# Access:
+#   PostgreSQL: localhost:5432 (deerflow / deerflow / deerflow)
+#   Redis:      localhost:6379
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: deer-flow-postgres-dev
+    environment:
+      - POSTGRES_DB=deerflow
+      - POSTGRES_USER=deerflow
+      - POSTGRES_PASSWORD=deerflow
+    command: postgres -c max_connections=250 -c log_statement=all
+    volumes:
+      - postgres-data-dev:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deerflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow-dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis-dev
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data-dev:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow-dev
+
+volumes:
+  postgres-data-dev:
+  redis-data-dev:
+
+networks:
+  deer-flow-dev:
+    driver: bridge

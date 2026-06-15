@@ -268,7 +268,20 @@ def _write_tenant_agent_soul(tenant_id: str, name: str, content: str) -> None:
     (soul_dir / "SOUL.md").write_text(content, encoding="utf-8")
 
 
-def _write_tenant_agent_config(tenant_id: str, name: str, *, display_name: str | None = None, description: str | None = None, icon: str | None = None, visibility: str = "tenant_public", model: str | None = None, tool_groups: list[str] | None = None, skills: list[str] | None = None, mcp_servers: list[str] | None = None, tags: list[str] | None = None) -> None:
+def _write_tenant_agent_config(
+    tenant_id: str,
+    name: str,
+    *,
+    display_name: str | None = None,
+    description: str | None = None,
+    icon: str | None = None,
+    visibility: str = "tenant_public",
+    model: str | None = None,
+    tool_groups: list[str] | None = None,
+    skills: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> None:
     """Write a config.yaml for the tenant agent so filesystem-based discovery works."""
     import yaml
 

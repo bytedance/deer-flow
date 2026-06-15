@@ -362,7 +362,7 @@ async def _search_single_collection(query: str, collection: str, rag_config, con
     knowledge_bases = await repo.resolve_accessible_by_collections(
         [collection], tenant_id=tenant_id, user_id=user_id
     )
-    accessible_ids = [str(kb.get("id", "")) for kb in (knowledge_bases or [])]
+    [str(kb.get("id", "")) for kb in (knowledge_bases or [])]
 
     # Explicit application-level permission verification via KbAccessControl
     from deerflow.knowledge_base.access_control import KbAccessControl, UserContext

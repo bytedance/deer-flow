@@ -23,6 +23,48 @@
 # Access: http://localhost:${PORT:-2026}
 
 services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  # Required for multi-worker mode. max_connections=250 supports 4 workers × ~50 connections.
+  postgres:
+    image: postgres:16-alpine
+    container_name: deer-flow-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-deerflow}
+      - POSTGRES_USER=${POSTGRES_USER:-deerflow}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-deerflow}
+    command: postgres -c max_connections=250
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deerflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # Required for multi-worker mode (stream bridge, rate limit, IM coordination).
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: redis-server --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
   # ── Reverse Proxy ──────────────────────────────────────────────────────────
   nginx:
     image: nginx:latest
@@ -69,9 +111,9 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
-        UV_EXTRAS: ${UV_EXTRAS:-}
+        UV_EXTRAS: ${UV_EXTRAS:-postgres}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4} --timeout-graceful-shutdown 30"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -110,6 +152,11 @@ services:
       - ../.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -145,6 +192,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+
+volumes:
+  postgres-data:
+  redis-data:
+
 networks:
   deer-flow:
     driver: bridge

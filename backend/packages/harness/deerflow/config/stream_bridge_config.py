@@ -19,7 +19,7 @@ class StreamBridgeConfig(BaseModel):
         description="Redis URL for the redis stream bridge type. Example: 'redis://localhost:6379/0'.",
     )
     queue_maxsize: int = Field(
-        default=256,
+        default=1024,
         description="Maximum number of events buffered per run in the memory bridge.",
     )
 

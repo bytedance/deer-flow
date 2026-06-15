@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
+from .metrics import stream_bridge_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +68,39 @@ class MemoryStreamBridge(StreamBridge):
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         stream = self._get_or_create_stream(run_id)
-        entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
+        seq = self._counters.get(run_id, 0)
+        entry = StreamEvent(id=self._next_id(run_id), event=event, data=data, sequence=seq)
         async with stream.condition:
-            stream.events.append(entry)
-            if len(stream.events) > self._maxsize:
-                overflow = len(stream.events) - self._maxsize
-                del stream.events[:overflow]
-                stream.start_offset += overflow
+            if len(stream.events) >= self._maxsize:
+                self._apply_backpressure(stream, entry)
+            else:
+                stream.events.append(entry)
+            stream_bridge_metrics.record_publish(event, data)
+            stream_bridge_metrics.set_queue_depth(run_id, len(stream.events))
             stream.condition.notify_all()
+
+    def _apply_backpressure(self, stream: _RunStream, new_entry: StreamEvent) -> None:
+        """Merge-drop backpressure: drop intermediate token events before FIFO.
+
+        For ``messages-tuple`` (token streaming) events, find the oldest
+        ``messages-tuple`` entry in the buffer and replace it in-place with
+        the new entry.  This keeps the first and latest tokens while discarding
+        intermediates, reducing SSE payload size during long generations.
+
+        For non-token events (or when no ``messages-tuple`` remains), fall back
+        to FIFO: drop the oldest event.
+        """
+        stream_bridge_metrics.record_backpressure()
+        if new_entry.event == "messages":
+            for idx, existing in enumerate(stream.events):
+                if existing.event == "messages":
+                    stream.events[idx] = new_entry
+                    return
+
+        overflow = len(stream.events) - self._maxsize + 1
+        del stream.events[:overflow]
+        stream.start_offset += overflow
+        stream.events.append(new_entry)
 
     async def publish_end(self, run_id: str) -> None:
         stream = self._get_or_create_stream(run_id)
@@ -127,6 +153,7 @@ class MemoryStreamBridge(StreamBridge):
             await asyncio.sleep(delay)
         self._streams.pop(run_id, None)
         self._counters.pop(run_id, None)
+        stream_bridge_metrics.remove_run(run_id)
 
     async def close(self) -> None:
         self._streams.clear()

@@ -164,6 +164,26 @@ class RagConfig(BaseModel):
         "buffer before submit() raises. Acts as a back-pressure signal so a "
         "burst of uploads can't grow the queue without bound.",
     )
+    dispatcher_mode: str = Field(
+        default="local",
+        description="Indexing dispatcher mode: 'local' uses an in-memory asyncio.Queue "
+        "(single-worker); 'queue' uses PostgreSQL FOR UPDATE SKIP LOCKED for "
+        "cross-worker job claiming (multi-worker).",
+    )
+    job_timeout_seconds: int = Field(
+        default=300,
+        ge=10,
+        le=3600,
+        description="Maximum time (seconds) an indexing job may run before being "
+        "considered stale and reclaimed by another worker.",
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Maximum number of retry attempts for a failed indexing job. "
+        "After this many retries, the job is marked as permanently failed.",
+    )
 
 
 # Global configuration instance

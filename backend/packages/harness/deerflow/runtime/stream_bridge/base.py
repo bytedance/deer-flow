@@ -23,11 +23,14 @@ class StreamEvent:
         event: SSE event name, e.g. ``"metadata"``, ``"updates"``,
             ``"events"``, ``"error"``, ``"end"``.
         data: JSON-serialisable payload.
+        sequence: Monotonically increasing per-run integer sequence number.
+            Used by the frontend for gap detection.
     """
 
     id: str
     event: str
     data: Any
+    sequence: int = 0
 
 
 HEARTBEAT_SENTINEL = StreamEvent(id="", event="__heartbeat__", data=None)

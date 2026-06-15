@@ -215,6 +215,11 @@ def _assemble_from_features(
     # --- [5] ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
 
+    # --- [5b] ToolEndEmit (always, emits tool_end custom events) ---
+    from deerflow.agents.middlewares.tool_end_emit_middleware import ToolEndEmitMiddleware
+
+    chain.append(ToolEndEmitMiddleware())
+
     # --- [6] Summarization ---
     if feat.summarization is not False:
         if isinstance(feat.summarization, AgentMiddleware):
@@ -277,7 +282,12 @@ def _assemble_from_features(
 
     chain.append(LoopDetectionMiddleware())
 
-    # --- [13] Clarification (always last among built-ins) ---
+    # --- [13] StatePatchEmit (always, observes tracked field changes) ---
+    from deerflow.agents.middlewares.state_patch_emit_middleware import StatePatchEmitMiddleware
+
+    chain.append(StatePatchEmitMiddleware())
+
+    # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 

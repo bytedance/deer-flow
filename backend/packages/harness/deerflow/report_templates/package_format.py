@@ -10,8 +10,7 @@ Package structure:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,7 +38,7 @@ class PackageMetadata(BaseModel):
     owner_user_id: str | None = Field(default=None, description="Owner user ID (if private)")
     tenant_id: str | None = Field(default=None, description="Tenant ID (if tenant-scoped)")
     tags: list[str] = Field(default_factory=list)
-    exported_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    exported_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     exported_by: str | None = Field(default=None, description="User ID who exported")
     dsl_version: str = Field(default="1", description="DSL schema version")
 
@@ -51,7 +50,7 @@ class PackageBlueprintOrigin(BaseModel):
 
     blueprint_id: str = Field(description="Blueprint ID this template was derived from")
     blueprint_version: str | None = Field(default=None, description="Blueprint version at derivation time")
-    derived_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    derived_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 def validate_package_contents(files: dict[str, bytes]) -> list[str]:

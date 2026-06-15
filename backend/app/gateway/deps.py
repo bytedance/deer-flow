@@ -16,12 +16,13 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 
 from deerflow.config.app_config import AppConfig
-
 from deerflow.runtime import RunContext
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from langgraph.types import Checkpointer
+
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.feedback import FeedbackRepository
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
     from deerflow.runtime import RunManager, StreamBridge
     from deerflow.runtime.events.store.base import RunEventStore
     from deerflow.runtime.runs.store.base import RunStore
-    from langgraph.types import Checkpointer
 else:
     FeedbackRepository = Any
     RunManager = Any
@@ -167,8 +167,10 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
                 indexing_service=kb_service._indexing,
                 kb_repo=kb_repo,
                 doc_repo=doc_repo,
+                job_repo=job_repo if rag_cfg.dispatcher_mode == "queue" else None,
                 workers=rag_cfg.indexing_workers,
                 queue_max=rag_cfg.indexing_queue_max,
+                mode=rag_cfg.dispatcher_mode,
             )
             await index_dispatcher.start()
             kb_service.attach_dispatcher(index_dispatcher)
@@ -239,15 +241,14 @@ async def langgraph_runtime(app: FastAPI) -> AsyncGenerator[None, None]:
             insights_cfg = getattr(config, "insights", None)
             low_conf_threshold = 0.3
             aggregation_hours = 6
-            cluster_threshold = 5
             if insights_cfg is not None and isinstance(insights_cfg, dict):
                 low_conf_threshold = insights_cfg.get("low_confidence_threshold", 0.3)
                 aggregation_hours = insights_cfg.get("aggregation_interval_hours", 6)
-                cluster_threshold = insights_cfg.get("cluster_threshold", 5)
+                insights_cfg.get("cluster_threshold", 5)
             elif hasattr(insights_cfg, "low_confidence_threshold"):
                 low_conf_threshold = getattr(insights_cfg, "low_confidence_threshold", 0.3)
                 aggregation_hours = getattr(insights_cfg, "aggregation_interval_hours", 6)
-                cluster_threshold = getattr(insights_cfg, "cluster_threshold", 5)
+                getattr(insights_cfg, "cluster_threshold", 5)
 
             aggregator = FeedbackAggregator(sf, insights_cache)
             app.state.insights_aggregator = aggregator
@@ -435,8 +436,8 @@ def get_ins_base_provider():
     """
     global _cached_ins_base_provider
 
-    from deerflow.config.auth_config import get_auth_config
     from app.gateway.auth.ins_base_provider import InsBaseAuthProvider
+    from deerflow.config.auth_config import get_auth_config
     from deerflow.rpc.rpc_client import get_rpc_client
 
     auth_config = get_auth_config()

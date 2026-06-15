@@ -76,6 +76,7 @@ class ChannelService:
             channel_sessions=channel_sessions,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
+        self._channel_locks: dict[str, Any] = {}  # name -> IMChannelLock (if held)
         self._config = config
         self._running = False
 
@@ -122,7 +123,7 @@ class ChannelService:
         logger.info("ChannelService started with channels: %s", list(self._channels.keys()))
 
     async def stop(self) -> None:
-        """Stop all channels and the manager."""
+        """Stop all channels and the manager, releasing distributed locks."""
         for name, channel in list(self._channels.items()):
             try:
                 await channel.stop()
@@ -130,6 +131,9 @@ class ChannelService:
             except Exception:
                 logger.exception("Error stopping channel %s", name)
         self._channels.clear()
+
+        for name in list(self._channel_locks):
+            await self._release_channel_lock(name)
 
         await self.manager.stop()
         self._running = False
@@ -158,11 +162,16 @@ class ChannelService:
             logger.warning("Unknown channel type: %s", name)
             return False
 
+        if not await self._try_acquire_channel_lock(name):
+            logger.info("Channel %s skipped — another worker holds the lock", name)
+            return False
+
         try:
             from deerflow.reflection import resolve_class
 
             channel_cls = resolve_class(import_path, base_class=None)
         except Exception:
+            await self._release_channel_lock(name)
             logger.exception("Failed to import channel class for %s", name)
             return False
 
@@ -172,14 +181,57 @@ class ChannelService:
             await channel.start()
             if not channel.is_running:
                 self._channels.pop(name, None)
+                await self._release_channel_lock(name)
                 logger.error("Channel %s did not enter a running state after start()", name)
                 return False
             logger.info("Channel %s started", name)
             return True
         except Exception:
             self._channels.pop(name, None)
+            await self._release_channel_lock(name)
             logger.exception("Failed to start channel %s", name)
             return False
+
+    async def _try_acquire_channel_lock(self, channel_name: str) -> bool:
+        """Try to acquire the distributed lock for a channel.
+
+        Returns True if the channel should proceed (lock acquired or coordination disabled).
+        """
+        from deerflow.config.app_config import get_app_config
+        app_config = get_app_config()
+        extra = app_config.model_extra or {}
+        im_config = extra.get("im") if isinstance(extra, dict) else None
+        coord_mode = (im_config or {}).get("coordination_mode", "none") if isinstance(im_config, dict) else "none"
+
+        if coord_mode != "redis":
+            return True
+
+        try:
+            import redis as redis_lib
+
+            from deerflow.config.worker_id import WORKER_ID
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            client = redis_lib.from_url(redis_url, decode_responses=False)
+            from app.channels.coordination import IMChannelLock
+            lock = IMChannelLock(redis_client=client, channel=channel_name, worker_id=WORKER_ID)
+            acquired = await lock.acquire()
+            if acquired:
+                self._channel_locks[channel_name] = lock
+            else:
+                client.close()
+            return acquired
+        except Exception:
+            logger.exception("Failed to acquire IM lock for channel=%s — starting anyway", channel_name)
+            return True
+
+    async def _release_channel_lock(self, channel_name: str) -> None:
+        """Release the distributed lock for a channel if held."""
+        lock = self._channel_locks.pop(channel_name, None)
+        if lock is not None:
+            try:
+                await lock.release()
+            except Exception:
+                logger.exception("Failed to release IM lock for channel=%s", channel_name)
 
     def get_status(self) -> dict[str, Any]:
         """Return status information for all channels."""

@@ -15,23 +15,25 @@ from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.audio_input_config import AudioInputConfig, load_audio_input_config_from_dict
 from deerflow.config.auth_config import AuthConfig, load_auth_config_from_dict
-from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.content_safety_config import ContentSafetyConfig, load_content_safety_config_from_dict
 from deerflow.config.cost_config import CostConfig, load_cost_config_from_dict
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.deployment_config import DeploymentConfig, load_deployment_config_from_dict
+from deerflow.config.domain_memory_config import DomainMemoryConfig, load_domain_memory_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.http_connector_config import HttpConnectorConfig
-from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
-from deerflow.config.session_memory_config import SessionMemoryConfig, load_session_memory_config_from_dict
-from deerflow.config.domain_memory_config import DomainMemoryConfig, load_domain_memory_config_from_dict
 from deerflow.config.memory_api_config import MemoryApiConfig, load_memory_api_config_from_dict
+from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.nacos_config import NacosConfig, load_nacos_config_from_dict
 from deerflow.config.rag_config import RagConfig, load_rag_config_from_dict
 from deerflow.config.rate_limit_config import RateLimitConfig, load_rate_limit_config_from_dict
 from deerflow.config.rpc_config import RpcConfig, load_rpc_config_from_dict
+from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.session_memory_config import SessionMemoryConfig, load_session_memory_config_from_dict
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
@@ -41,7 +43,6 @@ from deerflow.config.title_config import TitleConfig, load_title_config_from_dic
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
-from deerflow.config.runtime_paths import existing_project_file
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -130,6 +131,7 @@ class AppConfig(BaseModel):
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     auth: AuthConfig = Field(default_factory=AuthConfig, description="API authentication configuration")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig, description="Database backend configuration")
+    deployment: DeploymentConfig = Field(default_factory=DeploymentConfig, description="Deployment mode configuration (single_worker or multi_worker)")
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig, description="API rate limiting configuration")
     content_safety: ContentSafetyConfig = Field(default_factory=ContentSafetyConfig, description="Content safety moderation configuration")
     cost: CostConfig = Field(default_factory=CostConfig, description="Cost management and budget control configuration")
@@ -192,6 +194,7 @@ class AppConfig(BaseModel):
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
+        cls._apply_deployment_mode_env(config_data)
         cls._apply_database_defaults(config_data)
         cls._validate_postgres_consistency(config_data)
 
@@ -204,6 +207,7 @@ class AppConfig(BaseModel):
         config_data["extensions"] = extensions_config.model_dump()
 
         result = cls.model_validate(config_data)
+        cls._validate_multi_worker_backends(result)
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result
@@ -242,6 +246,7 @@ class AppConfig(BaseModel):
         load_audio_input_config_from_dict(config.audio_input.model_dump())
         load_content_safety_config_from_dict(config.content_safety.model_dump())
         load_rate_limit_config_from_dict(config.rate_limit.model_dump())
+        load_deployment_config_from_dict(config.deployment.model_dump())
 
         # Derive checkpointer config from database section if no standalone config.
         # This eliminates the need for a separate `checkpointer:` block in config.yaml.
@@ -280,11 +285,118 @@ class AppConfig(BaseModel):
             reset_store()
 
     @classmethod
+    def _apply_deployment_mode_env(cls, config_data: dict[str, Any]) -> None:
+        """Read ``DEER_FLOW_MULTI_WORKER`` / ``DEER_FLOW_DEV_MODE`` env vars.
+
+        ``DEER_FLOW_MULTI_WORKER=1`` forces ``deployment.mode`` to
+        ``multi_worker`` (unless explicitly set in config.yaml).
+        ``DEER_FLOW_DEV_MODE=1`` forces ``deployment.mode`` to
+        ``single_worker`` and takes precedence over ``DEER_FLOW_MULTI_WORKER``.
+        """
+        dev_mode = os.getenv("DEER_FLOW_DEV_MODE", "").strip()
+        multi_worker = os.getenv("DEER_FLOW_MULTI_WORKER", "").strip()
+
+        deployment_config = config_data.get("deployment")
+        if deployment_config is None:
+            deployment_config = {}
+            config_data["deployment"] = deployment_config
+        if not isinstance(deployment_config, dict):
+            return
+
+        explicit_mode = deployment_config.get("mode")
+
+        if dev_mode == "1":
+            deployment_config["mode"] = "single_worker"
+            if explicit_mode and explicit_mode != "single_worker":
+                logger.warning("DEER_FLOW_DEV_MODE=1 overrides deployment.mode=%s → single_worker", explicit_mode)
+            logger.warning("DEER_FLOW_DEV_MODE=1 active. Forcing all backends to local (memory/file). Not suitable for production.")
+            cls._force_dev_mode_defaults(config_data)
+            return
+
+        if multi_worker == "1" and not explicit_mode:
+            deployment_config["mode"] = "multi_worker"
+            logger.info("DEER_FLOW_MULTI_WORKER=1: deployment.mode → multi_worker")
+
+    @classmethod
+    def _force_dev_mode_defaults(cls, config_data: dict[str, Any]) -> None:
+        """Force all backends to local (memory/file) for development.
+
+        Overrides explicit config values — dev mode is a sledgehammer.
+        """
+        overrides: dict[str, Any] = {
+            "database": {"backend": "sqlite"},
+            "memory": {"storage_class": "deerflow.agents.memory.storage.FileMemoryStorage"},
+            "rag": {"vector_store_backend": "chroma"},
+            "cost": {"storage_backend": "json"},
+            "stream_bridge": {"type": "memory"},
+            "rate_limit": {"backend": "memory"},
+        }
+        for section, values in overrides.items():
+            section_data = config_data.get(section)
+            if section_data is None:
+                section_data = {}
+                config_data[section] = section_data
+            if isinstance(section_data, dict):
+                for key, value in values.items():
+                    old = section_data.get(key)
+                    if old != value and old is not None:
+                        logger.warning("DEER_FLOW_DEV_MODE: %s.%s=%s → %s", section, key, old, value)
+                    section_data[key] = value
+
+    @classmethod
+    def _apply_multi_worker_defaults(
+        cls, config_data: dict[str, Any], database_config: dict[str, Any], user_set_backend: bool,
+    ) -> None:
+        """Auto-default subsystem backends for multi-worker mode.
+
+        Only applies when ``deployment.mode`` is ``multi_worker`` AND the
+        deployment mode was not explicitly set in config.yaml (env-var
+        triggered).  Uses ``setdefault`` so explicit user values always win.
+        """
+        deployment_config = config_data.get("deployment")
+        if not isinstance(deployment_config, dict):
+            return
+        if deployment_config.get("mode") != "multi_worker":
+            return
+
+        # database.backend: only auto-set if user didn't explicitly configure it.
+        if not user_set_backend:
+            old = database_config.get("backend")
+            if old != "postgres":
+                logger.info("Auto-defaulted database.backend=postgres from deployment.mode=multi_worker (was %s)", old)
+                database_config["backend"] = "postgres"
+
+        # 4 new subsystems not covered by the postgres auto-default block.
+        subsystem_defaults: list[tuple[str, str, str]] = [
+            ("stream_bridge", "type", "redis"),
+            ("rate_limit", "backend", "redis"),
+            ("indexing", "dispatcher_mode", "queue"),
+            ("im", "coordination_mode", "redis"),
+        ]
+        for section, key, value in subsystem_defaults:
+            section_data = config_data.get(section)
+            if section_data is None:
+                section_data = {}
+                config_data[section] = section_data
+            if isinstance(section_data, dict):
+                old = section_data.get(key)
+                if old is None:
+                    section_data[key] = value
+                    logger.info("Auto-defaulted %s.%s=%s from deployment.mode=multi_worker", section, key, value)
+                elif old != value:
+                    logger.warning(
+                        "%s.%s=%s in multi-worker mode; explicitly configured, keeping user value",
+                        section, key, old,
+                    )
+
+    @classmethod
     def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
         """Apply config.yaml defaults for persistence when the section is absent.
 
-        When ``database.backend=postgres``, auto-default subsystem backends
-        to PostgreSQL-compatible values if not explicitly configured.
+        When ``deployment.mode=multi_worker``, auto-default all stateful
+        components to shared backends (PostgreSQL + Redis).
+        When ``database.backend=postgres``, auto-default database-related
+        subsystems to PostgreSQL-compatible values.
         """
         database_config = config_data.get("database")
         if database_config is None:
@@ -292,8 +404,17 @@ class AppConfig(BaseModel):
             config_data["database"] = database_config
         if not isinstance(database_config, dict):
             return
+
+        # Track whether user explicitly set database.backend (before defaults).
+        user_set_backend = "backend" in database_config
+
         for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
             database_config.setdefault(key, value)
+
+        # Multi-worker mode: set database.backend=postgres + 4 new subsystems
+        # before the postgres early-return check, so postgres auto-defaults
+        # (memory, rag, cost, run_events) apply naturally afterward.
+        cls._apply_multi_worker_defaults(config_data, database_config, user_set_backend)
 
         if database_config.get("backend") != "postgres":
             return
@@ -419,6 +540,47 @@ class AppConfig(BaseModel):
             )
 
     @classmethod
+    def _validate_multi_worker_backends(cls, config: Self) -> None:
+        """Validate shared backend connectivity in multi-worker mode.
+
+        Fail-fast if PostgreSQL or Redis is unreachable. Only runs when
+        ``deployment.mode`` is ``multi_worker``.
+        """
+        if config.deployment.mode != "multi_worker":
+            return
+
+        errors: list[str] = []
+
+        if config.database.backend == "postgres":
+            try:
+                import psycopg
+                with psycopg.connect(config.database.postgres_url, autocommit=True) as conn:
+                    conn.execute("SELECT 1")
+                logger.info("Multi-worker validation: PostgreSQL connection OK")
+            except Exception as e:
+                errors.append(f"PostgreSQL connection failed: {e}")
+
+        stream_bridge_type = config.stream_bridge.type if config.stream_bridge else "memory"
+        if stream_bridge_type == "redis":
+            try:
+                import redis as redis_lib
+                redis_url = config.stream_bridge.redis_url or os.getenv("REDIS_URL", "redis://localhost:6379")
+                client = redis_lib.from_url(redis_url, socket_connect_timeout=5)
+                client.ping()
+                client.close()
+                logger.info("Multi-worker validation: Redis connection OK")
+            except Exception as e:
+                errors.append(f"Redis connection failed: {e}")
+
+        if errors:
+            for err in errors:
+                logger.error("Multi-worker mode: %s", err)
+            raise ConfigValidationError(
+                "Multi-worker mode requires reachable shared backends. "
+                + "; ".join(errors)
+            )
+
+    @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
         """Check if the user's config.yaml is outdated compared to config.example.yaml.
 
@@ -462,6 +624,11 @@ class AppConfig(BaseModel):
                 user_version,
                 example_version,
             )
+            if example_data and "deployment" in example_data and "deployment" not in config_data:
+                logger.warning(
+                    "Missing 'deployment' section in config.yaml. Add deployment.mode (single_worker | multi_worker) "
+                    "or set DEER_FLOW_MULTI_WORKER=1 to enable multi-worker deployment."
+                )
 
     @classmethod
     def resolve_env_variables(cls, config: Any, strict: bool = True) -> Any:

@@ -53,7 +53,7 @@ def render_charts_file(charts_json_path: str) -> str:
         return f"错误：文件不存在 {charts_json_path} (物理路径: {path})"
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             charts_data = json.load(f)
     except Exception as e:
         return f"错误：无法读取文件 {e}"

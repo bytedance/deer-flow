@@ -334,3 +334,81 @@ async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+
+
+# ---------------------------------------------------------------------------
+# Merge-drop backpressure tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_merge_drop_replaces_oldest_messages_event():
+    """When queue is full, a new 'messages' event should replace the oldest 'messages' event."""
+    bridge = MemoryStreamBridge(queue_maxsize=3)
+    run_id = "run-merge-drop"
+
+    await bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await bridge.publish(run_id, "messages", {"token": "a"})
+    await bridge.publish(run_id, "messages", {"token": "b"})
+    assert len(bridge._streams[run_id].events) == 3
+
+    await bridge.publish(run_id, "messages", {"token": "c"})
+
+    stream = bridge._streams[run_id]
+    assert len(stream.events) == 3
+    event_types = [e.event for e in stream.events]
+    assert "metadata" in event_types
+    msg_events = [e for e in stream.events if e.event == "messages"]
+    assert len(msg_events) == 2
+    tokens = [e.data.get("token") for e in msg_events]
+    assert "a" not in tokens
+    assert "c" in tokens
+
+
+@pytest.mark.anyio
+async def test_merge_drop_fifo_when_no_messages_events():
+    """When queue is full and no 'messages' events exist, fall back to FIFO."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-fifo"
+
+    await bridge.publish(run_id, "metadata", {"n": 1})
+    await bridge.publish(run_id, "values", {"n": 2})
+    assert len(bridge._streams[run_id].events) == 2
+
+    await bridge.publish(run_id, "updates", {"n": 3})
+
+    stream = bridge._streams[run_id]
+    assert len(stream.events) == 2
+    assert stream.events[0].event == "values"
+    assert stream.events[1].event == "updates"
+
+
+@pytest.mark.anyio
+async def test_sequence_numbers_are_monotonic():
+    """Each event should have a monotonically increasing sequence number."""
+    bridge = MemoryStreamBridge(queue_maxsize=1024)
+    run_id = "run-seq"
+
+    await bridge.publish(run_id, "metadata", {"n": 1})
+    await bridge.publish(run_id, "values", {"n": 2})
+    await bridge.publish(run_id, "updates", {"n": 3})
+
+    stream = bridge._streams[run_id]
+    sequences = [e.sequence for e in stream.events]
+    assert sequences == [0, 1, 2]
+
+
+@pytest.mark.anyio
+async def test_sequence_numbers_survive_merge_drop():
+    """Sequence numbers remain unique even when events are replaced by merge-drop."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-seq-merge"
+
+    await bridge.publish(run_id, "messages", {"token": "a"})
+    await bridge.publish(run_id, "messages", {"token": "b"})
+    await bridge.publish(run_id, "messages", {"token": "c"})
+
+    stream = bridge._streams[run_id]
+    sequences = [e.sequence for e in stream.events]
+    assert len(set(sequences)) == len(sequences)
+    assert all(s >= 0 for s in sequences)

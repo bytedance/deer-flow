@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class ClosureSourceType(str, enum.Enum):
+class ClosureSourceType(enum.StrEnum):
     DIAGNOSIS = "diagnosis"
     REPORT = "report"
     INSPECTION = "inspection"
@@ -27,7 +27,7 @@ class ClosureSourceType(str, enum.Enum):
     CHAT = "chat"
 
 
-class ClosurePriority(str, enum.Enum):
+class ClosurePriority(enum.StrEnum):
     URGENT = "urgent"
     IMPORTANT = "important"
     NORMAL = "normal"

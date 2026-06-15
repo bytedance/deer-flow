@@ -315,6 +315,8 @@ class LocalSandbox(Sandbox):
                 shell=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
             )
         else:
@@ -324,6 +326,8 @@ class LocalSandbox(Sandbox):
                 shell=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
             )
         output = result.stdout

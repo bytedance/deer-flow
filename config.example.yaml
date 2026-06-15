@@ -15,13 +15,30 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 12
+config_version: 13
 
 # ============================================================================
 # Logging
 # ============================================================================
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
+
+# ============================================================================
+# Deployment Mode
+# ============================================================================
+# Controls how stateful components share state across worker processes.
+#
+# - single_worker (default): all backends are process-local (memory, SQLite,
+#   file, ChromaDB). Suitable for development and single-instance deployments.
+# - multi_worker: automatically switches all stateful components to shared
+#   backends (PostgreSQL + Redis) so multiple worker processes can share state.
+#
+# Equivalent environment variables (override this field):
+#   DEER_FLOW_MULTI_WORKER=1   → force multi_worker mode
+#   DEER_FLOW_DEV_MODE=1       → force all backends to local (memory/file/sqlite/chroma)
+#
+# deployment:
+#   mode: single_worker
 
 # ============================================================================
 # Token Usage
@@ -31,6 +48,13 @@ log_level: info
 # and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: false
+
+# ============================================================================
+# UI Configuration
+# ============================================================================
+# Toggles for optional UI features in the frontend workspace.
+# ui:
+#   show_bash_script: false  # Whether to show the bash script preview in the UI
 
 # ============================================================================
 # Models Configuration
@@ -1022,6 +1046,8 @@ skill_evolution:
 # database:
 #   backend: postgres
 #   postgres_url: $DATABASE_URL
+#   pool_size: 5           # SQLAlchemy connection pool size (postgres only)
+#   max_overflow: 5        # Max overflow connections beyond pool_size (postgres only)
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
@@ -1227,6 +1253,20 @@ auth:
   rsa_public_key: ""                 # RSA public key PEM for ins_base provider login encryption
 
 # ============================================================================
+# Stream Bridge Configuration
+# ============================================================================
+# Decouples agent workers from SSE endpoints. Agent runs produce events into
+# the bridge; HTTP endpoints consume them and push to the browser.
+#
+# 'memory' (default): in-process asyncio.Queue — zero dependencies, single worker only.
+# 'redis': Redis Streams — supports multi-worker / distributed deployments.
+#          Requires: pip install deerflow-harness[redis]
+stream_bridge:
+  type: "memory"                     # "memory" or "redis"
+  redis_url: ""                      # Required when type="redis", e.g. "redis://localhost:6379/0"
+  queue_maxsize: 1024                # Max events buffered per run (memory bridge)
+
+# ============================================================================
 # Rate Limiting Configuration
 # ============================================================================
 # Request rate limiting via slowapi. Uses in-memory storage by default;
@@ -1370,3 +1410,169 @@ rate_limit:
 #     #     - method: "getUserById"
 #     #       path: "/api/user/{id}"
 #     #       http_method: "GET"
+#     # Direct connection mode (pick one of discovery or base_url):
+#     # - name: ins-bus-rpc
+#     #   base_url: "http://localhost:8801"
+
+# ============================================================================
+# Audio Input Configuration
+# ============================================================================
+# Speech-to-text input for the frontend. When enabled, users can record audio
+# via the microphone or upload audio files, which are transcribed and submitted
+# as text messages.
+#
+# Built-in providers:
+#   deerflow.audio.providers.qwen_asr:QwenASRTranscriptionProvider   — Alibaba DashScope
+#   deerflow.audio.providers.openai_asr:OpenAIASRTranscriptionProvider — OpenAI Whisper
+
+# audio_input:
+#   enabled: false
+#   microphone_enabled: true            # Allow live microphone recording
+#   file_transcription_enabled: true    # Allow uploading audio files for transcription
+#   default_locale: zh-CN               # Default locale for transcription
+#   supported_locales:
+#     - zh-CN
+#     - en-US
+#   accepted_mime_types:
+#     - audio/mpeg
+#     - audio/mp3
+#     - audio/wav
+#     - audio/x-wav
+#     - audio/wave
+#     - audio/webm
+#     - audio/ogg
+#     - audio/mp4
+#     - audio/x-m4a
+#     - audio/aac
+#     - audio/flac
+#   max_file_size: 26214400             # 25 MiB
+#   provider:
+#     use: deerflow.audio.providers.qwen_asr:QwenASRTranscriptionProvider
+#     config:
+#       model: qwen3-asr-flash
+#       api_key: $DASHSCOPE_API_KEY
+#       base_url: https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+#       timeout_s: 120.0
+
+# ============================================================================
+# HTTP Connectors
+# ============================================================================
+# Reusable HTTP connection templates that skills and tools can reference by name.
+# Each connector defines authentication, timeouts, caching, and retry policy
+# for an upstream HTTP service. Skills reference connectors via the connector_ref
+# field so credentials and tuning live in one place.
+
+# http_connectors:
+#   default:
+#     - name: list_datasets
+#       description: "列举可用数据集"
+#       url: "http://data-platform.internal/api/v1/datasets"
+#       method: GET
+#       auth_type: bearer               # "none", "bearer", "basic", "api_key"
+#       auth_token_env: DATA_PLATFORM_TOKEN
+#       timeout_seconds: 30
+#       max_response_bytes: 524288
+#       cache_ttl_seconds: 300
+#       max_retries: 1
+
+# ============================================================================
+# External System Integrations (CRM/ERP/InS/SMS)
+# ============================================================================
+# Declarative registry of external systems the agent can route capabilities to.
+# Each system declares its transport (http), auth scheme, and a list of
+# capabilities (namespaced strings like "monitoring.trend"). The `routes` map
+# binds capabilities to a primary system so the agent can invoke them without
+# hardcoding system details.
+#
+# system_type: ins | xsy | sms | custom
+# transport_type: http
+# auth_type: bearer | xsy_oauth2 | basic | api_key
+# auth_mode: static (uses secret_ref) | user_token (forwards current user's token)
+
+# integrations:
+#   enabled: false
+#   systems:
+#     ins_prod:
+#       system_type: ins
+#       display_name: "InS Production"
+#       connector_ref: ins_http_main    # Reference to an http_connectors entry
+#       transport_type: http
+#       base_url: "http://182.92.187.198/"
+#       base_path: "/"
+#       auth_type: bearer
+#       auth_mode: user_token
+#       timeout_seconds: 30
+#       max_retries: 2
+#       capabilities:
+#         - asset.catalog
+#         - asset.context
+#         - monitoring.trend
+#         - monitoring.waveform
+#         - monitoring.orbit
+#         - monitoring.alarm_history
+#     xsy_prod:
+#       system_type: xsy
+#       display_name: "销售易 CRM"
+#       description: "销售易 CRM 系统集成，提供产品出库、服务事件查询与统计"
+#       transport_type: http
+#       base_url: "https://api.xiaoshouyi.com"
+#       auth_type: xsy_oauth2
+#       auth_mode: static
+#       timeout_seconds: 30.0
+#       enabled: true
+#       capabilities:
+#         - outbound.query
+#         - outbound.statistics
+#         - service_event.query
+#         - service_event.statistics
+#         - service_event.anomaly
+#         - xsy.report
+#       extra_config:
+#         auth_url: "https://login.xiaoshouyi.com/auc/oauth2/token"
+#         client_id_env: "$XSY_CLIENT_ID"
+#         client_secret_env: "$XSY_CLIENT_SECRET"
+#         username_env: "$XSY_USERNAME"
+#         password_env: "$XSY_PASSWORD"
+#     sms:
+#       system_type: sms
+#       display_name: "SMS设备异常统计与评估系统"
+#       description: "SMS集成，提供异常列表/详情、健康评估、风险排名、待办统计"
+#       transport_type: http
+#       base_url: "http://182.92.187.198"
+#       auth_type: bearer
+#       auth_mode: user_token
+#       timeout_seconds: 30.0
+#       enabled: true
+#       capabilities:
+#         - abnormal.list
+#         - abnormal.detail
+#         - health.assessment
+#         - health.anomaly_statistics
+#         - health.risk_ranking
+#         - todo_stats.get
+#   routes:
+#     monitoring.trend: ins_prod
+#     outbound.query:
+#       primary_system_key: xsy_prod
+#     outbound.statistics:
+#       primary_system_key: xsy_prod
+#     service_event.query:
+#       primary_system_key: xsy_prod
+#     service_event.statistics:
+#       primary_system_key: xsy_prod
+#     service_event.anomaly:
+#       primary_system_key: xsy_prod
+#     xsy.report:
+#       primary_system_key: xsy_prod
+#     todo_stats.get:
+#       primary_system_key: sms
+#     abnormal.list:
+#       primary_system_key: sms
+#     abnormal.detail:
+#       primary_system_key: sms
+#     health.assessment:
+#       primary_system_key: sms
+#     health.anomaly_statistics:
+#       primary_system_key: sms
+#     health.risk_ranking:
+#       primary_system_key: sms

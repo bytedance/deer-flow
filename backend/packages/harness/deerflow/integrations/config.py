@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class RetryPolicy(BaseModel):
@@ -128,7 +128,7 @@ class CapabilityRouteConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_no_overlap(self) -> "CapabilityRouteConfig":
+    def validate_no_overlap(self) -> CapabilityRouteConfig:
         """Ensure enrich and fallback don't overlap."""
         overlap = set(self.enrich_system_keys) & set(self.fallback_system_keys)
         if overlap:
@@ -241,7 +241,7 @@ class IntegrationsConfig(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def validate_route_systems(self) -> "IntegrationsConfig":
+    def validate_route_systems(self) -> IntegrationsConfig:
         """Ensure all routes reference known systems."""
         system_keys = set(self.systems.keys())
         for route_key, route in self.routes.items():

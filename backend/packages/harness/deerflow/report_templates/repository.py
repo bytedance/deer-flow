@@ -36,15 +36,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
-
-import re
+from typing import Any
 
 import yaml
 
@@ -56,7 +56,6 @@ from deerflow.report_templates.records import (
     TemplateIndex,
     TemplateStatus,
     Visibility,
-    new_report_run_id,
     new_template_id,
     now_iso,
     validate_report_run_id,
@@ -130,15 +129,15 @@ class Scope:
     tenant_id: str | None = None
 
     @staticmethod
-    def private(user_id: str) -> "Scope":
+    def private(user_id: str) -> Scope:
         return Scope("private", user_id=validate_user_tenant_id(user_id))
 
     @staticmethod
-    def tenant(tenant_id: str) -> "Scope":
+    def tenant(tenant_id: str) -> Scope:
         return Scope("tenant", tenant_id=validate_user_tenant_id(tenant_id))
 
     @staticmethod
-    def builtin() -> "Scope":
+    def builtin() -> Scope:
         return Scope("builtin")
 
 
@@ -683,7 +682,7 @@ class FileSystemReportTemplateRepository:
         if not metadata_path.exists():
             return None
         try:
-            with open(metadata_path, "r", encoding="utf-8") as f:
+            with open(metadata_path, encoding="utf-8") as f:
                 meta = yaml.safe_load(f)
         except Exception:
             return None

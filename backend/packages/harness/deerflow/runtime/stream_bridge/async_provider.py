@@ -40,7 +40,7 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
     if config is None or config.type == "memory":
         from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
-        maxsize = config.queue_maxsize if config is not None else 256
+        maxsize = config.queue_maxsize if config is not None else 1024
         bridge = MemoryStreamBridge(queue_maxsize=maxsize)
         logger.info("Stream bridge initialised: memory (queue_maxsize=%d)", maxsize)
         try:
@@ -50,6 +50,24 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         return
 
     if config.type == "redis":
-        raise NotImplementedError("Redis stream bridge planned for Phase 2")
+        if not config.redis_url:
+            raise ValueError("stream_bridge.redis_url is required when type='redis'")
+
+        from deerflow.runtime.stream_bridge.redis_bridge import RedisStreamBridge
+
+        bridge = RedisStreamBridge(
+            redis_url=config.redis_url,
+            queue_maxsize=config.queue_maxsize,
+        )
+        logger.info(
+            "Stream bridge initialised: redis (url=%s, queue_maxsize=%d)",
+            config.redis_url,
+            config.queue_maxsize,
+        )
+        try:
+            yield bridge
+        finally:
+            await bridge.close()
+        return
 
     raise ValueError(f"Unknown stream bridge type: {config.type!r}")

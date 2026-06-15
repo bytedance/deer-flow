@@ -291,6 +291,10 @@ http_connectors:
       max_response_bytes: 524288
       cache_ttl_seconds: 300
       max_retries: 1
+stream_bridge:
+  type: memory
+  redis_url: ''
+  queue_maxsize: 1024
 rate_limit:
   enabled: false
   backend: memory

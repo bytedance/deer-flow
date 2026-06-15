@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -68,6 +68,8 @@ class IndexJobRepository:
         error: str | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
+        worker_id: str | None = None,
+        retry_count: int | None = None,
     ) -> None:
         updates: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if new_chunk_ids is not None:
@@ -78,10 +80,85 @@ class IndexJobRepository:
             updates["started_at"] = started_at
         if finished_at is not None:
             updates["finished_at"] = finished_at
+        if worker_id is not None:
+            updates["worker_id"] = worker_id
+        if retry_count is not None:
+            updates["retry_count"] = retry_count
         async with self._sf() as session:
             stmt = update(IndexJobRow).where(IndexJobRow.id == job_id).values(**updates)
             await session.execute(stmt)
             await session.commit()
+
+    async def claim_job(self, worker_id: str) -> dict[str, Any] | None:
+        """Claim the oldest pending job for *worker_id* using FOR UPDATE SKIP LOCKED.
+
+        Returns the claimed job dict, or None if no pending job is available.
+        """
+        async with self._sf() as session:
+            stmt = (
+                select(IndexJobRow)
+                .where(IndexJobRow.status == "pending")
+                .order_by(IndexJobRow.created_at.asc())
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            now = datetime.now(UTC)
+            row.status = "running"
+            row.worker_id = worker_id
+            row.started_at = now
+            row.updated_at = now
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_dict(row)
+
+    async def reclaim_stale_jobs(
+        self,
+        *,
+        timeout_seconds: int,
+        max_retries: int,
+    ) -> int:
+        """Reset running jobs that have exceeded *timeout_seconds*.
+
+        Jobs whose ``retry_count`` would exceed *max_retries* after increment
+        are marked ``failed`` instead of being reset to ``pending``.
+
+        Returns the number of jobs reclaimed (reset + failed).
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=timeout_seconds)
+        reclaimed = 0
+
+        async with self._sf() as session:
+            stmt = (
+                select(IndexJobRow)
+                .where(
+                    IndexJobRow.status == "running",
+                    IndexJobRow.started_at.isnot(None),
+                    IndexJobRow.started_at < cutoff,
+                )
+            )
+            result = await session.execute(stmt)
+            stale_rows = result.scalars().all()
+
+            now = datetime.now(UTC)
+            for row in stale_rows:
+                if row.retry_count >= max_retries:
+                    row.status = "failed"
+                    row.error = f"exceeded max retries ({max_retries})"
+                    row.finished_at = now
+                else:
+                    row.status = "pending"
+                    row.worker_id = None
+                    row.started_at = None
+                    row.retry_count = row.retry_count + 1
+                row.updated_at = now
+                reclaimed += 1
+
+            await session.commit()
+        return reclaimed
 
     async def list_by_document(
         self,
@@ -125,7 +202,7 @@ class IndexJobRepository:
             )
             by_status = dict((await session.execute(by_status_stmt)).all())
 
-            now = datetime.now(UTC)
+            datetime.now(UTC)
             recent_stmt = (
                 select(IndexJobRow)
                 .where(IndexJobRow.knowledge_base_id == kb_id)

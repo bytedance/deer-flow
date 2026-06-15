@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -11,8 +11,8 @@ from app.gateway.auth.dependencies import CurrentUser, require_admin
 from app.gateway.auth.models import UserResponse
 from app.gateway.deps import get_local_provider, get_tenant_store, get_thread_store
 from deerflow.config.tenant_storage import TenantConfig
-from deerflow.content_safety.log_storage import AuditLogEntry, AuditLogStorage
-from deerflow.cost.storage import UsageStorage, get_usage_storage
+from deerflow.content_safety.log_storage import AuditLogStorage
+from deerflow.cost.storage import get_usage_storage
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -172,11 +172,11 @@ async def _get_thread_counts(request: Request) -> dict[str, int]:
 @router.get("/stats", response_model=AdminStatsResponse)
 async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_admin)) -> AdminStatsResponse:
     """Get system overview statistics (admin only)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     scope_tenant_id = _resolve_scope_tenant_id(user)
 
     today_records = _get_cross_tenant_records(start_date=today)
-    month_records = _get_cross_tenant_records(start_date=datetime.now(timezone.utc).strftime("%Y-%m") + "-01")
+    month_records = _get_cross_tenant_records(start_date=datetime.now(UTC).strftime("%Y-%m") + "-01")
     today_records = _filter_records_by_tenant(today_records, scope_tenant_id)
     month_records = _filter_records_by_tenant(month_records, scope_tenant_id)
 
@@ -210,8 +210,8 @@ async def get_admin_stats(request: Request, user: CurrentUser = Depends(require_
 @router.get("/tenants", response_model=list[TenantSummary])
 async def list_tenants(request: Request, user: CurrentUser = Depends(require_admin)) -> list[TenantSummary]:
     """List all registered tenants with usage data (admin only)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    month_start = datetime.now(timezone.utc).strftime("%Y-%m") + "-01"
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    month_start = datetime.now(UTC).strftime("%Y-%m") + "-01"
     scope_tenant_id = _resolve_scope_tenant_id(user)
 
     today_records = _get_cross_tenant_records(start_date=today)

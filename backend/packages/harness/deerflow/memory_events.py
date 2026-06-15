@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class MemoryEventBus:
                     message = await asyncio.wait_for(queue.get(), timeout=30.0)
                     payload = json.dumps(message["data"], default=str, ensure_ascii=False)
                     yield f"event: {message['event']}\ndata: {payload}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield "event: heartbeat\ndata: {}\n\n"
         except asyncio.CancelledError:
             pass

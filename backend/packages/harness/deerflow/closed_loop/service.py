@@ -28,8 +28,6 @@ from deerflow.closed_loop.permissions import CLOSURE_READ, CLOSURE_VERIFY, CLOSU
 from deerflow.closed_loop.repository import ClosureRepository
 from deerflow.closed_loop.schemas import (
     ClosureMetadata,
-    ClosurePriority,
-    ClosureSourceType,
     CreateTicketRequest,
     ListTicketsFilter,
     NotificationsSummary,

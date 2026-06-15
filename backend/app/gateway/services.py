@@ -19,6 +19,10 @@ from langchain_core.messages import HumanMessage
 
 from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge, get_tenant_store
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.auth_config import get_auth_config
+from deerflow.config.cost_config import get_cost_config
+from deerflow.config.tenant import get_current_tenant_id
+from deerflow.cost.storage import get_usage_storage
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -31,12 +35,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
-from deerflow.config.auth_config import get_auth_config
-from deerflow.config.tenant import get_current_tenant_id
 from deerflow.runtime.user_context import get_effective_user_id, get_effective_username
-from deerflow.cost.storage import UsageStorage, get_usage_storage
-from deerflow.cost.budget import BudgetChecker
-from deerflow.config.cost_config import get_cost_config
 
 logger = logging.getLogger(__name__)
 
@@ -519,7 +518,10 @@ async def sse_consumer(
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
-            yield format_sse(entry.event, entry.data, event_id=entry.id or None)
+            payload = entry.data
+            if isinstance(payload, dict) and entry.sequence:
+                payload = {**payload, "_seq": entry.sequence}
+            yield format_sse(entry.event, payload, event_id=entry.id or None)
 
     finally:
         if record.status in (RunStatus.pending, RunStatus.running):
