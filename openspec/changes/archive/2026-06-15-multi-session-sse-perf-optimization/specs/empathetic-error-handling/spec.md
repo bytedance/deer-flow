@@ -1,22 +1,4 @@
-# empathetic-error-handling Specification
-
-## Purpose
-TBD - created by archiving change personal-assistant-ux. Update Purpose after archive.
-## Requirements
-### Requirement: Error category mapping in backend
-The `LLMErrorHandlingMiddleware` SHALL map technical errors to user-friendly error categories before they reach the assistant. The categories SHALL be: `network_issue`, `timeout`, `service_unavailable`, `data_not_found`, `permission_denied`, `rate_limited`.
-
-#### Scenario: Network error mapped to category
-- **WHEN** an LLM provider call fails with a connection error or DNS resolution failure
-- **THEN** the error ToolMessage SHALL include `error_category: "network_issue"` and a suggested next action
-
-#### Scenario: Timeout error mapped to category
-- **WHEN** an LLM provider call exceeds its timeout threshold
-- **THEN** the error ToolMessage SHALL include `error_category: "timeout"` and a suggested next action ("请稍等一下再试，或者缩小分析的时间范围")
-
-#### Scenario: Unknown error mapped to generic category
-- **WHEN** an error does not match any known category
-- **THEN** the error ToolMessage SHALL include `error_category: "service_unavailable"` with a generic empathetic message
+## MODIFIED Requirements
 
 ### Requirement: Empathetic error messages in frontend
 
@@ -63,11 +45,3 @@ The frontend SHALL display user-friendly, empathetic error messages instead of r
 - **THEN** upon the user returning to the thread, the system SHALL detect `thread.status` is terminal (`completed` or `error`)
 - **AND** execute `onFinish`-equivalent finalization: fetch complete state, append messages, invalidate sidebar queries
 - **AND** if the run ended with an error, display the error inline (not as toast) following the empathetic error display rules
-
-### Requirement: Error messages do not blame the user
-All error message templates SHALL use language that takes responsibility ("我们遇到了一些问题") rather than blaming the user ("您的操作有误").
-
-#### Scenario: Permission error phrasing
-- **WHEN** the user lacks permission for an operation
-- **THEN** the error message SHALL say "这个功能目前还没有开放给您，需要联系管理员开通" rather than "权限不足" or "Access denied"
-
