@@ -2,6 +2,12 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import type { AgentThread, AgentThreadContext } from "./types";
 
+export type ChannelThreadSource = {
+  type: "im_channel";
+  provider: string;
+  label: string;
+};
+
 type ThreadRouteTarget =
   | string
   | {
@@ -48,4 +54,43 @@ export function textOfMessage(message: Message) {
 
 export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
+}
+
+const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
+  dingtalk: "DingTalk",
+  discord: "Discord",
+  feishu: "Feishu",
+  slack: "Slack",
+  telegram: "Telegram",
+  wechat: "WeChat",
+  wecom: "WeCom",
+};
+
+function labelOfChannelProvider(provider: string) {
+  return CHANNEL_PROVIDER_LABELS[provider] ?? provider;
+}
+
+export function channelSourceOfThread(
+  thread: Pick<AgentThread, "metadata">,
+): ChannelThreadSource | null {
+  const source = thread.metadata?.channel_source;
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return null;
+  }
+
+  if (Reflect.get(source, "type") !== "im_channel") {
+    return null;
+  }
+
+  const provider = Reflect.get(source, "provider");
+  if (typeof provider !== "string" || provider.trim().length === 0) {
+    return null;
+  }
+
+  const normalizedProvider = provider.trim().toLowerCase();
+  return {
+    type: "im_channel",
+    provider: normalizedProvider,
+    label: labelOfChannelProvider(normalizedProvider),
+  };
 }

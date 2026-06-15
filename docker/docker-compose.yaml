@@ -14,7 +14,7 @@
 #   DEER_FLOW_CONFIG_PATH            — path to config.yaml
 #   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
 #   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
-#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path, default /var/run/docker.sock
+#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
@@ -117,7 +117,12 @@ services:
       #- ../skills:/app/skills:ro
       - ../skills:/app/skills
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
-      # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
+# raidery fork deviation: upstream moved these mounts to opt-in overlays
+# (docker-compose.dood.yaml / docker-compose.cli-auth.yaml, see upstream
+# commits 5d61718c / 474c89ba). We keep them inline because DooD +
+# Claude CLI auto-auth are core dev workflow here. Revisit if the
+# opt-in pattern lands cleanly via scripts/deploy.sh.
+# DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
       # ~/.claude.json — claude CLI 凭证 / session state (JSON 文件)

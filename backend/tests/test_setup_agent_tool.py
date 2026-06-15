@@ -148,3 +148,58 @@ class TestSetupAgentNoDataLoss:
         default_dir = tmp_path / "users" / "default" / "agents" / "test-agent"
         assert (expected_dir / "SOUL.md").read_text() == "# My Agent"
         assert not default_dir.exists()
+
+
+# --- Empty soul guard tests  ---
+
+
+class TestSetupAgentEmptySoulGuard:
+    """The tool must refuse to persist an empty / whitespace-only SOUL.md and
+    must not touch the filesystem at all, so an existing SOUL.md (per-agent or
+    global default) cannot be silently overwritten with empty content.
+    """
+
+    def test_empty_soul_returns_error_and_does_not_write(self, tmp_path: Path):
+        result = _call_setup_agent(tmp_path, soul="", description="desc")
+
+        messages = result.update["messages"]
+        assert len(messages) == 1
+        assert "soul content is empty" in messages[0].content
+        assert "created_agent_name" not in result.update
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
+        assert not agent_dir.exists()
+
+    def test_whitespace_only_soul_returns_error_and_does_not_write(self, tmp_path: Path):
+        result = _call_setup_agent(tmp_path, soul="   \n\t  ", description="desc")
+
+        messages = result.update["messages"]
+        assert len(messages) == 1
+        assert "soul content is empty" in messages[0].content
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
+        assert not agent_dir.exists()
+
+    def test_empty_soul_does_not_overwrite_existing_global_soul(self, tmp_path: Path):
+        """If agent_name resolution would have fallen back to base_dir, an
+        empty soul must not clobber a pre-existing global SOUL.md.
+        """
+        global_soul = tmp_path / "SOUL.md"
+        global_soul.write_text("original global soul", encoding="utf-8")
+
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+            setup_agent.func(
+                soul="",
+                description="desc",
+                runtime=_DummyRuntime(context={"agent_name": None}, tool_call_id="tool-empty"),
+            )
+
+        assert global_soul.read_text(encoding="utf-8") == "original global soul"
+
+    def test_empty_soul_does_not_overwrite_existing_per_agent_soul(self, tmp_path: Path):
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
+        agent_dir.mkdir(parents=True)
+        existing_soul = agent_dir / "SOUL.md"
+        existing_soul.write_text("original per-agent soul", encoding="utf-8")
+
+        _call_setup_agent(tmp_path, soul="   ", description="desc")
+
+        assert existing_soul.read_text(encoding="utf-8") == "original per-agent soul"
