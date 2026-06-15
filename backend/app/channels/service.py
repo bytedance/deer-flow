@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
@@ -64,8 +65,7 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     merge_runtime_channel_configs(channels_config, connection_config)
 
 
-def _make_connection_repo(app_config: AppConfig):
-    connection_config = getattr(app_config, "channel_connections", None)
+def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
 
@@ -137,7 +137,7 @@ class ChannelService:
         require_bound_identity = bool(connection_config is not None and getattr(connection_config, "enabled", False) and getattr(connection_config, "require_bound_identity", True))
         return cls(
             channels_config=channels_config,
-            connection_repo=_make_connection_repo(app_config),
+            connection_repo=_make_connection_repo(connection_config),
             require_bound_identity=require_bound_identity,
         )
 
