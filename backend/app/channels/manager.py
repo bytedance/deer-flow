@@ -56,6 +56,7 @@ STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
+WORKSPACE_OPTIONAL_CONNECTION_PROVIDERS = {"dingtalk", "discord", "wecom"}
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -921,51 +922,80 @@ class ChannelManager:
 
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
-        if msg.msg_type != InboundMessageType.COMMAND and self._requires_bound_identity(msg):
-            await self._reject_unbound_channel_message(msg)
-            return
+        try:
+            if msg.msg_type != InboundMessageType.COMMAND and await self._requires_bound_identity(msg):
+                await self._reject_unbound_channel_message(msg)
+                return
 
-        async with self._semaphore:
-            try:
+            async with self._semaphore:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg)
-            except InvalidChannelSessionConfigError as exc:
-                logger.warning(
-                    "Invalid channel session config for %s (chat=%s): %s",
-                    msg.channel_name,
-                    msg.chat_id,
-                    exc,
-                )
-                await self._send_error(msg, str(exc))
-            except SlashSkillCommandResolutionError as exc:
-                logger.warning(
-                    "Slash skill command resolution failed for %s (chat=%s): %s",
-                    msg.channel_name,
-                    msg.chat_id,
-                    exc,
-                )
-                await self._send_error(msg, str(exc))
-            except Exception:
-                logger.exception(
-                    "Error handling message from %s (chat=%s)",
-                    msg.channel_name,
-                    msg.chat_id,
-                )
-                await self._send_error(msg, "An internal error occurred. Please try again.")
+        except InvalidChannelSessionConfigError as exc:
+            logger.warning(
+                "Invalid channel session config for %s (chat=%s): %s",
+                msg.channel_name,
+                msg.chat_id,
+                exc,
+            )
+            await self._send_error(msg, str(exc))
+        except SlashSkillCommandResolutionError as exc:
+            logger.warning(
+                "Slash skill command resolution failed for %s (chat=%s): %s",
+                msg.channel_name,
+                msg.chat_id,
+                exc,
+            )
+            await self._send_error(msg, str(exc))
+        except Exception:
+            logger.exception(
+                "Error handling message from %s (chat=%s)",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
 
-    def _requires_bound_identity(self, msg: InboundMessage) -> bool:
+    def _bound_identity_workspace_candidates(self, msg: InboundMessage) -> list[str | None]:
+        workspace_candidates: list[str | None] = [msg.workspace_id or None]
+        if msg.channel_name in WORKSPACE_OPTIONAL_CONNECTION_PROVIDERS and workspace_candidates[0] is not None:
+            workspace_candidates.append(None)
+        return workspace_candidates
+
+    async def _has_verified_bound_identity(self, msg: InboundMessage) -> bool:
+        has_connection = bool(msg.connection_id)
+        has_owner = bool(msg.owner_user_id)
+        if not (has_connection and has_owner):
+            return False
+        if self._connection_repo is None:
+            return False
+
+        # The manager is the run-creation security boundary, so it does not
+        # trust mutable InboundMessage identity fields by themselves. Re-read
+        # the binding by provider identity and require it to match the asserted
+        # connection owner before creating DeerFlow threads or runs.
+        for workspace_id in self._bound_identity_workspace_candidates(msg):
+            connection = await self._connection_repo.find_connection_by_external_identity(
+                provider=msg.channel_name,
+                external_account_id=msg.user_id,
+                workspace_id=workspace_id,
+            )
+            if connection is None:
+                continue
+            if connection.get("id") == msg.connection_id and connection.get("owner_user_id") == msg.owner_user_id:
+                return True
+
+        return False
+
+    async def _requires_bound_identity(self, msg: InboundMessage) -> bool:
         if not self._require_bound_identity:
             return False
         if _auth_disabled_owner_user_id():
             return False
 
-        has_connection = bool(msg.connection_id)
-        has_owner = bool(msg.owner_user_id)
-        return not (has_connection and has_owner)
+        return not await self._has_verified_bound_identity(msg)
 
     async def _reject_unbound_channel_message(self, msg: InboundMessage) -> None:
         logger.info(
@@ -976,7 +1006,7 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=await self._lookup_thread_id(msg) or "",
+            thread_id="",
             text=BOUND_IDENTITY_REQUIRED_MESSAGE,
             thread_ts=msg.thread_ts,
             metadata=_slim_metadata(msg.metadata),
@@ -1045,7 +1075,7 @@ class ChannelManager:
         self._channel_metadata_synced.add(thread_id)
 
     async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
-        if self._requires_bound_identity(msg):
+        if await self._requires_bound_identity(msg):
             await self._reject_unbound_channel_message(msg)
             return
 
