@@ -2580,11 +2580,7 @@ class _BoundIdentityRepo:
             }
         )
         for connection in self.connections:
-            if (
-                connection.get("provider") == provider
-                and connection.get("external_account_id") == external_account_id
-                and connection.get("workspace_id") == workspace_id
-            ):
+            if connection.get("provider") == provider and connection.get("external_account_id") == external_account_id and connection.get("workspace_id") == workspace_id:
                 return connection
         return None
 
