@@ -155,9 +155,10 @@ export function sanitizeProps(
 
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(props)) {
-    if (allowedKeys.has(key)) {
-      sanitized[key] = sanitizeValue(value);
-    }
+    if (!allowedKeys.has(key)) continue;
+    const cleaned = sanitizeValue(value);
+    if (cleaned === null) continue;
+    sanitized[key] = cleaned;
   }
 
   if (component === "form" && Array.isArray(sanitized.fields)) {
