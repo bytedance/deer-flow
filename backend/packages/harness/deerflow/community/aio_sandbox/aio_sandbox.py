@@ -138,8 +138,16 @@ class AioSandbox(Sandbox):
                     # before we target it on retry.
                     fresh_id = str(uuid.uuid4())
                     self._client.shell.create_session(id=fresh_id)
-                    result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                    output = result.data.output if result.data else ""
+                    try:
+                        result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                        output = result.data.output if result.data else ""
+                    finally:
+                        # Release the one-shot recovery session, best-effort, so
+                        # repeated corruption can't accumulate sessions.
+                        try:
+                            self._client.shell.cleanup_session(fresh_id)
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to release recovery session {fresh_id}: {cleanup_error}")
 
                 return output if output else "(no output)"
             except Exception as e:

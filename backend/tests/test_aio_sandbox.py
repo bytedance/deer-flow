@@ -91,6 +91,7 @@ class TestErrorObservationRetry:
         """
         exec_calls = []
         created_ids = []
+        cleaned_ids = []
 
         def mock_exec(command, **kwargs):
             exec_calls.append(kwargs)
@@ -102,8 +103,12 @@ class TestErrorObservationRetry:
             created_ids.append(id)
             return SimpleNamespace(data=SimpleNamespace(session_id=id))
 
+        def mock_cleanup_session(session_id, **kwargs):
+            cleaned_ids.append(session_id)
+
         sandbox._client.shell.exec_command = mock_exec
         sandbox._client.shell.create_session = mock_create_session
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
 
         result = sandbox.execute_command("test")
 
@@ -117,6 +122,28 @@ class TestErrorObservationRetry:
         # ...and the retry targets exactly that created session, never an
         # uncreated/fabricated id (which would 404).
         assert exec_calls[1].get("id") == created_ids[0]
+        # ...and that one-shot recovery session is released afterwards so a
+        # sandbox that keeps hitting corruption doesn't accumulate sessions.
+        assert cleaned_ids == [created_ids[0]]
+
+    def test_cleanup_failure_does_not_mask_successful_retry(self, sandbox):
+        """A failure releasing the recovery session must not lose the retry output."""
+
+        def mock_exec(command, **kwargs):
+            if "id" not in kwargs:
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
+            return SimpleNamespace(data=SimpleNamespace(output="recovered"))
+
+        def mock_cleanup_session(session_id, **kwargs):
+            raise RuntimeError("cleanup boom")
+
+        sandbox._client.shell.exec_command = mock_exec
+        sandbox._client.shell.create_session = lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
+
+        # The retry succeeded; the swallowed cleanup error must not turn this
+        # into an "Error: ..." result.
+        assert sandbox.execute_command("test") == "recovered"
 
     def test_no_retry_on_clean_output(self, sandbox):
         """Normal output should not trigger a retry."""
