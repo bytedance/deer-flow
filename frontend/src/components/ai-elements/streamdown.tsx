@@ -5,7 +5,7 @@ import { Streamdown } from "streamdown";
 
 import { installClipboardFallback } from "@/core/clipboard";
 import {
-  capBlockquoteNesting,
+  capMarkdownNesting,
   normalizeStreamdownMathMarkdown,
 } from "@/core/streamdown/preprocess";
 
@@ -62,13 +62,16 @@ export function ClipboardSafeStreamdown({
   parseIncompleteMarkdown,
   ...props
 }: ClipboardSafeStreamdownProps) {
-  // Fast path for the dominant pathological input (pure ">" chains) so the
-  // error boundary below rarely has to absorb a full stack overflow.
+  // Fast path for the dominant pathological inputs (deep ">" chains and deeply
+  // nested lists both blow up marked's recursive tokenizers) so the error
+  // boundary below rarely has to absorb a stack overflow — and never has to
+  // face the heap exhaustion the same lists cause on larger stacks, which it
+  // cannot catch.
   const safeChildren = useMemo(() => {
     if (typeof children !== "string") {
       return children;
     }
-    return normalizeStreamdownMathMarkdown(capBlockquoteNesting(children));
+    return normalizeStreamdownMathMarkdown(capMarkdownNesting(children));
   }, [children]);
   return (
     <StreamdownFallbackBoundary raw={children}>
