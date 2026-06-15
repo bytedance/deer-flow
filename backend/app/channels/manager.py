@@ -55,7 +55,7 @@ STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
-BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings first, then send your message again."
+BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -921,6 +921,10 @@ class ChannelManager:
 
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
+        if msg.msg_type != InboundMessageType.COMMAND and self._requires_bound_identity(msg):
+            await self._reject_unbound_channel_message(msg)
+            return
+
         async with self._semaphore:
             try:
                 if msg.msg_type == InboundMessageType.COMMAND:

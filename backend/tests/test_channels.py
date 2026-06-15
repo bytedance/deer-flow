@@ -2601,6 +2601,45 @@ class TestChannelManagerBoundIdentityPolicy:
 
         _run(go())
 
+    def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            assert manager._semaphore is not None
+            await manager._semaphore.acquire()
+            try:
+                await asyncio.wait_for(
+                    manager._handle_message(
+                        InboundMessage(
+                            channel_name="slack",
+                            chat_id="C123",
+                            user_id="U-platform",
+                            text="hi",
+                        )
+                    ),
+                    timeout=0.5,
+                )
+            finally:
+                manager._semaphore.release()
+                await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+
+        _run(go())
+
     def test_bound_auth_enabled_chat_is_allowed_when_bound_identity_is_required(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
