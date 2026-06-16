@@ -179,7 +179,7 @@ When the scope has multiple artifacts, cluster before reviewing and synthesize a
 
 Cluster by relatedness, not by type. Group artifacts that share files, interfaces, or the same issue/feature into one cluster; same-type artifacts that touch disjoint files are independent.
 
-- Related cluster: review in ONE shared context so cross-artifact reasoning is possible. Parallel agents cannot see each other's findings, so never split a related cluster across parallel agents.
+- Related cluster: review in ONE shared context so cross-artifact reasoning is possible — parallel agents cannot see each other's findings. If it cannot fit one context, fan out per sub-group and reconcile in the synthesis pass; never split it blind, without that re-aggregation.
 - Independent clusters: may run in parallel. Offloading a large or independent batch to one subagent per cluster keeps the main context clean — consider it for big batches, prefer offering it to the maintainer over silently spawning, and do not spawn for two or three related items or when the cold-start cost is not earned.
 
 After per-artifact review, run one synthesis pass over the whole batch and report it to the maintainer (decision-support, not a public comment):
