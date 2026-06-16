@@ -96,10 +96,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       }
     } catch (err) {
       console.error("Failed to refresh user:", err);
-      // Don't clear EHM user on network errors
-      if (!hasEhmCookie()) {
-        setUser(null);
-      }
+      // Keep the last known user on transient network errors; only a confirmed
+      // 401 should clear the session UI state.
     } finally {
       setIsLoading(false);
     }

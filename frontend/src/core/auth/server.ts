@@ -6,6 +6,21 @@ import { getServerEhmToken, getServerEhmUser } from "./ehm-auth";
 
 const SSR_AUTH_TIMEOUT_MS = 5_000;
 
+function buildGatewayCookieHeader(cookieStore: {
+  get(name: string): { value: string } | undefined;
+}): string | null {
+  const accessToken = cookieStore.get("access_token")?.value;
+  if (!accessToken) return null;
+
+  const cookieParts = [`access_token=${accessToken}`];
+  const refreshToken = cookieStore.get("refresh_token")?.value;
+  if (refreshToken) {
+    cookieParts.push(`refresh_token=${refreshToken}`);
+  }
+
+  return cookieParts.join("; ");
+}
+
 /**
  * Fetch the authenticated user from the gateway using the request's cookies.
  * Returns a tagged AuthResult — callers use exhaustive switch, no try/catch.
@@ -36,7 +51,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
     }
   }
 
-  const sessionCookie = cookieStore.get("access_token");
+  const gatewayCookieHeader = buildGatewayCookieHeader(cookieStore);
 
   let internalGatewayUrl: string;
   try {
@@ -45,7 +60,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
     return { tag: "config_error", message: String(err) };
   }
 
-  if (!sessionCookie) {
+  if (!gatewayCookieHeader) {
     return { tag: "unauthenticated" };
   }
 
@@ -54,7 +69,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
 
   try {
     const res = await fetch(`${internalGatewayUrl}/api/v1/auth/me`, {
-      headers: { Cookie: `access_token=${sessionCookie.value}` },
+      headers: { Cookie: gatewayCookieHeader },
       cache: "no-store",
       signal: controller.signal,
     });

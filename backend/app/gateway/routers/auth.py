@@ -26,6 +26,28 @@ class RefreshResponse(BaseModel):
     message: str = "Token refreshed"
 
 
+def _build_user_response(user: object) -> UserResponse:
+    """Convert an authenticated principal into the public user payload."""
+    user_data = getattr(user, "ins_base_user_data", {}) or {}
+
+    user_id = str(user_data.get("userId", getattr(user, "id", "")))
+    user_name = str(
+        user_data.get("userName", getattr(user, "user_name", "")) or ""
+    )
+    real_name = str(
+        user_data.get("realName", getattr(user, "real_name", "")) or ""
+    )
+
+    return UserResponse(
+        id=user_id,
+        email=str(getattr(user, "email", "")),
+        system_role=getattr(user, "system_role", "user"),
+        tenant_id=str(getattr(user, "tenant_id", "default")),
+        user_name=user_name,
+        real_name=real_name,
+    )
+
+
 def _set_session_cookie(response: Response, token_value: str, request: Request) -> None:
     """Set the access_token HttpOnly cookie on the response."""
     from deerflow.config.auth_config import get_auth_config
@@ -127,9 +149,14 @@ async def refresh(request: Request, response: Response):
 async def get_me(request: Request):
     """Get current authenticated user info from the ins-base token.
 
-    Reads the ``access_token`` cookie, validates it against ins-base-rpc,
-    and returns the user profile.
+    Reuses the authenticated principal populated by middleware when present.
+    Falls back to validating the ``access_token`` cookie against ins-base-rpc
+    only when middleware has not already attached a user object.
     """
+    state_user = getattr(request.state, "user", None)
+    if state_user is not None:
+        return _build_user_response(state_user)
+
     access_token = request.cookies.get("access_token")
     if not access_token:
         raise HTTPException(
@@ -162,16 +189,4 @@ async def get_me(request: Request):
             ).model_dump(),
         )
 
-    user_data = getattr(user, "ins_base_user_data", {})
-    user_id = str(user_data.get("userId", user.id))
-    user_name = str(user_data.get("userName", ""))
-    real_name = str(user_data.get("realName", ""))
-
-    return UserResponse(
-        id=user_id,
-        email=user.email,
-        system_role=user.system_role,
-        tenant_id=user.tenant_id,
-        user_name=user_name,
-        real_name=real_name,
-    )
+    return _build_user_response(user)

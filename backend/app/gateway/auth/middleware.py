@@ -239,6 +239,7 @@ def create_auth_middleware():
 
                         if user is not None:
                             tenant_id = getattr(user, "tenant_id", "default")
+                            user_data = getattr(user, "ins_base_user_data", {}) or {}
                             try:
                                 validate_tenant_id(tenant_id)
                             except ValueError as e:
@@ -250,8 +251,12 @@ def create_auth_middleware():
                             request.state.user = _UserState({
                                 "id": getattr(user, "id", tenant_id),
                                 "username": getattr(user, "email", "ins-base-user"),
+                                "email": getattr(user, "email", ""),
                                 "tenant_id": tenant_id,
                                 "role": getattr(user, "system_role", "member"),
+                                "user_name": str(user_data.get("userName", "")),
+                                "real_name": str(user_data.get("realName", "")),
+                                "ins_base_user_data": user_data,
                                 "auth_method": "ins_base",
                                 "ins_base_token": access_token,
                             })
