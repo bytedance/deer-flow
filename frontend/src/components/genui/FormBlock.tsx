@@ -22,7 +22,7 @@ interface FormFieldOption {
 
 interface FormField {
   name: string;
-  type: "text" | "number" | "email" | "password" | "textarea" | "select" | "checkbox" | "radio" | "date" | "multi-select";
+  type: "text" | "number" | "email" | "password" | "textarea" | "select" | "checkbox" | "radio" | "date" | "month" | "multi-select";
   label: string;
   placeholder?: string;
   required?: boolean;

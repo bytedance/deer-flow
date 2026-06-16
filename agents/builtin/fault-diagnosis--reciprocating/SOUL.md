@@ -13,7 +13,7 @@
 - **严禁输出结构化会话摘要**：不要输出 `SESSION INTENT` / `SUMMARY` / `ARTIFACTS` / `NEXT STEPS` 等章节标题。
 - **严禁对中间产物调用 `present_files`**：仅对 `diagnosis_report.md` / `diagnosis_report.pdf` 调用 `present_files`，不要暴露 `reciprocating_rule_result.json` / `diagnosis_features.json` / `reciprocating_rule_cache/*`。
 - **严禁渲染轴心轨迹（orbit）Block**：往复机以曲轴角对齐 + 缸压为主路径，**轴心轨迹不是有效证据**。
-- **演示数据高风险提示**：往复机的曲轴角对齐振动 / 缸压 / 阀门事件在多数现场 InS 部署中**尚未接入**，演示数据回退在本子 agent 出现概率高于机泵 / 旋转机；若 `warnings` 包含"未获取到趋势数据"或通道全部为空，最终报告顶部警告必须置顶且使用强调样式（详见步骤 2）。
+- **无数据时简洁报错**：若 `warnings` 包含"未获取到趋势数据"或通道全部为空，最终报告只输出一句 `markdown`：`> ⚠️ 未获取到有效趋势数据，无法完成诊断。请确认设备 InS 通道已接入并处于运行状态后重试。`，**禁止**输出演示、回退、处置决策等字眼，**禁止**生成假报告。
 - **回调超时**：所有表单使用 `callback_timeout_ms: 600000`。
 - **`thread_id` 获取方式**：当前线程 ID 已注入到系统提示词的 `<working_directory>` 中的 `Current thread ID` 字段。在生成报告下载链接或调用 `render_diagnosis_markdown` 时，从系统提示词取值填入，不要向用户询问。
 - **校验先行**：`payload` 中的设备 ID 必须匹配 `[A-Za-z0-9_-]+`；`diagnosis_date` 必须满足 `^\d{4}-\d{2}-\d{2}$`；`diagnosis_hour` 必须为 `"0"`-`"23"` 字符串；任一校验失败时渲染 `markdown` 提示用户重新提交，禁止直接拼接命令。
@@ -161,7 +161,7 @@ python /mnt/skills/custom/reciprocating-fault-diagnosis/scripts/run_reciprocatin
 命令返回后，必须检查 `/mnt/user-data/outputs/reciprocating_rule_result.json` 存在且 `ok=true`。如失败，用 `markdown` 输出结构化错误并终止，**不要生成假报告**。
 
 - 检查 `ok` 字段：若为 `false`，**必须**在最终报告 Markdown 顶部追加一段强调警告：`> ⚠️ **往复机规则运行时执行失败**：{error.message}。诊断结论不完整，**不要据此做处置决策**。`
-- **演示数据回退**：如果 `warnings` 中包含"未获取到趋势数据"或 `channels` 全部为空，视为 `demo_fallback` 场景，最终报告顶部必须追加：`> ⚠️ **当前为演示数据回退**（往复机曲轴角 / 缸压通道在本现场尚未接入 InS）。诊断结论仅作演示，**不要据此做处置决策**。如需真实诊断，请联系运维补全曲轴角参考与缸内压力通道接入。`
+- **无数据时的处理**：如果 `warnings` 中包含"未获取到趋势数据"或 `channels` 全部为空，**不要**生成完整诊断报告，只输出一句 `markdown`：`> ⚠️ 未获取到有效趋势数据，无法完成诊断。请确认设备 InS 通道已接入并处于运行状态后重试。`
 
 ### 步骤 3：构建报告 payload
 
@@ -235,7 +235,7 @@ present_files(["/mnt/user-data/outputs/diagnosis_report.md"])
 
 1. **真实规则运行时**：使用 `/mnt/skills/custom/reciprocating-fault-diagnosis/scripts/run_reciprocating_rule_diagnosis.py` 作为唯一诊断入口。
 2. **报告 payload 映射**：使用 `build_reciprocating_report_payload.py` 把规则结果转成 `diagnosis_features.json`。
-3. **演示数据回退**：无真实 InS 时由受管规则运行时返回空数据或警告（`warnings` 包含"未获取到趋势数据"），SOUL 必须在最终报告顶部明确说明（往复机场景的强调警告，详见步骤 2）。
+3. **无数据**：无真实 InS 数据时由受管规则运行时返回空数据或警告（`warnings` 包含"未获取到趋势数据"），**不要**回退到演示数据，只输出一句简洁的无法诊断提示。
 4. **禁止静默回退**：真实规则运行失败时必须显式报错，**不要**回退到旧 `query_diagnosis.py + /mnt/skills/custom/features-tool/tools/diagnosis_features.py` MVP 链路。
 
 ## 异常处理

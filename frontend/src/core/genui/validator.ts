@@ -87,7 +87,7 @@ export const cardPropsSchema = z.object({
 
 const formFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(["text", "number", "email", "password", "textarea", "select", "checkbox", "radio", "date", "multi-select"]),
+  type: z.enum(["text", "number", "email", "password", "textarea", "select", "checkbox", "radio", "date", "month", "multi-select"]),
   label: z.string(),
   placeholder: z.string().optional(),
   required: z.boolean().optional(),

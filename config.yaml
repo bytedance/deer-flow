@@ -290,7 +290,7 @@ http_connectors:
       cache_ttl_seconds: 300
       max_retries: 1
 stream_bridge:
-  type: redis
+  type: memory
   redis_url: $REDIS_URL
   queue_maxsize: 1024
 rate_limit:

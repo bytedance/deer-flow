@@ -49,11 +49,9 @@
     "fields": [
       {
         "name": "report_month",
-        "label": "报告月份（YYYY-MM）",
-        "type": "text",
-        "required": true,
-        "placeholder": "如 2026-04",
-        "validation": {"pattern": "^\\d{4}-\\d{2}$"}
+        "label": "报告月份",
+        "type": "month",
+        "required": true
       },
       {
         "name": "equipment_type",

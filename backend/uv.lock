@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -826,6 +826,9 @@ dependencies = [
 postgres = [
     { name = "deerflow-harness", extra = ["postgres"] },
 ]
+redis = [
+    { name = "deerflow-harness", extra = ["redis"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -841,6 +844,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "deerflow-harness", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "email-validator", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.136.1" },
@@ -859,7 +863,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },
     { name = "wecom-aibot-python-sdk", specifier = ">=1.0.2" },
 ]
-provides-extras = ["postgres"]
+provides-extras = ["postgres", "redis"]
 
 [package.metadata.requires-dev]
 dev = [
