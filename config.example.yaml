@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 13
+config_version: 14
 
 # ============================================================================
 # Logging
@@ -1208,6 +1208,9 @@ run_events:
 #
 # channel_connections:
 #   enabled: false
+#   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
+#   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
+#   require_bound_identity: true
 #
 #   telegram:
 #     enabled: false

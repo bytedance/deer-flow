@@ -48,6 +48,11 @@ Then enable user bindings in `channel_connections`:
 ```yaml
 channel_connections:
   enabled: true
+  # Auth-enabled deployments require ordinary IM messages to come from a
+  # connected DeerFlow user by default. Set this to false only for legacy
+  # operator-owned/open-bot deployments that intentionally route unbound
+  # platform users to platform-ID user buckets.
+  require_bound_identity: true
 
   telegram:
     enabled: true
@@ -73,6 +78,10 @@ channel_connections:
 ```
 
 `channel_connections` does not duplicate provider secrets. It only controls the browser-facing connect UI and stores per-user binding records. Telegram needs `bot_username` only so the frontend can open a deep link.
+
+When `channel_connections.enabled` and `require_bound_identity` are true, auth-enabled deployments reject ordinary unbound IM messages before creating a DeerFlow thread or run. Users must connect the channel from DeerFlow Settings first. Auth-disabled local mode still routes channel messages to the auth-disabled default user, and legacy open-bot behavior can be restored explicitly with `require_bound_identity: false`.
+
+Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
 
 ## Connect Flow
 
