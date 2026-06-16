@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers.mcp import (
     _MCP_STDIO_COMMAND_ALLOWLIST_ENV,
     McpConfigUpdateRequest,
@@ -21,6 +22,8 @@ from app.gateway.routers.mcp import (
     _merge_preserving_secrets,
     _require_admin_user,
     _validate_mcp_update_request,
+    reset_mcp_tools_cache_endpoint,
+    update_mcp_configuration,
 )
 
 # ---------------------------------------------------------------------------
@@ -337,6 +340,71 @@ async def test_mcp_config_requires_admin_user():
         await _require_admin_user(_request_with_role("user"))
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
+    called = False
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+
+    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
+
+    assert called is True
+    assert response.success is True
+    assert "next use" in response.message
+
+    with pytest.raises(HTTPException) as exc_info:
+        await reset_mcp_tools_cache_endpoint(_request_with_role("user"))
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path):
+    reset_calls = 0
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+
+    current_config = SimpleNamespace(skills={}, mcp_servers={})
+    reloaded_config = SimpleNamespace(
+        mcp_servers={
+            "github": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-github"],
+            )
+        }
+    )
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: reloaded_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+
+    response = await update_mcp_configuration(
+        _request_with_role("admin"),
+        McpConfigUpdateRequest(
+            mcp_servers={
+                "github": McpServerConfigResponse(
+                    type="stdio",
+                    command="npx",
+                    args=["-y", "@modelcontextprotocol/server-github"],
+                )
+            }
+        ),
+    )
+
+    assert reset_calls == 1
+    assert list(response.mcp_servers) == ["github"]
 
 
 def test_validate_mcp_update_allows_default_npx_stdio_command(monkeypatch):
