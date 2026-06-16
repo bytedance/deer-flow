@@ -1,0 +1,208 @@
+config_version: 13
+log_level: info
+token_usage:
+  enabled: true
+models:
+- name: minimax-m2.5
+  display_name: MiniMax M2.5 (Dashscope)
+  use: langchain_openai:ChatOpenAI
+  model: MiniMax/MiniMax-M2.5
+  api_key: sk-cbc2f7fcb3a54bc38f8782f0138cffcb
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 131072
+  temperature: 1.0
+  supports_vision: true
+  supports_thinking: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: adaptive
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+- name: minimax-m3
+  display_name: MiniMax M3 (Dashscope)
+  use: langchain_openai:ChatOpenAI
+  model: MiniMax/MiniMax-M3
+  api_key: sk-cbc2f7fcb3a54bc38f8782f0138cffcb
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 131072
+  temperature: 1.0
+  supports_vision: true
+  supports_thinking: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: adaptive
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+- name: deepseek-v4-pro
+  display_name: DeepSeek V4 Pro (Dashscope)
+  use: langchain_openai:ChatOpenAI
+  model: deepseek-v4-pro
+  api_key: sk-cbc2f7fcb3a54bc38f8782f0138cffcb
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 393216
+  temperature: 0.7
+  supports_vision: false
+  supports_thinking: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: enabled
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+- name: deepseek-v4-flash
+  display_name: DeepSeek V4 Flash (Dashscope)
+  use: langchain_openai:ChatOpenAI
+  model: deepseek-v4-flash
+  api_key: sk-cbc2f7fcb3a54bc38f8782f0138cffcb
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 393216
+  temperature: 0.7
+  supports_vision: false
+  supports_thinking: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: enabled
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+- name: glm-5.1
+  display_name: GLM 5.1 (Dashscope)
+  use: langchain_openai:ChatOpenAI
+  model: glm-5.1
+  api_key: sk-cbc2f7fcb3a54bc38f8782f0138cffcb
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  request_timeout: 600.0
+  max_retries: 2
+  max_tokens: 131072
+  temperature: 0.7
+  supports_vision: false
+  supports_thinking: true
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: enabled
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+tool_groups:
+- name: web
+- name: file:read
+- name: file:write
+- name: bash
+tools:
+- name: web_search
+  group: web
+  use: deerflow.community.ddg_search.tools:web_search_tool
+  max_results: 5
+- name: web_fetch
+  group: web
+  use: deerflow.community.jina_ai.tools:web_fetch_tool
+  timeout: 10
+- name: bash
+  group: bash
+  use: deerflow.sandbox.tools:bash_tool
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: true
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
+tool_search:
+  enabled: false
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: .tool-results
+  exempt_tools:
+  - read_file
+  - read_file_tool
+suggestions:
+  enabled: true
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  hard_limit: 5
+  window_size: 20
+  max_tracked_threads: 100
+  tool_freq_warn: 30
+  tool_freq_hard_limit: 50
+safety_finish_reason:
+  enabled: true
+uploads:
+  max_files: 10
+  max_file_size: 52428800
+  max_total_size: 104857600
+  auto_convert_documents: false
+  pdf_converter: auto
+skills:
+  container_path: /mnt/skills
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null
+summarization:
+  enabled: true
+  model_name: null
+  trigger:
+  - type: tokens
+    value: 32000
+  keep:
+    type: messages
+    value: 10
+  trim_tokens_to_summarize: 15564
+  summary_prompt: null
+  preserve_recent_skill_count: 5
+  preserve_recent_skill_tokens: 25000
+  preserve_recent_skill_tokens_per_skill: 5000
+  skill_file_read_tool_names:
+  - read_file
+  - read
+  - view
+  - cat
+memory:
+  enabled: false
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: true
+  max_injection_tokens: 2000
+  token_counting: tiktoken
+agents_api:
+  enabled: true
+skill_evolution:
+  enabled: false
+  moderation_model_name: null
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+run_events:
+  backend: memory
+  max_trace_content: 10240
+  track_token_usage: true
