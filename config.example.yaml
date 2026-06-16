@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 12
+config_version: 13
 
 # ============================================================================
 # Logging
@@ -710,6 +710,16 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
+
+# ============================================================================
+# Suggestions Configuration
+# ============================================================================
+# Configure whether the agent automatically generates follow-up question
+# suggestions at the end of each response.
+
+suggestions:
+  enabled: true
+
 
 # ============================================================================
 # Loop Detection Configuration

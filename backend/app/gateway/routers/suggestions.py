@@ -135,6 +135,8 @@ async def generate_suggestions(
     request: Request,
     config: AppConfig = Depends(get_config),
 ) -> SuggestionsResponse:
+    if not config.suggestions.enabled:
+        return SuggestionsResponse(suggestions=[])
     if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
