@@ -892,7 +892,8 @@ sandbox:
 # Subagents are background workers delegated tasks by the lead agent
 
 # subagents:
-#   # Default timeout in seconds for all subagents (default: 1800 = 30 minutes)
+#   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
+#   # Custom agents use their own timeout_seconds (default 900) unless overridden.
 #   timeout_seconds: 1800
 #   # Optional global max-turn override for all subagents.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.

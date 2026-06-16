@@ -319,7 +319,10 @@ class TestRegistryGetSubagentConfig:
         assert get_subagent_config("general-purpose") is not None
         assert get_subagent_config("bash") is not None
 
-    def test_default_timeout_preserved_when_no_config(self):
+    def test_explicit_global_timeout_propagates_to_general_purpose(self):
+        """An explicit global timeout (here the non-default 900) propagates to a
+        built-in agent, while max_turns still comes from the builtin def (150).
+        """
         from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config(timeout_seconds=900)
@@ -338,6 +341,8 @@ class TestRegistryGetSubagentConfig:
         config = get_subagent_config("general-purpose")
         assert config.max_turns == 150
         assert config.timeout_seconds == 1800
+        # Pin bash too so the config.example.yaml "bash=60" doc cannot drift.
+        assert get_subagent_config("bash").max_turns == 60
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config
