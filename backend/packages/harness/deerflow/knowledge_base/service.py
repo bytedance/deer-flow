@@ -184,6 +184,7 @@ class KnowledgeBaseService:
         if kb is None:
             raise ValueError(f"Knowledge base {kb_id} not found")
 
+        content = content.replace("\x00", "")
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc = await self._doc_repo.create(
             knowledge_base_id=kb_id,
@@ -247,6 +248,7 @@ class KnowledgeBaseService:
 
         needs_reindex = False
         if content is not None:
+            content = content.replace("\x00", "")
             new_hash = hashlib.sha256(content.encode()).hexdigest()
             if new_hash != doc["content_hash"]:
                 fields["content"] = content
@@ -378,6 +380,7 @@ class KnowledgeBaseService:
         """Create a document after verifying write permission on the KB."""
         kb = await self.check_write_permission(kb_id, user_id=user_id, tenant_id=tenant_id, role=role)
 
+        content = content.replace("\x00", "")
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         doc = await self._doc_repo.create(
             knowledge_base_id=kb_id,
@@ -453,6 +456,7 @@ class KnowledgeBaseService:
 
         needs_reindex = False
         if content is not None:
+            content = content.replace("\x00", "")
             new_hash = hashlib.sha256(content.encode()).hexdigest()
             if new_hash != doc["content_hash"]:
                 fields["content"] = content

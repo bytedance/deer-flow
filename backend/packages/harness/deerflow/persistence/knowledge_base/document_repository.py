@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.knowledge_base.model import KnowledgeBaseDocumentRow
 
 
+def _sanitize_content(content: str) -> str:
+    """Remove null bytes and other characters rejected by PostgreSQL UTF-8."""
+    return content.replace("\x00", "")
+
+
 class DocumentRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -40,6 +45,7 @@ class DocumentRepository:
     ) -> dict[str, Any]:
         doc_id = uuid4().hex
         now = datetime.now(UTC)
+        content = _sanitize_content(content)
         row = KnowledgeBaseDocumentRow(
             id=doc_id,
             knowledge_base_id=knowledge_base_id,
@@ -117,6 +123,8 @@ class DocumentRepository:
     ) -> dict[str, Any] | None:
         allowed = {"title", "content", "content_format", "content_hash", "content_length", "version", "source_name", "metadata_json"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if "content" in updates:
+            updates["content"] = _sanitize_content(updates["content"])
         if not updates:
             return await self.get(doc_id, tenant_id=tenant_id, owner_user_id=owner_user_id)
         updates["updated_at"] = datetime.now(UTC)
@@ -291,6 +299,8 @@ class DocumentRepository:
         """Update a document scoped to KB (no owner filter). Use after write permission check."""
         allowed = {"title", "content", "content_format", "content_hash", "content_length", "version", "source_name", "metadata_json"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if "content" in updates:
+            updates["content"] = _sanitize_content(updates["content"])
         if not updates:
             return await self.get_by_kb(doc_id, knowledge_base_id=knowledge_base_id)
         updates["updated_at"] = datetime.now(UTC)
