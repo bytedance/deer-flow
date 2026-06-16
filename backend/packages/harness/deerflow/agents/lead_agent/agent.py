@@ -317,6 +317,14 @@ def build_middlewares(
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # Add Headroom context compaction (non-destructive per-call message compression).
+    # Registered after summarization so it compresses the post-summary, post-budget
+    # message copy handed to the model without mutating persisted state.
+    if resolved_app_config.compaction.enabled:
+        from deerflow.agents.middlewares.compaction_middleware import HeadroomCompactionMiddleware
+
+        middlewares.append(HeadroomCompactionMiddleware.from_app_config(resolved_app_config))
+
     # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)

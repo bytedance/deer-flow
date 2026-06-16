@@ -236,6 +236,13 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
+    # Headroom context compaction — subagents read large tool outputs too, so they
+    # benefit from the same non-destructive per-call message compression.
+    if app_config.compaction.enabled:
+        from deerflow.agents.middlewares.compaction_middleware import HeadroomCompactionMiddleware
+
+        middlewares.append(HeadroomCompactionMiddleware.from_app_config(app_config))
+
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
     # finish_reason=content_filter (and friends), and the bad call would then

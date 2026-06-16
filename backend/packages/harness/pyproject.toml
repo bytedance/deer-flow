@@ -40,6 +40,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Context compaction via Headroom (non-destructive per-call message compression).
+# Optional because it pulls in an ML compression stack; the middleware degrades
+# to a no-op when this extra is not installed.
+compaction = ["headroom-ai>=0.1.0"]
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",
