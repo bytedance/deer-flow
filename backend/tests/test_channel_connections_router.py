@@ -1004,6 +1004,122 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
     anyio.run(repo.close)
 
 
+def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+
+    async def seed_connection():
+        await repo.upsert_connection(
+            owner_user_id=str(_user().id),
+            provider="slack",
+            external_account_id="U123",
+            status="revoked",
+        )
+
+    anyio.run(seed_connection)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    # No runtime channels_config -> the slack provider is unavailable.
+    app = _make_app(config, repo, {})
+
+    with TestClient(app) as client:
+        response = client.get("/api/channels/providers")
+
+    assert response.status_code == 200
+    by_provider = {item["provider"]: item for item in response.json()["providers"]}
+    assert by_provider["slack"]["connectable"] is False
+    assert by_provider["slack"]["unavailable_reason"] is not None
+    # A revoked binding must stay distinguishable from a never-connected one,
+    # even when the runtime provider is currently unavailable.
+    assert by_provider["slack"]["connection_status"] == "revoked"
+
+    anyio.run(repo.close)
+
+
+def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tmp_path, monkeypatch):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+            "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(config, repo, {}, runtime_config_store=runtime_config_store)
+
+    async def configure_channel(provider, runtime_config):
+        # Simulate a concurrent admin request for a *different* provider whose
+        # write to app.state lands while this request awaits the worker restart.
+        app.state.channels_config = {
+            **app.state.channels_config,
+            "telegram": {"enabled": True, "bot_token": "tg-token"},
+        }
+        return True
+
+    service = SimpleNamespace(configure_channel=configure_channel)
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+
+    assert response.status_code == 200
+    # The concurrent telegram write must survive alongside the slack write.
+    assert app.state.channels_config["slack"]["bot_token"] == "xoxb-ui"
+    assert app.state.channels_config["telegram"]["bot_token"] == "tg-token"
+
+    anyio.run(repo.close)
+
+
+def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate(
+        {
+            "enabled": True,
+            "slack": {"enabled": True},
+        }
+    )
+    runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
+    app = _make_app(config, repo, {}, runtime_config_store=runtime_config_store)
+
+    with TestClient(app) as client:
+        configure_response = client.post(
+            "/api/channels/slack/runtime-config",
+            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+        )
+    assert configure_response.status_code == 200
+
+    repo.disconnect_provider_connections = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+
+    assert disconnect_response.status_code == 500
+    # When the DB revoke fails, the store/cache must not be left diverged from
+    # the DB: the provider stays configured so a later re-configure cannot
+    # silently reactivate un-revoked connection rows.
+    assert app.state.channels_config["slack"]["bot_token"] == "xoxb-ui"
+    assert runtime_config_store.get_provider_config("slack") == {
+        "enabled": True,
+        "bot_token": "xoxb-ui",
+        "app_token": "xapp-ui",
+    }
+
+    anyio.run(repo.close)
+
+
 def test_disconnect_connection_revokes_current_user_connection(tmp_path):
     import anyio
 
