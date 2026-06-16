@@ -122,3 +122,10 @@ export async function checkAgentName(
   }
   return res.json() as Promise<{ available: boolean; name: string }>;
 }
+
+export async function listToolGroups(): Promise<{ name: string }[]> {
+  const res = await fetch(`${getBackendBaseURL()}/api/tool-groups`);
+  if (!res.ok) throw new Error(`Failed to load tool groups: ${res.statusText}`);
+  const data = (await res.json()) as { tool_groups: { name: string }[] };
+  return data.tool_groups;
+}

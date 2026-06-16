@@ -6,11 +6,13 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import get_config
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -469,3 +471,14 @@ async def delete_agent(name: str) -> None:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     logger.info(f"Deleted agent '{name}' from {agent_dir}")
+
+
+@router.get(
+    "/tool-groups",
+    summary="List Tool Groups",
+    description="Retrieve all available tool groups from configuration.",
+)
+async def list_tool_groups(config: AppConfig = Depends(get_config)) -> dict:
+    """Return all configured tool groups."""
+    _require_agents_api_enabled()
+    return {"tool_groups": [{"name": g.name} for g in config.tool_groups]}

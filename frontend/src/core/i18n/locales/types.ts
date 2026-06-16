@@ -155,6 +155,21 @@ export interface Translations {
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
+    edit: string;
+    editPageTitle: string;
+    nameLabel: string;
+    descriptionLabel: string;
+    descriptionPlaceholder: string;
+    modelLabel: string;
+    modelNone: string;
+    toolGroupsLabel: string;
+    toolGroupsPlaceholder: string;
+    skillsLabel: string;
+    skillsPlaceholder: string;
+    soulLabel: string;
+    soulPlaceholder: string;
+    updateSuccess: string;
+    updateError: string;
   };
 
   // Breadcrumb

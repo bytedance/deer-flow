@@ -5,6 +5,7 @@ import {
   deleteAgent,
   getAgent,
   listAgents,
+  listToolGroups,
   updateAgent,
 } from "./api";
 import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
@@ -61,4 +62,12 @@ export function useDeleteAgent() {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
+}
+
+export function useToolGroups() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["tool-groups"],
+    queryFn: () => listToolGroups(),
+  });
+  return { toolGroups: data ?? [], isLoading, error };
 }
