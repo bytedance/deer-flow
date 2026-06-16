@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -871,3 +871,100 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+# ---------------------------------------------------------------------------
+# Per-thread index (thread_id -> run_ids): keeps per-thread queries
+# O(runs-in-thread) instead of scanning every in-memory run, and stays
+# consistent with ``_runs`` across create / cleanup / rollback.
+# ---------------------------------------------------------------------------
+
+
+class _FailingPutRunStore(MemoryRunStore):
+    """Memory run store whose every ``put`` fails (non-retryably)."""
+
+    async def put(self, run_id, **kwargs):
+        raise ValueError("simulated persist failure")
+
+
+@pytest.mark.anyio
+async def test_thread_index_scopes_runs_per_thread(manager: RunManager):
+    a1 = await manager.create("thread-a")
+    a2 = await manager.create("thread-a")
+    b1 = await manager.create("thread-b")
+
+    # The index mirrors _runs membership, bucketed by thread.
+    assert set(manager._runs_by_thread["thread-a"]) == {a1.run_id, a2.run_id}
+    assert set(manager._runs_by_thread["thread-b"]) == {b1.run_id}
+
+    # Per-thread queries return only that thread's runs (no cross-thread leak).
+    assert {r.run_id for r in await manager.list_by_thread("thread-a")} == {a1.run_id, a2.run_id}
+    assert {r.run_id for r in await manager.list_by_thread("thread-b")} == {b1.run_id}
+    assert await manager.list_by_thread("thread-missing") == []
+
+
+@pytest.mark.anyio
+async def test_thread_index_preserves_insertion_order(manager: RunManager):
+    # The index is insertion-ordered (dict-as-ordered-set) so list_by_thread
+    # keeps the stable tie-breaking the full-scan implementation guaranteed.
+    first = await manager.create("thread-a")
+    second = await manager.create("thread-a")
+    assert list(manager._runs_by_thread["thread-a"]) == [first.run_id, second.run_id]
+
+
+@pytest.mark.anyio
+async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager: RunManager):
+    a1 = await manager.create("thread-a")
+    a2 = await manager.create("thread-a")
+
+    await manager.cleanup(a1.run_id, delay=0)
+    assert a1.run_id not in manager._runs
+    assert set(manager._runs_by_thread["thread-a"]) == {a2.run_id}
+
+    await manager.cleanup(a2.run_id, delay=0)
+    # Empty buckets are pruned so the index cannot grow without bound.
+    assert "thread-a" not in manager._runs_by_thread
+    assert await manager.list_by_thread("thread-a") == []
+
+
+@pytest.mark.anyio
+async def test_has_inflight_reflects_index(manager: RunManager):
+    record = await manager.create("thread-a")
+    assert await manager.has_inflight("thread-a") is True
+    assert await manager.has_inflight("thread-b") is False
+
+    await manager.set_status(record.run_id, RunStatus.success)
+    assert await manager.has_inflight("thread-a") is False
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_inflight_is_thread_scoped(manager: RunManager):
+    await manager.create_or_reject("thread-a", multitask_strategy="reject")
+    # A different thread is unaffected by thread-a's active run.
+    await manager.create_or_reject("thread-b", multitask_strategy="reject")
+    # A second active run on the same thread is rejected.
+    with pytest.raises(ConflictError):
+        await manager.create_or_reject("thread-a", multitask_strategy="reject")
+
+
+@pytest.mark.anyio
+async def test_failed_create_unindexes_run():
+    manager = RunManager(store=_FailingPutRunStore())
+    with pytest.raises(ValueError):
+        await manager.create("thread-a")
+    # A rolled-back run must leave no trace in either _runs or the index.
+    assert manager._runs == {}
+    assert "thread-a" not in manager._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_failed_create_or_reject_unindexes_run():
+    # Symmetric to test_failed_create_unindexes_run: create_or_reject has its own
+    # insert + rollback-unindex site, so a persist failure there must also leave
+    # neither _runs nor the index holding the rolled-back run. This closes the last
+    # mutation path not exercised by an index-consistency test.
+    manager = RunManager(store=_FailingPutRunStore())
+    with pytest.raises(ValueError):
+        await manager.create_or_reject("thread-a", multitask_strategy="reject")
+    assert manager._runs == {}
+    assert "thread-a" not in manager._runs_by_thread

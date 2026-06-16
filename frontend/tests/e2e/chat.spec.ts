@@ -12,6 +12,7 @@ test.describe("Chat workspace", () => {
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
   });
 
   test("can type a message in the input box", async ({ page }) => {

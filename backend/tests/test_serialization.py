@@ -157,3 +157,171 @@ def test_serialize_dispatcher_default_mode():
 
     result = serialize(_FakePydanticV1())
     assert result == {"key": "v1"}
+
+
+# ── strip_data_url_image_blocks ──────────────────────────────────────────────
+
+
+def _make_msg(
+    content,
+    *,
+    hide_from_ui=False,
+    msg_type="human",
+):
+    """Build a serialised-style message dict."""
+    msg = {"type": msg_type, "content": content}
+    if hide_from_ui:
+        msg["additional_kwargs"] = {"hide_from_ui": True}
+    return msg
+
+
+def test_strip_data_url_removes_base64_from_hidden_messages():
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    messages = [
+        _make_msg(
+            [
+                {"type": "text", "text": "Here are the images:"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBOR..."},
+                },
+                {"type": "text", "text": "- file.jpg (image/jpeg)"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,/9j/..."},
+                },
+            ],
+            hide_from_ui=True,
+        ),
+    ]
+    result = strip_data_url_image_blocks(messages)
+    assert len(result) == 1
+    content = result[0]["content"]
+    # Only text blocks remain
+    assert content == [
+        {"type": "text", "text": "Here are the images:"},
+        {"type": "text", "text": "- file.jpg (image/jpeg)"},
+    ]
+
+
+def test_strip_data_url_preserves_non_hidden_messages():
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    messages = [
+        _make_msg(
+            [
+                {"type": "text", "text": "Check this out"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBOR..."},
+                },
+            ],
+            hide_from_ui=False,
+        ),
+    ]
+    result = strip_data_url_image_blocks(messages)
+    assert result == messages
+
+
+def test_strip_data_url_preserves_https_image_urls():
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    messages = [
+        _make_msg(
+            [
+                {"type": "text", "text": "See image"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/img.png"},
+                },
+            ],
+            hide_from_ui=True,
+        ),
+    ]
+    result = strip_data_url_image_blocks(messages)
+    assert result == messages
+
+
+def test_strip_data_url_handles_string_content():
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    messages = [
+        _make_msg("plain text content", hide_from_ui=True),
+    ]
+    result = strip_data_url_image_blocks(messages)
+    assert result == messages
+
+
+def test_strip_data_url_handles_non_dict_messages():
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    result = strip_data_url_image_blocks(["a_string", None, 42])
+    assert result == ["a_string", None, 42]
+
+
+def test_strip_data_url_mixed_messages():
+    """A realistic mix: normal user message + hidden image injection + AI reply."""
+    from deerflow.runtime.serialization import strip_data_url_image_blocks
+
+    messages = [
+        _make_msg("Please analyze this image", hide_from_ui=False),
+        _make_msg(
+            [
+                {"type": "text", "text": "Here are the images:"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AABBCCDD"},
+                },
+            ],
+            hide_from_ui=True,
+        ),
+        _make_msg("I can see a landscape", msg_type="ai"),
+    ]
+    result = strip_data_url_image_blocks(messages)
+    assert len(result) == 3
+    # First message untouched
+    assert result[0]["content"] == "Please analyze this image"
+    # Hidden message: image_url stripped, text kept
+    assert result[1]["content"] == [{"type": "text", "text": "Here are the images:"}]
+    # AI message untouched
+    assert result[2]["content"] == "I can see a landscape"
+
+
+def test_serialize_channel_values_for_api_strips_base64():
+    from deerflow.runtime.serialization import serialize_channel_values_for_api
+
+    channel_values = {
+        "messages": [
+            {
+                "type": "human",
+                "content": "hello",
+            },
+            {
+                "type": "human",
+                "content": [
+                    {"type": "text", "text": "images:"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,BIGDATA"},
+                    },
+                ],
+                "additional_kwargs": {"hide_from_ui": True},
+            },
+        ],
+        "title": "My thread",
+    }
+    result = serialize_channel_values_for_api(channel_values)
+    assert result["title"] == "My thread"
+    assert len(result["messages"]) == 2
+    assert result["messages"][0]["content"] == "hello"
+    # base64 block stripped, text block kept
+    assert result["messages"][1]["content"] == [{"type": "text", "text": "images:"}]
+
+
+def test_serialize_channel_values_for_api_no_messages():
+    """When channel_values has no messages key, returns without error."""
+    from deerflow.runtime.serialization import serialize_channel_values_for_api
+
+    result = serialize_channel_values_for_api({"title": "empty"})
+    assert result == {"title": "empty"}
