@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
+  KB_ALLOWED_EXTENSIONS,
+  KB_UPLOAD_MAX_SIZE,
   createDocument,
   createKnowledgeBase,
   deleteDocument,
@@ -11,6 +13,7 @@ import {
   searchKnowledgeBase,
   updateDocument,
   updateKnowledgeBase,
+  validateUploadFile,
 } from "@/core/knowledge-base/api";
 
 function mockResponse(data: unknown, status = 200) {
@@ -174,5 +177,81 @@ describe("knowledge-base API", () => {
     await expect(listKnowledgeBases()).rejects.toThrow(
       "Failed to list knowledge bases",
     );
+  });
+});
+
+describe("upload validation constants", () => {
+  test("KB_UPLOAD_MAX_SIZE matches backend _UPLOAD_MAX_SIZE", () => {
+    expect(KB_UPLOAD_MAX_SIZE).toBe(20 * 1024 * 1024);
+  });
+
+  test("KB_ALLOWED_EXTENSIONS uses dot-prefixed lowercase values", () => {
+    expect(KB_ALLOWED_EXTENSIONS).toEqual(
+      new Set([".pdf", ".doc", ".docx", ".md", ".txt"]),
+    );
+  });
+
+  test("KB_ALLOWED_EXTENSIONS is a Set for O(1) lookup", () => {
+    expect(KB_ALLOWED_EXTENSIONS.has(".pdf")).toBe(true);
+    expect(KB_ALLOWED_EXTENSIONS.has(".xlsx")).toBe(false);
+    expect(KB_ALLOWED_EXTENSIONS.has("pdf")).toBe(false);
+  });
+});
+
+describe("validateUploadFile", () => {
+  test("returns null for a valid .pdf under 20 MB", () => {
+    const file = new File(["x".repeat(100)], "report.pdf", {
+      type: "application/pdf",
+    });
+    expect(validateUploadFile(file)).toBeNull();
+  });
+
+  test("returns null for a valid .md under 20 MB", () => {
+    const file = new File(["x".repeat(100)], "README.md", { type: "text/markdown" });
+    expect(validateUploadFile(file)).toBeNull();
+  });
+
+  test("returns unsupported_type for .xlsx", () => {
+    const file = new File(["data"], "sheet.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    expect(validateUploadFile(file)).toBe("unsupported_type");
+  });
+
+  test("returns unsupported_type for file with no extension", () => {
+    const file = new File(["text"], "README", { type: "text/plain" });
+    expect(validateUploadFile(file)).toBe("unsupported_type");
+  });
+
+  test("returns too_large for file over 20 MB", () => {
+    const file = new File(
+      [new ArrayBuffer(21 * 1024 * 1024)],
+      "large.pdf",
+      { type: "application/pdf" },
+    );
+    expect(validateUploadFile(file)).toBe("too_large");
+  });
+
+  test("checks extension before size (unsupported_type wins over too_large)", () => {
+    const file = new File(
+      [new ArrayBuffer(21 * 1024 * 1024)],
+      "large.xlsx",
+      { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    );
+    expect(validateUploadFile(file)).toBe("unsupported_type");
+  });
+
+  test("handles uppercase extension", () => {
+    const file = new File(["x".repeat(100)], "report.PDF", {
+      type: "application/pdf",
+    });
+    expect(validateUploadFile(file)).toBeNull();
+  });
+
+  test("handles multi-dot filename", () => {
+    const file = new File(["x".repeat(100)], "report.v2.pdf", {
+      type: "application/pdf",
+    });
+    expect(validateUploadFile(file)).toBeNull();
   });
 });

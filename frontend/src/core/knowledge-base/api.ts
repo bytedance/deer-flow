@@ -5,6 +5,22 @@ import {
   type ConversionErrorBody,
 } from "../uploads/conversion-errors";
 
+/** Matches back-end `_UPLOAD_MAX_SIZE` in `backend/app/gateway/routers/knowledge_bases.py`. */
+export const KB_UPLOAD_MAX_SIZE = 20 * 1024 * 1024; // 20 MB
+
+/** Matches back-end `_ALLOWED_EXTENSIONS` — dot-prefixed, lowercase, for O(1) lookup. */
+export const KB_ALLOWED_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".md", ".txt"]);
+
+export type UploadValidationError = "unsupported_type" | "too_large";
+
+/** Client-side validation matching back-end checks in `upload_document`. */
+export function validateUploadFile(file: File): UploadValidationError | null {
+  const ext = "." + (file.name.split(".").pop() ?? "").toLowerCase();
+  if (!KB_ALLOWED_EXTENSIONS.has(ext)) return "unsupported_type";
+  if (file.size > KB_UPLOAD_MAX_SIZE) return "too_large";
+  return null;
+}
+
 import type {
   CreateDocumentRequest,
   CreateKBRequest,
