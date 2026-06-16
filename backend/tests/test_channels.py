@@ -2773,6 +2773,59 @@ class TestChannelManagerBoundIdentityPolicy:
 
         _run(go())
 
+    def test_bound_identity_recheck_uses_message_workspace_fallback_decision(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "custom-provider",
+                        "external_account_id": "U-platform",
+                        "workspace_id": None,
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="custom-provider",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="workspace-1",
+                    connection_fallback_without_workspace=True,
+                    text="hi",
+                )
+            )
+
+            assert repo.lookups == [
+                {
+                    "provider": "custom-provider",
+                    "external_account_id": "U-platform",
+                    "workspace_id": "workspace-1",
+                },
+                {
+                    "provider": "custom-provider",
+                    "external_account_id": "U-platform",
+                    "workspace_id": None,
+                },
+            ]
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+
+        _run(go())
+
     def test_auth_disabled_chat_keeps_default_user_when_bound_identity_is_required(self, monkeypatch):
         from app.channels.manager import ChannelManager
         from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID

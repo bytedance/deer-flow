@@ -50,6 +50,8 @@ class InboundMessage:
         owner_user_id: DeerFlow user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
         workspace_id: Optional external workspace/guild/team id.
+        connection_fallback_without_workspace: Whether connection lookup may
+            fall back to a workspace-less binding for this provider/message.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -65,6 +67,7 @@ class InboundMessage:
     connection_id: str | None = None
     owner_user_id: str | None = None
     workspace_id: str | None = None
+    connection_fallback_without_workspace: bool = False
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)

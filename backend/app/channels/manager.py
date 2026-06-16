@@ -56,7 +56,6 @@ STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
-WORKSPACE_OPTIONAL_CONNECTION_PROVIDERS = {"dingtalk", "discord", "wecom"}
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -960,7 +959,7 @@ class ChannelManager:
 
     def _bound_identity_workspace_candidates(self, msg: InboundMessage) -> list[str | None]:
         workspace_candidates: list[str | None] = [msg.workspace_id or None]
-        if msg.channel_name in WORKSPACE_OPTIONAL_CONNECTION_PROVIDERS and workspace_candidates[0] is not None:
+        if msg.connection_fallback_without_workspace and workspace_candidates[0] is not None:
             workspace_candidates.append(None)
         return workspace_candidates
 

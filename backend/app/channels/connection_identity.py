@@ -16,6 +16,7 @@ async def attach_connection_identity(
     fallback_without_workspace: bool = False,
 ) -> InboundMessage:
     """Attach connection metadata to an inbound message when a persisted binding exists."""
+    inbound.connection_fallback_without_workspace = fallback_without_workspace
     if repo is None:
         return inbound
 
