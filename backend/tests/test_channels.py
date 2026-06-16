@@ -2727,6 +2727,56 @@ class TestChannelManagerBoundIdentityPolicy:
 
         _run(go())
 
+    def test_bound_auth_enabled_message_checks_bound_identity_once_on_hot_path(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+            await manager.start()
+            try:
+                await manager._handle_message(
+                    InboundMessage(
+                        channel_name="slack",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        owner_user_id="deerflow-user-1",
+                        connection_id="connection-1",
+                        workspace_id="T123",
+                        text="hi",
+                    )
+                )
+            finally:
+                await manager.stop()
+
+            assert repo.lookups == [
+                {
+                    "provider": "slack",
+                    "external_account_id": "U-platform",
+                    "workspace_id": "T123",
+                }
+            ]
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+
+        _run(go())
+
     def test_auth_enabled_chat_rejects_unverified_bound_identity(self, monkeypatch):
         from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
 

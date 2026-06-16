@@ -922,7 +922,11 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
-            if msg.msg_type != InboundMessageType.COMMAND and await self._requires_bound_identity(msg):
+            # Non-command chat can be rejected before it consumes a semaphore
+            # slot. Commands are handled below because provider adapters consume
+            # binding commands before manager dispatch, and _handle_command()
+            # applies its own admission gate for manager-level commands.
+            if msg.msg_type != InboundMessageType.COMMAND and await self._lacks_required_bound_identity(msg):
                 await self._reject_unbound_channel_message(msg)
                 return
 
@@ -930,7 +934,7 @@ class ChannelManager:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
-                    await self._handle_chat(msg)
+                    await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -976,7 +980,7 @@ class ChannelManager:
         )
         return bool(connection and connection.get("id") == msg.connection_id and connection.get("owner_user_id") == msg.owner_user_id)
 
-    async def _requires_bound_identity(self, msg: InboundMessage) -> bool:
+    async def _lacks_required_bound_identity(self, msg: InboundMessage) -> bool:
         if not self._require_bound_identity:
             return False
         if _auth_disabled_owner_user_id():
@@ -1061,8 +1065,17 @@ class ChannelManager:
             self._channel_metadata_synced.clear()
         self._channel_metadata_synced.add(thread_id)
 
-    async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
-        if await self._requires_bound_identity(msg):
+    async def _handle_chat(
+        self,
+        msg: InboundMessage,
+        extra_context: dict[str, Any] | None = None,
+        *,
+        bound_identity_checked: bool = False,
+    ) -> None:
+        # Normal entry paths already run the bound-identity check in
+        # _handle_message() or _handle_command(). Keep this default False so
+        # direct callers and future internal paths still fail closed.
+        if not bound_identity_checked and await self._lacks_required_bound_identity(msg):
             await self._reject_unbound_channel_message(msg)
             return
 
@@ -1298,7 +1311,7 @@ class ChannelManager:
         # query Gateway state via commands. Provider-level binding flows
         # (/connect <code>, /start <code>) are consumed by the provider adapter
         # before the message reaches the manager, so they are unaffected.
-        if await self._requires_bound_identity(msg):
+        if await self._lacks_required_bound_identity(msg):
             await self._reject_unbound_channel_message(msg)
             return
 
@@ -1320,7 +1333,7 @@ class ChannelManager:
 
             chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
             chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
-            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
+            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True}, bound_identity_checked=True)
             return
 
         if reply is None and command == "new":
@@ -1360,7 +1373,7 @@ class ChannelManager:
                 from dataclasses import replace as _dc_replace
 
                 chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)
-                await self._handle_chat(chat_msg)
+                await self._handle_chat(chat_msg, bound_identity_checked=True)
                 return
             else:
                 reply = _unknown_command_reply(command)
