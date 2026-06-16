@@ -273,6 +273,7 @@ result = report_direct_execute(
 import json
 import sys
 sys.path.insert(0, "/mnt/skills/custom/monthly-report/scripts")
+from pathlib import Path
 from export_report import write_report
 
 with open("/mnt/user-data/outputs/monthly_kpi.json", "r", encoding="utf-8") as f:
@@ -282,8 +283,16 @@ with open("/mnt/user-data/outputs/monthly_kpi.json", "r", encoding="utf-8") as f
 # 不要在 SOUL 端再 import 它或本地拼装完整 8 节正文。
 write_report(payload)
 
-# PDF export not supported in standalone monthly-report skill (Markdown only)
+# 尝试生成 PDF（沙箱不可用时自动降级，从已生成的 .md 文件读取内容）
 pdf_available = False
+try:
+    from export_report import write_report_pdf
+    output_dir = Path("/mnt/user-data/outputs")
+    md_text = (output_dir / "monthly_report.md").read_text(encoding="utf-8")
+    pdf_path = write_report_pdf(md_text, output_dir, "monthly_report")
+    pdf_available = pdf_path is not None
+except Exception:
+    pdf_available = False
 ```
 
 10. GenUI Block 渲染清单（每项独立调用 `render_ui`，按以下顺序）：

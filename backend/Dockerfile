@@ -13,8 +13,8 @@ FROM python:3.12-slim-bookworm AS builder
 ARG NODE_MAJOR=22
 ARG APT_MIRROR
 ARG UV_INDEX_URL
-# Optional extras to install (e.g. "postgres" for PostgreSQL support)
-# Usage: docker build --build-arg UV_EXTRAS=postgres ...
+# Optional extras to install (e.g. "postgres-pdf" for PostgreSQL + PDF support)
+# Usage: docker build --build-arg UV_EXTRAS=postgres-pdf ...
 ARG UV_EXTRAS
 
 # Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
@@ -23,12 +23,17 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
     fi
 
-# Install build tools + Node.js (build-essential needed for native Python extensions)
+# Install build tools + Node.js + weasyprint build deps (for PDF export)
+# build-essential needed for native Python extensions; cairo/pango/gdk-pixbuf headers
+# needed by cairocffi to generate CFFI bindings at wheel-build time.
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
     gnupg \
     ca-certificates \
+    libcairo2-dev \
+    libpango1.0-dev \
+    libgdk-pixbuf-2.0-dev \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
@@ -47,9 +52,9 @@ COPY backend ./backend
 COPY agents ./agents
 
 # Install dependencies with cache mount
-# When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
+# UV_EXTRAS supports multiple space-separated extras (e.g. "postgres pdf").
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    sh -c "cd backend && UV_INDEX_URL=\${UV_INDEX_URL:-https://pypi.org/simple} uv sync \$(for e in \$UV_EXTRAS; do printf ' --extra %s' \"\$e\"; done)"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
@@ -82,6 +87,18 @@ COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
+
+# Install weasyprint runtime dependencies (shared libs for cairo/pango/gdk-pixbuf)
+# and a basic font family so PDF text renders correctly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libpangoft2-1.0-0 \
+    libgobject-2.0-0 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker

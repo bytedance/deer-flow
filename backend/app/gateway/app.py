@@ -8,6 +8,13 @@ from contextlib import asynccontextmanager
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+    # uvicorn's asyncio_loop_factory on Windows unconditionally returns
+    # ProactorEventLoop, which is incompatible with psycopg's async pool.
+    # Patch it to return SelectorEventLoop (already requested by the policy).
+    import uvicorn.loops.asyncio as _uv_asyncio
+
+    _uv_asyncio.asyncio_loop_factory = lambda use_subprocess=False: asyncio.SelectorEventLoop
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response

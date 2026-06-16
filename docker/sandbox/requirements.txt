@@ -24,3 +24,7 @@ ruptures
 onnxruntime
 scipy
 PyEMD
+
+# PDF export (weasyprint + dependencies)
+weasyprint>=62.0
+markdown>=3.7

@@ -68,7 +68,7 @@ check:
 # Install all dependencies
 install:
 	@echo "Installing backend dependencies..."
-	@cd backend && uv sync --extra postgres
+	@cd backend && uv sync --extra postgres --extra pdf
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
 	@echo "Installing pre-commit hooks..."

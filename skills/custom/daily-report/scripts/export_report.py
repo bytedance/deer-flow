@@ -436,6 +436,65 @@ def build_export_result(payload: dict, path: Path | None = None) -> dict:
     }
 
 
+def write_report_pdf(md_text: str, output_dir: Path, filename_base: str) -> Path | None:
+    """将 Markdown 文本渲染为 PDF 文件。
+
+    Args:
+        md_text: Markdown 文本内容
+        output_dir: 输出目录
+        filename_base: 输出文件名基础（如 "daily_report"）
+
+    Returns:
+        PDF 文件路径，失败时返回 None
+    """
+    try:
+        from weasyprint import HTML  # type: ignore[import-not-found]
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("weasyprint unavailable, PDF export skipped", exc_info=True)
+        return None
+
+    try:
+        try:
+            import markdown
+
+            html_body = markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+        except ImportError:
+            import html as _html
+
+            html_body = f"<pre>{_html.escape(md_text)}</pre>"
+
+        html_doc = (
+            "<!DOCTYPE html>\n"
+            '<html lang="zh-CN">\n'
+            '<head><meta charset="utf-8"/>\n'
+            "<style>\n"
+            "body { font-family: 'WenQuanYi Zen Hei', 'Noto Sans CJK SC', 'SimSun', sans-serif; "
+            "max-width: 900px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #333; }\n"
+            "table { border-collapse: collapse; width: 100%; margin: 12px 0; }\n"
+            "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }\n"
+            "th { background-color: #f2f2f2; }\n"
+            "h1 { font-size: 1.8em; border-bottom: 2px solid #333; padding-bottom: 8px; }\n"
+            "h2 { font-size: 1.4em; margin-top: 24px; }\n"
+            "pre { background: #f5f5f5; padding: 12px; overflow-x: auto; }\n"
+            "img { max-width: 100%; }\n"
+            "</style>\n"
+            "</head>\n"
+            f"<body>\n{html_body}\n</body>\n</html>"
+        )
+
+        pdf_path = output_dir / f"{filename_base}.pdf"
+        HTML(string=html_doc).write_pdf(target=str(pdf_path))
+        return pdf_path
+
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("PDF export failed (gracefully degraded)", exc_info=True)
+        return None
+
+
 def load_payload(path: Path | None = None) -> dict:
     """加载日报 KPI JSON 文件。"""
     if path is not None:

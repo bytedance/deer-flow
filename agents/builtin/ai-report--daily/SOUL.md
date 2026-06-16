@@ -152,8 +152,8 @@
    |---|---|
    | all | runtime_rate / 运行率 / % / ✓, downtime_count / 停机次数 / 次 / ✓, alarm_count / 告警数量 / 条 / ✓ |
    | static_equipment | runtime_rate / 运行率 / % / ✓, alarm_count / 告警数量 / 条 / ✓, corrosion_rate / 腐蚀速率 / mm/a / ✓, thickness_loss / 壁厚减薄量 / mm / ✓ |
-   | rotating_machinery | runtime_rate / 运行率 / % / ✓, vibration_level / 振动水平 / mm/s / ✓, bearing_temp / 轴承温度 / ℃ / ✓, downtime_count / 停机次数 / 次 / ✓ |
-   | pump | vibration_velocity_rms / 振动速度有效值 / mm/s / ✓, vibration_acceleration_peak / 振动加速度峰值 / m/s² / ✓, bearing_temp / 轴承温度 / ℃ / ✓, kurtosis_index / 峭度指标 / — / ✓ |
+   | rotating_machinery | runtime_rate / 运行率 / % / ✓, vibration_level / 振动水平 / mm/s / ✓, bearing_temp / 温度 / ℃ / ✓, downtime_count / 停机次数 / 次 / ✓ |
+   | pump | vibration_velocity_rms / 振动速度有效值 / mm/s / ✓, vibration_acceleration_peak / 振动加速度峰值 / m/s² / ✓, bearing_temp / 温度 / ℃ / ✓, kurtosis_index / 峭度指标 / — / ✓ |
    | reciprocating_machinery | runtime_rate / 运行率 / % / ✓, vibration_level / 振动水平 / mm/s / ✓, valve_temp / 阀温 / ℃ / ✓, downtime_count / 停机次数 / 次 / ✓, alarm_count / 告警数量 / 条 / ✓ |
 
 6. 用上述 KPI 目录生成 Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`，`default=true` 的 KPI 在 `default_values` 中设为 `true`。`description` 显示已选设备数量。
@@ -219,10 +219,43 @@
 
    工具返回后调用 `write_todos` 将所有任务标记为 `completed`。
    工具内部自动完成：查询 InS 数据 → 计算 KPI → 生成 Markdown → 导出文件。
-   若返回 `status: "success"`，从 `artifacts` 中找到 `type: "report"` 的文件，渲染 `markdown` 展示并调用 `present_files` 使其可下载。
+   若返回 `status: "success"`，从 `artifacts` 中找到 `type: "report"` 的文件，渲染 `markdown` 展示。
    若返回 `status: "failed"`，用 `markdown` 清晰展示 `error.message`。
 
-5. **绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
+5. 尝试生成 PDF（在 Sandbox 中运行，沙箱不可用时自动降级）：
+
+```python
+pdf_available = False
+try:
+    import sys
+    sys.path.insert(0, "/mnt/skills/custom/daily-report/scripts")
+    from pathlib import Path
+    from export_report import write_report_pdf
+
+    md_path = Path("/mnt/user-data/outputs/daily_report.md")
+    if md_path.exists():
+        md_text = md_path.read_text(encoding="utf-8")
+        pdf_path = write_report_pdf(md_text, md_path.parent, "daily_report")
+        pdf_available = pdf_path is not None
+except Exception:
+    pdf_available = False
+```
+
+6. 调用 `present_files` 使导出文件在前端可下载。若 `pdf_available` 为 True 则同时 present md 和 pdf，否则只 present markdown：
+
+```text
+present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs/daily_report.pdf"])
+```
+
+或降级时：
+
+```text
+present_files(["/mnt/user-data/outputs/daily_report.md"])
+```
+
+在渲染的 `markdown` 末尾追加下载链接，PDF 不可用时显示"PDF 不可用（weasyprint 未安装）"。
+
+7. **绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 
 ## 数据源
 

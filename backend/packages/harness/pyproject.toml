@@ -53,6 +53,7 @@ pymupdf = ["pymupdf4llm>=1.27.2.3"]
 rag = ["chromadb>=0.5.0"]
 pgvector = ["psycopg[binary]>=3.2.0", "sqlalchemy>=2.0.0", "pgvector>=0.3.0"]
 redis = ["redis[hiredis]>=8.0.0"]
+pdf = ["weasyprint>=62.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -59,7 +59,7 @@ KPI_DISPLAY_NAMES: dict[str, str] = {
     "corrosion_rate": "腐蚀速率",
     "thickness_loss": "壁厚减薄量",
     "vibration_level": "振动水平",
-    "bearing_temp": "轴承温度",
+    "bearing_temp": "温度",
     "flow_rate": "流量",
     "outlet_pressure": "出口压力",
     "valve_temp": "阀温",

@@ -168,11 +168,12 @@ sys.path.insert(0, "/mnt/skills/custom/weekly-report/scripts")
 from _report_common import get_kpi_catalog
 
 available_kpis = get_kpi_catalog("{validated.equipment_type}")
-# available_kpis 示例（static_equipment）：
-# [{"key": "runtime_rate", "name": "运行率", "unit": "%"},
-#  {"key": "alarm_count", "name": "告警数量", "unit": "条"},
-#  {"key": "corrosion_rate", "name": "腐蚀速率", "unit": "mm/a"},
-#  {"key": "thickness_loss", "name": "壁厚减薄量", "unit": "mm"}]
+# available_kpis 示例：
+# static_equipment → 运行率(%), 告警数量(条), 腐蚀速率(mm/a), 壁厚减薄量(mm)
+# rotating_machinery → 运行率(%), 振动水平(mm/s), 温度(℃), 停机次数(次)
+# pump → 振动速度有效值(mm/s), 振动加速度峰值(m/s²), 温度(℃), 峭度指标(—)
+# reciprocating_machinery → 运行率(%), 振动水平(mm/s), 阀温(℃), 停机次数(次), 告警数量(条)
+# all → 运行率(%), 停机次数(次), 告警数量(条)
 ```
 
 7. **严格根据 `available_kpis` 动态生成** Round 2 KPI 选择表单。每个 KPI 生成一个 checkbox 字段，字段 `name` 为 `kpi_{key}`，`label` 为 `{name} ({unit})`。前 3 个 KPI 在 `default_values` 中设为 `true`，其余为 `false`。`description` 显示已选设备数量。
@@ -257,6 +258,7 @@ import json
 import sys
 sys.path.insert(0, "/mnt/skills/custom/weekly-report/scripts")
 from export_report import render_markdown, write_report
+from pathlib import Path
 
 with open("/mnt/user-data/outputs/weekly_kpi.json", "r", encoding="utf-8") as f:
     payload = json.load(f)
@@ -266,8 +268,16 @@ with open("/mnt/user-data/outputs/weekly_kpi.json", "r", encoding="utf-8") as f:
 # 自动导出 Markdown（必需）
 write_report(payload)
 
-# PDF export not supported in standalone weekly-report skill (Markdown only)
+# 尝试生成 PDF（沙箱不可用时自动降级）
+report_md = render_markdown(payload, thread_id="{thread_id}")
 pdf_available = False
+try:
+    from export_report import write_report_pdf
+    output_dir = Path("/mnt/user-data/outputs")
+    pdf_path = write_report_pdf(report_md, output_dir, "weekly_report")
+    pdf_available = pdf_path is not None
+except Exception:
+    pdf_available = False
 
 # 在 markdown 末尾追加下载链接
 report_md = render_markdown(payload, thread_id="{thread_id}")

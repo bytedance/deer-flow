@@ -83,7 +83,10 @@ def _attempt_pdf(
 ) -> ExportResult:
     try:
         from weasyprint import HTML  # type: ignore[import-not-found]
-    except ImportError:
+    except Exception:
+        # Module not installed (ImportError) or installed but system libs
+        # missing — e.g. Windows without GTK (OSError).
+        logger.warning("weasyprint unavailable, PDF export skipped", exc_info=True)
         return ExportResult(
             md_path=str(md_path),
             pdf_path=None,

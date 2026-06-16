@@ -96,6 +96,12 @@ configure_uv_extras() {
     local database_backend
     database_backend="$(detect_database_backend)"
 
+    # Always include pdf (weasyprint) — lightweight, graceful degradation when
+    # system libs are missing, zero runtime cost when PDF isn't requested.
+    if [[ " ${UV_EXTRAS:-} " != *" pdf "* ]]; then
+        export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }pdf"
+    fi
+
     if [ "$database_backend" = "postgres" ]; then
         if [[ " ${UV_EXTRAS:-} " != *" postgres "* ]]; then
             export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }postgres"
