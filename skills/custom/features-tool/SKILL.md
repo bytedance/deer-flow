@@ -60,8 +60,7 @@ python /mnt/skills/custom/features-tool/tools/extract_trend_features_6k_tool.py 
 ## 环境变量
 
 - `INS_BASE_URL` - InS 平台地址
-- `INS_USERNAME` / `INS_PASSWORD` - 登录凭证
-- `INS_ACCESS_TOKEN` - Bearer token（优先使用）
+- `INS_ACCESS_TOKEN` - Bearer token（由 Deer Flow 运行时自动注入）
 - `DIAGNOSIS_OUTPUT_DIR` - 诊断输出目录（默认 `/mnt/user-data/outputs`）
 - `DIAGNOSIS_SKILLS_ROOT` - skills 根目录（默认 `/mnt/skills/custom`）
 

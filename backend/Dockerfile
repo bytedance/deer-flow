@@ -47,9 +47,9 @@ COPY backend ./backend
 COPY agents ./agents
 
 # Install dependencies with cache mount
-# When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
+# UV_EXTRAS is space-separated (e.g. "postgres redis").
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    sh -c "cd backend && UV_INDEX_URL=\${UV_INDEX_URL:-https://pypi.org/simple} && opts=''; for e in \${UV_EXTRAS}; do opts=\"\$opts --extra \$e\"; done && uv sync \$opts"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.

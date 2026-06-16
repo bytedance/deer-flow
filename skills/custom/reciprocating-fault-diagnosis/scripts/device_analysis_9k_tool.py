@@ -25,8 +25,8 @@ ins_client = InsApiClient(INS_SETTINGS)
 
 
 async def get_device_children_9k(device_id: str) -> dict:
-    if not INS_SETTINGS.username or not INS_SETTINGS.password:
-        raise RuntimeError("缺少 INS_USERNAME 或 INS_PASSWORD 环境变量，无法登录 InS 接口")
+    if not INS_SETTINGS.access_token:
+        raise RuntimeError("缺少 INS_ACCESS_TOKEN 环境变量，无法访问 InS 接口")
 
     components = await ins_client.get_slim_components(device_id)
     filtered = [

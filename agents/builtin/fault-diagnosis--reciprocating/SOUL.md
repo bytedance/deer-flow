@@ -153,7 +153,7 @@ python /mnt/skills/custom/reciprocating-fault-diagnosis/scripts/run_reciprocatin
 
 说明：
 
-- 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
+- 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`。
 - `INS_BASE_URL` 是可选部署级环境变量，未配置时使用工具默认值。
 - 规则运行时实现三层流水线（通道层 → 气缸层 → 机组层），内部自动完成配置获取（`queryD901Config`）、趋势数据拉取（`getTrendDataHis` 9k 端点）、特征提取和规则匹配。
 - **严禁调用 orbit 工具链**：往复机不使用 `ins-get-orbit-data` / `ins-extract-orbit-centerline-features`，轴心轨迹**不是**往复机的有效证据维度。

@@ -75,12 +75,10 @@ def render_ui_tool(
         thread_id = config.get("configurable", {}).get("thread_id", "")
         checkpoint_id = config.get("configurable", {}).get("checkpoint_id", "")
 
-        # Check for duplicate interactive blocks BEFORE persisting or streaming.
-        # This must happen early so the second call doesn't leak a duplicate block
-        # to the frontend.
-        if interactive and callback_id and action == "create":
+        if callback_id and action == "create":
             from deerflow.agents.middlewares.genui_middleware import get_interaction_store
 
+            # Check for duplicate interactive blocks BEFORE persisting or streaming.
             store = get_interaction_store()
             existing = store.get(thread_id, callback_id)
             if existing and not existing.submitted and not existing.is_expired:
@@ -124,17 +122,21 @@ def render_ui_tool(
 
         writer = get_stream_writer()
 
-        if interactive and callback_id and action == "create":
+        if callback_id and action == "create":
             from deerflow.agents.middlewares.genui_middleware import get_interaction_store
 
             timeout_seconds = (callback_timeout_ms / 1000.0) if callback_timeout_ms else 300.0
-
             store = get_interaction_store()
             store.register(
                 callback_id=callback_id,
                 thread_id=thread_id,
                 checkpoint_id=checkpoint_id,
                 timeout=timeout_seconds,
+            )
+            import logging
+            logging.getLogger(__name__).info(
+                "[render_ui] Registered callback '%s' for thread '%s' (interactive=%s)",
+                callback_id, thread_id, interactive,
             )
 
         writer(block)

@@ -5,8 +5,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
 
 try:
     from google.protobuf.json_format import MessageToDict
@@ -225,24 +223,6 @@ def slim_component(
     return result
 
 
-def normalize_pem(key: str) -> str:
-    body = (
-        key.replace("-----BEGIN PUBLIC KEY-----", "")
-        .replace("-----END PUBLIC KEY-----", "")
-        .replace("\n", "")
-        .replace("\r", "")
-        .replace(" ", "")
-    )
-    chunks = [body[i:i + 64] for i in range(0, len(body), 64)]
-    return "-----BEGIN PUBLIC KEY-----\n" + "\n".join(chunks) + "\n-----END PUBLIC KEY-----\n"
-
-
-def rsa_encrypt(plaintext: str, public_key_pem: str) -> str:
-    public_key = serialization.load_pem_public_key(normalize_pem(public_key_pem).encode("utf-8"))
-    encrypted = public_key.encrypt(plaintext.encode("utf-8"), padding.PKCS1v15())
-    return base64.b64encode(encrypted).decode("utf-8")
-
-
 def _safe_error_detail(response: Any) -> str | None:
     """Extract error detail from a non-2xx response body without raising."""
     try:
@@ -265,43 +245,18 @@ class InsApiClient:
             headers={"Content-Type": "application/json;charset=utf-8"},
             timeout=_timeout_from_env(),
         )
-        self.token: str | None = None
         self.access_token = (access_token or settings.access_token or "").strip() or None
 
     async def close(self) -> None:
         await self.http.aclose()
 
-    async def login(self) -> str:
-        encoded_user = rsa_encrypt(self.settings.username, self.settings.rsa_public_key)
-        encoded_pass = rsa_encrypt(self.settings.password, self.settings.rsa_public_key)
-        response = await self.http.post(
-            f"{self.settings.base_url}/ins-os-view/login",
-            params={
-                "captchaPass": "true",
-                "enCodeUser": encoded_user,
-                "enCodePassword": encoded_pass,
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
-        code = body.get("code", 0)
-        if code != 200:
-            raise RuntimeError(body.get("msg") or "登录失败")
-
-        data = body.get("data") or {}
-        token = data.get("token") or body.get("token")
-        if not token:
-            raise RuntimeError(f"登录响应中缺少 token: {body}")
-
-        self.token = str(token)
-        return self.token
-
     async def ensure_token(self) -> str:
         if self.access_token:
             return self.access_token
-        if self.token:
-            return self.token
-        return await self.login()
+        raise RuntimeError(
+            "缺少 INS_ACCESS_TOKEN 环境变量，无法访问 InS 接口。"
+            "Deer Flow 运行时会自动注入当前用户的 Bearer token。"
+        )
 
     async def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         token = await self.ensure_token()

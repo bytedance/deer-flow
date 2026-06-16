@@ -99,7 +99,7 @@ class TestRedisStreamBridgeSubscribe:
         ]
 
         events = []
-        async for event in bridge.subscribe("run-1"):
+        async for event in bridge.subscribe("run-1", heartbeat_interval=0):
             events.append(event)
             if event is END_SENTINEL:
                 break
@@ -171,6 +171,36 @@ class TestRedisStreamBridgeSubscribe:
 
         xread_call = mock_redis_client.xread.call_args
         assert xread_call[0][0] == {"deerflow:stream:run-1": "1234567890-4"}
+
+    @pytest.mark.anyio
+    async def test_subscribe_replays_from_start_for_invalid_last_event_id(self, bridge, mock_redis_client):
+        mock_redis_client.xread.return_value = [
+            ("deerflow:stream:run-1", [
+                ("1234567890-0", {"event": "__end__", "data": "", "sequence": "0"}),
+            ])
+        ]
+
+        async for event in bridge.subscribe("run-1", last_event_id="not-a-redis-stream-id"):
+            if event is END_SENTINEL:
+                break
+
+        xread_call = mock_redis_client.xread.call_args
+        assert xread_call[0][0] == {"deerflow:stream:run-1": "0-0"}
+
+    @pytest.mark.anyio
+    async def test_subscribe_replays_from_start_for_malformed_last_event_id(self, bridge, mock_redis_client):
+        mock_redis_client.xread.return_value = [
+            ("deerflow:stream:run-1", [
+                ("1234567890-0", {"event": "__end__", "data": "", "sequence": "0"}),
+            ])
+        ]
+
+        async for event in bridge.subscribe("run-1", last_event_id="1234567890-run"):
+            if event is END_SENTINEL:
+                break
+
+        xread_call = mock_redis_client.xread.call_args
+        assert xread_call[0][0] == {"deerflow:stream:run-1": "0-0"}
 
 
 class TestRedisStreamBridgeCleanup:

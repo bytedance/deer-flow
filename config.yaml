@@ -115,8 +115,6 @@ sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   image: deer-flow-sandbox:latest
   environment:
-    INS_USERNAME: $INS_USERNAME
-    INS_PASSWORD: $INS_PASSWORD
     INS_BASE_URL: $INS_BASE_URL
     INS_CONNECT_TIMEOUT: $INS_CONNECT_TIMEOUT
     INS_READ_TIMEOUT: $INS_READ_TIMEOUT
@@ -292,8 +290,8 @@ http_connectors:
       cache_ttl_seconds: 300
       max_retries: 1
 stream_bridge:
-  type: memory
-  redis_url: ''
+  type: redis
+  redis_url: $REDIS_URL
   queue_maxsize: 1024
 rate_limit:
   enabled: false

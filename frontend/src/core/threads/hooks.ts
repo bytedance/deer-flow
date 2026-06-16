@@ -46,6 +46,10 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
@@ -404,11 +408,9 @@ export function useThreadStream({
         messagesRef.current = [];
       }
 
-      const updates: Array<Partial<AgentThreadState> | null> = Object.values(
-        data || {},
-      );
+      const updates = [data, ...Object.values(data || {})].filter(isRecord);
       for (const update of updates) {
-        if (update && typeof update === "object" && "title" in update && update.title) {
+        if (typeof update.title === "string" && update.title) {
           void queryClient.setQueriesData(
             {
               queryKey: ["threads", "search"],

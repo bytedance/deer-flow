@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -61,6 +62,28 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
+
+
+def _request_log_context(request: ModelRequest) -> dict[str, Any]:
+    runtime = getattr(request, "runtime", None)
+    runtime_context = getattr(runtime, "context", None)
+    runtime_context = runtime_context if isinstance(runtime_context, dict) else {}
+    config = getattr(request, "config", None)
+    config = config if isinstance(config, dict) else {}
+    configurable = config.get("configurable", {})
+    configurable = configurable if isinstance(configurable, dict) else {}
+    model = getattr(request, "model", None)
+    tools = getattr(request, "tools", None)
+    messages = getattr(request, "messages", None)
+    return {
+        "pid": os.getpid(),
+        "run_id": runtime_context.get("run_id") or configurable.get("run_id") or "-",
+        "thread_id": runtime_context.get("thread_id") or configurable.get("thread_id") or "-",
+        "agent_name": runtime_context.get("agent_name") or configurable.get("agent_name") or "-",
+        "model_type": type(model).__name__ if model is not None else "-",
+        "tools_count": len(tools) if isinstance(tools, list) else 0,
+        "messages_count": len(messages) if isinstance(messages, list) else 0,
+    }
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -211,14 +234,48 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        log_ctx = _request_log_context(request)
         if self._check_circuit():
+            logger.warning(
+                "LLM call circuit-open: pid=%s run_id=%s thread_id=%s agent=%s model=%s tools=%s messages=%s",
+                log_ctx["pid"],
+                log_ctx["run_id"],
+                log_ctx["thread_id"],
+                log_ctx["agent_name"],
+                log_ctx["model_type"],
+                log_ctx["tools_count"],
+                log_ctx["messages_count"],
+            )
             return AIMessage(content=self._build_circuit_breaker_message())
 
         attempt = 1
         while True:
+            attempt_start = time.monotonic()
+            logger.info(
+                "LLM call start attempt %d/%d: pid=%s run_id=%s thread_id=%s agent=%s model=%s tools=%s messages=%s",
+                attempt,
+                self.retry_max_attempts,
+                log_ctx["pid"],
+                log_ctx["run_id"],
+                log_ctx["thread_id"],
+                log_ctx["agent_name"],
+                log_ctx["model_type"],
+                log_ctx["tools_count"],
+                log_ctx["messages_count"],
+            )
             try:
                 response = handler(request)
                 self._record_success()
+                logger.info(
+                    "LLM call success attempt %d/%d: pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d",
+                    attempt,
+                    self.retry_max_attempts,
+                    log_ctx["pid"],
+                    log_ctx["run_id"],
+                    log_ctx["thread_id"],
+                    log_ctx["model_type"],
+                    int((time.monotonic() - attempt_start) * 1000),
+                )
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
@@ -231,9 +288,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 if retriable and attempt < self.retry_max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                        "Transient LLM error on attempt %d/%d: pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d; retrying in %dms: %s",
                         attempt,
                         self.retry_max_attempts,
+                        log_ctx["pid"],
+                        log_ctx["run_id"],
+                        log_ctx["thread_id"],
+                        log_ctx["model_type"],
+                        int((time.monotonic() - attempt_start) * 1000),
                         wait_ms,
                         _extract_error_detail(exc),
                     )
@@ -242,8 +304,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
+                    "LLM call failed after %d attempt(s): pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d error=%s",
                     attempt,
+                    log_ctx["pid"],
+                    log_ctx["run_id"],
+                    log_ctx["thread_id"],
+                    log_ctx["model_type"],
+                    int((time.monotonic() - attempt_start) * 1000),
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
@@ -257,14 +324,48 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        log_ctx = _request_log_context(request)
         if self._check_circuit():
+            logger.warning(
+                "LLM call circuit-open: pid=%s run_id=%s thread_id=%s agent=%s model=%s tools=%s messages=%s",
+                log_ctx["pid"],
+                log_ctx["run_id"],
+                log_ctx["thread_id"],
+                log_ctx["agent_name"],
+                log_ctx["model_type"],
+                log_ctx["tools_count"],
+                log_ctx["messages_count"],
+            )
             return AIMessage(content=self._build_circuit_breaker_message())
 
         attempt = 1
         while True:
+            attempt_start = time.monotonic()
+            logger.info(
+                "LLM call start attempt %d/%d: pid=%s run_id=%s thread_id=%s agent=%s model=%s tools=%s messages=%s",
+                attempt,
+                self.retry_max_attempts,
+                log_ctx["pid"],
+                log_ctx["run_id"],
+                log_ctx["thread_id"],
+                log_ctx["agent_name"],
+                log_ctx["model_type"],
+                log_ctx["tools_count"],
+                log_ctx["messages_count"],
+            )
             try:
                 response = await handler(request)
                 self._record_success()
+                logger.info(
+                    "LLM call success attempt %d/%d: pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d",
+                    attempt,
+                    self.retry_max_attempts,
+                    log_ctx["pid"],
+                    log_ctx["run_id"],
+                    log_ctx["thread_id"],
+                    log_ctx["model_type"],
+                    int((time.monotonic() - attempt_start) * 1000),
+                )
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
@@ -277,9 +378,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 if retriable and attempt < self.retry_max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                        "Transient LLM error on attempt %d/%d: pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d; retrying in %dms: %s",
                         attempt,
                         self.retry_max_attempts,
+                        log_ctx["pid"],
+                        log_ctx["run_id"],
+                        log_ctx["thread_id"],
+                        log_ctx["model_type"],
+                        int((time.monotonic() - attempt_start) * 1000),
                         wait_ms,
                         _extract_error_detail(exc),
                     )
@@ -288,8 +394,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
+                    "LLM call failed after %d attempt(s): pid=%s run_id=%s thread_id=%s model=%s duration_ms=%d error=%s",
                     attempt,
+                    log_ctx["pid"],
+                    log_ctx["run_id"],
+                    log_ctx["thread_id"],
+                    log_ctx["model_type"],
+                    int((time.monotonic() - attempt_start) * 1000),
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )

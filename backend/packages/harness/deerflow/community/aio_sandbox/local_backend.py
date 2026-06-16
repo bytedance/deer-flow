@@ -542,6 +542,12 @@ class LocalContainerBackend(SandboxBackend):
             ]
         )
 
+        # Docker-only: map host.docker.internal to the Docker host gateway so
+        # sandbox scripts can reach the Gateway API via DEER_FLOW_GATEWAY_URL
+        # (e.g. http://host.docker.internal:8001).
+        if self._runtime == "docker":
+            cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+
         # Environment variables
         for key, value in self._environment.items():
             cmd.extend(["-e", f"{key}={value}"])

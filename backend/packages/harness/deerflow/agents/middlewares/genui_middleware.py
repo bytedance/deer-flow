@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import override
 
 from langchain.agents import AgentState
@@ -52,11 +55,77 @@ class InteractionStore:
 
     Tracks registered callbacks, enforces idempotency (submit-once),
     and cleans up expired records.
+
+    Persists to a JSON file so that callbacks survive uvicorn --reload
+    (hot-reload spawns a new process that would otherwise lose the
+    in-memory store).
     """
+
+    _PERSIST_DIR = Path(os.environ.get("DEER_FLOW_HOME", ".")) / ".interaction_store"
 
     def __init__(self) -> None:
         self._records: dict[str, InteractionRecord] = {}
         self._lock = threading.Lock()
+        self._persist_path = self._PERSIST_DIR / "callbacks.json"
+        self._load()
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def _persist_dir(self) -> Path:
+        d = self._PERSIST_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _load(self) -> None:
+        """Load persisted callbacks from disk, dropping expired ones."""
+        path = self._persist_path
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        now = time.time()
+        for key, raw in data.items():
+            record = InteractionRecord(
+                callback_id=raw["callback_id"],
+                thread_id=raw["thread_id"],
+                checkpoint_id=raw["checkpoint_id"],
+                timeout=raw["timeout"],
+                created_at=raw.get("created_at", now),
+                submitted=raw.get("submitted", False),
+            )
+            if now > record.created_at + record.timeout:
+                continue  # drop expired
+            if record.submitted:
+                record = record.with_submission(raw.get("payload", {}))
+            self._records[key] = record
+        if self._records:
+            logger.info("InteractionStore restored %d callbacks from %s", len(self._records), path)
+
+    def _save(self) -> None:
+        """Persist current callbacks to disk (called under _lock by caller)."""
+        try:
+            self._persist_dir()
+            data = {
+                key: {
+                    "callback_id": r.callback_id,
+                    "thread_id": r.thread_id,
+                    "checkpoint_id": r.checkpoint_id,
+                    "timeout": r.timeout,
+                    "created_at": r.created_at,
+                    "submitted": r.submitted,
+                    "payload": r.payload,
+                }
+                for key, r in self._records.items()
+            }
+            tmp = self._persist_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self._persist_path)
+        except OSError:
+            logger.debug("Failed to persist InteractionStore", exc_info=True)
+
+    # ── Public API ───────────────────────────────────────────────────
 
     @staticmethod
     def _make_key(thread_id: str, callback_id: str) -> str:
@@ -77,6 +146,7 @@ class InteractionStore:
         )
         with self._lock:
             self._records[self._make_key(thread_id, callback_id)] = record
+            self._save()
         logger.debug("Registered interaction callback %s for thread %s", callback_id, thread_id)
         return record
 
@@ -98,6 +168,7 @@ class InteractionStore:
                 return None
             updated = record.with_submission(payload)
             self._records[key] = updated
+            self._save()
             return updated
 
     def cleanup_expired(self) -> int:
@@ -111,13 +182,18 @@ class InteractionStore:
             for key in expired_keys:
                 del self._records[key]
                 removed += 1
+            if removed:
+                self._save()
         if removed:
             logger.debug("Cleaned up %d expired interaction records", removed)
         return removed
 
     def remove(self, thread_id: str, callback_id: str) -> bool:
         with self._lock:
-            return self._records.pop(self._make_key(thread_id, callback_id), None) is not None
+            existed = self._records.pop(self._make_key(thread_id, callback_id), None) is not None
+            if existed:
+                self._save()
+            return existed
 
 
 # Global singleton instance
