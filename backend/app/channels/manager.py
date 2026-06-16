@@ -56,6 +56,7 @@ STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
+BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -148,6 +149,7 @@ class _SlashSkillCommandResolution:
 
 @dataclass(frozen=True, slots=True)
 class _BoundIdentityRejection:
+    message: str = BOUND_IDENTITY_REQUIRED_MESSAGE
     # Server-side connection id that may be used only as an outbound routing
     # hint for the rejection message. This is never copied from the inbound
     # message; it comes from the repository re-read when available.
@@ -994,7 +996,7 @@ class ChannelManager:
         if not (has_connection and has_owner):
             return _BoundIdentityRejection()
         if self._connection_repo is None:
-            return _BoundIdentityRejection()
+            return _BoundIdentityRejection(message=BOUND_IDENTITY_UNAVAILABLE_MESSAGE)
 
         # The manager is the run-creation security boundary, so it does not
         # trust mutable InboundMessage identity fields by themselves. Re-read
@@ -1030,7 +1032,7 @@ class ChannelManager:
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
             thread_id="",
-            text=BOUND_IDENTITY_REQUIRED_MESSAGE,
+            text=bound_identity_rejection.message,
             thread_ts=msg.thread_ts,
             connection_id=bound_identity_rejection.outbound_connection_id,
             owner_user_id=bound_identity_rejection.outbound_owner_user_id,

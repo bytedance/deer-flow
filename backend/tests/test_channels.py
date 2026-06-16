@@ -2647,6 +2647,44 @@ class TestChannelManagerBoundIdentityPolicy:
 
         _run(go())
 
+    def test_bound_identity_repo_unavailable_uses_transient_failure_message(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="hi",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
     def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
         from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
 
