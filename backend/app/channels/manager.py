@@ -1304,6 +1304,17 @@ class ChannelManager:
     # -- command handling --------------------------------------------------
 
     async def _handle_command(self, msg: InboundMessage) -> None:
+        # Commands are the other run-creation entry point besides chat: /new
+        # calls _create_thread() directly, and /bootstrap routes into
+        # _handle_chat(). Apply the same bound-identity admission boundary here
+        # so unbound platform users cannot create unowned threads/checkpoints or
+        # query Gateway state via commands. Provider-level binding flows
+        # (/connect <code>, /start <code>) are consumed by the provider adapter
+        # before the message reaches the manager, so they are unaffected.
+        if await self._requires_bound_identity(msg):
+            await self._reject_unbound_channel_message(msg)
+            return
+
         raw_text = msg.text
         text = raw_text.strip()
         parts = text.split(maxsplit=1)
