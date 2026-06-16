@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -36,6 +37,29 @@ _LAG_WARNING_THRESHOLD = 100
 
 def _stream_key(run_id: str) -> str:
     return f"{_STREAM_KEY_PREFIX}{run_id}"
+
+
+def _normalize_stream_id(last_event_id: str | None) -> str:
+    sid = (last_event_id or "").strip()
+    if not sid:
+        return "0-0"
+
+    if sid in {"$", ">"}:
+        return sid
+
+    first, separator, second = sid.partition("-")
+    if not first.isdigit():
+        logger.warning("Invalid Redis stream id %r; replaying from start of stream", sid)
+        return "0-0"
+
+    if not separator:
+        return sid
+
+    if second.isdigit():
+        return sid
+
+    logger.warning("Invalid Redis stream id %r; replaying from start of stream", sid)
+    return "0-0"
 
 
 class RedisStreamBridge(StreamBridge):
@@ -107,18 +131,37 @@ class RedisStreamBridge(StreamBridge):
         heartbeat_interval: float = 15.0,
     ) -> AsyncIterator[StreamEvent]:
         key = _stream_key(run_id)
-        start_id = last_event_id if last_event_id else "0-0"
+        start_id = _normalize_stream_id(last_event_id)
+        effective_heartbeat_interval = heartbeat_interval if heartbeat_interval is not None else self._heartbeat_interval
+        last_heartbeat_at = time.monotonic()
+
+        def heartbeat_due() -> bool:
+            return time.monotonic() - last_heartbeat_at >= effective_heartbeat_interval
 
         while True:
             try:
+                # If the stream doesn't exist yet, XREAD with BLOCK would hang
+                # forever on some Redis versions. Check existence first.
+                if start_id == "0-0":
+                    exists = await self._redis.exists(key)
+                    if not exists:
+                        if heartbeat_due():
+                            yield HEARTBEAT_SENTINEL
+                            last_heartbeat_at = time.monotonic()
+                        await asyncio.sleep(self._poll_interval)
+                        continue
+
                 entries = await self._redis.xread({key: start_id}, count=50, block=int(self._poll_interval * 1000))
             except Exception:
-                logger.warning("Redis XREAD failed for run %s", run_id, exc_info=True)
+                logger.warning("Redis XREAD failed for run %s, resetting to start of stream", run_id, exc_info=True)
+                start_id = "0-0"
                 await asyncio.sleep(self._poll_interval)
                 continue
 
             if not entries:
-                yield HEARTBEAT_SENTINEL
+                if heartbeat_due():
+                    yield HEARTBEAT_SENTINEL
+                    last_heartbeat_at = time.monotonic()
                 continue
 
             for _stream_name, messages in entries:

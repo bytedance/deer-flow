@@ -36,12 +36,23 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _message_tool_calls(msg) -> list[dict]:
-        """Return normalized tool calls from structured fields or raw provider payloads."""
-        tool_calls = getattr(msg, "tool_calls", None) or []
+        """Return normalized tool calls from structured fields or raw provider payloads.
+
+        Handles both BaseMessage objects and plain dicts (e.g. deserialized
+        checkpoint messages).
+        """
+        # Support both object attributes and dict keys
+        if isinstance(msg, dict):
+            tool_calls = msg.get("tool_calls") or []
+            additional_kwargs = msg.get("additional_kwargs") or {}
+        else:
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+
         if tool_calls:
             return list(tool_calls)
 
-        raw_tool_calls = (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []
+        raw_tool_calls = additional_kwargs.get("tool_calls") or []
         normalized: list[dict] = []
         for raw_tc in raw_tool_calls:
             if not isinstance(raw_tc, dict):
@@ -84,11 +95,18 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         for msg in messages:
             if isinstance(msg, ToolMessage):
                 existing_tool_msg_ids.add(msg.tool_call_id)
+            elif isinstance(msg, dict) and msg.get("type") == "tool":
+                tid = msg.get("tool_call_id")
+                if tid:
+                    existing_tool_msg_ids.add(tid)
 
         # Check if any patching is needed
         needs_patch = False
         for msg in messages:
-            if getattr(msg, "type", None) != "ai":
+            msg_type = getattr(msg, "type", None)
+            if msg_type is None and isinstance(msg, dict):
+                msg_type = msg.get("type")
+            if msg_type != "ai":
                 continue
             for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")
@@ -107,7 +125,10 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patch_count = 0
         for msg in messages:
             patched.append(msg)
-            if getattr(msg, "type", None) != "ai":
+            msg_type = getattr(msg, "type", None)
+            if msg_type is None and isinstance(msg, dict):
+                msg_type = msg.get("type")
+            if msg_type != "ai":
                 continue
             for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")

@@ -19,6 +19,8 @@ import asyncio
 import copy
 import inspect
 import logging
+import os
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -39,6 +41,33 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+
+
+def _runtime_log_context(config: dict, run_id: str, thread_id: str) -> dict[str, Any]:
+    cfg = config.get("configurable", {})
+    ctx = config.get("context", {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    ctx = ctx if isinstance(ctx, dict) else {}
+    return {
+        "pid": os.getpid(),
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "agent_name": cfg.get("agent_name") or ctx.get("agent_name") or "-",
+        "model_name": cfg.get("model_name") or cfg.get("model") or ctx.get("model_name") or ctx.get("model") or "-",
+        "tenant_id": cfg.get("tenant_id") or ctx.get("tenant_id") or "-",
+        "user_id": cfg.get("user_id") or ctx.get("user_id") or "-",
+    }
+
+
+def _chunk_debug_summary(chunk: Any) -> str:
+    if isinstance(chunk, dict):
+        keys = list(chunk.keys())
+        return f"dict(keys={keys[:8]}, size={len(keys)})"
+    if isinstance(chunk, tuple):
+        return f"tuple(len={len(chunk)})"
+    if isinstance(chunk, list):
+        return f"list(len={len(chunk)})"
+    return type(chunk).__name__
 
 
 def _build_runtime_context(
@@ -143,6 +172,7 @@ async def run_agent(
     run_id = record.run_id
     thread_id = record.thread_id
     requested_modes: set[str] = set(stream_modes or ["values"])
+    log_ctx = _runtime_log_context(config, run_id, thread_id)
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
@@ -159,7 +189,18 @@ async def run_agent(
         )
 
     try:
-        _run_start_mono = __import__("time").monotonic()
+        _run_start_mono = time.monotonic()
+        logger.info(
+            "Run %s worker start: pid=%s thread_id=%s agent=%s model=%s tenant=%s user=%s requested_modes=%s",
+            log_ctx["run_id"],
+            log_ctx["pid"],
+            log_ctx["thread_id"],
+            log_ctx["agent_name"],
+            log_ctx["model_name"],
+            log_ctx["tenant_id"],
+            log_ctx["user_id"],
+            sorted(requested_modes),
+        )
         # Initialize RunJournal + write human_message event.
         # These are inside the try block so any exception (e.g. a DB
         # error writing the event) flows through the except/finally
@@ -178,6 +219,7 @@ async def run_agent(
 
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
+        logger.info("Run %s worker pid=%s status=running", run_id, os.getpid())
 
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
@@ -206,6 +248,7 @@ async def run_agent(
                 "thread_id": thread_id,
             },
         )
+        logger.info("Run %s worker pid=%s published metadata", run_id, os.getpid())
 
         # 3. Build the agent
         from langchain_core.runnables import RunnableConfig
@@ -226,6 +269,12 @@ async def run_agent(
             config.setdefault("callbacks", []).append(journal)
 
         runnable_config = RunnableConfig(**config)
+        logger.info(
+            "Run %s worker pid=%s building agent factory=%s",
+            run_id,
+            os.getpid(),
+            getattr(agent_factory, "__name__", type(agent_factory).__name__),
+        )
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_result = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:
@@ -236,6 +285,7 @@ async def run_agent(
             agent = await agent_result
         else:
             agent = agent_result
+        logger.info("Run %s worker pid=%s agent built type=%s", run_id, os.getpid(), type(agent).__name__)
 
         # 4. Attach checkpointer and store
         if checkpointer is not None:
@@ -273,9 +323,11 @@ async def run_agent(
                 deduped.append(m)
         lg_modes = deduped
 
-        logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
+        logger.info("Run %s worker pid=%s streaming with modes %s (requested: %s)", run_id, os.getpid(), lg_modes, requested_modes)
 
         # 7. Stream using graph.astream
+        stream_start_mono = time.monotonic()
+        event_count = 0
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
             single_mode = lg_modes[0]
@@ -284,6 +336,17 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
                 sse_event = _lg_mode_to_sse_event(single_mode)
+                event_count += 1
+                logger.info(
+                    "Run %s worker pid=%s stream event #%d mode=%s sse_event=%s chunk=%s elapsed_ms=%d",
+                    run_id,
+                    os.getpid(),
+                    event_count,
+                    single_mode,
+                    sse_event,
+                    _chunk_debug_summary(chunk),
+                    int((time.monotonic() - stream_start_mono) * 1000),
+                )
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
         else:
             # Multiple modes or subgraphs: astream yields tuples
@@ -302,6 +365,17 @@ async def run_agent(
                     continue
 
                 sse_event = _lg_mode_to_sse_event(mode)
+                event_count += 1
+                logger.info(
+                    "Run %s worker pid=%s stream event #%d mode=%s sse_event=%s chunk=%s elapsed_ms=%d",
+                    run_id,
+                    os.getpid(),
+                    event_count,
+                    mode,
+                    sse_event,
+                    _chunk_debug_summary(chunk),
+                    int((time.monotonic() - stream_start_mono) * 1000),
+                )
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
 
         # 8. Final status
@@ -330,6 +404,7 @@ async def run_agent(
                 await run_manager.set_status(run_id, RunStatus.cancelled)
         else:
             await run_manager.set_status(run_id, RunStatus.success)
+            logger.info("Run %s worker pid=%s completed success events=%d duration_ms=%d", run_id, os.getpid(), event_count, int((time.monotonic() - _run_start_mono) * 1000))
 
     except asyncio.CancelledError:
         action = record.abort_action
@@ -359,8 +434,8 @@ async def run_agent(
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception(
-            "Run %s failed: %s (failure_category=execution_failed, failed_layer=runtime)",
-            run_id, error_msg,
+            "Run %s worker pid=%s failed: %s (failure_category=execution_failed, failed_layer=runtime)",
+            run_id, os.getpid(), error_msg,
         )
         await run_manager.set_status(
             run_id, RunStatus.failed,
@@ -487,6 +562,7 @@ async def run_agent(
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
         await bridge.publish_end(run_id)
+        logger.info("Run %s worker pid=%s published end sentinel status=%s", run_id, os.getpid(), record.status.value)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
 
 

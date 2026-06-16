@@ -301,7 +301,7 @@ python /mnt/skills/custom/rotating-fault-diagnosis/scripts/run_rotating_rule_dia
 
 说明：
 
-- 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`，也**不要**在脚本里使用 `INS_USERNAME` / `INS_PASSWORD` 重新登录。
+- 当前用户 Bearer token 由 Deer Flow 运行上下文自动注入为 `INS_ACCESS_TOKEN`，**不要**再手工传 `--access-token`。
 - 真实规则运行时会自行完成趋势采集、异常时刻选择、波形频谱提取、轨迹提取和候选故障竞争。
 - 规则运行时会直接复用前一步已经生成的 `/mnt/user-data/outputs/device_context.json`；如果该文件缺失或 `target_info` 无法解析，本轮诊断应直接失败，不要在 Python 规则侧再起独立模型兜底。
 - 中间缓存可能仍会落盘到 `/mnt/user-data/outputs/rotating_rule_cache/` 供规则过程使用，但**最终报告彻底不要图谱**，报告阶段禁止渲染趋势图、频谱图、轨迹图，也禁止为图谱再次取数。

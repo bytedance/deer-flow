@@ -55,8 +55,6 @@ Required runtime environment:
 - `INS_ACCESS_TOKEN`: current user Bearer token injected by Deer Flow runtime
 - `INS_BASE_URL`: optional deployment-level InS base URL
 
-Do not use `INS_USERNAME` / `INS_PASSWORD`, Nacos, MQ, database credentials, or start-stop status configuration for this managed path.
-
 The managed runtime does not evaluate start-stop state and never skips vibration diagnosis because of startup/shutdown status.
 
 ## Workflow

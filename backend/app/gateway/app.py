@@ -85,6 +85,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+# Suppress noisy Nacos heartbeat HTTP logs
+logging.getLogger("httpx").addFilter(
+    lambda record: "/ns/instance/beat" not in record.getMessage()
+)
+
 from deerflow.config.worker_id import apply_worker_id_filter  # noqa: E402
 
 apply_worker_id_filter()

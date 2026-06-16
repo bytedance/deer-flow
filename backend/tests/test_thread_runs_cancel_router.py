@@ -62,7 +62,7 @@ async def test_cancel_running_run_returns_202_and_marks_run_cancelled():
     )
 
     assert response.status_code == 202
-    assert run_manager.get(run_id).status == RunStatus.cancelled
+    assert (await run_manager.get(run_id)).status == RunStatus.cancelled
 
 
 @pytest.mark.parametrize(
@@ -93,4 +93,4 @@ async def test_cancel_terminal_run_is_idempotent(
     )
 
     assert response.status_code == expected_status_code
-    assert run_manager.get(run_id).status == status
+    assert (await run_manager.get(run_id)).status == status

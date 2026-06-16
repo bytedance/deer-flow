@@ -329,4 +329,34 @@ describe("state_patch idempotency and sequence gap detection", () => {
       expect.objectContaining({ queryKey: ["thread", "test-thread"] }),
     );
   });
+
+  it("ignores enumerable sequence fields while processing update titles", async () => {
+    setupStream();
+    seedThreadCache();
+    const snapshots: unknown[] = [];
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          React.createElement(Probe, { snapshots }),
+        ),
+      );
+    });
+    await Promise.resolve();
+
+    expect(() => {
+      capturedCallbacks.onUpdateEvent?.({
+        agent: { title: "Weekly Report" },
+        _seq: 2,
+      });
+    }).not.toThrow();
+    await React.act(async () => {
+      await Promise.resolve();
+    });
+
+    const cached = queryClient.getQueryData(["thread", "test-thread"]) as AgentThread | undefined;
+    expect(cached?.values?.title).toBe("Weekly Report");
+  });
 });

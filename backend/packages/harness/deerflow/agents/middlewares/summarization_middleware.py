@@ -123,9 +123,51 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
+    @staticmethod
+    def _is_awaiting_ui_interaction(messages: list[AnyMessage]) -> bool:
+        """Check if the agent is waiting for a user UI interaction submission.
+
+        Returns True when the most recent render_ui call has interactive=True
+        and no corresponding ui_interaction HumanMessage has been received yet.
+        In this state, summarization would lose the form context and should be skipped.
+        """
+        last_interactive_render_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    args = tc.get("args") or {}
+                    if tc.get("name") == "render_ui" and args.get("interactive"):
+                        last_interactive_render_idx = i
+                        break
+            if last_interactive_render_idx >= 0:
+                break
+
+        if last_interactive_render_idx < 0:
+            return False
+
+        # Check if any subsequent HumanMessage contains a ui_interaction
+        for i in range(last_interactive_render_idx + 1, len(messages)):
+            msg = messages[i]
+            if isinstance(msg, HumanMessage):
+                content = msg.content
+                if isinstance(content, str) and "ui_interaction" in content:
+                    return False
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            if "ui_interaction" in part.get("text", ""):
+                                return False
+        return True
+
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
+
+        # Skip summarization when the agent is waiting for a UI interaction —
+        # the summary would lose the interactive form context.
+        if self._is_awaiting_ui_interaction(messages):
+            return None
 
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):
@@ -151,6 +193,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
+
+        # Skip summarization when the agent is waiting for a UI interaction —
+        # the summary would lose the interactive form context.
+        if self._is_awaiting_ui_interaction(messages):
+            return None
 
         total_tokens = self.token_counter(messages)
         if not self._should_summarize(messages, total_tokens):

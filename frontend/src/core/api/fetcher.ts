@@ -18,6 +18,52 @@ export function isStateChangingMethod(method: string): boolean {
 const CSRF_COOKIE_PREFIX = "csrf_token=";
 const REFRESH_PATH = "/api/v1/auth/refresh";
 const EHM_AUTHENTICATE_PATH = "/api/v1/auth/ins-base/authenticate";
+const INS_REFRESH_COOKIE = "InS-refresh";
+
+/**
+ * Read a named cookie from document.cookie.
+ * SSR-safe: returns null when document is undefined.
+ */
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${name}=`;
+  for (const pair of document.cookie.split("; ")) {
+    if (pair.startsWith(prefix)) {
+      return decodeURIComponent(pair.slice(prefix.length));
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the EHM ``InS-refresh`` cookie set by the EHM platform.
+ * This is the InS refresh token used to obtain a new bearer token
+ * when the access_token has expired.
+ */
+function readInsRefreshCookie(): string | null {
+  return readCookie(INS_REFRESH_COOKIE);
+}
+
+/**
+ * Attempt to refresh the InS access token via ins-base-rpc /auth/refresh.
+ * On success, the gateway sets a new ``access_token`` cookie.
+ * Returns true if the refresh succeeded.
+ */
+async function refreshInsBaseSession(): Promise<boolean> {
+  const refreshToken = readInsRefreshCookie();
+  if (!refreshToken) return false;
+  try {
+    const res = await globalThis.fetch("/api/v1/auth/ins-base/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Read the ``csrf_token`` cookie set by the gateway at login.
@@ -114,6 +160,22 @@ export async function fetch(
     if (hasEhmTokenCookie()) {
       const authRes = await reauthenticateEhmSession(url, merged);
       if (authRes?.ok) {
+        const retryRes = await globalThis.fetch(input, {
+          ...init,
+          headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
+          credentials: "include",
+        });
+        if (retryRes.status !== 401) {
+          return retryRes;
+        }
+      }
+    }
+
+    // EHM-authenticated session: try refreshing via InS-refresh cookie
+    // (set by EHM platform when running under same-origin reverse proxy)
+    if (!url.includes(REFRESH_PATH) && readInsRefreshCookie()) {
+      const insRefreshed = await refreshInsBaseSession();
+      if (insRefreshed) {
         const retryRes = await globalThis.fetch(input, {
           ...init,
           headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),

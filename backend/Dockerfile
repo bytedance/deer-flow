@@ -52,9 +52,9 @@ COPY backend ./backend
 COPY agents ./agents
 
 # Install dependencies with cache mount
-# UV_EXTRAS supports multiple space-separated extras (e.g. "postgres pdf").
+# UV_EXTRAS is space-separated (e.g. "postgres pdf redis").
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && UV_INDEX_URL=\${UV_INDEX_URL:-https://pypi.org/simple} uv sync \$(for e in \$UV_EXTRAS; do printf ' --extra %s' \"\$e\"; done)"
+    sh -c "cd backend && UV_INDEX_URL=\${UV_INDEX_URL:-https://pypi.org/simple} && opts=''; for e in \${UV_EXTRAS}; do opts=\"\$opts --extra \$e\"; done && uv sync \$opts"
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.

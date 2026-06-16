@@ -112,16 +112,74 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    def get(self, run_id: str) -> RunRecord | None:
-        """Return a run record by ID, or ``None``."""
-        return self._runs.get(run_id)
+    async def get(self, run_id: str) -> RunRecord | None:
+        """Return a run record by ID, or ``None``.
+
+        Checks the in-memory registry first; falls back to the persistent
+        RunStore so that runs created by other workers are visible.
+        """
+        record = self._runs.get(run_id)
+        if record is not None:
+            return record
+        if self._store is None:
+            return None
+        try:
+            data = await self._store.get(run_id)
+        except Exception:
+            logger.debug("Failed to look up run %s in store", run_id, exc_info=True)
+            return None
+        if data is None:
+            return None
+        # Reconstruct a lightweight RunRecord from persisted data (no task/abort)
+        return RunRecord(
+            run_id=data.get("run_id", run_id),
+            thread_id=data.get("thread_id", ""),
+            assistant_id=data.get("assistant_id"),
+            status=RunStatus(data.get("status", "pending")),
+            on_disconnect=DisconnectMode(data.get("on_disconnect") or "cancel"),
+            multitask_strategy=data.get("multitask_strategy", "reject"),
+            metadata=data.get("metadata") or {},
+            kwargs=data.get("kwargs") or {},
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            error=data.get("error"),
+            failure_category=data.get("failure_category"),
+            failed_layer=data.get("failed_layer"),
+        )
 
     async def list_by_thread(self, thread_id: str) -> list[RunRecord]:
-        """Return all runs for a given thread, newest first."""
+        """Return all runs for a given thread, newest first.
+
+        Merges in-memory records with the persistent RunStore so runs
+        created by other workers are also visible.
+        """
         async with self._lock:
-            # Dict insertion order matches creation order, so reversing it gives
-            # us deterministic newest-first results even when timestamps tie.
-            return [r for r in self._runs.values() if r.thread_id == thread_id]
+            local = [r for r in self._runs.values() if r.thread_id == thread_id]
+        local_ids = {r.run_id for r in local}
+        if self._store is not None:
+            try:
+                stored = await self._store.list_by_thread(thread_id)
+                for data in stored:
+                    rid = data.get("run_id")
+                    if rid and rid not in local_ids:
+                        local.append(RunRecord(
+                            run_id=rid,
+                            thread_id=data.get("thread_id", thread_id),
+                            assistant_id=data.get("assistant_id"),
+                            status=RunStatus(data.get("status", "unknown")),
+                            on_disconnect=DisconnectMode(data.get("on_disconnect") or "cancel"),
+                            multitask_strategy=data.get("multitask_strategy", "reject"),
+                            metadata=data.get("metadata") or {},
+                            kwargs=data.get("kwargs") or {},
+                            created_at=data.get("created_at", ""),
+                            updated_at=data.get("updated_at", ""),
+                            error=data.get("error"),
+                            failure_category=data.get("failure_category"),
+                            failed_layer=data.get("failed_layer"),
+                        ))
+            except Exception:
+                logger.debug("Failed to list runs for thread %s from store", thread_id, exc_info=True)
+        return local
 
     async def set_status(
         self,

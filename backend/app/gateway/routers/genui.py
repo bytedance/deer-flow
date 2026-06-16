@@ -44,6 +44,12 @@ async def submit_ui_interaction(
     record = store.get(thread_id, req.callback_id)
 
     if record is None:
+        # Debug: list all registered callbacks for this thread
+        all_keys = [k for k in store._records.keys() if k.startswith(thread_id)]
+        logger.warning(
+            "Unknown callback '%s' for thread '%s'. Registered callbacks for this thread: %s",
+            req.callback_id, thread_id, all_keys,
+        )
         raise HTTPException(status_code=404, detail=f"Unknown callback: {req.callback_id}")
 
     try:

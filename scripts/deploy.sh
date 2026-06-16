@@ -227,10 +227,14 @@ configure_uv_extras() {
         if [[ " ${UV_EXTRAS:-} " != *" postgres "* ]]; then
             export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }postgres"
         fi
-        echo -e "${BLUE}Database backend: postgres (UV_EXTRAS=$UV_EXTRAS)${NC}"
-    else
-        echo -e "${BLUE}Database backend: $database_backend (UV_EXTRAS=$UV_EXTRAS)${NC}"
     fi
+
+    # Redis is required for multi-worker stream bridge
+    if [[ " ${UV_EXTRAS:-} " != *" redis "* ]]; then
+        export UV_EXTRAS="${UV_EXTRAS:+$UV_EXTRAS }redis"
+    fi
+
+    echo -e "${BLUE}Database backend: $database_backend (UV_EXTRAS=$UV_EXTRAS)${NC}"
 }
 
 build_custom_sandbox_image() {
