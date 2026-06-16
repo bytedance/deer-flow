@@ -74,7 +74,7 @@ def test_generate_suggestions_strips_inline_think_block(monkeypatch):
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=content))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["深度学习和机器学习的区别？", "常用框架有哪些？", "需要什么数学基础？"]
 
@@ -103,7 +103,7 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
     fake_model.ainvoke.assert_awaited_once()
@@ -125,7 +125,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -147,7 +147,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -166,6 +166,29 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_returns_empty_when_disabled(monkeypatch):
+    """Ensure suggestions are bypassed and returned an empty list when disabled in config."""
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=3,
+        model_name=None,
+    )
+
+    mock_config = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("Model should not be called."))
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=mock_config))
+
+    assert result.suggestions == []
+    fake_model.ainvoke.assert_not_called()

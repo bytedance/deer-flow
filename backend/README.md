@@ -113,6 +113,7 @@ FastAPI application providing REST endpoints for frontend integration:
 |-------|---------|
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
+| `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET/PUT /api/skills` | List and manage skills |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |

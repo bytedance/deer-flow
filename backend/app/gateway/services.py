@@ -224,6 +224,11 @@ def build_run_config(
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
     identically.
     """
+    # Lead-agent recursion budget (LangGraph super-steps for the lead graph
+    # only). Independent of subagent depth: a `task()` dispatch runs the whole
+    # subagent inside ONE lead tools-node step, and subagents enforce their own
+    # limit via `subagents.max_turns`. Do not conflate this 100 with the
+    # general-purpose subagent's max_turns.
     config: dict[str, Any] = {"recursion_limit": 100}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
