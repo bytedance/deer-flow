@@ -957,12 +957,6 @@ class ChannelManager:
 
     # -- chat handling -----------------------------------------------------
 
-    def _bound_identity_workspace_candidates(self, msg: InboundMessage) -> list[str | None]:
-        workspace_candidates: list[str | None] = [msg.workspace_id or None]
-        if msg.connection_fallback_without_workspace and workspace_candidates[0] is not None:
-            workspace_candidates.append(None)
-        return workspace_candidates
-
     async def _has_verified_bound_identity(self, msg: InboundMessage) -> bool:
         has_connection = bool(msg.connection_id)
         has_owner = bool(msg.owner_user_id)
@@ -975,18 +969,12 @@ class ChannelManager:
         # trust mutable InboundMessage identity fields by themselves. Re-read
         # the binding by provider identity and require it to match the asserted
         # connection owner before creating DeerFlow threads or runs.
-        for workspace_id in self._bound_identity_workspace_candidates(msg):
-            connection = await self._connection_repo.find_connection_by_external_identity(
-                provider=msg.channel_name,
-                external_account_id=msg.user_id,
-                workspace_id=workspace_id,
-            )
-            if connection is None:
-                continue
-            if connection.get("id") == msg.connection_id and connection.get("owner_user_id") == msg.owner_user_id:
-                return True
-
-        return False
+        connection = await self._connection_repo.find_connection_by_external_identity(
+            provider=msg.channel_name,
+            external_account_id=msg.user_id,
+            workspace_id=msg.workspace_id or None,
+        )
+        return bool(connection and connection.get("id") == msg.connection_id and connection.get("owner_user_id") == msg.owner_user_id)
 
     async def _requires_bound_identity(self, msg: InboundMessage) -> bool:
         if not self._require_bound_identity:
