@@ -146,6 +146,18 @@ class _SlashSkillCommandResolution:
     failure_message: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundIdentityRejection:
+    # Server-side connection id that may be used only as an outbound routing
+    # hint for the rejection message. This is never copied from the inbound
+    # message; it comes from the repository re-read when available.
+    outbound_connection_id: str | None = None
+    # Server-side owner for the outbound routing connection above. It lets
+    # channel senders preserve per-connection context without trusting the
+    # rejected inbound identity assertion.
+    outbound_owner_user_id: str | None = None
+
+
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
     if exc is None:
         return False
@@ -926,8 +938,11 @@ class ChannelManager:
             # slot. Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
-            if msg.msg_type != InboundMessageType.COMMAND and await self._lacks_required_bound_identity(msg):
-                await self._reject_unbound_channel_message(msg)
+            bound_identity_rejection = None
+            if msg.msg_type != InboundMessageType.COMMAND:
+                bound_identity_rejection = await self._get_bound_identity_rejection(msg)
+            if bound_identity_rejection is not None:
+                await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
                 return
 
             async with self._semaphore:
@@ -961,34 +976,51 @@ class ChannelManager:
 
     # -- chat handling -----------------------------------------------------
 
-    async def _has_verified_bound_identity(self, msg: InboundMessage) -> bool:
+    async def _get_bound_identity_rejection(self, msg: InboundMessage) -> _BoundIdentityRejection | None:
+        """Return None when *msg* may proceed; otherwise return rejection routing hints.
+
+        The returned object means the message lacks a verified bound identity.
+        Its fields are intentionally limited to server-side values re-read from
+        the connection repository, so rejection outbounds never trust a rejected
+        inbound message's asserted connection metadata.
+        """
+        if not self._require_bound_identity:
+            return None
+        if _auth_disabled_owner_user_id():
+            return None
+
         has_connection = bool(msg.connection_id)
         has_owner = bool(msg.owner_user_id)
         if not (has_connection and has_owner):
-            return False
+            return _BoundIdentityRejection()
         if self._connection_repo is None:
-            return False
+            return _BoundIdentityRejection()
 
         # The manager is the run-creation security boundary, so it does not
         # trust mutable InboundMessage identity fields by themselves. Re-read
-        # the binding by provider identity and require it to match the asserted
-        # connection owner before creating DeerFlow threads or runs.
+        # the binding by provider identity before creating DeerFlow threads or
+        # runs. If the asserted identity does not match, keep only the
+        # server-side connection fields as outbound routing hints.
         connection = await self._connection_repo.find_connection_by_external_identity(
             provider=msg.channel_name,
             external_account_id=msg.user_id,
             workspace_id=msg.workspace_id or None,
         )
-        return bool(connection and connection.get("id") == msg.connection_id and connection.get("owner_user_id") == msg.owner_user_id)
+        if connection is None:
+            return _BoundIdentityRejection()
 
-    async def _lacks_required_bound_identity(self, msg: InboundMessage) -> bool:
-        if not self._require_bound_identity:
-            return False
-        if _auth_disabled_owner_user_id():
-            return False
+        connection_id = connection.get("id")
+        owner_user_id = connection.get("owner_user_id")
+        if connection_id == msg.connection_id and owner_user_id == msg.owner_user_id:
+            return None
+        return _BoundIdentityRejection(outbound_connection_id=connection_id, outbound_owner_user_id=owner_user_id)
 
-        return not await self._has_verified_bound_identity(msg)
-
-    async def _reject_unbound_channel_message(self, msg: InboundMessage) -> None:
+    async def _reject_unbound_channel_message(
+        self,
+        msg: InboundMessage,
+        *,
+        bound_identity_rejection: _BoundIdentityRejection,
+    ) -> None:
         logger.info(
             "[Manager] rejecting unbound channel message: channel=%s, chat_id=%s",
             msg.channel_name,
@@ -1000,6 +1032,8 @@ class ChannelManager:
             thread_id="",
             text=BOUND_IDENTITY_REQUIRED_MESSAGE,
             thread_ts=msg.thread_ts,
+            connection_id=bound_identity_rejection.outbound_connection_id,
+            owner_user_id=bound_identity_rejection.outbound_owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
@@ -1075,8 +1109,9 @@ class ChannelManager:
         # Normal entry paths already run the bound-identity check in
         # _handle_message() or _handle_command(). Keep this default False so
         # direct callers and future internal paths still fail closed.
-        if not bound_identity_checked and await self._lacks_required_bound_identity(msg):
-            await self._reject_unbound_channel_message(msg)
+        bound_identity_rejection = None if bound_identity_checked else await self._get_bound_identity_rejection(msg)
+        if bound_identity_rejection is not None:
+            await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
             return
 
         client = self._get_client()
@@ -1311,8 +1346,9 @@ class ChannelManager:
         # query Gateway state via commands. Provider-level binding flows
         # (/connect <code>, /start <code>) are consumed by the provider adapter
         # before the message reaches the manager, so they are unaffected.
-        if await self._lacks_required_bound_identity(msg):
-            await self._reject_unbound_channel_message(msg)
+        bound_identity_rejection = await self._get_bound_identity_rejection(msg)
+        if bound_identity_rejection is not None:
+            await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
             return
 
         raw_text = msg.text

@@ -2640,6 +2640,8 @@ class TestChannelManagerBoundIdentityPolicy:
             assert len(outbound_received) == 1
             assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
             assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
             mock_client.threads.create.assert_not_called()
             mock_client.runs.wait.assert_not_called()
 
@@ -2681,6 +2683,8 @@ class TestChannelManagerBoundIdentityPolicy:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
 
         _run(go())
 
@@ -2818,6 +2822,8 @@ class TestChannelManagerBoundIdentityPolicy:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id == "actual-connection"
+            assert outbound_received[0].owner_user_id == "actual-owner"
             mock_client.threads.create.assert_not_called()
             mock_client.runs.wait.assert_not_called()
 
@@ -2913,6 +2919,8 @@ class TestChannelManagerBoundIdentityPolicy:
             assert len(outbound_received) == 1
             assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
             assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
             mock_client.threads.create.assert_not_called()
 
         _run(go())
