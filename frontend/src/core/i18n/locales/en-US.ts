@@ -280,6 +280,7 @@ export const enUS: Translations = {
     status: "Status",
     statusActive: "Active",
     statusIndexing: "Indexing",
+    statusPending: "Pending",
     statusError: "Error",
     documents: "Documents",
     chunks: "Chunks",
@@ -315,6 +316,9 @@ export const enUS: Translations = {
     searchResults: "Search Results",
     uploadFile: "Upload File",
     uploadFilePlaceholder: "PDF, DOCX, Markdown, or plain text (max 20 MB)",
+    uploadFileSizeHint: "Max 20 MB",
+    uploadFileTooLarge: "File too large ({size}MB), max 20 MB",
+    uploadFileUnsupportedType: "Unsupported file type: {name} (PDF, DOCX, Markdown, TXT supported)",
     uploading: "Uploading...",
     uploadSuccess: "File uploaded successfully",
     textInput: "Text Input",
@@ -343,6 +347,7 @@ export const enUS: Translations = {
     tabTenant: "Tenant",
     tabPublic: "Public",
     tabAdmin: "Admin",
+    tabHealth: "Health",
     groupMine: "My Knowledge Bases",
     groupTenant: "Company",
     groupPublic: "Public",
@@ -352,6 +357,7 @@ export const enUS: Translations = {
     indexingInProgress: "Indexing...",
     indexComplete: "Index complete",
     indexFailed: "Index failed",
+    uploadingCount: "Uploading ({count})",
     // Index health
     indexHealth: "Index Health",
     indexedCount: "Indexed",
@@ -363,6 +369,26 @@ export const enUS: Translations = {
     retrievalLatencyAvg: "Retrieval latency (Avg)",
     totalQueries: "Total queries",
     noIndexData: "No index data yet",
+    healthSummaryLoading: "Loading health summary...",
+    healthSummaryEmpty:
+      "No knowledge bases found. Create a knowledge base to see health metrics.",
+    healthSummaryIndexSuccess: "Index Success",
+    healthSummaryDocumentsCount: (ready: number, total: number) =>
+      `${ready} / ${total} docs`,
+    healthSummaryRetrievalP95: "Retrieval P95",
+    healthSummaryQueriesAcross: (queries: number, totalKbs: number) =>
+      `${queries} queries across ${totalKbs} KB${totalKbs === 1 ? "" : "s"}`,
+    healthSummaryIndexingInProgress: (count: number) =>
+      `${count} indexing in progress`,
+    healthSummaryAllIdle: "All idle",
+    healthSummaryFailedDocs: "Failed Docs",
+    healthSummaryErrorCategories: (count: number) =>
+      `${count} error categor${count === 1 ? "y" : "ies"}`,
+    healthSummaryFailureByType: "Failure by Type",
+    healthSummaryRecentFailures: (count: number) =>
+      `Recent Failures (${count})`,
+    healthSummaryUnknownError: "Unknown error",
+    healthSummaryPerKnowledgeBase: "Per Knowledge Base",
   },
 
   // Breadcrumb

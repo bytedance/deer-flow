@@ -1,14 +1,5 @@
 "use client";
 
-import {
-  FileTextIcon,
-  PencilIcon,
-  PlusIcon,
-  RefreshCwIcon,
-  SearchIcon,
-  Trash2Icon,
-  UploadIcon,
-} from "@/components/ui/icons";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -20,13 +11,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  FileTextIcon,
+  PencilIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  Trash2Icon,
+  UploadIcon,
+} from "@/components/ui/icons";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  validateUploadFile,
   useCreateDocument,
   useDeleteDocument,
-  useDocumentIndexStatus,
   useDocuments,
   useReindexDocument,
   useSearchKnowledgeBase,
@@ -36,6 +36,7 @@ import {
 import type { KnowledgeBase, KnowledgeBaseDocument, SearchResultItem } from "@/core/knowledge-base";
 
 import { KbIndexHealthCard } from "./kb-index-health-card";
+import { TrackedDocumentItem } from "./kb-tracked-document-item";
 
 interface KBDocumentsDialogProps {
   open: boolean;
@@ -51,7 +52,13 @@ function getDocumentStatusMeta(
   doc: KnowledgeBaseDocument,
   t: ReturnType<typeof useI18n>["t"],
 ): { label: string; variant: "secondary" | "destructive"; title?: string } | null {
-  if (isDocumentIndexing(doc.index_status)) {
+  if (doc.index_status === "pending") {
+    return {
+      label: t.knowledgeBase.statusPending,
+      variant: "secondary",
+    };
+  }
+  if (doc.index_status === "indexing") {
     return {
       label: t.knowledgeBase.statusIndexing,
       variant: "secondary",
@@ -66,6 +73,20 @@ function getDocumentStatusMeta(
   }
   return null;
 }
+
+export function buildTrackedDocEntry(
+  doc: { id: string },
+  title: string,
+  fileName: string,
+): { id: string; title: string; fileName: string } {
+  return {
+    id: doc.id,
+    title: title.trim() || fileName,
+    fileName,
+  };
+}
+
+export const __test_only = { getDocumentStatusMeta, isDocumentIndexing, buildTrackedDocEntry };
 
 export function KBDocumentsDialog({
   open,
@@ -153,11 +174,9 @@ function AddDocumentForm({
   const [file, setFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Track the just-uploaded document for index progress polling
-  const [trackingDocId, setTrackingDocId] = useState<string | null>(null);
-  const indexStatus = useDocumentIndexStatus(kbId, trackingDocId, {
-    enabled: trackingDocId !== null,
-  });
+  const [trackedDocs, setTrackedDocs] = useState<
+    Array<{ id: string; title: string; fileName: string }>
+  >([]);
 
   async function handleTextSubmit() {
     if (!title.trim() || !content.trim()) return;
@@ -174,180 +193,170 @@ function AddDocumentForm({
 
   async function handleFileSubmit() {
     if (!file) return;
+
+    const error = validateUploadFile(file);
+    if (error === "unsupported_type") {
+      toast.error(
+        t.knowledgeBase.uploadFileUnsupportedType.replace("{name}", file.name),
+      );
+      setFile(null);
+      return;
+    }
+    if (error === "too_large") {
+      toast.error(
+        t.knowledgeBase.uploadFileTooLarge.replace(
+          "{size}",
+          String(Math.round(file.size / 1024 / 1024)),
+        ),
+      );
+      setFile(null);
+      return;
+    }
+
     try {
       const doc = await uploadDoc.mutateAsync({
         file,
         title: title.trim() || undefined,
       });
-      setTrackingDocId(doc.id);
+      setTrackedDocs((prev) => [
+        ...prev,
+        buildTrackedDocEntry(doc, title, file.name),
+      ]);
+      setTitle("");
+      setFile(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
-  // When index status resolves to terminal, act accordingly
-  const status = indexStatus.data?.index_status;
-  const isTerminal = status === "indexed" || status === "failed";
-
-  // Show upload progress tracker after successful upload
-  if (trackingDocId) {
-    const isIndexing = status === "pending" || status === "indexing";
-    return (
-      <div className="bg-muted/50 flex flex-col gap-3 rounded-lg border p-4">
-        <div className="flex items-center gap-2">
-          <FileTextIcon className="text-muted-foreground h-4 w-4" />
-          <span className="text-sm font-medium truncate">
-            {title || file?.name || trackingDocId}
-          </span>
-        </div>
-
-        {isIndexing && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <RefreshCwIcon className="h-3.5 w-3.5 animate-spin" />
-            <span>{t.knowledgeBase.indexingInProgress}</span>
-          </div>
-        )}
-
-        {status === "indexed" && (
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="text-xs">
-              {indexStatus.data?.chunk_count ?? 0} {t.knowledgeBase.chunks}
-            </Badge>
-            <span className="text-sm text-muted-foreground">{t.knowledgeBase.indexComplete}</span>
-          </div>
-        )}
-
-        {status === "failed" && (
-          <div className="flex flex-col gap-2">
-            <div className="text-destructive text-sm font-medium">
-              {t.knowledgeBase.indexFailed}
-            </div>
-            {indexStatus.data?.index_error && (
-              <p className="text-destructive/80 text-xs">{indexStatus.data.index_error}</p>
-            )}
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setTrackingDocId(null);
-                }}
-              >
-                {t.common.cancel}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {isTerminal && (
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={onDone}>
-              {t.common.close}
-            </Button>
-          </div>
-        )}
-      </div>
-    );
+  function handleDismiss(docId: string) {
+    setTrackedDocs((prev) => prev.filter((d) => d.id !== docId));
   }
 
   return (
-    <div className="bg-muted/50 flex flex-col gap-3 rounded-lg border p-4">
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          variant={mode === "text" ? "default" : "outline"}
-          onClick={() => setMode("text")}
-        >
-          <FileTextIcon className="mr-1.5 h-3.5 w-3.5" />
-          {t.knowledgeBase.textInput}
-        </Button>
-        <Button
-          size="sm"
-          variant={mode === "upload" ? "default" : "outline"}
-          onClick={() => setMode("upload")}
-        >
-          <UploadIcon className="mr-1.5 h-3.5 w-3.5" />
-          {t.knowledgeBase.fileUpload}
-        </Button>
-      </div>
+    <div className="flex flex-col gap-3">
+      <div className="bg-muted/50 flex flex-col gap-3 rounded-lg border p-4">
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={mode === "text" ? "default" : "outline"}
+            onClick={() => setMode("text")}
+          >
+            <FileTextIcon className="mr-1.5 h-3.5 w-3.5" />
+            {t.knowledgeBase.textInput}
+          </Button>
+          <Button
+            size="sm"
+            variant={mode === "upload" ? "default" : "outline"}
+            onClick={() => setMode("upload")}
+          >
+            <UploadIcon className="mr-1.5 h-3.5 w-3.5" />
+            {t.knowledgeBase.fileUpload}
+          </Button>
+        </div>
 
-      <div className="flex flex-col gap-2">
-        <label htmlFor="doc-title" className="text-sm font-medium">
-          {t.knowledgeBase.documentTitle}
-        </label>
-        <Input
-          id="doc-title"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder={t.knowledgeBase.documentTitlePlaceholder}
-        />
-      </div>
-
-      {mode === "text" ? (
         <div className="flex flex-col gap-2">
-          <label htmlFor="doc-content" className="text-sm font-medium">
-            {t.knowledgeBase.documentContent}
+          <label htmlFor="doc-title" className="text-sm font-medium">
+            {t.knowledgeBase.documentTitle}
           </label>
-          <Textarea
-            id="doc-content"
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder={t.knowledgeBase.documentContentPlaceholder}
-            rows={5}
+          <Input
+            id="doc-title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={t.knowledgeBase.documentTitlePlaceholder}
           />
         </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <label htmlFor="doc-file" className="text-sm font-medium">
-            {t.knowledgeBase.uploadFile}
-          </label>
-          <div
-            className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed p-4"
-            onClick={() => fileInputRef.current?.click()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click();
-            }}
-            role="button"
-            tabIndex={0}
-          >
-            <UploadIcon className="text-muted-foreground h-5 w-5" />
-            <span className="text-muted-foreground text-sm">
-              {file ? file.name : t.knowledgeBase.uploadFilePlaceholder}
-            </span>
+
+        {mode === "text" ? (
+          <div className="flex flex-col gap-2">
+            <label htmlFor="doc-content" className="text-sm font-medium">
+              {t.knowledgeBase.documentContent}
+            </label>
+            <Textarea
+              id="doc-content"
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder={t.knowledgeBase.documentContentPlaceholder}
+              rows={5}
+            />
           </div>
-          <input
-            ref={fileInputRef}
-            id="doc-file"
-            type="file"
-            className="hidden"
-            accept=".pdf,.doc,.docx,.md,.txt"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            <label htmlFor="doc-file" className="text-sm font-medium">
+              {t.knowledgeBase.uploadFile}
+            </label>
+            <div
+              className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed p-4"
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click();
+              }}
+              role="button"
+              tabIndex={0}
+            >
+              <UploadIcon className="text-muted-foreground h-5 w-5" />
+              <span className="text-muted-foreground text-sm">
+                {file ? file.name : t.knowledgeBase.uploadFilePlaceholder}
+              </span>
+            </div>
+            <input
+              ref={fileInputRef}
+              id="doc-file"
+              type="file"
+              className="hidden"
+              accept=".pdf,.doc,.docx,.md,.txt"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <p className="text-muted-foreground text-xs">
+              {t.knowledgeBase.uploadFileSizeHint}
+            </p>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onDone}>
+            {t.common.cancel}
+          </Button>
+          {mode === "text" ? (
+            <Button
+              size="sm"
+              onClick={handleTextSubmit}
+              disabled={createDoc.isPending || !title.trim() || !content.trim()}
+            >
+              {createDoc.isPending ? t.knowledgeBase.creating : t.knowledgeBase.create}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={handleFileSubmit}
+              disabled={uploadDoc.isPending || !file}
+            >
+              {uploadDoc.isPending ? t.knowledgeBase.uploading : t.knowledgeBase.uploadFile}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {trackedDocs.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <span className="text-muted-foreground text-xs font-medium">
+            {t.knowledgeBase.uploadingCount.replace(
+              "{count}",
+              String(trackedDocs.length),
+            )}
+          </span>
+          {trackedDocs.map((doc) => (
+            <TrackedDocumentItem
+              key={doc.id}
+              kbId={kbId}
+              docId={doc.id}
+              title={doc.title}
+              fileName={doc.fileName}
+              onDismiss={handleDismiss}
+            />
+          ))}
         </div>
       )}
-
-      <div className="flex justify-end gap-2">
-        <Button size="sm" variant="outline" onClick={onDone}>
-          {t.common.cancel}
-        </Button>
-        {mode === "text" ? (
-          <Button
-            size="sm"
-            onClick={handleTextSubmit}
-            disabled={createDoc.isPending || !title.trim() || !content.trim()}
-          >
-            {createDoc.isPending ? t.knowledgeBase.creating : t.knowledgeBase.create}
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            onClick={handleFileSubmit}
-            disabled={uploadDoc.isPending || !file}
-          >
-            {uploadDoc.isPending ? t.knowledgeBase.uploading : t.knowledgeBase.uploadFile}
-          </Button>
-        )}
-      </div>
     </div>
   );
 }

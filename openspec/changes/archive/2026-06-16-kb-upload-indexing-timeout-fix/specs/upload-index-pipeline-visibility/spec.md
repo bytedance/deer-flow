@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Upload to index status is visible
 The system SHALL display the full pipeline status from upload through indexing completion, including the indexing indicator immediately upon upload success without waiting for the first poll cycle, and SHALL allow users to upload additional files while previous uploads are still indexing.
@@ -35,27 +35,7 @@ The system SHALL display the full pipeline status from upload through indexing c
 - **WHEN** the user closes and reopens the add form
 - **THEN** the new form SHALL start with an empty tracker list; the document list below SHALL show the current status of all documents
 
-### Requirement: KB-level aggregated index statistics
-The system SHALL aggregate per-document indexing status into knowledge-base-level statistics accessible via API.
-
-#### Scenario: KB list endpoint includes index summary
-- **WHEN** a user lists knowledge bases via `GET /api/knowledge-bases`
-- **THEN** each returned KB entry SHALL carry `document_count`, `indexed_count`, and `failed_count` computed from the KB's documents
-
-#### Scenario: KB detail endpoint includes index detail
-- **WHEN** a user requests `GET /api/knowledge-bases/{id}`
-- **THEN** the response SHALL include per-status document counts, last index timestamp, and recent failure entries
-
-### Requirement: Failure classification in pipeline visibility
-The system SHALL classify index failures displayed in the pipeline view by standardized error categories.
-
-#### Scenario: Failed document shows classified error type
-- **WHEN** a document's index_status is "failed"
-- **THEN** the UI SHALL display the classified failure type alongside the raw error message
-
-#### Scenario: KB detail groups failures by type
-- **WHEN** a knowledge base has multiple failed documents
-- **THEN** the index stats SHALL group failures by category (e.g., "EMPTY_RESULT: 3, ENCRYPTED_PDF: 1")
+## ADDED Requirements
 
 ### Requirement: Large file upload timeout resilience
 The system SHALL support file uploads up to 20 MB without gateway timeout errors under typical network conditions.

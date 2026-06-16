@@ -253,6 +253,7 @@ export const zhCN: Translations = {
     status: "状态",
     statusActive: "正常",
     statusIndexing: "索引中",
+    statusPending: "等待索引",
     statusError: "异常",
     documents: "文档",
     chunks: "分块",
@@ -286,6 +287,9 @@ export const zhCN: Translations = {
     searchResults: "搜索结果",
     uploadFile: "上传文件",
     uploadFilePlaceholder: "PDF、DOCX、Markdown 或纯文本（最大 20 MB）",
+    uploadFileSizeHint: "最大 20 MB",
+    uploadFileTooLarge: "文件过大（{size}MB），最大支持 20 MB",
+    uploadFileUnsupportedType: "不支持的文件格式：{name}（支持 PDF、DOCX、Markdown、TXT）",
     uploading: "上传中...",
     uploadSuccess: "文件上传成功",
     textInput: "文本输入",
@@ -314,6 +318,7 @@ export const zhCN: Translations = {
     tabTenant: "租户",
     tabPublic: "公开",
     tabAdmin: "管理",
+    tabHealth: "健康",
     groupMine: "我的知识库",
     groupTenant: "公司",
     groupPublic: "公共",
@@ -323,6 +328,7 @@ export const zhCN: Translations = {
     indexingInProgress: "索引中…",
     indexComplete: "索引完成",
     indexFailed: "索引失败",
+    uploadingCount: "上传中 ({count})",
     // Index health
     indexHealth: "索引健康度",
     indexedCount: "已索引",
@@ -334,6 +340,23 @@ export const zhCN: Translations = {
     retrievalLatencyAvg: "检索延迟 (Avg)",
     totalQueries: "检索次数",
     noIndexData: "暂无索引数据",
+    healthSummaryLoading: "正在加载健康概览...",
+    healthSummaryEmpty: "未找到知识库。创建知识库后即可查看健康指标。",
+    healthSummaryIndexSuccess: "索引成功率",
+    healthSummaryDocumentsCount: (ready: number, total: number) =>
+      `${ready} / ${total} 篇文档`,
+    healthSummaryRetrievalP95: "检索 P95",
+    healthSummaryQueriesAcross: (queries: number, totalKbs: number) =>
+      `${queries} 次查询，覆盖 ${totalKbs} 个知识库`,
+    healthSummaryIndexingInProgress: (count: number) =>
+      `${count} 个知识库索引中`,
+    healthSummaryAllIdle: "全部空闲",
+    healthSummaryFailedDocs: "失败文档",
+    healthSummaryErrorCategories: (count: number) => `${count} 类错误`,
+    healthSummaryFailureByType: "按类型统计失败",
+    healthSummaryRecentFailures: (count: number) => `最近失败 (${count})`,
+    healthSummaryUnknownError: "未知错误",
+    healthSummaryPerKnowledgeBase: "各知识库明细",
   },
 
   // Breadcrumb

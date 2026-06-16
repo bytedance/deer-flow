@@ -196,6 +196,7 @@ export interface Translations {
     status: string;
     statusActive: string;
     statusIndexing: string;
+    statusPending: string;
     statusError: string;
     documents: string;
     chunks: string;
@@ -229,6 +230,9 @@ export interface Translations {
     searchResults: string;
     uploadFile: string;
     uploadFilePlaceholder: string;
+    uploadFileSizeHint: string;
+    uploadFileTooLarge: string;
+    uploadFileUnsupportedType: string;
     uploading: string;
     uploadSuccess: string;
     textInput: string;
@@ -257,6 +261,7 @@ export interface Translations {
     tabTenant: string;
     tabPublic: string;
     tabAdmin: string;
+    tabHealth: string;
     groupMine: string;
     groupTenant: string;
     groupPublic: string;
@@ -266,6 +271,7 @@ export interface Translations {
     indexingInProgress: string;
     indexComplete: string;
     indexFailed: string;
+    uploadingCount: string;
     // Index health
     indexHealth: string;
     indexedCount: string;
@@ -277,6 +283,23 @@ export interface Translations {
     retrievalLatencyAvg: string;
     totalQueries: string;
     noIndexData: string;
+    healthSummaryLoading: string;
+    healthSummaryEmpty: string;
+    healthSummaryIndexSuccess: string;
+    healthSummaryDocumentsCount: (ready: number, total: number) => string;
+    healthSummaryRetrievalP95: string;
+    healthSummaryQueriesAcross: (
+      queries: number,
+      totalKbs: number,
+    ) => string;
+    healthSummaryIndexingInProgress: (count: number) => string;
+    healthSummaryAllIdle: string;
+    healthSummaryFailedDocs: string;
+    healthSummaryErrorCategories: (count: number) => string;
+    healthSummaryFailureByType: string;
+    healthSummaryRecentFailures: (count: number) => string;
+    healthSummaryUnknownError: string;
+    healthSummaryPerKnowledgeBase: string;
   };
 
   // Breadcrumb

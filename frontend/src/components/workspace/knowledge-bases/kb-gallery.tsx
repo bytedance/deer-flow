@@ -117,7 +117,7 @@ export function KBGallery() {
             <TabsTrigger value="admin">{t.knowledgeBase.tabAdmin}</TabsTrigger>
             <TabsTrigger value="health">
               <HeartPulseIcon className="mr-1 h-3.5 w-3.5" />
-              Health
+              {t.knowledgeBase.tabHealth}
             </TabsTrigger>
           </TabsList>
 

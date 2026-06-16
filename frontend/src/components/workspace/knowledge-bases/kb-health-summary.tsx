@@ -16,16 +16,18 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { useI18n } from "@/core/i18n/hooks";
 import { useHealthSummary } from "@/core/knowledge-base";
 
 export function KbHealthSummary() {
+  const { t } = useI18n();
   const { data: summary, isLoading } = useHealthSummary();
 
   if (isLoading) {
     return (
       <div className="text-muted-foreground flex items-center justify-center py-12">
         <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
-        Loading health summary...
+        {t.knowledgeBase.healthSummaryLoading}
       </div>
     );
   }
@@ -33,7 +35,7 @@ export function KbHealthSummary() {
   if (!summary || summary.total_kbs === 0) {
     return (
       <div className="text-muted-foreground py-12 text-center text-sm">
-        No knowledge bases found. Create a knowledge base to see health metrics.
+        {t.knowledgeBase.healthSummaryEmpty}
       </div>
     );
   }
@@ -51,57 +53,72 @@ export function KbHealthSummary() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* ---- SLA cards ---- */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Index Success</CardTitle>
+            <CardTitle className="text-sm font-medium">
+              {t.knowledgeBase.healthSummaryIndexSuccess}
+            </CardTitle>
             <CheckCircle2Icon className="h-4 w-4 text-green-600" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{successRate}%</div>
             <Progress value={successRate} className="mt-2 h-1.5" />
             <p className="text-muted-foreground mt-1 text-xs">
-              {summary.documents.ready} / {summary.documents.total} docs
+              {t.knowledgeBase.healthSummaryDocumentsCount(
+                summary.documents.ready,
+                summary.documents.total,
+              )}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Retrieval P95</CardTitle>
+            <CardTitle className="text-sm font-medium">
+              {t.knowledgeBase.healthSummaryRetrievalP95}
+            </CardTitle>
             <TimerIcon className="h-4 w-4 text-blue-600" />
           </CardHeader>
           <CardContent>
             <div className={`text-2xl font-bold ${latencyColor}`}>
               {summary.retrieval.total_queries > 0
                 ? `${p95.toFixed(0)} ms`
-                : "—"}
+                : "-"}
             </div>
             <p className="text-muted-foreground mt-1 text-xs">
-              {summary.retrieval.total_queries} queries across {summary.total_kbs} KBs
+              {t.knowledgeBase.healthSummaryQueriesAcross(
+                summary.retrieval.total_queries,
+                summary.total_kbs,
+              )}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Knowledge Bases</CardTitle>
+            <CardTitle className="text-sm font-medium">
+              {t.knowledgeBase.title}
+            </CardTitle>
             <DatabaseIcon className="h-4 w-4 text-purple-600" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{summary.total_kbs}</div>
             <p className="text-muted-foreground mt-1 text-xs">
               {summary.documents.indexing > 0
-                ? `${summary.documents.indexing} indexing in progress`
-                : "All idle"}
+                ? t.knowledgeBase.healthSummaryIndexingInProgress(
+                    summary.documents.indexing,
+                  )
+                : t.knowledgeBase.healthSummaryAllIdle}
             </p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Failed Docs</CardTitle>
+            <CardTitle className="text-sm font-medium">
+              {t.knowledgeBase.healthSummaryFailedDocs}
+            </CardTitle>
             <AlertTriangleIcon
               className={`h-4 w-4 ${summary.documents.failed > 0 ? "text-red-500" : "text-muted-foreground"}`}
             />
@@ -113,18 +130,19 @@ export function KbHealthSummary() {
               {summary.documents.failed}
             </div>
             <p className="text-muted-foreground mt-1 text-xs">
-              {Object.keys(summary.failure_by_type).length} error categories
+              {t.knowledgeBase.healthSummaryErrorCategories(
+                Object.keys(summary.failure_by_type).length,
+              )}
             </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* ---- Failure breakdown ---- */}
       {Object.keys(summary.failure_by_type).length > 0 && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">
-              Failure by Type
+              {t.knowledgeBase.healthSummaryFailureByType}
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -132,7 +150,7 @@ export function KbHealthSummary() {
               {Object.entries(summary.failure_by_type).map(([cat, count]) => (
                 <span
                   key={cat}
-                  className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700 border border-red-200"
+                  className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700"
                 >
                   <XCircleIcon className="h-3 w-3" />
                   {cat}: {count}
@@ -143,24 +161,25 @@ export function KbHealthSummary() {
         </Card>
       )}
 
-      {/* ---- Recent failures ---- */}
       {summary.recent_failures.length > 0 && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">
-              Recent Failures ({summary.recent_failures.length})
+              {t.knowledgeBase.healthSummaryRecentFailures(
+                summary.recent_failures.length,
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="max-h-48 space-y-1 overflow-y-auto">
-              {summary.recent_failures.slice(0, 10).map((f) => (
+              {summary.recent_failures.slice(0, 10).map((failure) => (
                 <div
-                  key={f.job_id}
+                  key={failure.job_id}
                   className="flex items-start gap-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs"
                 >
                   <XCircleIcon className="mt-0.5 h-3 w-3 shrink-0 text-red-500" />
                   <span className="text-muted-foreground line-clamp-2 break-all">
-                    {f.error ?? "Unknown error"}
+                    {failure.error ?? t.knowledgeBase.healthSummaryUnknownError}
                   </span>
                 </div>
               ))}
@@ -169,11 +188,10 @@ export function KbHealthSummary() {
         </Card>
       )}
 
-      {/* ---- Per-KB drill-down table ---- */}
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium">
-            Per Knowledge Base
+            {t.knowledgeBase.healthSummaryPerKnowledgeBase}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -181,12 +199,22 @@ export function KbHealthSummary() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b text-left">
-                  <th className="pb-2 font-medium">Name</th>
-                  <th className="pb-2 text-right font-medium">Docs</th>
-                  <th className="pb-2 text-right font-medium">Ready</th>
-                  <th className="pb-2 text-right font-medium">Failed</th>
-                  <th className="pb-2 text-right font-medium">Avg Latency</th>
-                  <th className="pb-2 text-right font-medium">Queries</th>
+                  <th className="pb-2 font-medium">{t.knowledgeBase.name}</th>
+                  <th className="pb-2 text-right font-medium">
+                    {t.knowledgeBase.documents}
+                  </th>
+                  <th className="pb-2 text-right font-medium">
+                    {t.knowledgeBase.indexedCount}
+                  </th>
+                  <th className="pb-2 text-right font-medium">
+                    {t.knowledgeBase.failedCount}
+                  </th>
+                  <th className="pb-2 text-right font-medium">
+                    {t.knowledgeBase.retrievalLatencyAvg}
+                  </th>
+                  <th className="pb-2 text-right font-medium">
+                    {t.knowledgeBase.totalQueries}
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -205,7 +233,7 @@ export function KbHealthSummary() {
                     <td className="py-2 text-right">
                       {kb.total_queries > 0
                         ? `${kb.avg_retrieval_latency_ms.toFixed(0)} ms`
-                        : "—"}
+                        : "-"}
                     </td>
                     <td className="py-2 text-right">{kb.total_queries}</td>
                   </tr>
