@@ -97,7 +97,7 @@ class TestSubagentOverrideConfig:
 class TestSubagentsAppConfigDefaults:
     def test_default_timeout(self):
         config = SubagentsAppConfig()
-        assert config.timeout_seconds == 900
+        assert config.timeout_seconds == 1800
 
     def test_default_max_turns_override_is_none(self):
         config = SubagentsAppConfig()
@@ -281,7 +281,7 @@ class TestLoadSubagentsConfig:
     def test_load_empty_dict_uses_defaults(self):
         load_subagents_config_from_dict({})
         cfg = get_subagents_app_config()
-        assert cfg.timeout_seconds == 900
+        assert cfg.timeout_seconds == 1800
         assert cfg.max_turns is None
         assert cfg.agents == {}
 
@@ -325,7 +325,19 @@ class TestRegistryGetSubagentConfig:
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
-        assert config.max_turns == 100
+        assert config.max_turns == 150
+
+    def test_builtin_defaults_have_research_headroom(self):
+        """Out-of-box defaults (no config.yaml subagents section) must give
+        general-purpose enough turns/time for deep research, which previously
+        failed with GraphRecursionError at the old max_turns=100 limit.
+        """
+        from deerflow.subagents.registry import get_subagent_config
+
+        load_subagents_config_from_dict({})  # no subagents config -> model defaults
+        config = get_subagent_config("general-purpose")
+        assert config.max_turns == 150
+        assert config.timeout_seconds == 1800
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config

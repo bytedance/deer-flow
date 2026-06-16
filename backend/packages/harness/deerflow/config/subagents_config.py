@@ -72,9 +72,9 @@ class SubagentsAppConfig(BaseModel):
     """Configuration for the subagent system."""
 
     timeout_seconds: int = Field(
-        default=900,
+        default=1800,
         ge=1,
-        description="Default timeout in seconds for all subagents (default: 900 = 15 minutes)",
+        description="Default timeout in seconds for all subagents (default: 1800 = 30 minutes)",
     )
     max_turns: int | None = Field(
         default=None,
