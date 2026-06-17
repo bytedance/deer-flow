@@ -96,7 +96,7 @@ def test_serialize_channel_values_strips_pregel_keys():
         "messages": ["hello"],
         "__pregel_tasks": "internal",
         "__pregel_resuming": True,
-        "__interrupt__": "stop",
+        "__interrupt__": [{"value": "ask_human", "resumable": True}],
         "title": "Test",
     }
     result = serialize_channel_values(raw)
@@ -104,7 +104,10 @@ def test_serialize_channel_values_strips_pregel_keys():
     assert "title" in result
     assert "__pregel_tasks" not in result
     assert "__pregel_resuming" not in result
-    assert "__interrupt__" not in result
+    assert "__interrupt__" in result
+    assert isinstance(result["__interrupt__"], list)
+    assert len(result["__interrupt__"]) == 1
+    assert result["__interrupt__"][0]["value"] == "ask_human"
 
 
 def test_serialize_channel_values_serializes_objects():
