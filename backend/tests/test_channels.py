@@ -148,6 +148,27 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_unsubscribe_outbound_removes_fresh_bound_method_reference(self):
+        bus = MessageBus()
+        received = []
+
+        class Handler:
+            async def callback(self, msg):
+                received.append((self, msg))
+
+        handler = Handler()
+        other_handler = Handler()
+
+        async def go():
+            bus.subscribe_outbound(handler.callback)
+            bus.subscribe_outbound(other_handler.callback)
+            bus.unsubscribe_outbound(handler.callback)
+            out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
+            await bus.publish_outbound(out)
+            assert received == [(other_handler, out)]
+
+        _run(go())
+
     def test_outbound_error_does_not_crash(self):
         bus = MessageBus()
 
@@ -2565,6 +2586,445 @@ class TestResolveRunParamsUserId:
         assert "channel_user_id" not in run_context
 
 
+class _BoundIdentityRepo:
+    def __init__(self, connections: list[dict[str, str | None]] | None = None) -> None:
+        self.connections = list(connections or [])
+        self.lookups: list[dict[str, str | None]] = []
+        self.thread_sets: list[dict[str, str | None]] = []
+
+    async def find_connection_by_external_identity(self, *, provider: str, external_account_id: str, workspace_id: str | None = None):
+        self.lookups.append(
+            {
+                "provider": provider,
+                "external_account_id": external_account_id,
+                "workspace_id": workspace_id,
+            }
+        )
+        for connection in self.connections:
+            if connection.get("provider") == provider and connection.get("external_account_id") == external_account_id and connection.get("workspace_id") == workspace_id:
+                return connection
+        return None
+
+    async def get_thread_id(self, connection_id: str, chat_id: str, topic_id: str | None = None):
+        return None
+
+    async def set_thread_id(
+        self,
+        *,
+        connection_id: str,
+        owner_user_id: str,
+        provider: str,
+        external_conversation_id: str,
+        external_topic_id: str | None,
+        thread_id: str,
+    ) -> None:
+        self.thread_sets.append(
+            {
+                "connection_id": connection_id,
+                "owner_user_id": owner_user_id,
+                "provider": provider,
+                "external_conversation_id": external_conversation_id,
+                "external_topic_id": external_topic_id,
+                "thread_id": thread_id,
+            }
+        )
+
+
+class TestChannelManagerBoundIdentityPolicy:
+    def test_unbound_auth_enabled_chat_is_rejected_before_thread_or_run_creation(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                    thread_ts="1710000000.000100",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_bound_identity_repo_unavailable_uses_transient_failure_message(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="hi",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            assert manager._semaphore is not None
+            await manager._semaphore.acquire()
+            try:
+                await asyncio.wait_for(
+                    manager._handle_message(
+                        InboundMessage(
+                            channel_name="slack",
+                            chat_id="C123",
+                            user_id="U-platform",
+                            text="hi",
+                        )
+                    ),
+                    timeout=0.5,
+                )
+            finally:
+                manager._semaphore.release()
+                await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+
+        _run(go())
+
+    def test_bound_auth_enabled_chat_is_allowed_when_bound_identity_is_required(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == "deerflow-user-1"
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_bound_auth_enabled_message_checks_bound_identity_once_on_hot_path(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+            await manager.start()
+            try:
+                await manager._handle_message(
+                    InboundMessage(
+                        channel_name="slack",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        owner_user_id="deerflow-user-1",
+                        connection_id="connection-1",
+                        workspace_id="T123",
+                        text="hi",
+                    )
+                )
+            finally:
+                await manager.stop()
+
+            assert repo.lookups == [
+                {
+                    "provider": "slack",
+                    "external_account_id": "U-platform",
+                    "workspace_id": "T123",
+                }
+            ]
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+
+        _run(go())
+
+    def test_auth_enabled_chat_rejects_unverified_bound_identity(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "actual-connection",
+                        "owner_user_id": "actual-owner",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": None,
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="forged-owner",
+                    connection_id="forged-connection",
+                    text="hi",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id == "actual-connection"
+            assert outbound_received[0].owner_user_id == "actual-owner"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_auth_disabled_chat_keeps_default_user_when_bound_identity_is_required(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-local")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_legacy_open_bot_mode_allows_unbound_auth_enabled_chat(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=False)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-legacy")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == "U-platform"
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_unbound_auth_enabled_new_command_is_rejected_before_thread_creation(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="/new",
+                    msg_type=InboundMessageType.COMMAND,
+                    thread_ts="1710000000.000100",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+
+        _run(go())
+
+    def test_bound_auth_enabled_new_command_creates_thread(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="/new",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+
+        _run(go())
+
+
 class TestChannelManagerConnectionRouting:
     def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch):
         from app.channels.manager import ChannelManager
@@ -3810,6 +4270,13 @@ class TestChannelService:
         service = ChannelService(channels_config={}, connection_repo=repo)
 
         assert service.manager._connection_repo is repo
+
+    def test_require_bound_identity_is_forwarded_to_manager(self):
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={}, require_bound_identity=True)
+
+        assert service.manager._require_bound_identity is True
 
     def test_remove_channel_stops_running_channel_and_forgets_config(self):
         from app.channels.service import ChannelService

@@ -33,6 +33,7 @@ def test_public_paths(path: str):
     [
         "/api/models",
         "/api/mcp/config",
+        "/api/mcp/cache/reset",
         "/api/memory",
         "/api/skills",
         "/api/threads/123",
@@ -147,6 +148,10 @@ def _make_app():
 
     @app.put("/api/mcp/config")
     async def mcp_put():
+        return {"ok": True}
+
+    @app.post("/api/mcp/cache/reset")
+    async def mcp_cache_reset():
         return {"ok": True}
 
     @app.delete("/api/threads/abc")
@@ -357,6 +362,11 @@ def test_protected_path_with_junk_cookie_rejected(client):
 
 def test_protected_post_no_cookie_returns_401(client):
     res = client.post("/api/threads/abc/runs/stream")
+    assert res.status_code == 401
+
+
+def test_mcp_cache_reset_post_no_cookie_returns_401(client):
+    res = client.post("/api/mcp/cache/reset")
     assert res.status_code == 401
 
 

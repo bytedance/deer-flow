@@ -20,8 +20,13 @@ class SubagentConfig:
         skills: Optional list of skill names to load. If None, inherits all enabled skills.
                 If an empty list, no skills are loaded.
         model: Model to use - 'inherit' uses parent's model.
-        max_turns: Maximum number of agent turns before stopping.
-        timeout_seconds: Maximum execution time in seconds (default: 900 = 15 minutes).
+        max_turns: Maximum agent turns before stopping. Built-in agents use the
+            value set here (general-purpose=150, bash=60) unless the global
+            ``subagents.max_turns`` is set.
+        timeout_seconds: Bare fallback execution-time cap. For built-in agents the
+            effective limit is the global ``subagents.timeout_seconds`` (default
+            1800 = 30 min), layered on by the registry; this 900 only applies
+            when no differing global value exists.
     """
 
     name: str
