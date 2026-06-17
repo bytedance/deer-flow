@@ -519,10 +519,24 @@ def _safe_user_id_for_run(raw_user_id: str) -> str:
 
 
 def _channel_storage_user_id(msg: InboundMessage) -> str | None:
+    """Resolve the storage bucket owner for an inbound message's files/artifacts.
+
+    Mirrors the run-identity policy in ``_resolve_run_params`` so uploads land in
+    and artifacts are read from the same bucket the agent run uses: prefer the
+    bound DeerFlow owner, otherwise fall back to the sanitized raw platform user
+    id. Without this fallback, an unbound auth-enabled channel would run under
+    ``safe(msg.user_id)`` but stage files under ``get_effective_user_id()`` (the
+    dispatcher task's unset contextvar → ``"default"``), so uploads would land in
+    ``users/default/...`` while the agent reads ``users/{safe_platform_user_id}/...``.
+    Returns ``None`` only when neither identity is available, leaving the caller to
+    fall back to the contextvar/default user.
+    """
     owner_user_id = _effective_owner_user_id(msg)
-    if not owner_user_id:
-        return None
-    return _safe_user_id_for_run(owner_user_id)
+    if owner_user_id:
+        return _safe_user_id_for_run(owner_user_id)
+    if msg.user_id:
+        return _safe_user_id_for_run(msg.user_id)
+    return None
 
 
 def _resolve_slash_skill_command(

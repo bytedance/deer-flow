@@ -830,6 +830,28 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_channel_storage_user_id_falls_back_to_platform_user(self, monkeypatch):
+        """Unbound auth-enabled channels stage files under the same bucket the run uses.
+
+        ``_resolve_run_params`` runs an unbound msg under ``safe(msg.user_id)``, so
+        ``_channel_storage_user_id`` must resolve to the same value instead of
+        ``None`` (which would fall back to ``"default"`` in the dispatcher task and
+        cross buckets — the agent would read uploads the channel never wrote there).
+        """
+        from app.channels.manager import _channel_storage_user_id, _safe_user_id_for_run
+
+        # Auth enabled (no auth-disabled owner), unbound (no owner_user_id).
+        monkeypatch.setattr("app.channels.manager._auth_disabled_owner_user_id", lambda: None)
+
+        unbound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi")
+        assert _channel_storage_user_id(unbound) == _safe_user_id_for_run("U-platform")
+
+        bound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi", owner_user_id="owner-1")
+        assert _channel_storage_user_id(bound) == _safe_user_id_for_run("owner-1")
+
+        anonymous = InboundMessage(channel_name="slack", chat_id="C1", user_id="", text="hi")
+        assert _channel_storage_user_id(anonymous) is None
+
     def test_handle_chat_creates_thread(self):
         from app.channels.manager import ChannelManager
 
