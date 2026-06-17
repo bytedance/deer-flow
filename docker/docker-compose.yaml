@@ -140,7 +140,7 @@ services:
 # (docker-compose.dood.yaml / docker-compose.cli-auth.yaml, see upstream
 # commits 5d61718c / 474c89ba). We keep them inline because DooD +
 # Claude CLI auto-auth are core dev workflow here. Revisit if the
-# opt-in pattern lands cleanly via scripts/docker.sh.
+# opt-in pattern lands cleanly via scripts/deploy.sh.
 # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -153,8 +153,10 @@ services:
       # bind-mount 到 host 的 docker/pi-agent/ 下，recreate 容器不丢状态。
       - ./pi-agent/:/root/.pi/agent/
       # Dev: mount gateway source code for hot-reload
-      - ../backend/app/gateway:/app/backend/app/gateway
+      - ../backend/app:/app/backend/app
       - ../backend/packages/harness:/app/backend/packages/harness
+      - ../backend/.tiktoken_cache:/root/.tiktoken_cache:ro
+      - ${DEER_FLOW_HOME}/persistent:/app/persistent
       - ../offline-claude:/root/offline-claude
     working_dir: /app
     environment:
@@ -173,6 +175,7 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - TIKTOKEN_CACHE_DIR=/root/.tiktoken_cache
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,provisioner,host.docker.internal
