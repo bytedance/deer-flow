@@ -3,10 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { startConnectionPoll } from "@/core/channels/connect-poll";
 import type { ChannelConnection } from "@/core/channels/types";
 
-function connection(
-  provider: string,
-  status: string,
-): ChannelConnection {
+function connection(provider: string, status: string): ChannelConnection {
   return {
     id: `${provider}-1`,
     provider,

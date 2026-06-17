@@ -70,8 +70,7 @@ export function startConnectionPoll(
             return;
           }
           const connected = connections.some(
-            (item) =>
-              item.provider === provider && item.status === "connected",
+            (item) => item.provider === provider && item.status === "connected",
           );
           if (connected) {
             onConnected();
