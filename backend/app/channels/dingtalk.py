@@ -247,32 +247,19 @@ class DingTalkChannel(Channel):
                 self._card_repliers.pop(out_track_id, None)
             return
 
-        # Non-card mode: send sampleMarkdown with retry
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                if conversation_type == _CONVERSATION_TYPE_GROUP:
-                    await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
-                else:
-                    await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[DingTalk] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_markdown() -> None:
+            if conversation_type == _CONVERSATION_TYPE_GROUP:
+                await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
+            else:
+                await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
 
-        logger.error("[DingTalk] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("DingTalk send failed without an exception from any attempt")
-        raise last_exc
+        # Non-card mode: send sampleMarkdown with retry
+        await self._send_with_retry(
+            send_markdown,
+            max_retries=_max_retries,
+            log_prefix="[DingTalk]",
+        )
+        return
 
     async def _send_markdown_fallback(
         self,
@@ -801,15 +788,6 @@ class DingTalkChannel(Channel):
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
-
-    @staticmethod
-    def _log_future_error(fut: Any, name: str, msg_id: str) -> None:
-        try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[DingTalk] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except (asyncio.CancelledError, asyncio.InvalidStateError):
-            pass
 
 
 class _DingTalkMessageHandler:

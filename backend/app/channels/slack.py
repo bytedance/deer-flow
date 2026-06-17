@@ -141,49 +141,38 @@ class SlackChannel(Channel):
         if msg.thread_ts:
             kwargs["thread_ts"] = msg.thread_ts
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await asyncio.to_thread(web_client.chat_postMessage, **kwargs)
-                # Add a completion reaction to the thread root
-                if msg.thread_ts:
-                    await asyncio.to_thread(
-                        self._add_reaction_with_client,
-                        web_client,
-                        msg.chat_id,
-                        msg.thread_ts,
-                        "white_check_mark",
-                    )
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Slack] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-
-        logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
-        # Add failure reaction on error
-        if msg.thread_ts:
-            try:
+        async def post_message() -> None:
+            await asyncio.to_thread(web_client.chat_postMessage, **kwargs)
+            # Add a completion reaction to the thread root
+            if msg.thread_ts:
                 await asyncio.to_thread(
                     self._add_reaction_with_client,
                     web_client,
                     msg.chat_id,
                     msg.thread_ts,
-                    "x",
+                    "white_check_mark",
                 )
-            except Exception:
-                pass
-        if last_exc is None:
-            raise RuntimeError("Slack send failed without an exception from any attempt")
-        raise last_exc
+
+        try:
+            await self._send_with_retry(
+                post_message,
+                max_retries=_max_retries,
+                log_prefix="[Slack]",
+            )
+        except Exception:
+            # Add failure reaction on error
+            if msg.thread_ts:
+                try:
+                    await asyncio.to_thread(
+                        self._add_reaction_with_client,
+                        web_client,
+                        msg.chat_id,
+                        msg.thread_ts,
+                        "x",
+                    )
+                except Exception:
+                    pass
+            raise
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         web_client = await self._get_web_client_for_message(msg)

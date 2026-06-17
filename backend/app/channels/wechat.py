@@ -342,27 +342,15 @@ class WechatChannel(Channel):
             "base_info": self._base_info(),
         }
 
-        last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                data = await self._request_json("/ilink/bot/sendmessage", payload)
-                self._ensure_success(data, "sendmessage")
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[WeChat] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
 
-        logger.error("[WeChat] send failed after %d attempts: %s", max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.is_image:
