@@ -371,15 +371,6 @@ class DingTalkChannel(Channel):
                 logger.info("[DingTalk] empty text, ignoring message")
                 return
 
-            logger.info(
-                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
-                conversation_type,
-                msg_id,
-                sender_staff_id,
-                sender_nick,
-                text[:100],
-            )
-
             connect_code = extract_connect_code(text)
             if connect_code and self._connection_repo is not None:
                 if self._main_loop and self._main_loop.is_running():
@@ -401,6 +392,17 @@ class DingTalkChannel(Channel):
             if self._allowed_users and sender_staff_id not in self._allowed_users:
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
+
+            # Log parsed message content only after the allowed_users gate so blocked
+            # senders' message text does not leak into INFO-level logs.
+            logger.info(
+                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
+                conversation_type,
+                msg_id,
+                sender_staff_id,
+                sender_nick,
+                text[:100],
+            )
 
             if _is_dingtalk_command(text):
                 msg_type = InboundMessageType.COMMAND
