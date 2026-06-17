@@ -7,9 +7,13 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.gateway.deps import require_admin_user
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
+
+_ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage channel runtime workers."
 
 
 class ChannelStatusResponse(BaseModel):
@@ -20,17 +24,6 @@ class ChannelStatusResponse(BaseModel):
 class ChannelRestartResponse(BaseModel):
     success: bool
     message: str
-
-
-async def _require_admin_user(request: Request) -> None:
-    user = getattr(request.state, "user", None)
-    if user is None:
-        from app.gateway.deps import get_current_user_from_request
-
-        user = await get_current_user_from_request(request)
-
-    if getattr(user, "system_role", None) != "admin":
-        raise HTTPException(status_code=403, detail="Admin privileges required to manage channel runtime workers.")
 
 
 @router.get("/", response_model=ChannelStatusResponse)
@@ -48,7 +41,7 @@ async def get_channels_status() -> ChannelStatusResponse:
 @router.post("/{name}/restart", response_model=ChannelRestartResponse)
 async def restart_channel(name: str, request: Request) -> ChannelRestartResponse:
     """Restart a specific IM channel."""
-    await _require_admin_user(request)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
     from app.channels.service import get_channel_service
 
