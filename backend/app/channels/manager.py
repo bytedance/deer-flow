@@ -522,12 +522,15 @@ class _FollowupEntry:
     ``ChannelManager._drain_followups_for_thread`` — not from a per-entry
     message, since every buffered entry for one thread_id shares that
     identity already (thread_id is itself derived deterministically from
-    (repo, number, agent_name) for GitHub). Only the text needs to survive
-    per entry.
+    (repo, number, agent_name) for GitHub). The text is what the drained
+    turn reads. ``ack_target`` is the provider's opaque follow-up
+    acknowledgement, copied at buffer time so a later reaction can still
+    address the comment after the inbound message is gone.
     """
 
     dedupe_key: str
     text: str
+    ack_target: dict[str, Any] | None = None
 
 
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
@@ -585,6 +588,20 @@ def _followup_dedupe_key(msg: InboundMessage) -> str:
     # No stable provider id available: fall back to a per-message key so the
     # entry is still buffered (just never deduped against a redelivery).
     return f"__no_id__:{id(msg)}:{msg.created_at}"
+
+
+def _followup_ack_target(msg: InboundMessage) -> dict[str, Any] | None:
+    """Copy a provider follow-up acknowledgement off an inbound message.
+
+    The manager stores and later hands this mapping back to the channel. It
+    does not interpret provider fields. An empty or non-mapping value means
+    the event has nothing to acknowledge (for example a GitHub review
+    summary, which has no reaction endpoint).
+    """
+    raw = (msg.metadata or {}).get("followup_ack")
+    if not isinstance(raw, Mapping) or not raw:
+        return None
+    return {str(key): value for key, value in raw.items()}
 
 
 def _format_followup_block(entries: list[_FollowupEntry]) -> str:
@@ -1578,6 +1595,9 @@ class ChannelManager:
         # run after this manager has been shut down. Discarded via the same
         # task's done-callback (see _maybe_spawn_followup_watcher).
         self._followup_watcher_tasks: set[asyncio.Task] = set()
+        # Short-lived reaction/acknowledgement posts for buffered follow-ups.
+        # Tracked so stop() can cancel one that is still talking to the provider.
+        self._followup_ack_tasks: set[asyncio.Task] = set()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -1676,24 +1696,27 @@ class ChannelManager:
             logger.exception("[Manager] get_stream_bridge callable raised; follow-up watch disabled for this run")
             return None
 
-    def _enforce_followup_cap(self, thread_id: str, buffer: OrderedDict[str, _FollowupEntry]) -> None:
+    def _enforce_followup_cap(self, thread_id: str, buffer: OrderedDict[str, _FollowupEntry]) -> list[_FollowupEntry]:
         """Drop the OLDEST buffered entries once *buffer* exceeds the per-thread cap.
 
         Dropping the oldest (rather than the newest, incoming) entry means a
         thread that is deep enough in the backlog to hit the cap still keeps
         the most recent activity — a better signal for the eventual coalesced
-        turn than the stalest queued comment. No reaction/acknowledgment is
-        sent on drop (out of scope for this slice); a WARNING is logged so
-        operators can see it in gateway.log.
+        turn than the stalest queued comment. Each dropped entry is returned
+        so the caller can ask the channel for an overflow acknowledgement.
+        A WARNING is also logged so operators can see it in gateway.log.
         """
+        dropped: list[_FollowupEntry] = []
         while len(buffer) > FOLLOWUP_BUFFER_MAX_PER_THREAD:
-            dropped_key, _ = buffer.popitem(last=False)
+            dropped_key, entry = buffer.popitem(last=False)
+            dropped.append(entry)
             logger.warning(
                 "[Manager] follow-up buffer overflow for thread_id=%s (cap=%d); dropped oldest buffered comment (dedupe_key=%s)",
                 thread_id,
                 FOLLOWUP_BUFFER_MAX_PER_THREAD,
                 dropped_key,
             )
+        return dropped
 
     def _buffer_followup(self, thread_id: str, msg: InboundMessage) -> None:
         """Append *msg* to thread_id's follow-up buffer (ConflictError path).
@@ -1713,14 +1736,20 @@ class ChannelManager:
             )
             return
 
-        buffer[key] = _FollowupEntry(dedupe_key=key, text=msg.text)
-        self._enforce_followup_cap(thread_id, buffer)
+        entry = _FollowupEntry(dedupe_key=key, text=msg.text, ack_target=_followup_ack_target(msg))
+        buffer[key] = entry
+        dropped = self._enforce_followup_cap(thread_id, buffer)
+        kept = entry.dedupe_key in buffer
         logger.info(
             "[Manager] buffered follow-up for busy thread_id=%s (dedupe_key=%s, buffered=%d)",
             thread_id,
             key,
             len(buffer),
         )
+        if kept:
+            self._schedule_followup_ack(msg.channel_name, entry.ack_target, kind="queued")
+        for old in dropped:
+            self._schedule_followup_ack(msg.channel_name, old.ack_target, kind="overflow")
 
     def _pop_followup_batch(self, thread_id: str, *, limit: int) -> list[_FollowupEntry]:
         """Pop up to *limit* buffered entries FIFO (oldest first)."""
@@ -1737,7 +1766,7 @@ class ChannelManager:
             self._followup_buffers.pop(thread_id, None)
         return batch
 
-    def _requeue_followups(self, thread_id: str, entries: list[_FollowupEntry]) -> None:
+    def _requeue_followups(self, thread_id: str, entries: list[_FollowupEntry], *, channel_name: str) -> None:
         """Put a popped batch back at the front of the buffer (oldest-first).
 
         Used when the drain's own ``runs.create`` call itself fails —
@@ -1757,8 +1786,51 @@ class ChannelManager:
         for key, entry in existing.items():
             merged.setdefault(key, entry)
 
-        self._enforce_followup_cap(thread_id, merged)
+        dropped = self._enforce_followup_cap(thread_id, merged)
         self._followup_buffers[thread_id] = merged
+        for old in dropped:
+            self._schedule_followup_ack(channel_name, old.ack_target, kind="overflow")
+
+    def _schedule_followup_ack(self, channel_name: str, target: Mapping[str, Any] | None, *, kind: str) -> None:
+        """Ask the live channel to acknowledge one buffered comment.
+
+        No-ops when the process has no channel service, the provider is not
+        running, or the provider did not opt into follow-up acknowledgements.
+        That keeps direct ``ChannelManager`` tests, and every channel other
+        than GitHub, on the previous buffer-only path. The post itself runs
+        as a tracked task so a slow provider cannot stall the inbound worker.
+        """
+        if not target or kind not in {"queued", "overflow"}:
+            return
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        channel = service.get_channel(channel_name) if service is not None else None
+        if channel is None or not getattr(channel, "supports_followup_ack", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        snapshot = dict(target)
+        task = loop.create_task(
+            self._dispatch_followup_ack(channel, snapshot, kind=kind),
+            name=f"deerflow-followup-ack-{kind}",
+        )
+        self._followup_ack_tasks.add(task)
+        task.add_done_callback(self._followup_ack_tasks.discard)
+        task.add_done_callback(self._log_task_error)
+
+    async def _dispatch_followup_ack(self, channel: Any, target: Mapping[str, Any], *, kind: str) -> None:
+        """Call the channel and swallow acknowledgement failures."""
+        try:
+            await channel.acknowledge_followup(target, kind=kind)
+        except Exception:
+            logger.warning(
+                "[Manager] follow-up acknowledgement failed channel=%s kind=%s",
+                getattr(channel, "name", "?"),
+                kind,
+            )
 
     def _maybe_spawn_followup_watcher(
         self,
@@ -1965,7 +2037,7 @@ class ChannelManager:
                     thread_id,
                     len(entries),
                 )
-            self._requeue_followups(thread_id, entries)
+            self._requeue_followups(thread_id, entries, channel_name=carrier_msg.channel_name)
             return
 
         self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
