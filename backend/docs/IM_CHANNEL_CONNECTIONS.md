@@ -111,6 +111,8 @@ Feishu/Lark, DingTalk, WeChat, and WeCom:
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 
+For providers with an `allowed_users` allowlist (Telegram, Slack, DingTalk, WeChat, …), a valid `/connect <code>` (or Telegram `/start <code>`) is consumed **before** the allowlist is checked. This is intentional: a user who is not yet on the allowlist — and whose platform identity the bot has therefore never seen — can still complete their first browser-initiated bind. After binding, `allowed_users` continues to gate ordinary (non-bind) messages as before.
+
 ## Runtime Model
 
 Connection records live in SQL tables under `deerflow.persistence.channel_connections`:
@@ -126,6 +128,8 @@ Incoming messages that resolve to a connection carry `connection_id`, `owner_use
 
 - Browser APIs remain authenticated and CSRF-protected.
 - Connect codes are 128-bit random, short-lived, and single-use.
+- `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
+- An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another DeerFlow user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
 - Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
 - This implementation does not add public provider callback or webhook routes.
