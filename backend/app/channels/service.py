@@ -234,8 +234,9 @@ class ChannelService:
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.
 
-        Uses ``get_app_config()`` which detects file changes via mtime,
-        so edits to ``config.yaml`` are picked up without a process restart.
+        Uses ``get_app_config()`` which detects file changes via config
+        signature, so edits to ``config.yaml`` are picked up without a process
+        restart.
         The UI runtime-config overlay applied at startup is re-applied here
         so a file-driven reload neither drops credentials entered from the
         browser nor resurrects a channel disconnected from it.

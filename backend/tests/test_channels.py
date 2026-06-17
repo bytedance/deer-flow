@@ -4474,12 +4474,10 @@ class TestChannelService:
         """
         from app.channels.service import ChannelService
 
-        stale_file_config = {"feishu": {"enabled": True, "app_id": "file_id", "app_secret": "file_secret"}}
+        def fail_get_app_config():
+            raise AssertionError("configure_channel must not reload file config")
 
-        def mock_get_app_config():
-            return SimpleNamespace(model_extra={"channels": stale_file_config})
-
-        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", fail_get_app_config)
 
         service = ChannelService(channels_config={})
         service._running = True

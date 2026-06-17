@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 from collections.abc import Mapping
@@ -400,6 +401,8 @@ class AppConfig(BaseModel):
 _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
+_ConfigSignature = tuple[float | None, int | None, str | None]
+_app_config_signature: _ConfigSignature | None = None
 _app_config_is_custom = False
 _current_app_config: ContextVar[AppConfig | None] = ContextVar("deerflow_current_app_config", default=None)
 _current_app_config_stack: ContextVar[tuple[AppConfig | None, ...]] = ContextVar("deerflow_current_app_config_stack", default=())
@@ -413,14 +416,33 @@ def _get_config_mtime(config_path: Path) -> float | None:
         return None
 
 
+def _get_config_signature(config_path: Path) -> _ConfigSignature | None:
+    """Get cache metadata for a config file, including a content digest."""
+    try:
+        stat_result = config_path.stat()
+    except OSError:
+        return None
+
+    digest = hashlib.sha256()
+    try:
+        with config_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return (stat_result.st_mtime, stat_result.st_size, None)
+
+    return (stat_result.st_mtime, stat_result.st_size, digest.hexdigest())
+
+
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
     """Load config from disk and refresh cache metadata."""
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
 
     resolved_path = AppConfig.resolve_config_path(config_path)
     _app_config = AppConfig.from_file(str(resolved_path))
     _app_config_path = resolved_path
     _app_config_mtime = _get_config_mtime(resolved_path)
+    _app_config_signature = _get_config_signature(resolved_path)
     _app_config_is_custom = False
     return _app_config
 
@@ -429,11 +451,11 @@ def get_app_config() -> AppConfig:
     """Get the DeerFlow config instance.
 
     Returns a cached singleton instance and automatically reloads it when the
-    underlying config file path or modification time changes. Use
+    underlying config file path or content signature changes. Use
     `reload_app_config()` to force a reload, or `reset_app_config()` to clear
     the cache.
     """
-    global _app_config, _app_config_path, _app_config_mtime
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature
 
     runtime_override = _current_app_config.get()
     if runtime_override is not None:
@@ -444,8 +466,9 @@ def get_app_config() -> AppConfig:
 
     resolved_path = AppConfig.resolve_config_path()
     current_mtime = _get_config_mtime(resolved_path)
+    current_signature = _get_config_signature(resolved_path)
 
-    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_mtime != current_mtime
+    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_signature != current_signature
     if should_reload:
         if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None and _app_config_mtime != current_mtime:
             logger.info(
@@ -453,6 +476,8 @@ def get_app_config() -> AppConfig:
                 _app_config_mtime,
                 current_mtime,
             )
+        elif _app_config_path == resolved_path and _app_config_signature != current_signature:
+            logger.info("Config file content signature changed, reloading AppConfig")
         _load_and_cache_app_config(str(resolved_path))
     return _app_config
 
@@ -480,10 +505,11 @@ def reset_app_config() -> None:
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
+    _app_config_signature = None
     _app_config_is_custom = False
 
 
@@ -495,10 +521,11 @@ def set_app_config(config: AppConfig) -> None:
     Args:
         config: The AppConfig instance to use.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
     _app_config = config
     _app_config_path = None
     _app_config_mtime = None
+    _app_config_signature = None
     _app_config_is_custom = True
 
 
