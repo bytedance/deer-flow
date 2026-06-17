@@ -3,10 +3,8 @@ name: markitdown
 license: MIT
 source: https://github.com/microsoft/markitdown
 description: |
-  Convert an uploaded document to clean Markdown. Supports PDF, PPTX, DOCX, JPG, PNG (these have non-obvious gotchas); XLSX/HTML/CSV/EPUB/JSON/XML are also fine. Images and scanned PDFs are OCR'd via the internal MinerU service.
-
-  Triggers: "把这份 PDF 转成 markdown", "convert this to md", "OCR this screenshot", "把这个截图读一下", "识别这个文件", "读这个扫描件", "总结这个文档", "extract text from this PDF/PPTX/DOCX".
-
+  Convert an uploaded document to clean Markdown. Supports PDF, PPTX, DOCX, JPG, PNG ; XLSX/HTML/CSV/EPUB/JSON/XML are also fine. Images and scanned PDFs are OCR'd via the internal MinerU service.
+  Triggers: "把这份 PDF 转成 markdown", "把这个截图读一下", "识别这个文件", "读这个扫描件", "总结这个文档".
   Do NOT use for: audio/video files, YouTube URLs, batch-converting a folder, or files already in text form (use Read tool).
 ---
 
@@ -104,8 +102,6 @@ script 内部已经 `print(content)` 把 MD body 写到 stdout —— agent 拿�
 - 多文件批量：按上面的阈值逐个判断，**整批**全 ≥ 500 行时只 share 文件
 - 关键发现用 2-3 句自然语言总结（标题、章节、表格、图片数等）
 - 不主动建议"要不要也 OCR 别的格式 / 加图片描述" —— 用户追问再处理
-
-> 这套"小结果 inline / 大结果 present_files"是 skills/public/data-analysis 的标准输出模式，参考它的 SKILL.md "## 输出与后续处理" 段。
 
 ## Gotchas 详解
 
