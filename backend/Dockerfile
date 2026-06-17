@@ -130,6 +130,13 @@ RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
     && test -x /usr/local/bin/claude-agent-acp \
     && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
 
+# ── Install MCP Filesystem Server ──────────────────────────────────────────
+# 在线 build 时直接 npm -g 装入镜像，避免运行时 npx 拉网。
+# 离线环境改用 scripts/bundle-mcp-filesystem.sh + COPY tarball 的方式。
+ARG MCP_FILESYSTEM_VERSION=latest
+RUN npm install -g "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
+    && test -x /usr/local/bin/mcp-server-filesystem
+
 # ── Install Pi Coding Agent + pi-acp (offline bundled, opt-in) ─────────────
 # pi-acp 在 stdio 通信时 shell out 调 `pi --mode rpc`，所以 acp_agents.pi
 # 需要两个 bundle 同时 vendor：
@@ -258,6 +265,13 @@ RUN tar -xzf /tmp/acp-bundle.tar.gz -C /usr/local --no-same-owner \
     && rm /tmp/acp-bundle.tar.gz \
     && test -x /usr/local/bin/claude-agent-acp \
     && node -e "console.log('claude-agent-acp', require('/usr/local/lib/node_modules/@agentclientprotocol/claude-agent-acp/package.json').version)"
+
+# ── Install MCP Filesystem Server ──────────────────────────────────────────
+# 在线 build 时直接 npm -g 装入镜像，避免运行时 npx 拉网。
+# 离线环境改用 scripts/bundle-mcp-filesystem.sh + COPY tarball 的方式。
+ARG MCP_FILESYSTEM_VERSION=latest
+RUN npm install -g "@modelcontextprotocol/server-filesystem@${MCP_FILESYSTEM_VERSION}" \
+    && test -x /usr/local/bin/mcp-server-filesystem
 
 # ── Install Pi Coding Agent + pi-acp (offline bundled, opt-in) ─────────────
 # pi-acp 在 stdio 通信时 shell out 调 `pi --mode rpc`，所以 acp_agents.pi
