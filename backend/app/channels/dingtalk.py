@@ -392,15 +392,16 @@ class DingTalkChannel(Channel):
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
-            # Log parsed message content only after the allowed_users gate so blocked
-            # senders' message text does not leak into INFO-level logs.
+            # Log only metadata (length, not content) so message text never reaches
+            # INFO logs, and only after the allowed_users gate so blocked senders are
+            # not logged at all.
             logger.info(
-                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
+                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text_len=%d",
                 conversation_type,
                 msg_id,
                 sender_staff_id,
                 sender_nick,
-                text[:100],
+                len(text or ""),
             )
 
             if _is_dingtalk_command(text):
