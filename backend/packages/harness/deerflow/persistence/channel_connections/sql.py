@@ -308,10 +308,19 @@ class ChannelConnectionRepository:
         current_time = now or datetime.now(UTC)
         async with self.session_factory() as session:
             await self._serialize_oauth_owner_scope(session, owner_user_id, provider)
-            # Issue a write first: this prunes expired rows and, on SQLite,
-            # takes the database write lock so the count below cannot race a
-            # concurrent inserter between count and commit.
-            await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
+            # Prune only this owner/provider's expired codes (the ones that affect
+            # this cap), not every user's — avoids a global DELETE on each connect
+            # POST. Issuing this write first also takes the SQLite database write
+            # lock so the count below cannot race a concurrent inserter between
+            # count and commit. Stale codes for other owners are pruned globally
+            # by consume_oauth_state / delete_expired_oauth_states.
+            await session.execute(
+                delete(ChannelOAuthStateRow).where(
+                    ChannelOAuthStateRow.owner_user_id == owner_user_id,
+                    ChannelOAuthStateRow.provider == provider,
+                    ChannelOAuthStateRow.expires_at < current_time,
+                )
+            )
             pending = await session.execute(
                 select(func.count())
                 .select_from(ChannelOAuthStateRow)

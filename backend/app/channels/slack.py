@@ -312,7 +312,7 @@ class SlackChannel(Channel):
                 asyncio.run_coroutine_threadsafe(
                     self._bind_connection_from_connect_code(
                         event=event,
-                        team_id=str(team_id or event.get("team") or ""),
+                        team_id=str(team_id or ""),
                         code=connect_code,
                     ),
                     self._loop,
@@ -337,7 +337,8 @@ class SlackChannel(Channel):
             msg_type=msg_type,
             thread_ts=thread_ts,
             metadata={
-                "team_id": team_id or event.get("team"),
+                # team_id is already resolved (payload team_id/team, else event team) by the caller.
+                "team_id": team_id,
                 "message_id": event.get("ts"),
                 "client_msg_id": event.get("client_msg_id"),
             },

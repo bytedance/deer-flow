@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +65,10 @@ BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, 
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
 INBOUND_DEDUPE_MAX_ENTRIES = 4096
-INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id", "client_msg_id", "client_id")
+# Only server-stable provider message ids: client-generated ids (client_msg_id,
+# client_id) are not guaranteed identical across a provider's own redelivery, so
+# keying dedupe on them would miss exactly the retries we want to absorb.
+INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -777,7 +781,10 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
-        self._recent_inbound_events: dict[tuple[str, str, str, str], float] = {}
+        # Insertion order == chronological (keys are never re-inserted), so an
+        # OrderedDict lets us evict expired/overflow entries from the front in
+        # O(k) instead of scanning all entries on every inbound message.
+        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -923,6 +930,14 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+            # Dedupe before logging "received" so a provider retrying an event N
+            # times does not log N accepts; duplicates are logged once as ignored.
+            # Note: this manager-level dedupe only guards the agent run / final
+            # answer. Provider adapters may emit ack side-effects (a "Working on
+            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
+            # intentionally not deduped here.
+            if self._is_duplicate_inbound(msg):
+                continue
             logger.info(
                 "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
                 msg.channel_name,
@@ -931,8 +946,6 @@ class ChannelManager:
                 len(msg.text or ""),
                 len(msg.files),
             )
-            if self._is_duplicate_inbound(msg):
-                continue
             task = asyncio.create_task(self._handle_message(msg))
             task.add_done_callback(self._log_task_error)
 
@@ -970,13 +983,16 @@ class ChannelManager:
             return False
 
         now = time.monotonic()
-        for seen_key, seen_at in list(self._recent_inbound_events.items()):
-            if now - seen_at > INBOUND_DEDUPE_TTL_SECONDS:
-                self._recent_inbound_events.pop(seen_key, None)
-        if len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
-            overflow = len(self._recent_inbound_events) - INBOUND_DEDUPE_MAX_ENTRIES
-            for seen_key in list(self._recent_inbound_events)[:overflow]:
-                self._recent_inbound_events.pop(seen_key, None)
+        # Entries are in chronological insertion order, so expired ones cluster at
+        # the front: pop from the front until we hit a still-live entry.
+        while self._recent_inbound_events:
+            _, oldest_at = next(iter(self._recent_inbound_events.items()))
+            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
+                self._recent_inbound_events.popitem(last=False)
+            else:
+                break
+        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
+            self._recent_inbound_events.popitem(last=False)
 
         if key in self._recent_inbound_events:
             logger.info(

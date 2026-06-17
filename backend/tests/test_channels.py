@@ -800,12 +800,12 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_dispatch_loop_dedupes_stable_provider_message_id(self):
+    def test_dispatch_loop_dedupes_stable_provider_message_id(self, tmp_path):
         from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = ChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._client = _make_mock_langgraph_client()
             outbound_received: list[OutboundMessage] = []
@@ -816,23 +816,35 @@ class TestChannelManager:
             bus.subscribe_outbound(capture_outbound)
             await manager.start()
 
-            inbound = InboundMessage(
-                channel_name="slack",
-                chat_id="C123",
-                user_id="U123",
-                text="sensitive prompt",
-                topic_id="1710000000.000100",
-                metadata={"team_id": "T123", "message_id": "1710000000.000200"},
-            )
-            await bus.publish_inbound(inbound)
-            await bus.publish_inbound(inbound)
+            def _slack_inbound(message_id: str) -> InboundMessage:
+                # Distinct objects per publish, like a real provider redelivery.
+                return InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U123",
+                    text="sensitive prompt",
+                    topic_id="1710000000.000100",
+                    metadata={"team_id": "T123", "message_id": message_id},
+                )
+
+            # Same stable message_id delivered twice -> processed once.
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
             await _wait_for(lambda: manager._client.runs.wait.call_count == 1 and len(outbound_received) == 1)
             await asyncio.sleep(0.05)
-            await manager.stop()
-
             assert manager._client.threads.create.call_count == 1
             assert manager._client.runs.wait.call_count == 1
             assert len(outbound_received) == 1
+
+            # Negative control: a *different* message_id must still be processed,
+            # so an over-dedupe regression (dropping distinct messages) is caught.
+            await bus.publish_inbound(_slack_inbound("1710000000.000999"))
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2 and len(outbound_received) == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+            assert len(outbound_received) == 2
 
         _run(go())
 
@@ -858,13 +870,13 @@ class TestChannelManager:
         )
         assert ChannelManager._inbound_dedupe_key(without_workspace) is None
 
-    def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self):
+    def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
         from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = ChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             client = _make_mock_langgraph_client()
             attempts = {"n": 0}

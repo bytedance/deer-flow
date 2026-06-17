@@ -265,6 +265,11 @@ class TestChannelConnectionRepository:
         assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
         assert await repo.delete_expired_oauth_states(now=now) == 1
         assert await repo.count_oauth_states(owner_user_id="alice", provider="slack") == 1
+        # Pin that the surviving row is the active one (an inverted expiry
+        # predicate would delete the active row, still return 1, and pass above).
+        async with repo.session_factory() as session:
+            survivors = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
+        assert [row.state_hash for row in survivors] == [repo.hash_state("active-state")]
 
     @pytest.mark.anyio
     async def test_create_oauth_state_within_cap_enforces_pending_cap(self, repo):

@@ -118,6 +118,10 @@ def test_slack_http_events_mode_is_rejected(monkeypatch, caplog):
             bus=MessageBus(),
             config={
                 "bot_token": "xoxb-operator",
+                # Provide app_token too so the missing-token early return cannot
+                # fire before the HTTP-mode guard — otherwise the state assertions
+                # below would hold even if the guard were deleted.
+                "app_token": "xapp-token",
                 "event_delivery": "http",
                 "connection_repo": MagicMock(),
             },
