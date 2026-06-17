@@ -7,6 +7,7 @@ import base64
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -355,6 +356,66 @@ def test_allowed_users_filter_blocks_non_whitelisted_sender():
         )
 
         assert published == []
+
+    _run(go())
+
+
+def test_connect_code_bypasses_allowed_users_filter(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    async def go():
+        from datetime import UTC, datetime, timedelta
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'wechat.db'}", sqlite_dir=str(tmp_path))
+        try:
+            repo = ChannelConnectionRepository(
+                get_session_factory(),
+                cipher=ChannelCredentialCipher.from_key("wechat-secret"),
+            )
+            code = "wechat-bind-code"
+            await repo.create_oauth_state(
+                owner_user_id="deerflow-user-1",
+                provider="wechat",
+                state=code,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+
+            # The newcomer ("blocked-user") is not in allowed_users yet, but a valid
+            # /connect code must still bootstrap their first bind.
+            channel = WechatChannel(
+                bus=bus,
+                config={"bot_token": "test-token", "allowed_users": ["allowed-user"], "connection_repo": repo},
+            )
+            channel._send_connection_reply = AsyncMock()  # type: ignore[method-assign]
+
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "from_user_id": "blocked-user",
+                    "context_token": "ctx-connect",
+                    "item_list": [{"type": 1, "text_item": {"text": f"/connect {code}"}}],
+                }
+            )
+
+            connections = await repo.list_connections("deerflow-user-1")
+            assert len(connections) == 1
+            assert connections[0]["provider"] == "wechat"
+            assert connections[0]["external_account_id"] == "blocked-user"
+            # The connect-code reply was sent and no normal inbound was published.
+            channel._send_connection_reply.assert_awaited_once()
+            assert published == []
+        finally:
+            await close_engine()
 
     _run(go())
 

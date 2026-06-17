@@ -591,22 +591,14 @@ class WechatChannel(Channel):
             return
 
         chat_id = str(raw_message.get("from_user_id") or raw_message.get("ilink_user_id") or "").strip()
-        if not chat_id or not self._check_user(chat_id):
+        if not chat_id:
             return
 
         text = self._extract_text(raw_message)
-        files = await self._extract_inbound_files(raw_message)
-        if not text and not files:
-            return
-
         context_token = str(raw_message.get("context_token") or "").strip()
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
-        if context_token:
-            self._context_tokens_by_chat[chat_id] = context_token
-            if thread_ts:
-                self._context_tokens_by_thread[thread_ts] = context_token
-
+        # Handle the connect code before applying allowed_users so a browser-initiated
+        # bind can bootstrap an external identity that is not yet whitelisted.
         connect_code = extract_connect_code(text)
         if connect_code and self._connection_repo is not None:
             handled = await self._bind_connection_from_connect_code(
@@ -616,6 +608,20 @@ class WechatChannel(Channel):
             )
             if handled:
                 return
+
+        if not self._check_user(chat_id):
+            return
+
+        files = await self._extract_inbound_files(raw_message)
+        if not text and not files:
+            return
+
+        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+
+        if context_token:
+            self._context_tokens_by_chat[chat_id] = context_token
+            if thread_ts:
+                self._context_tokens_by_thread[thread_ts] = context_token
 
         inbound = self._make_inbound(
             chat_id=chat_id,

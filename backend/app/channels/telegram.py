@@ -463,13 +463,15 @@ class TelegramChannel(Channel):
 
     async def _cmd_start(self, update, context) -> None:
         """Handle /start command."""
-        if not self._check_user(update.effective_user.id):
-            return
         args = getattr(context, "args", []) if context is not None else []
         if args:
+            # Handle the deep-link bind token before applying allowed_users so a
+            # browser-initiated bind can bootstrap a new external identity.
             handled = await self._bind_connection_from_start_token(update, str(args[0]))
             if handled:
                 return
+        if not self._check_user(update.effective_user.id):
+            return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
