@@ -191,14 +191,13 @@ export const enUS: Translations = {
       "Are you sure you want to delete this agent? This action cannot be undone.",
     deleteSuccess: "Agent deleted",
     newChat: "New chat",
-    createPageTitle: "Design your Agent",
-    createPageSubtitle:
-      "Describe the agent you want — I'll help you create it through conversation.",
+    createPageTitle: "New Agent",
+    createPageSubtitle: "Create the agent, then configure it manually.",
     nameStepTitle: "Name your new Agent",
     nameStepHint:
       "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
     nameStepPlaceholder: "e.g. code-reviewer",
-    nameStepContinue: "Continue",
+    nameStepContinue: "Create and edit",
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
