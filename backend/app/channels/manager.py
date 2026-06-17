@@ -1190,6 +1190,7 @@ class ChannelManager:
                 run_config,
                 run_context,
                 human_message,
+                storage_user_id=storage_user_id,
             )
             return
 
@@ -1262,6 +1263,7 @@ class ChannelManager:
         run_config: dict[str, Any],
         run_context: dict[str, Any],
         human_message: dict[str, Any],
+        storage_user_id: str | None = None,
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
 
@@ -1334,7 +1336,10 @@ class ChannelManager:
             response_text = _extract_response_text(result)
             pending_clarification = _has_current_turn_clarification(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=_channel_storage_user_id(msg))
+            # Reuse the storage owner resolved by _handle_chat so artifact delivery
+            # matches the upload bucket and we avoid re-running _safe_user_id_for_run
+            # (and its possible filesystem touch) on the streaming-error path.
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
             if not response_text:
                 if attachments:
