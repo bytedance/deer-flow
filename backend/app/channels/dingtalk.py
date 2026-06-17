@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -137,7 +137,6 @@ class DingTalkChannel(Channel):
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -371,8 +370,8 @@ class DingTalkChannel(Channel):
                 logger.info("[DingTalk] empty text, ignoring message")
                 return
 
-            connect_code = extract_connect_code(text)
-            if connect_code and self._connection_repo is not None:
+            connect_code = self._pending_connect_code(text)
+            if connect_code:
                 if self._main_loop and self._main_loop.is_running():
                     fut = asyncio.run_coroutine_threadsafe(
                         self._bind_connection_from_connect_code(

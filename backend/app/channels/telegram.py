@@ -52,7 +52,6 @@ class TelegramChannel(Channel):
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
         # bot message being edited in place: {"message_id", "last_edit_at", "last_text"}
         self._stream_messages: dict[str, dict[str, Any]] = {}
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:

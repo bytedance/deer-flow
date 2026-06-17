@@ -11,7 +11,7 @@ import time
 from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -72,7 +72,6 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
-        self._connection_repo = config.get("connection_repo")
 
     @staticmethod
     def _non_empty_str(value: Any) -> str | None:
@@ -851,8 +850,8 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            connect_code = extract_connect_code(text)
-            if connect_code and self._connection_repo is not None:
+            connect_code = self._pending_connect_code(text)
+            if connect_code:
                 if self._main_loop and self._main_loop.is_running():
                     fut = asyncio.run_coroutine_threadsafe(
                         self._bind_connection_from_connect_code(
