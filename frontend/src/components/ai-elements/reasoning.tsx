@@ -19,6 +19,7 @@ type ReasoningContextValue = {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
   duration: number | undefined;
+  startTime: number | null;
 };
 
 const ReasoningContext = createContext<ReasoningContextValue | null>(null);
@@ -37,6 +38,7 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   duration?: number;
+  startTimeProp?: number | null;
 };
 
 const AUTO_CLOSE_DELAY = 1000;
@@ -50,6 +52,7 @@ export const Reasoning = memo(
     defaultOpen = true,
     onOpenChange,
     duration: durationProp,
+    startTimeProp,
     children,
     ...props
   }: ReasoningProps) => {
@@ -64,19 +67,24 @@ export const Reasoning = memo(
     });
 
     const [hasAutoClosed, setHasAutoClosed] = useState(false);
-    const [startTime, setStartTime] = useState<number | null>(null);
+    const [startTime, setStartTime] = useState<number | null>(
+      () => startTimeProp ?? (isStreaming ? Date.now() : null),
+    );
 
     // Track duration when streaming starts and ends
     useEffect(() => {
       if (isStreaming) {
-        if (startTime === null) {
+        // Force sync the start time with the Turn start time if provided
+        if (startTimeProp != null && startTime !== startTimeProp) {
+          setStartTime(startTimeProp);
+        } else if (startTimeProp == null && startTime === null) {
           setStartTime(Date.now());
         }
       } else if (startTime !== null) {
         setDuration(Math.ceil((Date.now() - startTime) / MS_IN_S));
         setStartTime(null);
       }
-    }, [isStreaming, startTime, setDuration]);
+    }, [isStreaming, startTimeProp, startTime, setDuration]);
 
     // Auto-open when streaming starts, auto-close when streaming ends (once only)
     useEffect(() => {
@@ -97,7 +105,7 @@ export const Reasoning = memo(
 
     return (
       <ReasoningContext.Provider
-        value={{ isStreaming, isOpen, setIsOpen, duration }}
+        value={{ isStreaming, isOpen, setIsOpen, duration, startTime }}
       >
         <Collapsible
           className={cn("not-prose mb-4", className)}
@@ -115,10 +123,44 @@ export const Reasoning = memo(
 export type ReasoningTriggerProps = ComponentProps<
   typeof CollapsibleTrigger
 > & {
-  getThinkingMessage?: (isStreaming: boolean, duration?: number) => ReactNode;
+  getThinkingMessage?: (
+    isStreaming: boolean,
+    duration?: number,
+    startTime?: number | null,
+  ) => ReactNode;
+  hasContent?: boolean;
 };
 
-const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
+const LiveTimer = ({ startTime }: { startTime: number }) => {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const calculateElapsed = () => Math.ceil((Date.now() - startTime) / 1000);
+    setElapsed(calculateElapsed());
+
+    const interval = setInterval(() => {
+      setElapsed(calculateElapsed());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [startTime]);
+
+  return (
+    <span className="flex items-center gap-2">
+      <Shimmer duration={1}>Thinking...</Shimmer>
+      <span className="text-muted-foreground/80">({elapsed}s)</span>
+    </span>
+  );
+};
+
+const defaultGetThinkingMessage = (
+  isStreaming: boolean,
+  duration?: number,
+  startTime?: number | null,
+) => {
+  if (isStreaming && startTime != null && startTime !== undefined) {
+    return <LiveTimer startTime={startTime} />;
+  }
   if (isStreaming || duration === 0) {
     return <Shimmer duration={1}>Thinking...</Shimmer>;
   }
@@ -133,14 +175,16 @@ export const ReasoningTrigger = memo(
     className,
     children,
     getThinkingMessage = defaultGetThinkingMessage,
+    hasContent = true,
     ...props
   }: ReasoningTriggerProps) => {
-    const { isStreaming, isOpen, duration } = useReasoning();
+    const { isStreaming, isOpen, duration, startTime } = useReasoning();
 
     return (
       <CollapsibleTrigger
         className={cn(
           "text-muted-foreground hover:text-foreground flex w-full items-center gap-2 text-sm transition-colors",
+          !hasContent && "cursor-default",
           className,
         )}
         {...props}
@@ -148,13 +192,15 @@ export const ReasoningTrigger = memo(
         {children ?? (
           <>
             <BrainIcon className="size-4" />
-            {getThinkingMessage(isStreaming, duration)}
-            <ChevronDownIcon
-              className={cn(
-                "size-4 transition-transform",
-                isOpen ? "rotate-180" : "rotate-0",
-              )}
-            />
+            {getThinkingMessage(isStreaming, duration, startTime)}
+            {hasContent && (
+              <ChevronDownIcon
+                className={cn(
+                  "size-4 transition-transform",
+                  isOpen ? "rotate-180" : "rotate-0",
+                )}
+              />
+            )}
           </>
         )}
       </CollapsibleTrigger>
