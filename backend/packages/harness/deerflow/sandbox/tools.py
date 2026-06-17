@@ -1665,6 +1665,12 @@ def read_file_tool(
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
+    except UnicodeDecodeError:
+        return (
+            f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
+            "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
+            "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
+        )
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
