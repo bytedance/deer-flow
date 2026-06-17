@@ -956,7 +956,12 @@ class ChannelManager:
         if message_id is None:
             return None
 
-        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or ""
+        # Fail closed: without a workspace/team/guild identifier we cannot tell two
+        # workspaces apart (e.g. Slack channel ids are not globally unique), so
+        # skip dedupe rather than risk collapsing distinct workspaces' messages.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        if not workspace_id:
+            return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
     def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
@@ -984,6 +989,18 @@ class ChannelManager:
 
         self._recent_inbound_events[key] = now
         return False
+
+    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+        """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
+
+        Called only on transient/unexpected handling failures: the key was
+        recorded on receipt so retries arriving *while* the message is being
+        handled are still deduped, but if handling fails we must not turn a
+        recoverable error into a TTL-long black hole for the same message_id.
+        """
+        key = self._inbound_dedupe_key(msg)
+        if key is not None:
+            self._recent_inbound_events.pop(key, None)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1035,6 +1052,10 @@ class ChannelManager:
                 msg.channel_name,
                 msg.chat_id,
             )
+            # Transient/unexpected failure: release the dedupe key so a provider
+            # redelivery of the same message can recover instead of being dropped
+            # for the dedupe TTL.
+            self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
