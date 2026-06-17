@@ -299,6 +299,26 @@ deployment needs additional trusted launchers.
 }
 ```
 
+#### Reset MCP Tools Cache
+
+Clear cached MCP tools and persistent MCP sessions process-wide. This affects
+all threads and users in the current Gateway process. Tools are loaded again
+from configured MCP servers on the next agent run or tool lookup.
+
+```http
+POST /api/mcp/cache/reset
+```
+
+Requires an authenticated admin session.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "MCP tools cache reset. Tools will reload on next use."
+}
+```
+
 ### Skills
 
 #### List Skills

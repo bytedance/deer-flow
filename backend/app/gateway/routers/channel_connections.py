@@ -412,7 +412,16 @@ def _provider_response(
     from app.gateway.auth_disabled import is_auth_disabled
 
     status, unavailable_reason = _provider_status(config, channels_config, provider)
-    if connection:
+    if unavailable_reason is not None:
+        # The runtime provider is unavailable, so a stale "connected" row must
+        # not be reported as connected. Other statuses (e.g. "revoked") are
+        # preserved so consumers can still distinguish a revoked binding from a
+        # never-connected one.
+        if connection and connection["status"] != "connected":
+            connection_status = connection["status"]
+        else:
+            connection_status = "not_connected"
+    elif connection:
         connection_status = connection["status"]
     elif is_auth_disabled() and status["configured"] and unavailable_reason is None:
         # Auth-disabled local mode routes every channel message to the default
@@ -561,7 +570,6 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
     if not provider_config.enabled:
         raise HTTPException(status_code=400, detail="Channel provider is not enabled")
 
-    owner_user_id = _get_user_id(request)
     try:
         repo = _get_repository(request, config)
     except HTTPException as exc:
@@ -569,25 +577,33 @@ async def disconnect_channel_provider_runtime(provider: str, request: Request) -
             raise
         repo = None
 
-    if repo is not None:
-        for connection in await repo.list_connections(owner_user_id):
-            if connection["provider"] == provider and connection["status"] != "revoked":
-                await repo.disconnect_connection(
-                    connection_id=connection["id"],
-                    owner_user_id=owner_user_id,
-                )
+    current_channels_config = await _get_channels_config(request)
+    candidate_channels_config = dict(current_channels_config)
+    candidate_channels_config.pop(provider, None)
 
-    store = await _get_runtime_config_store(request)
-    await asyncio.to_thread(store.set_provider_disconnected, provider)
-    channels_config = await _load_channels_config(request, config)
-    request.app.state.channels_config = channels_config
-
-    stopped = await _sync_runtime_channel_after_removal(provider, channels_config)
+    stopped = await _sync_runtime_channel_after_removal(provider, candidate_channels_config)
     if stopped is False:
         display_name = _PROVIDER_META[provider]["display_name"]
         raise HTTPException(status_code=400, detail=f"Failed to stop {display_name} channel. Try again.")
 
-    return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])
+    # Revoke the DB connection rows before committing the store/cache so a repo
+    # failure cannot leave the store and cache saying "disconnected" while the
+    # DB still holds "connected" rows that a later re-configure would silently
+    # reactivate.
+    if repo is not None:
+        await repo.disconnect_provider_connections(provider=provider)
+
+    store = await _get_runtime_config_store(request)
+    await asyncio.to_thread(store.set_provider_disconnected, provider)
+
+    # Re-read the live cached config and drop only this provider so a concurrent
+    # mutation for a different provider is not clobbered. No await may occur
+    # between this read and the reassignment.
+    live_channels_config = await _get_channels_config(request)
+    live_channels_config.pop(provider, None)
+    request.app.state.channels_config = live_channels_config
+
+    return _provider_response(config, live_channels_config, provider, _PROVIDER_META[provider])
 
 
 @router.post("/{provider}/connect", response_model=ChannelConnectResponse)
@@ -656,8 +672,8 @@ async def configure_channel_provider_runtime(
         # cached by get_app_config().
         runtime_config["bot_username"] = values["bot_username"]
 
-    channels_config[provider] = runtime_config
-    request.app.state.channels_config = channels_config
+    candidate_channels_config = dict(channels_config)
+    candidate_channels_config[provider] = runtime_config
 
     started = await _restart_runtime_channel_if_available(provider, runtime_config)
     if started is False:
@@ -667,4 +683,11 @@ async def configure_channel_provider_runtime(
     store = await _get_runtime_config_store(request)
     await asyncio.to_thread(store.set_provider_config, provider, runtime_config)
 
-    return _provider_response(config, channels_config, provider, _PROVIDER_META[provider])
+    # Re-read the live cached config and apply only this provider's change so a
+    # concurrent mutation for a different provider is not clobbered. No await
+    # may occur between this read and the reassignment.
+    live_channels_config = await _get_channels_config(request)
+    live_channels_config[provider] = runtime_config
+    request.app.state.channels_config = live_channels_config
+
+    return _provider_response(config, live_channels_config, provider, _PROVIDER_META[provider])

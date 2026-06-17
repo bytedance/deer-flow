@@ -8,7 +8,7 @@ dependencies = [
     "deerflow-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
-    "python-multipart>=0.0.27",
+    "python-multipart>=0.0.31",
     "sse-starlette>=2.1.0",
     "uvicorn[standard]>=0.34.0",
     "lark-oapi>=1.4.0",
@@ -19,7 +19,7 @@ dependencies = [
     "wecom-aibot-python-sdk>=0.1.6",
     "dingtalk-stream>=0.24.3",
     "bcrypt>=4.0.0",
-    "pyjwt>=2.9.0",
+    "pyjwt>=2.13.0",
     "email-validator>=2.0.0",
 ]
 

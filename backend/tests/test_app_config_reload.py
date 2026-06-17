@@ -316,7 +316,7 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         assert get_title_config().enabled is True
         assert get_summarization_config().enabled is False
         assert get_memory_config().enabled is True
-        assert get_subagents_app_config().timeout_seconds == 900
+        assert get_subagents_app_config().timeout_seconds == 1800
         assert get_tool_search_config().enabled is False
         assert get_guardrails_config().enabled is False
         assert get_checkpointer_config() is None
