@@ -2656,6 +2656,31 @@ class TestResolveRunParamsUserId:
         assert run_context["user_id"] == "123456"
         assert run_context["channel_user_id"] == "123456"
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"user_id": "U-platform", "owner_user_id": "deerflow-user-1"},  # bound
+            {"user_id": "U-platform"},  # unbound auth-enabled
+            {"user_id": "feishu|ou_AbC/123"},  # unbound needing sanitization
+        ],
+    )
+    def test_run_identity_matches_storage_bucket(self, kwargs, monkeypatch):
+        """The run user_id and the file/artifact storage bucket share one resolver.
+
+        Pins #2 and #3 to a single source of truth so they cannot drift: whatever
+        _resolve_run_params puts in run_context["user_id"] is exactly what
+        _channel_storage_user_id scopes uploads/artifacts to.
+        """
+        from app.channels.manager import _channel_storage_user_id
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="slack", chat_id="C123", text="hi", **kwargs)
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == _channel_storage_user_id(msg)
+
     def test_connection_owner_user_id_takes_precedence_over_platform_user_id(self, monkeypatch):
         manager = self._manager()
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)

@@ -519,17 +519,24 @@ def _safe_user_id_for_run(raw_user_id: str) -> str:
 
 
 def _channel_storage_user_id(msg: InboundMessage) -> str | None:
-    """Resolve the storage bucket owner for an inbound message's files/artifacts.
+    """Resolve the canonical DeerFlow user id for a channel-triggered message.
 
-    Mirrors the run-identity policy in ``_resolve_run_params`` so uploads land in
-    and artifacts are read from the same bucket the agent run uses: prefer the
-    bound DeerFlow owner, otherwise fall back to the sanitized raw platform user
-    id. Without this fallback, an unbound auth-enabled channel would run under
-    ``safe(msg.user_id)`` but stage files under ``get_effective_user_id()`` (the
-    dispatcher task's unset contextvar → ``"default"``), so uploads would land in
-    ``users/default/...`` while the agent reads ``users/{safe_platform_user_id}/...``.
-    Returns ``None`` only when neither identity is available, leaving the caller to
-    fall back to the contextvar/default user.
+    Single source of truth for both the agent **run identity**
+    (``_resolve_run_params`` → ``run_context["user_id"]``) and the **file/artifact
+    storage bucket** (``receive_file`` / ``_ingest_inbound_files`` /
+    ``_prepare_artifact_delivery``), so the bucket the agent reads/writes always
+    matches where channel files are staged. Prefer the bound DeerFlow owner,
+    otherwise fall back to the sanitized raw platform user id. Without that
+    fallback, an unbound auth-enabled channel would run under ``safe(msg.user_id)``
+    but stage files under ``get_effective_user_id()`` (the dispatcher task's unset
+    contextvar → ``"default"``), so uploads would land in ``users/default/...``
+    while the agent reads ``users/{safe_platform_user_id}/...``. Returns ``None``
+    only when neither identity is available, leaving the caller to fall back to the
+    contextvar/default user.
+
+    Distinct from :func:`_owner_headers`, which deliberately sends the *raw* owner
+    id (no sanitize, no platform fallback) over HTTP for gateway to re-resolve;
+    this helper is the in-process, sanitized, filesystem-facing identity.
     """
     owner_user_id = _effective_owner_user_id(msg)
     if owner_user_id:
@@ -845,11 +852,12 @@ class ChannelManager:
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
-        owner_user_id = _effective_owner_user_id(msg)
-        if owner_user_id:
-            run_context_identity["user_id"] = _safe_user_id_for_run(owner_user_id)
-        elif msg.user_id:
-            run_context_identity["user_id"] = _safe_user_id_for_run(msg.user_id)
+        # Single source of truth for the run identity: the same helper that scopes
+        # inbound files and outbound artifacts, so the bucket the agent reads/writes
+        # always matches where channel files are staged.
+        run_user_id = _channel_storage_user_id(msg)
+        if run_user_id:
+            run_context_identity["user_id"] = run_user_id
         if msg.user_id:
             run_context_identity["channel_user_id"] = msg.user_id
 
