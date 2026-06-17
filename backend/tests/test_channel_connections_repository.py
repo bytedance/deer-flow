@@ -277,22 +277,15 @@ class TestChannelConnectionRepository:
         expires = now + timedelta(minutes=5)
 
         for i in range(3):
-            inserted = await repo.create_oauth_state_within_cap(
-                owner_user_id="alice", provider="slack", state=f"code-{i}", expires_at=expires, max_pending=3, now=now
-            )
+            inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=f"code-{i}", expires_at=expires, max_pending=3, now=now)
             assert inserted is True
 
         # Cap reached: the next issuance is rejected and nothing is inserted.
-        assert (
-            await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="code-over", expires_at=expires, max_pending=3, now=now)
-            is False
-        )
+        assert await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="code-over", expires_at=expires, max_pending=3, now=now) is False
         assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
 
         # Expired rows are pruned and free up capacity; a different owner is unaffected.
-        assert (
-            await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="slack", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
-        )
+        assert await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="slack", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
 
     @pytest.mark.anyio
     async def test_create_oauth_state_within_cap_ignores_expired_rows(self, repo):
@@ -301,9 +294,7 @@ class TestChannelConnectionRepository:
         for i in range(3):
             await repo.create_oauth_state(owner_user_id="alice", provider="slack", state=f"old-{i}", expires_at=now - timedelta(minutes=1))
 
-        inserted = await repo.create_oauth_state_within_cap(
-            owner_user_id="alice", provider="slack", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now
-        )
+        inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now)
         assert inserted is True
         assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
 
@@ -317,9 +308,7 @@ class TestChannelConnectionRepository:
         results: list[bool] = []
 
         async def issue(state: str) -> None:
-            results.append(
-                await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=state, expires_at=expires, max_pending=3, now=now)
-            )
+            results.append(await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=state, expires_at=expires, max_pending=3, now=now))
 
         async with anyio.create_task_group() as tg:
             for i in range(8):
