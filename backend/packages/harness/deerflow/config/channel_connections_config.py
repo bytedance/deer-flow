@@ -42,6 +42,7 @@ class ChannelConnectionsConfig(BaseModel):
     """Top-level config for browser-connectable IM channels."""
 
     enabled: bool = False
+    require_bound_identity: bool = True
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)
     telegram: TelegramChannelConnectionConfig = Field(default_factory=TelegramChannelConnectionConfig)
     discord: DiscordChannelConnectionConfig = Field(default_factory=DiscordChannelConnectionConfig)

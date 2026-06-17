@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 13
+config_version: 14
 
 # ============================================================================
 # Logging
@@ -892,16 +892,18 @@ sandbox:
 # Subagents are background workers delegated tasks by the lead agent
 
 # subagents:
-#   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
-#   timeout_seconds: 900
-#   # Optional global max-turn override for all subagents
+#   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
+#   # Custom agents use their own timeout_seconds (default 900) unless overridden.
+#   timeout_seconds: 1800
+#   # Optional global max-turn override for all subagents.
+#   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
-#       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
-#       max_turns: 160
+#       timeout_seconds: 2700  # 45 minutes for very long deep-research tasks
+#       max_turns: 250         # raise above the 150 default for very deep tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search
@@ -1206,6 +1208,9 @@ run_events:
 #
 # channel_connections:
 #   enabled: false
+#   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
+#   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
+#   require_bound_identity: true
 #
 #   telegram:
 #     enabled: false
