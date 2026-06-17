@@ -338,6 +338,31 @@ def test_get_memory_honors_bound_owner_header() -> None:
     assert response.facts[0].content == "owner fact"
 
 
+def test_get_memory_sanitizes_unsafe_owner_header() -> None:
+    """A bound owner id needing sanitization routes to the safe bucket, not a 500.
+
+    The trusted owner header carries the raw owner id. The memory router must
+    normalize it through the same ``make_safe_user_id`` the channel file pipeline
+    applies, so the memory bucket matches the owner's file/upload bucket and the
+    raw id never reaches ``_validate_user_id`` unsanitized.
+    """
+    from deerflow.config.paths import make_safe_user_id
+
+    raw_owner = "feishu|ou_AbC/123"
+    seen: dict[str, str] = {}
+
+    def fake_get_memory_data(*, user_id: str) -> dict:
+        seen["user_id"] = user_id
+        return _sample_memory()
+
+    with patch("app.gateway.routers.memory.get_memory_data", side_effect=fake_get_memory_data):
+        asyncio.run(memory.get_memory(_internal_owner_request(raw_owner)))
+
+    expected = make_safe_user_id(raw_owner)
+    assert seen["user_id"] == expected
+    assert seen["user_id"] != raw_owner
+
+
 def test_get_memory_falls_back_to_effective_user_for_browser_requests() -> None:
     """Non-internal callers ignore the owner header and use the effective user."""
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME

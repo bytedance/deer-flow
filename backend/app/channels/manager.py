@@ -1213,7 +1213,10 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=_channel_storage_user_id(msg))
+        # Reuse the storage owner cached at the top of _handle_chat so uploads and
+        # artifact delivery always resolve to the same bucket, even if a future
+        # channel.receive_file returns a rewritten InboundMessage.
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:

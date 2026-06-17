@@ -14,6 +14,7 @@ from deerflow.agents.memory.updater import (
     update_memory_fact,
 )
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
@@ -28,8 +29,17 @@ def _resolve_memory_user_id(request: Request) -> str:
     honored after ``AuthMiddleware`` validated the internal token (see
     ``get_trusted_internal_owner_user_id``). Browser/API callers are never
     internal, so this falls back to the normal contextvar-based effective user.
+
+    The trusted owner header carries the *raw* owner id, so sanitize it through
+    ``make_safe_user_id`` (the same normalization the channel file pipeline applies
+    via ``_safe_user_id_for_run``/``prepare_user_dir_for_raw_id``). This keeps the
+    memory bucket aligned with the owner's file/upload bucket and avoids a 500 when
+    the raw id contains characters ``_validate_user_id`` would reject.
     """
-    return get_trusted_internal_owner_user_id(request) or get_effective_user_id()
+    raw_owner = get_trusted_internal_owner_user_id(request)
+    if raw_owner:
+        return make_safe_user_id(raw_owner)
+    return get_effective_user_id()
 
 
 class ContextSection(BaseModel):
