@@ -212,13 +212,31 @@ tools:
 
 ### Image search
 
+<Tabs items={["DuckDuckGo (default)", "InfoQuest", "Serper"]}>
+  <Tabs.Tab>
 ```yaml
 tools:
   - use: deerflow.community.image_search.tools:image_search_tool
-  # Or use InfoQuest:
-  # - use: deerflow.community.infoquest.tools:image_search_tool
-  #   api_key: $INFOQUEST_API_KEY
 ```
+No API key required. Default configuration, good for development and general use.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:image_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+Requires an InfoQuest API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serper.tools:image_search_tool
+    api_key: $SERPER_API_KEY
+```
+Google Images results via Serper. Requires a [Serper](https://serper.dev) API key. Reuses `SERPER_API_KEY` with the Serper `web_search` tool.
+  </Tabs.Tab>
+</Tabs>
 
 ## Tool groups
 
