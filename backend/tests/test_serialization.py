@@ -328,3 +328,32 @@ def test_serialize_channel_values_for_api_no_messages():
 
     result = serialize_channel_values_for_api({"title": "empty"})
     assert result == {"title": "empty"}
+
+
+def test_serialize_values_mode_strips_base64_from_hidden_messages():
+    """The SSE stream emits ``values`` snapshots of the full state, so it must
+    strip base64 image data from hide_from_ui messages just like the REST
+    endpoints do — otherwise the same payload leaks over the stream."""
+    import json
+
+    from deerflow.runtime.serialization import serialize
+
+    state = {
+        "messages": [
+            _make_msg(
+                [
+                    {"type": "text", "text": "context"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,iVBOR..."},
+                    },
+                ],
+                hide_from_ui=True,
+            ),
+        ],
+    }
+    result = serialize(state, mode="values")
+    # the hidden message survives (count/order preserved) but the data: block is gone
+    assert len(result["messages"]) == 1
+    assert "data:image/png;base64" not in json.dumps(result)
+    assert result["messages"][0]["content"] == [{"type": "text", "text": "context"}]
