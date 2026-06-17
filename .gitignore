@@ -22,6 +22,7 @@ venv/
 
 # Environment variables
 .env
+.env.bak
 
 # Configuration files
 config.yaml
