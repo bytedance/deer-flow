@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 import {
   configureChannelProvider,
@@ -8,59 +9,11 @@ import {
   listChannelConnections,
   listChannelProviders,
 } from "./api";
+import { startConnectionPoll, type ConnectPollHandle } from "./connect-poll";
 import type { ChannelProviderId, ChannelRuntimeConfigValues } from "./types";
 
 export const channelProviderQueryKey = ["channelProviders"] as const;
 export const channelConnectionsQueryKey = ["channelConnections"] as const;
-const CONNECT_POLL_INTERVAL_MS = 2000;
-
-function pollChannelConnectionUntilResolved(
-  queryClient: ReturnType<typeof useQueryClient>,
-  provider: ChannelProviderId,
-  expiresInSeconds: number,
-) {
-  const deadline = Date.now() + Math.max(1, expiresInSeconds) * 1000;
-
-  const poll = () => {
-    window.setTimeout(() => {
-      void Promise.all([
-        queryClient.fetchQuery({
-          queryKey: channelProviderQueryKey,
-          queryFn: () => listChannelProviders(),
-        }),
-        queryClient.fetchQuery({
-          queryKey: channelConnectionsQueryKey,
-          queryFn: () => listChannelConnections(),
-        }),
-      ])
-        .then(([providersResponse, connections]) => {
-          const providerConnected = providersResponse.providers.some(
-            (item) =>
-              item.provider === provider &&
-              item.connection_status === "connected",
-          );
-          const connectionConnected = connections.some(
-            (item) => item.provider === provider && item.status === "connected",
-          );
-          if (
-            providerConnected ||
-            connectionConnected ||
-            Date.now() >= deadline
-          ) {
-            return;
-          }
-          poll();
-        })
-        .catch(() => {
-          if (Date.now() < deadline) {
-            poll();
-          }
-        });
-    }, CONNECT_POLL_INTERVAL_MS);
-  };
-
-  poll();
-}
 
 export function useChannelProviders() {
   const { data, isLoading, error } = useQuery({
@@ -85,6 +38,19 @@ export function useChannelConnections() {
 
 export function useConnectChannelProvider() {
   const queryClient = useQueryClient();
+  const pollersRef = useRef<Map<ChannelProviderId, ConnectPollHandle>>(
+    new Map(),
+  );
+
+  // Cancel any in-flight polls when the component using this hook unmounts.
+  useEffect(() => {
+    const pollers = pollersRef.current;
+    return () => {
+      pollers.forEach((handle) => handle.cancel());
+      pollers.clear();
+    };
+  }, []);
+
   return useMutation({
     mutationFn: (provider: ChannelProviderId) =>
       connectChannelProvider(provider),
@@ -93,10 +59,27 @@ export function useConnectChannelProvider() {
       void queryClient.invalidateQueries({
         queryKey: channelConnectionsQueryKey,
       });
-      pollChannelConnectionUntilResolved(
-        queryClient,
+
+      // Replace any existing poll for this provider so repeated Connect clicks
+      // don't spawn parallel polling chains racing on the same query keys.
+      pollersRef.current.get(provider)?.cancel();
+      pollersRef.current.set(
         provider,
-        result.expires_in,
+        startConnectionPoll({
+          provider,
+          expiresInSeconds: result.expires_in,
+          fetchConnections: () =>
+            queryClient.fetchQuery({
+              queryKey: channelConnectionsQueryKey,
+              queryFn: () => listChannelConnections(),
+            }),
+          onConnected: () => {
+            // Refresh derived provider state exactly once when the bind lands.
+            void queryClient.invalidateQueries({
+              queryKey: channelProviderQueryKey,
+            });
+          },
+        }),
       );
     },
   });
