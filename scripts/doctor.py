@@ -103,6 +103,7 @@ def _split_use_path(use: str) -> tuple[str, str] | None:
 # Check result container
 # ---------------------------------------------------------------------------
 
+
 class CheckResult:
     def __init__(
         self,
@@ -128,6 +129,7 @@ class CheckResult:
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
 
 def check_python() -> CheckResult:
     v = sys.version_info
@@ -198,11 +200,7 @@ def check_nginx() -> CheckResult:
     return CheckResult(
         "nginx",
         "fail",
-        fix=(
-            "macOS:   brew install nginx\n"
-            "Ubuntu:  sudo apt install nginx\n"
-            "Windows: use WSL or Docker mode"
-        ),
+        fix=("macOS:   brew install nginx\nUbuntu:  sudo apt install nginx\nWindows: use WSL or Docker mode"),
     )
 
 
@@ -404,11 +402,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
                     )
 
             if use == "deerflow.models.claude_provider:ClaudeChatModel":
-                credential_paths = [
-                    Path(os.environ["CLAUDE_CODE_CREDENTIALS_PATH"]).expanduser()
-                    for env_name in ("CLAUDE_CODE_CREDENTIALS_PATH",)
-                    if os.environ.get(env_name)
-                ]
+                credential_paths = [Path(os.environ["CLAUDE_CODE_CREDENTIALS_PATH"]).expanduser() for env_name in ("CLAUDE_CODE_CREDENTIALS_PATH",) if os.environ.get(env_name)]
                 credential_paths.append(Path("~/.claude/.credentials.json").expanduser())
                 has_oauth_env = any(
                     os.environ.get(name)
@@ -428,10 +422,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
                         CheckResult(
                             f"Claude auth available (model: {model_name})",
                             "fail",
-                            fix=(
-                                "Set ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN, "
-                                "or place credentials at ~/.claude/.credentials.json"
-                            ),
+                            fix=("Set ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN, or place credentials at ~/.claude/.credentials.json"),
                         )
                     )
     except Exception as exc:
@@ -458,7 +449,6 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
         data = _load_yaml_file(config_path)
 
         tool_entries = [t for t in data.get("tools", []) if t.get("name") == tool_name]
-        tool_uses = [t.get("use", "") for t in tool_entries]
         if not tool_entries:
             return CheckResult(
                 label,
@@ -470,6 +460,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
         free_providers = {
             "web_search": {"ddg_search": "DuckDuckGo (no key needed)"},
             "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)"},
+            "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
         key_providers = {
             "web_search": {
@@ -478,35 +469,57 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
+                "serper": "SERPER_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
             },
+            "image_search": {
+                "infoquest": "INFOQUEST_API_KEY",
+                "serper": "SERPER_API_KEY",
+            },
         }
 
-        for tool_entry in tool_entries:
-            use = tool_entry.get("use", "")
+        def _configured_key_detail(tool: dict, default_var: str) -> tuple[Status, str] | None:
+            api_key = tool.get("api_key")
+            if isinstance(api_key, str) and api_key.strip():
+                key = api_key.strip()
+                if key.startswith("$"):
+                    env_name = key[1:]
+                    val = os.environ.get(env_name)
+                    if val and val.strip():
+                        return ("ok", f"{env_name} set from config")
+                    # The referenced var is unset; fall through to the default
+                    # env var below, which tools use as a runtime fallback.
+                else:
+                    return ("warn", "literal api_key set in config")
+
+            val = os.environ.get(default_var)
+            return ("ok", f"{default_var} set") if val and val.strip() else None
+
+        for tool in tool_entries:
+            use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
                     return CheckResult(label, "ok", detail)
 
-        for tool_entry in tool_entries:
-            use = tool_entry.get("use", "")
+        for tool in tool_entries:
+            use = tool.get("use", "")
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
-                    configured_key = tool_entry.get("api_key")
-                    if isinstance(configured_key, str) and configured_key.strip():
-                        if configured_key.startswith("$"):
-                            ref_var = configured_key[1:]
-                            if os.environ.get(ref_var):
-                                return CheckResult(label, "ok", f"{provider} ({ref_var} set via api_key)")
-                        else:
-                            return CheckResult(label, "ok", f"{provider} (api_key configured)")
-                    val = os.environ.get(var)
-                    if val:
-                        return CheckResult(label, "ok", f"{provider} ({var} set)")
+                    key_status = _configured_key_detail(tool, var)
+                    if key_status:
+                        status, detail = key_status
+                        if status == "warn":
+                            return CheckResult(
+                                label,
+                                "warn",
+                                f"{provider} ({detail})",
+                                fix=f"Move the API key to .env as {var}=<your-key> and reference it as ${var}",
+                            )
+                        return CheckResult(label, "ok", f"{provider} ({detail})")
                     return CheckResult(
                         label,
                         "warn",
@@ -514,7 +527,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                         fix=f"Add {var}=<your-key> to .env, or run 'make setup'",
                     )
 
-        for use in tool_uses:
+        for tool in tool_entries:
+            use = tool.get("use", "")
             split = _split_use_path(use)
             if split is None:
                 return CheckResult(
@@ -542,6 +556,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
 def check_web_fetch(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_fetch", label="web fetch configured")
+
+
+def check_image_search(config_path: Path) -> CheckResult:
+    return check_web_tool(config_path, tool_name="image_search", label="image search configured")
 
 
 def check_frontend_env(project_root: Path) -> CheckResult:
@@ -641,6 +659,7 @@ def check_env_file(project_root: Path) -> CheckResult:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     config_path = project_root / "config.yaml"
@@ -691,7 +710,7 @@ def main() -> int:
     sections.append(("LLM Provider", llm_checks))
 
     # ── Web Capabilities ─────────────────────────────────────────────────────
-    search_checks = [check_web_search(config_path), check_web_fetch(config_path)]
+    search_checks = [check_web_search(config_path), check_web_fetch(config_path), check_image_search(config_path)]
     sections.append(("Web Capabilities", search_checks))
 
     # ── Sandbox ──────────────────────────────────────────────────────────────

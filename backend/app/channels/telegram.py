@@ -52,7 +52,6 @@ class TelegramChannel(Channel):
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
         # bot message being edited in place: {"message_id", "last_edit_at", "last_text"}
         self._stream_messages: dict[str, dict[str, Any]] = {}
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -463,13 +462,15 @@ class TelegramChannel(Channel):
 
     async def _cmd_start(self, update, context) -> None:
         """Handle /start command."""
-        if not self._check_user(update.effective_user.id):
-            return
         args = getattr(context, "args", []) if context is not None else []
         if args:
+            # Handle the deep-link bind token before applying allowed_users so a
+            # browser-initiated bind can bootstrap a new external identity.
             handled = await self._bind_connection_from_start_token(update, str(args[0]))
             if handled:
                 return
+        if not self._check_user(update.effective_user.id):
+            return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
@@ -503,6 +504,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)
@@ -546,6 +548,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)

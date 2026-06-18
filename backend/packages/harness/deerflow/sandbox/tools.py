@@ -24,6 +24,11 @@ from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_
 from deerflow.tools.types import Runtime
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
+# in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
+# ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
+_IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
@@ -938,6 +943,54 @@ def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState)
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
+def _braces_are_identifier_placeholders_only(fragment: str) -> bool:
+    """Return True only if every ``{...}`` block is a single identifier placeholder.
+
+    Identifier-only blocks (``{id}``, ``{port}``) come from REST templates and
+    f-strings and are text. Bash brace expansion (``{passwd,shadow}``, ``{,.bak}``,
+    ``{etc,var}``) reconstitutes real host paths at runtime, so it must NOT be
+    exempted. Stray, empty, or nested braces are rejected too (each ``{``/``}``
+    must belong to one balanced single-placeholder block).
+
+    ``${VAR}`` shell variable expansion (e.g. ``/home/${USER}/.ssh/id_rsa``) also
+    expands to a real host path at runtime, so a ``${`` anywhere disqualifies the
+    fragment even though the inner name is identifier-shaped.
+    """
+    if "${" in fragment:
+        return False
+    blocks = _IDENTIFIER_BRACE_BLOCK_PATTERN.findall(fragment)
+    # Every brace must be part of a balanced ``{...}`` block (no stray/nested braces).
+    if fragment.count("{") != len(blocks) or fragment.count("}") != len(blocks):
+        return False
+    return all(_IDENTIFIER_PATTERN.fullmatch(inner) for inner in blocks)
+
+
+def _is_non_path_literal_fragment(fragment: str) -> bool:
+    """Return True if a ``/segment`` match is almost certainly text, not a path.
+
+    The absolute-path scan runs over the raw command string, so it also matches
+    ``/segment`` sequences sitting inside string literals, f-strings, and
+    templates (e.g. ``python -c "print(f'/端口{port}')"`` or a REST template
+    like ``/devices/{id}/port``). Non-ASCII characters and single identifier-like
+    ``{placeholder}`` braces do not appear in real host filesystem paths a command
+    would open, so treating such fragments as text removes those false positives.
+
+    Bash brace expansion (``cat /etc/{passwd,shadow}``) is deliberately NOT
+    exempted: it expands to plain host paths at runtime, so only braces that are
+    single identifier placeholders are treated as text (see
+    :func:`_braces_are_identifier_placeholders_only`).
+
+    This guard is best-effort, not a security boundary (see
+    :func:`validate_local_bash_command_paths`): plain ASCII host paths such as
+    ``/etc/passwd`` contain none of these markers and are still rejected.
+    """
+    if any(ord(ch) > 127 for ch in fragment):
+        return True
+    if "{" in fragment or "}" in fragment:
+        return _braces_are_identifier_placeholders_only(fragment)
+    return False
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -970,6 +1023,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         absolute_path = match.group()
+        if _is_non_path_literal_fragment(absolute_path):
+            continue
         if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
