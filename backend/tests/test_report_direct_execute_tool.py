@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from deerflow.tools.builtins.report_direct_tools import report_direct_execute
+
+
+def _make_runtime(context: dict | None = None):
+    """Create a minimal ToolRuntime-like mock."""
+    return SimpleNamespace(context=context or {})
 
 
 class TestReportDirectExecuteTool:
@@ -27,12 +33,11 @@ class TestReportDirectExecuteTool:
         }
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-                "equipment_type": "all",
-            }
+        result = report_direct_execute.func(
+            runtime=_make_runtime(),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
+            equipment_type="all",
         )
 
         result_data = json.loads(result)
@@ -52,11 +57,10 @@ class TestReportDirectExecuteTool:
         mock_executor.execute.side_effect = ScriptFailedError("Script failed", step="query_daily.py")
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-            }
+        result = report_direct_execute.func(
+            runtime=_make_runtime(),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
         )
 
         result_data = json.loads(result)
@@ -75,11 +79,10 @@ class TestReportDirectExecuteTool:
         mock_executor.execute.side_effect = NoDataError("No data", step="query_daily.py")
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-            }
+        result = report_direct_execute.func(
+            runtime=_make_runtime(),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
         )
 
         result_data = json.loads(result)
@@ -95,11 +98,10 @@ class TestReportDirectExecuteTool:
         mock_executor.execute.side_effect = RuntimeError("Unexpected error")
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-            }
+        result = report_direct_execute.func(
+            runtime=_make_runtime(),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
         )
 
         result_data = json.loads(result)
@@ -119,16 +121,15 @@ class TestReportDirectExecuteTool:
         }
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "weekly",
-                "scope": {"week_start": "2026-06-01", "date_end": "2026-06-07"},
-                "equipment_type": "rotating_machinery",
-                "compare_with": "previous_week",
-                "equipment_ids": ["P-203A", "T-501A"],
-                "equipment_labels": ["进料泵P-203A", "塔T-501A"],
-                "kpi_keys": ["runtime_rate", "alarm_count"],
-            }
+        result = report_direct_execute.func(
+            runtime=_make_runtime(),
+            report_type="weekly",
+            scope={"week_start": "2026-06-01", "date_end": "2026-06-07"},
+            equipment_type="rotating_machinery",
+            compare_with="previous_week",
+            equipment_ids=["P-203A", "T-501A"],
+            equipment_labels=["进料泵P-203A", "塔T-501A"],
+            kpi_keys=["runtime_rate", "alarm_count"],
         )
 
         result_data = json.loads(result)
@@ -159,11 +160,11 @@ class TestReportDirectExecuteTool:
         }
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-            }
+        # runtime.context carries the access_token (same source as bash_tool)
+        result = report_direct_execute.func(
+            runtime=_make_runtime(context={"access_token": "  bearer-token  "}),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
         )
 
         result_data = json.loads(result)
@@ -189,11 +190,11 @@ class TestReportDirectExecuteTool:
         }
         mock_executor_class.return_value = mock_executor
 
-        result = report_direct_execute.invoke(
-            {
-                "report_type": "daily",
-                "scope": {"report_date": "2026-06-08"},
-            }
+        # runtime.context has no access_token → should fall back to env var
+        result = report_direct_execute.func(
+            runtime=_make_runtime(context={}),
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
         )
 
         result_data = json.loads(result)

@@ -4,15 +4,16 @@ Single tool that bypasses DSL state machine and directly orchestrates
 Skill script calls for daily/weekly/monthly reports.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
 from typing import Annotated, Any
 
-from langchain.tools import tool
+from langchain.tools import ToolRuntime, tool
 from langgraph.config import get_config
+from langgraph.typing import ContextT
+
+from deerflow.agents.thread_state import ThreadState
 from pydantic import BaseModel, Field
 
 from deerflow.report_executor import DirectExecutionError, DirectReportExecutor
@@ -92,6 +93,7 @@ class ReportDirectExecuteInput(BaseModel):
 
 @tool("report_direct_execute", args_schema=ReportDirectExecuteInput)
 def report_direct_execute(
+    runtime: ToolRuntime[ContextT, ThreadState],
     report_type: str,
     scope: dict[str, Any],
     equipment_type: str = "all",
@@ -125,7 +127,10 @@ def report_direct_execute(
         thread_id = config.get("configurable", {}).get("thread_id", "unknown")
         output_dir = _get_output_dir(thread_id)
 
-        token = config.get("context", {}).get("access_token")
+        # Prefer runtime.context (injected by LangChain, always has access_token)
+        # over get_config()["context"] (may be missing in newer LangGraph versions).
+        context = runtime.context if runtime else None
+        token = context.get("access_token") if isinstance(context, dict) else None
         access_token = token.strip() if isinstance(token, str) and token.strip() else None
         if access_token is None:
             access_token = os.environ.get("INS_ACCESS_TOKEN")
