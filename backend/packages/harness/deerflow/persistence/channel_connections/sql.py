@@ -25,6 +25,12 @@ from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
+# Bounded retries for upsert_connection when a concurrent writer commits a
+# conflicting row first (same owner identity, or the same active external
+# identity guarded by the partial unique index). Each retry re-reads the
+# now-visible state, so a small bound converges under realistic contention.
+_UPSERT_MAX_ATTEMPTS = 3
+
 
 class ChannelCredentialCipher:
     """Encrypts provider credentials before they are persisted."""
@@ -128,36 +134,62 @@ class ChannelConnectionRepository:
             row.capabilities_json = dict(capabilities or {})
             row.metadata_json = dict(metadata or {})
 
+        async def _revoke_other_active_owners(session: AsyncSession) -> None:
+            if status != "connected":
+                return
+            with session.no_autoflush:
+                result = await session.execute(
+                    select(ChannelConnectionRow.id).where(
+                        ChannelConnectionRow.provider == provider,
+                        ChannelConnectionRow.external_account_id == external_account_id_value,
+                        ChannelConnectionRow.workspace_id == workspace_id_value,
+                        ChannelConnectionRow.owner_user_id != owner_user_id,
+                        ChannelConnectionRow.status != "revoked",
+                    )
+                )
+            transferred_ids = [row_id for row_id in result.scalars()]
+            if not transferred_ids:
+                return
+            await session.execute(update(ChannelConnectionRow).where(ChannelConnectionRow.id.in_(transferred_ids)).values(status="revoked"))
+            await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(transferred_ids)))
+
         stmt = select(ChannelConnectionRow).where(
             ChannelConnectionRow.owner_user_id == owner_user_id,
             ChannelConnectionRow.provider == provider,
             ChannelConnectionRow.external_account_id == external_account_id_value,
             ChannelConnectionRow.workspace_id == workspace_id_value,
         )
-        async with self.session_factory() as session:
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConnectionRow(
-                    id=self._new_id(),
-                    owner_user_id=owner_user_id,
-                    provider=provider,
-                    external_account_id=external_account_id_value,
-                    workspace_id=workspace_id_value,
-                )
-                session.add(row)
 
-            _apply(row)
-            try:
-                await session.commit()
-            except IntegrityError:
-                # A concurrent writer inserted the same identity first; retry as
-                # an update of that row.
-                await session.rollback()
-                row = (await session.execute(stmt)).scalar_one()
-                _apply(row)
-                await session.commit()
-            await session.refresh(row)
-            return self._connection_to_dict(row)
+        async with self.session_factory() as session:
+            last_error: IntegrityError | None = None
+            for _ in range(_UPSERT_MAX_ATTEMPTS):
+                try:
+                    row = (await session.execute(stmt)).scalar_one_or_none()
+                    # Revoke any other owner's active row for this external identity
+                    # *before* our connected row is flushed, so the partial unique
+                    # index on active identities is satisfied at commit time.
+                    await _revoke_other_active_owners(session)
+                    if row is None:
+                        row = ChannelConnectionRow(
+                            id=self._new_id(),
+                            owner_user_id=owner_user_id,
+                            provider=provider,
+                            external_account_id=external_account_id_value,
+                            workspace_id=workspace_id_value,
+                        )
+                        session.add(row)
+                    _apply(row)
+                    await session.commit()
+                    await session.refresh(row)
+                    return self._connection_to_dict(row)
+                except IntegrityError as exc:
+                    # A concurrent writer committed a conflicting row first (this
+                    # owner's identity, or the same active external identity). Roll
+                    # back and retry: the next pass re-reads the now-visible state,
+                    # revokes the newly-committed owner, and writes our row.
+                    last_error = exc
+                    await session.rollback()
+            raise last_error  # type: ignore[misc]  # loop runs at least once
 
     async def list_connections(self, owner_user_id: str) -> list[dict[str, Any]]:
         async with self.session_factory() as session:

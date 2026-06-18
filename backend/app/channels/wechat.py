@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -254,7 +254,6 @@ class WechatChannel(Channel):
         self._state_dir = self._resolve_state_dir(config.get("state_dir"))
         self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
         self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
-        self._connection_repo = config.get("connection_repo")
         self._load_state()
 
     async def start(self) -> None:
@@ -591,24 +590,16 @@ class WechatChannel(Channel):
             return
 
         chat_id = str(raw_message.get("from_user_id") or raw_message.get("ilink_user_id") or "").strip()
-        if not chat_id or not self._check_user(chat_id):
+        if not chat_id:
             return
 
         text = self._extract_text(raw_message)
-        files = await self._extract_inbound_files(raw_message)
-        if not text and not files:
-            return
-
         context_token = str(raw_message.get("context_token") or "").strip()
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
-        if context_token:
-            self._context_tokens_by_chat[chat_id] = context_token
-            if thread_ts:
-                self._context_tokens_by_thread[thread_ts] = context_token
-
-        connect_code = extract_connect_code(text)
-        if connect_code and self._connection_repo is not None:
+        # Handle the connect code before applying allowed_users so a browser-initiated
+        # bind can bootstrap an external identity that is not yet whitelisted.
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
             handled = await self._bind_connection_from_connect_code(
                 chat_id=chat_id,
                 context_token=context_token,
@@ -616,6 +607,20 @@ class WechatChannel(Channel):
             )
             if handled:
                 return
+
+        if not self._check_user(chat_id):
+            return
+
+        files = await self._extract_inbound_files(raw_message)
+        if not text and not files:
+            return
+
+        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+
+        if context_token:
+            self._context_tokens_by_chat[chat_id] = context_token
+            if thread_ts:
+                self._context_tokens_by_thread[thread_ts] = context_token
 
         inbound = self._make_inbound(
             chat_id=chat_id,

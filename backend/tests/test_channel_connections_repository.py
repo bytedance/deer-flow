@@ -89,6 +89,119 @@ class TestChannelConnectionRepository:
         assert len(await repo.list_connections("alice")) == 1
 
     @pytest.mark.anyio
+    async def test_upsert_connection_transfers_external_identity_between_owners(self, repo):
+        await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        bob = await repo.upsert_connection(
+            owner_user_id="bob",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        alice_rows = await repo.list_connections("alice")
+        resolved = await repo.find_connection_by_external_identity(
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+        )
+
+        assert alice_rows[0]["status"] == "revoked"
+        assert bob["status"] == "connected"
+        assert resolved is not None
+        assert resolved["owner_user_id"] == "bob"
+        assert resolved["id"] == bob["id"]
+
+    @pytest.mark.anyio
+    async def test_active_identity_unique_index_rejects_second_connected_owner(self, repo):
+        # The single-active-owner invariant must be enforced by the database, not
+        # only by the app-level revoke step (which can race under READ COMMITTED).
+        from sqlalchemy.exc import IntegrityError
+
+        await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        with pytest.raises(IntegrityError):
+            async with repo.session_factory() as session:
+                session.add(
+                    ChannelConnectionRow(
+                        id="manual-duplicate-active",
+                        owner_user_id="bob",
+                        provider="slack",
+                        external_account_id="U-shared",
+                        workspace_id="T1",
+                        status="connected",
+                    )
+                )
+                await session.commit()
+
+    @pytest.mark.anyio
+    async def test_active_identity_unique_index_allows_revoked_rows(self, repo):
+        # A revoked row must not occupy the active-identity slot, so a fresh
+        # connected bind for the same identity is allowed afterwards.
+        first = await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+        await repo.disconnect_connection(connection_id=first["id"], owner_user_id="alice")
+
+        second = await repo.upsert_connection(
+            owner_user_id="bob",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+        assert second["status"] == "connected"
+
+    @pytest.mark.anyio
+    async def test_concurrent_upserts_keep_single_active_owner(self, repo):
+        import asyncio
+
+        async def connect(owner: str):
+            return await repo.upsert_connection(
+                owner_user_id=owner,
+                provider="slack",
+                external_account_id="U-shared",
+                workspace_id="T1",
+                status="connected",
+            )
+
+        await asyncio.gather(connect("alice"), connect("bob"))
+
+        async with repo.session_factory() as session:
+            connected = (
+                (
+                    await session.execute(
+                        select(ChannelConnectionRow).where(
+                            ChannelConnectionRow.provider == "slack",
+                            ChannelConnectionRow.external_account_id == "U-shared",
+                            ChannelConnectionRow.workspace_id == "T1",
+                            ChannelConnectionRow.status == "connected",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(connected) == 1
+
+    @pytest.mark.anyio
     async def test_credentials_are_encrypted_at_rest_and_decrypted_by_repository(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",

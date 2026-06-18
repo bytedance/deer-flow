@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError as FutureCancelledError
 from typing import Any, TypeVar
 
+from app.channels.commands import extract_connect_code
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class Channel(ABC):
         self.bus = bus
         self.config = config
         self._running = False
+        self._connection_repo: Any = config.get("connection_repo")
 
     @property
     def is_running(self) -> bool:
@@ -116,6 +118,19 @@ class Channel(ABC):
 
         if exc:
             logger.error("[%s] %s failed for msg_id=%s: %s", self.name, name, msg_id, exc)
+
+    def _pending_connect_code(self, text: str) -> str | None:
+        """Return the one-time bind code if *text* is a ``/connect <code>`` command
+        and channel connections are configured, else ``None``.
+
+        Adapters MUST consult this **before** applying their ``allowed_users`` /
+        ``_check_user`` gate, so a browser-initiated bind can bootstrap an external
+        identity that the platform bot has never seen and is therefore not yet
+        authorized. (Telegram uses its deep-link ``/start <token>`` flow instead.)
+        """
+        if self._connection_repo is None:
+            return None
+        return extract_connect_code(text)
 
     def _make_inbound(
         self,

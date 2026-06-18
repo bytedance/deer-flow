@@ -9,7 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -65,7 +65,6 @@ class SlackChannel(Channel):
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
-        self._connection_repo = config.get("connection_repo")
         self._web_client_factory = config.get("web_client_factory")
         self._connection_web_clients: dict[str, tuple[str, Any]] = {}
         configured_bot_user_id = config.get("bot_user_id")
@@ -295,18 +294,13 @@ class SlackChannel(Channel):
 
         user_id = event.get("user", "")
 
-        # Check allowed users
-        if self._allowed_users and user_id not in self._allowed_users:
-            logger.debug("Ignoring message from non-allowed user: %s", user_id)
-            return
-
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
         if not text:
             return
 
-        connect_code = extract_connect_code(text)
+        connect_code = self._pending_connect_code(text)
         if connect_code:
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(
@@ -317,6 +311,12 @@ class SlackChannel(Channel):
                     ),
                     self._loop,
                 )
+            return
+
+        # Check allowed users after connect-code handling so browser-initiated
+        # binding can bootstrap a new external identity.
+        if self._allowed_users and user_id not in self._allowed_users:
+            logger.debug("Ignoring message from non-allowed user: %s", user_id)
             return
 
         channel_id = event.get("channel", "")

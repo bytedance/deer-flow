@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -71,7 +71,6 @@ class DiscordChannel(Channel):
         self._discord_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._discord_module = None
-        self._connection_repo = config.get("connection_repo")
 
     async def start(self) -> None:
         if self._running:
@@ -293,7 +292,7 @@ class DiscordChannel(Channel):
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
 
-        connect_code = extract_connect_code(text)
+        connect_code = self._pending_connect_code(text)
         if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
             return
 

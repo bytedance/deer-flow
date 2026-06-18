@@ -4881,6 +4881,41 @@ class TestSlackAllowedUsers:
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
 
+    def test_connect_code_bypasses_allowed_users_filter(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": ["U-allowed"], "connection_repo": object()},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._bind_connection_from_connect_code = AsyncMock(return_value=True)
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "U-blocked",
+            "text": "/connect slack-bind-code",
+            "team": "T123",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._bind_connection_from_connect_code.assert_called_once()
+        submit.assert_called_once()
+        bus.publish_inbound.assert_not_awaited()
+        channel._add_reaction.assert_not_called()
+        channel._send_running_reply.assert_not_called()
+
     def test_app_mention_strips_leading_bot_mention_before_command_detection(self):
         from app.channels.slack import SlackChannel
 
