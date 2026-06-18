@@ -337,7 +337,7 @@ async def run_agent(
                     break
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 event_count += 1
-                logger.info(
+                logger.debug(
                     "Run %s worker pid=%s stream event #%d mode=%s sse_event=%s chunk=%s elapsed_ms=%d",
                     run_id,
                     os.getpid(),
@@ -366,7 +366,7 @@ async def run_agent(
 
                 sse_event = _lg_mode_to_sse_event(mode)
                 event_count += 1
-                logger.info(
+                logger.debug(
                     "Run %s worker pid=%s stream event #%d mode=%s sse_event=%s chunk=%s elapsed_ms=%d",
                     run_id,
                     os.getpid(),
