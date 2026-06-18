@@ -247,6 +247,77 @@ class TestChannelConnectionRepository:
         assert [state.state_hash for state in states] == [repo.hash_state("active-state")]
 
     @pytest.mark.anyio
+    async def test_count_oauth_states_active_only_and_delete_expired(self, repo):
+        now = datetime.now(UTC)
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="expired-state",
+            expires_at=now - timedelta(minutes=1),
+        )
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="active-state",
+            expires_at=now + timedelta(minutes=5),
+        )
+
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+        assert await repo.delete_expired_oauth_states(now=now) == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack") == 1
+        # Pin that the surviving row is the active one (an inverted expiry
+        # predicate would delete the active row, still return 1, and pass above).
+        async with repo.session_factory() as session:
+            survivors = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
+        assert [row.state_hash for row in survivors] == [repo.hash_state("active-state")]
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_enforces_pending_cap(self, repo):
+        now = datetime.now(UTC)
+        expires = now + timedelta(minutes=5)
+
+        for i in range(3):
+            inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=f"code-{i}", expires_at=expires, max_pending=3, now=now)
+            assert inserted is True
+
+        # Cap reached: the next issuance is rejected and nothing is inserted.
+        assert await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="code-over", expires_at=expires, max_pending=3, now=now) is False
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
+
+        # Expired rows are pruned and free up capacity; a different owner is unaffected.
+        assert await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="slack", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_ignores_expired_rows(self, repo):
+        now = datetime.now(UTC)
+        # Three already-expired rows must not count against the cap.
+        for i in range(3):
+            await repo.create_oauth_state(owner_user_id="alice", provider="slack", state=f"old-{i}", expires_at=now - timedelta(minutes=1))
+
+        inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now)
+        assert inserted is True
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_does_not_leak_under_concurrency(self, repo):
+        """Concurrent issuance for one owner cannot push past the cap (willem #1)."""
+        import anyio
+
+        now = datetime.now(UTC)
+        expires = now + timedelta(minutes=5)
+        results: list[bool] = []
+
+        async def issue(state: str) -> None:
+            results.append(await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=state, expires_at=expires, max_pending=3, now=now))
+
+        async with anyio.create_task_group() as tg:
+            for i in range(8):
+                tg.start_soon(issue, f"code-{i}")
+
+        assert sum(1 for ok in results if ok) == 3
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
+
+    @pytest.mark.anyio
     async def test_consume_oauth_state_is_one_time_even_under_concurrent_consumers(self, repo):
         import anyio
 

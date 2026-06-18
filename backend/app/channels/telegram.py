@@ -503,6 +503,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)
@@ -546,6 +547,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)

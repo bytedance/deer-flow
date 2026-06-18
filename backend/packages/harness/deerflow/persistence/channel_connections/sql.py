@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -279,16 +279,128 @@ class ChannelConnectionRepository:
             session.add(row)
             await session.commit()
 
-    async def count_oauth_states(self, *, owner_user_id: str, provider: str) -> int:
+    async def create_oauth_state_within_cap(
+        self,
+        *,
+        owner_user_id: str,
+        provider: str,
+        state: str,
+        expires_at: datetime,
+        max_pending: int,
+        now: datetime | None = None,
+        code_verifier: str | None = None,
+        nonce_hash: str | None = None,
+        redirect_after: str | None = None,
+        requested_scopes: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Atomically enforce the per-(owner, provider) pending cap, then insert.
+
+        delete-expired + count + insert run in a single transaction serialized
+        per (owner, provider), so concurrent connect requests cannot each
+        observe ``count < max_pending`` and all insert (which would leak past
+        the cap). PostgreSQL takes a transaction-scoped advisory lock; SQLite
+        serializes writers through the write lock the leading DELETE acquires.
+
+        Returns ``True`` when the row was inserted, ``False`` when the cap is
+        already reached.
+        """
+        current_time = now or datetime.now(UTC)
         async with self.session_factory() as session:
-            result = await session.execute(
+            await self._serialize_oauth_owner_scope(session, owner_user_id, provider)
+            # Prune only this owner/provider's expired codes (the ones that affect
+            # this cap), not every user's — avoids a global DELETE on each connect
+            # POST. Issuing this write first also takes the SQLite database write
+            # lock so the count below cannot race a concurrent inserter between
+            # count and commit. Stale codes for other owners are pruned globally
+            # by consume_oauth_state / delete_expired_oauth_states.
+            await session.execute(
+                delete(ChannelOAuthStateRow).where(
+                    ChannelOAuthStateRow.owner_user_id == owner_user_id,
+                    ChannelOAuthStateRow.provider == provider,
+                    ChannelOAuthStateRow.expires_at < current_time,
+                )
+            )
+            pending = await session.execute(
                 select(func.count())
                 .select_from(ChannelOAuthStateRow)
                 .where(
                     ChannelOAuthStateRow.owner_user_id == owner_user_id,
                     ChannelOAuthStateRow.provider == provider,
+                    ChannelOAuthStateRow.consumed_at.is_(None),
+                    ChannelOAuthStateRow.expires_at >= current_time,
                 )
             )
+            if int(pending.scalar_one()) >= max_pending:
+                await session.rollback()
+                return False
+            session.add(
+                ChannelOAuthStateRow(
+                    state_hash=self.hash_state(state),
+                    owner_user_id=owner_user_id,
+                    provider=provider,
+                    code_verifier_encrypted=self._encrypt_optional_secret(code_verifier),
+                    nonce_hash=nonce_hash,
+                    redirect_after=redirect_after,
+                    requested_scopes_json=list(requested_scopes or []),
+                    metadata_json=dict(metadata or {}),
+                    expires_at=expires_at,
+                )
+            )
+            await session.commit()
+            return True
+
+    async def _serialize_oauth_owner_scope(self, session: AsyncSession, owner_user_id: str, provider: str) -> None:
+        """Serialize concurrent pending-cap transactions for one (owner, provider).
+
+        On PostgreSQL this takes a transaction-scoped advisory lock so concurrent
+        issuers run their count+insert one at a time. On SQLite the leading
+        DELETE in the caller's transaction already acquires the database write
+        lock, which serializes writers, so no extra lock is required.
+        """
+        try:
+            dialect = session.bind.dialect.name if session.bind is not None else ""
+        except Exception:
+            dialect = ""
+        if dialect == "postgresql":
+            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": self._oauth_scope_lock_key(owner_user_id, provider)})
+
+    @staticmethod
+    def _oauth_scope_lock_key(owner_user_id: str, provider: str) -> int:
+        digest = hashlib.sha256(f"{owner_user_id}\x00{provider}".encode()).digest()
+        # 63-bit non-negative key for pg_advisory_xact_lock(bigint).
+        return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+    async def delete_expired_oauth_states(self, *, now: datetime | None = None) -> int:
+        current_time = now or datetime.now(UTC)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def count_oauth_states(
+        self,
+        *,
+        owner_user_id: str,
+        provider: str,
+        active_only: bool = False,
+        now: datetime | None = None,
+    ) -> int:
+        current_time = now or datetime.now(UTC)
+        conditions = [
+            ChannelOAuthStateRow.owner_user_id == owner_user_id,
+            ChannelOAuthStateRow.provider == provider,
+        ]
+        if active_only:
+            conditions.extend(
+                [
+                    ChannelOAuthStateRow.consumed_at.is_(None),
+                    ChannelOAuthStateRow.expires_at >= current_time,
+                ]
+            )
+
+        async with self.session_factory() as session:
+            result = await session.execute(select(func.count()).select_from(ChannelOAuthStateRow).where(*conditions))
             return int(result.scalar_one())
 
     async def consume_oauth_state(

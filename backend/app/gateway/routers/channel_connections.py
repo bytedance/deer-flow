@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/channels", tags=["channel-connections"])
 logger = logging.getLogger(__name__)
 
 _STATE_TTL_SECONDS = 600
+_MAX_PENDING_CONNECT_CODES_PER_PROVIDER = 5
 _MASKED_CREDENTIAL_VALUE = "********"
 
 
@@ -332,13 +333,23 @@ async def _create_state(
     owner_user_id: str,
     provider: str,
 ) -> str:
+    now = datetime.now(UTC)
     state = _new_binding_code()
-    await repo.create_oauth_state(
+    # Atomic delete-expired + count + insert so concurrent connect POSTs from one
+    # owner cannot each see count < cap and all insert past the cap.
+    inserted = await repo.create_oauth_state_within_cap(
         owner_user_id=owner_user_id,
         provider=provider,
         state=state,
-        expires_at=datetime.now(UTC) + timedelta(seconds=_STATE_TTL_SECONDS),
+        expires_at=now + timedelta(seconds=_STATE_TTL_SECONDS),
+        max_pending=_MAX_PENDING_CONNECT_CODES_PER_PROVIDER,
+        now=now,
     )
+    if not inserted:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many pending channel connection codes. Wait for existing codes to expire or use one of them.",
+        )
     return state
 
 

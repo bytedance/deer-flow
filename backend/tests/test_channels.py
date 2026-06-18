@@ -800,6 +800,126 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_dispatch_loop_dedupes_stable_provider_message_id(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            def _slack_inbound(message_id: str) -> InboundMessage:
+                # Distinct objects per publish, like a real provider redelivery.
+                return InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U123",
+                    text="sensitive prompt",
+                    topic_id="1710000000.000100",
+                    metadata={"team_id": "T123", "message_id": message_id},
+                )
+
+            # Same stable message_id delivered twice -> processed once.
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 1 and len(outbound_received) == 1)
+            await asyncio.sleep(0.05)
+            assert manager._client.threads.create.call_count == 1
+            assert manager._client.runs.wait.call_count == 1
+            assert len(outbound_received) == 1
+
+            # Negative control: a *different* message_id must still be processed,
+            # so an over-dedupe regression (dropping distinct messages) is caught.
+            await bus.publish_inbound(_slack_inbound("1710000000.000999"))
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2 and len(outbound_received) == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+            assert len(outbound_received) == 2
+
+        _run(go())
+
+    def test_inbound_dedupe_key_fails_closed_without_workspace(self):
+        """Without a workspace identifier, skip dedupe instead of collapsing workspaces (willem #3)."""
+        from app.channels.manager import ChannelManager
+
+        with_workspace = InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="x",
+            metadata={"team_id": "T1", "message_id": "m1"},
+        )
+        assert ChannelManager._inbound_dedupe_key(with_workspace) == ("slack", "T1", "C1", "m1")
+
+        without_workspace = InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="x",
+            metadata={"message_id": "m1"},
+        )
+        assert ChannelManager._inbound_dedupe_key(without_workspace) is None
+
+    def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
+        """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            client = _make_mock_langgraph_client()
+            attempts = {"n": 0}
+
+            async def flaky_wait(*args, **kwargs):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise RuntimeError("transient gateway 503")
+                return {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "recovered"}]}
+
+            client.runs.wait = AsyncMock(side_effect=flaky_wait)
+            manager._client = client
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U123",
+                text="hello",
+                metadata={"team_id": "T123", "message_id": "m-1"},
+            )
+
+            # First delivery fails transiently; the dedupe key must be released.
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: attempts["n"] == 1 and len(outbound_received) >= 1)
+
+            # Provider redelivers the same message_id: it must be reprocessed, not dropped.
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: attempts["n"] == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert attempts["n"] == 2
+
+        _run(go())
+
     def test_handle_chat_outbound_preserves_inbound_metadata(self):
         """DingTalk (and similar) need inbound metadata on outbound sends (e.g. sender_staff_id)."""
         from app.channels.manager import ChannelManager
@@ -3752,7 +3872,7 @@ class TestWeComChannel:
             assert inbound.thread_ts == "msg-1"
             assert inbound.topic_id == "user-1"
             assert inbound.files == files
-            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single"}
+            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single", "message_id": "msg-1"}
             assert channel._ws_frames["msg-1"] is frame
             assert channel._ws_stream_ids["msg-1"] == "stream-1"
 
