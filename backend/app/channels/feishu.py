@@ -311,7 +311,7 @@ class FeishuChannel(Channel):
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
 
-    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """Download a Feishu file into the thread uploads directory.
 
         Returns the sandbox virtual path when the image is persisted successfully.
@@ -326,15 +326,23 @@ class FeishuChannel(Channel):
         text = msg.text
         for file in files:
             if file.get("image_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
                 text = text.replace("[image]", virtual_path, 1)
             elif file.get("file_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
                 text = text.replace("[file]", virtual_path, 1)
         msg.text = text
         return msg
 
-    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+    async def _receive_single_file(
+        self,
+        message_id: str,
+        file_key: str,
+        type: Literal["image", "file"],
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
 
         def inner():
@@ -373,9 +381,9 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve()
+        effective_user_id = user_id or get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
 
         ext = "png" if type == "image" else "bin"
         raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"

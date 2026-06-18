@@ -405,6 +405,12 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 10. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
 11. Outbound → channel callbacks → platform reply
 
+**Owner-scoped file storage**: inbound files, uploads, and output artifacts are staged under the DeerFlow owner's bucket so they land where the agent run reads/writes (`users/{user_id}/threads/{thread_id}/user-data/{uploads,outputs}`). `ChannelManager._handle_chat` resolves the storage owner once via `_channel_storage_user_id(msg)` (sanitized owner id, falling back to `safe(msg.user_id)` for unbound auth-enabled channels — mirroring `_resolve_run_params`'s run identity; `None` only when no identity is available) and threads it as the `user_id=` kwarg through the file pipeline:
+- `Channel.receive_file(msg, thread_id, user_id=...)` — owner-bound channels persist downloaded files under the owner's bucket instead of the default bucket
+- `_ingest_inbound_files(...)` and the underlying `ensure_uploads_dir` / `get_uploads_dir` — owner-scoped via the same kwarg
+- `_resolve_attachments` / `_prepare_artifact_delivery` — resolve output artifacts from the bound owner's bucket
+The cached value is reused for both the blocking (`runs.wait`) and streaming (`_handle_streaming_chat`) paths, so uploads and artifact delivery always target the same bucket even if a channel returns a rewritten `InboundMessage` from `receive_file`. The bucket id matches the memory bucket resolved by `_resolve_memory_user_id` (both normalize through `make_safe_user_id`).
+
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
@@ -438,6 +444,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`
 - Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
 - `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
+- The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router
 - In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
 - Absolute `storage_path` in config opts out of per-user isolation
 - **Migration**: Run `PYTHONPATH=. python scripts/migrate_user_isolation.py` to move legacy `memory.json`, `threads/`, and `agents/` into per-user layout. Supports `--dry-run` (preview changes) and `--user-id USER_ID` (assign unowned legacy data to a user, defaults to `default`).
@@ -624,7 +631,7 @@ Multi-file upload with automatic document conversion:
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
 - Rejects directory inputs before copying so uploads stay all-or-nothing
 - Reuses one conversion worker per request when called from an active event loop
-- Files stored in thread-isolated directories
+- Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
 - Agent receives uploaded file list via `UploadsMiddleware`
 

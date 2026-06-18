@@ -679,6 +679,55 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_fetch_gateway_uses_bound_owner_headers(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"facts": [{"text": "owner fact"}]}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return MockResponse()
+
+        calls = []
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            msg = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U-platform",
+                owner_user_id="deerflow-user-1",
+                connection_id="connection-1",
+                text="/memory",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._fetch_gateway("/api/memory", "memory", msg=msg)
+
+            assert reply == "Memory contains 1 fact(s)."
+            assert calls[0]["headers"][INTERNAL_OWNER_USER_ID_HEADER_NAME] == "deerflow-user-1"
+
+        _run(go())
+
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -716,7 +765,9 @@ class TestChannelManager:
             inbound = InboundMessage(
                 channel_name="test",
                 chat_id="chat1",
-                user_id="user1",
+                user_id="platform-user",
+                owner_user_id="owner-1",
+                connection_id="connection-1",
                 text="hi [image]",
                 files=[{"image_key": "img_1"}],
             )
@@ -729,12 +780,77 @@ class TestChannelManager:
             assert called_msg.text == "hi [image]"
             assert isinstance(called_thread_id, str)
             assert called_thread_id
+            assert mock_channel.receive_file.await_args.kwargs["user_id"] == "owner-1"
 
             mock_client.runs.wait.assert_called_once()
             run_call_args = mock_client.runs.wait.call_args
             assert run_call_args[1]["input"]["messages"][0]["content"] == "with /mnt/user-data/uploads/demo.png"
 
         _run(go())
+
+    def test_ingest_inbound_files_uses_explicit_owner_bucket(self, tmp_path, monkeypatch):
+        from app.channels.manager import INBOUND_FILE_READERS, _ingest_inbound_files
+        from deerflow.config.paths import Paths
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: paths)
+
+        async def read_file(file_info, client):
+            del file_info, client
+            return b"owner data"
+
+        INBOUND_FILE_READERS["owner-test"] = read_file
+
+        async def go():
+            try:
+                created = await _ingest_inbound_files(
+                    "thread-owner",
+                    InboundMessage(
+                        channel_name="owner-test",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        text="file",
+                        files=[{"filename": "report.txt", "type": "file"}],
+                    ),
+                    user_id="owner-1",
+                )
+            finally:
+                INBOUND_FILE_READERS.pop("owner-test", None)
+
+            assert created == [
+                {
+                    "filename": "report.txt",
+                    "size": len(b"owner data"),
+                    "path": "/mnt/user-data/uploads/report.txt",
+                    "is_image": False,
+                }
+            ]
+            assert (paths.sandbox_uploads_dir("thread-owner", user_id="owner-1") / "report.txt").read_bytes() == b"owner data"
+            assert not paths.sandbox_uploads_dir("thread-owner").exists()
+
+        _run(go())
+
+    def test_channel_storage_user_id_falls_back_to_platform_user(self, monkeypatch):
+        """Unbound auth-enabled channels stage files under the same bucket the run uses.
+
+        ``_resolve_run_params`` runs an unbound msg under ``safe(msg.user_id)``, so
+        ``_channel_storage_user_id`` must resolve to the same value instead of
+        ``None`` (which would fall back to ``"default"`` in the dispatcher task and
+        cross buckets — the agent would read uploads the channel never wrote there).
+        """
+        from app.channels.manager import _channel_storage_user_id, _safe_user_id_for_run
+
+        # Auth enabled (no auth-disabled owner), unbound (no owner_user_id).
+        monkeypatch.setattr("app.channels.manager._auth_disabled_owner_user_id", lambda: None)
+
+        unbound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi")
+        assert _channel_storage_user_id(unbound) == _safe_user_id_for_run("U-platform")
+
+        bound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi", owner_user_id="owner-1")
+        assert _channel_storage_user_id(bound) == _safe_user_id_for_run("owner-1")
+
+        anonymous = InboundMessage(channel_name="slack", chat_id="C1", user_id="", text="hi")
+        assert _channel_storage_user_id(anonymous) is None
 
     def test_handle_chat_creates_thread(self):
         from app.channels.manager import ChannelManager
@@ -1862,7 +1978,8 @@ class TestChannelManager:
     def test_handle_command_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
         from app.channels.manager import ChannelManager
 
-        async def fake_ingest(thread_id, msg):
+        async def fake_ingest(thread_id, msg, *, user_id=None):
+            del user_id
             return [
                 {
                     "filename": "report.pdf",
@@ -1916,7 +2033,8 @@ class TestChannelManager:
     def test_streaming_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
         from app.channels.manager import ChannelManager
 
-        async def fake_ingest(thread_id, msg):
+        async def fake_ingest(thread_id, msg, *, user_id=None):
+            del user_id
             return [
                 {
                     "filename": "report.pdf",
@@ -2657,6 +2775,31 @@ class TestResolveRunParamsUserId:
 
         assert run_context["user_id"] == "123456"
         assert run_context["channel_user_id"] == "123456"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"user_id": "U-platform", "owner_user_id": "deerflow-user-1"},  # bound
+            {"user_id": "U-platform"},  # unbound auth-enabled
+            {"user_id": "feishu|ou_AbC/123"},  # unbound needing sanitization
+        ],
+    )
+    def test_run_identity_matches_storage_bucket(self, kwargs, monkeypatch):
+        """The run user_id and the file/artifact storage bucket share one resolver.
+
+        Pins #2 and #3 to a single source of truth so they cannot drift: whatever
+        _resolve_run_params puts in run_context["user_id"] is exactly what
+        _channel_storage_user_id scopes uploads/artifacts to.
+        """
+        from app.channels.manager import _channel_storage_user_id
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="slack", chat_id="C123", text="hi", **kwargs)
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == _channel_storage_user_id(msg)
 
     def test_connection_owner_user_id_takes_precedence_over_platform_user_id(self, monkeypatch):
         manager = self._manager()
@@ -3429,6 +3572,60 @@ class TestFormatArtifactText:
 
 
 class TestHandleChatWithArtifacts:
+    def test_bound_owner_artifacts_resolve_from_owner_outputs_bucket(self, tmp_path, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+        outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
+        outputs_dir.mkdir(parents=True)
+        (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "generate report"},
+                    {
+                        "type": "ai",
+                        "content": "Here is your report.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                        ],
+                    },
+                    {"type": "tool", "name": "present_files", "content": "ok"},
+                ],
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="U-platform",
+                    owner_user_id="owner-1",
+                    connection_id="connection-1",
+                    text="generate report",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert len(outbound_received[0].attachments) == 1
+            assert outbound_received[0].attachments[0].actual_path == outputs_dir / "report.md"
+
+        _run(go())
+
     def test_artifacts_appended_to_text(self):
         from app.channels.manager import ChannelManager
 

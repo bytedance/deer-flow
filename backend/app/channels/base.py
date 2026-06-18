@@ -178,7 +178,7 @@ class Channel(ABC):
                 except Exception:
                     logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
 
-    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """
         Optionally process and materialize inbound file attachments for this channel.
 
@@ -190,8 +190,10 @@ class Channel(ABC):
         Args:
             msg: The inbound message, possibly containing file metadata in msg.files.
             thread_id: The resolved DeerFlow thread ID for sandbox path context.
+            user_id: Optional DeerFlow storage user ID for user-scoped channel workers.
 
         Returns:
             The (possibly modified) InboundMessage, with text and/or files updated as needed.
         """
+        del user_id
         return msg
