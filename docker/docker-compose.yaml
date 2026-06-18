@@ -25,26 +25,26 @@
 services:
   # ── PostgreSQL ────────────────────────────────────────────────────────────
   # Required for multi-worker mode. max_connections=250 supports 4 workers × ~50 connections.
-  postgres:
-    image: postgres:16-alpine
-    container_name: deer-flow-postgres
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-deerflow}
-      - POSTGRES_USER=${POSTGRES_USER:-deerflow}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-deerflow}
-    command: postgres -c max_connections=250
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deerflow}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - deer-flow
-    restart: unless-stopped
+#  postgres:
+#    image: postgres:16-alpine
+#    container_name: deer-flow-postgres
+#    environment:
+#      - POSTGRES_DB=${POSTGRES_DB:-deerflow}
+#      - POSTGRES_USER=${POSTGRES_USER:-deerflow}
+#      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-deerflow}
+#    command: postgres -c max_connections=250
+#    volumes:
+#      - postgres-data:/var/lib/postgresql/data
+#    ports:
+#      - "${POSTGRES_PORT:-5432}:5432"
+#    healthcheck:
+#      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deerflow}"]
+#      interval: 5s
+#      timeout: 3s
+#      retries: 10
+#    networks:
+#      - deer-flow
+#    restart: unless-stopped
 
   # ── Redis ─────────────────────────────────────────────────────────────────
   # Required for multi-worker mode (stream bridge, rate limit, IM coordination).
@@ -153,8 +153,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      postgres:
-        condition: service_healthy
+#      postgres:
+#        condition: service_healthy
       redis:
         condition: service_healthy
     networks:
