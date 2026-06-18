@@ -522,6 +522,40 @@ class TestHomeDirectorySpellingsBlockExecution:
         assert "blocked" in result.content.lower()
 
 
+class TestHomeDirectorySpellingsStayAllowed:
+    """Reads and names that only resemble HOME stay allowed (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "echo $HOME",
+            "echo ${HOME}",
+            'echo "$HOME"',
+            "ls $HOME",
+            "ls $HOME/",
+            "ls $HOME/Documents",
+            "ls ${HOME}/Documents",
+            "cat $HOME/.bashrc",
+            "cat ${HOME}/.bashrc",
+            'cat "$HOME/.bashrc"',
+            "cat $HOME/.bashrc > /tmp/bashrc.copy",
+            "rm -rf $HOMELESS",
+            "rm -rf $HOMELESS/",
+            "rm -rf $MY_HOME/",
+            "rm -rf ${HOME_CACHE}",
+            "rm -rf ${HOME_CACHE}/",
+            "rm -rf $HOME/Documents",
+            "rm -rf ~/Documents",
+            "rm -rf ${HOME}/Documents",
+            "> $HOMELESS/.bashrc",
+            "> ${HOME_CACHE}/.bashrc",
+            "> $MY_HOME/.profile",
+        ],
+    )
+    def test_reads_and_lookalikes_classified_as_pass(self, cmd):
+        assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 
