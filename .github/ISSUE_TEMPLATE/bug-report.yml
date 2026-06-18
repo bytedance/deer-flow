@@ -45,6 +45,7 @@ body:
         - MCP
         - Config / setup (make, config.yaml, env)
         - Docs
+        - CI infra
         - Not sure
     validations:
       required: true
