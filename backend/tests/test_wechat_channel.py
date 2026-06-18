@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock
 
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
@@ -1310,5 +1312,67 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert auth_state["status"] == "confirmed"
         assert auth_state["bot_token"] == "bound-token"
         assert auth_state["ilink_bot_id"] == "bot-99"
+        assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
 
     _run(go())
+
+
+def test_save_auth_state_tightens_preexisting_loose_file(tmp_path: Path):
+    """A world-readable auth file is replaced by an owner-only one, atomically.
+
+    The bot_token must never be observable at loose permissions: the atomic
+    0o600-temp + ``Path.replace`` path swaps in a fresh owner-only inode rather
+    than truncating the existing 0o644 file in place. Seeding the destination at
+    0o644 first means a regression back to ``write_text`` + late ``chmod`` would
+    leave a detectable window (and, here, the temp-file artifact behind).
+    """
+    from app.channels.wechat import WechatChannel
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    auth_path = state_dir / "wechat-auth.json"
+    auth_path.write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+    auth_path.chmod(0o644)
+
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"state_dir": str(state_dir), "qrcode_login_enabled": True},
+    )
+    channel._save_auth_state(status="confirmed", bot_token="bound-token", ilink_bot_id="bot-1")
+
+    assert (auth_path.stat().st_mode & 0o777) == 0o600
+    assert json.loads(auth_path.read_text(encoding="utf-8"))["bot_token"] == "bound-token"
+    # Atomic write leaves no temp-file residue behind.
+    assert list(state_dir.glob("*.tmp")) == []
+
+
+def test_save_auth_state_chmod_failure_is_logged_not_warned(tmp_path: Path, caplog):
+    """A chmod failure on a perms-less filesystem must not look like a persist failure.
+
+    With the post-replace chmod split into its own try/except, a chmod ``OSError``
+    is logged at debug while the JSON is genuinely on disk — operators must not see
+    the misleading ``failed to persist`` warning that the shared try/except produced.
+    """
+    from app.channels.wechat import WechatChannel
+
+    state_dir = tmp_path / "wechat-state"
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"state_dir": str(state_dir), "qrcode_login_enabled": True},
+    )
+
+    real_chmod = Path.chmod
+
+    def chmod_spy(self: Path, mode: int, *args, **kwargs):
+        if self.suffix == ".json":
+            raise OSError("chmod unsupported on this filesystem")
+        return real_chmod(self, mode, *args, **kwargs)
+
+    with caplog.at_level(logging.DEBUG, logger="app.channels.wechat"), mock.patch.object(Path, "chmod", chmod_spy):
+        channel._save_auth_state(status="confirmed", bot_token="bound-token")
+
+    auth_path = state_dir / "wechat-auth.json"
+    assert json.loads(auth_path.read_text(encoding="utf-8"))["bot_token"] == "bound-token"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("unable to chmod auth state" in message for message in messages)
+    assert not any("failed to persist auth state" in message for message in messages)
