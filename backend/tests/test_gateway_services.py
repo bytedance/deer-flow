@@ -106,6 +106,20 @@ def test_resolve_request_access_token_falls_back_to_cookie():
     assert _resolve_request_access_token(request) == "cookie-token"
 
 
+def test_resolve_request_access_token_returns_none_for_local_provider():
+    from app.gateway.services import _resolve_request_access_token
+    from deerflow.config.auth_config import load_auth_config_from_dict
+
+    load_auth_config_from_dict({"provider": "local"})
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer header-token"},
+        cookies={"access_token": "cookie-token"},
+        state=SimpleNamespace(user={"ins_base_token": "state-token"}),
+    )
+
+    assert _resolve_request_access_token(request) is None
+
+
 def test_build_run_config_basic():
     from app.gateway.services import build_run_config
 

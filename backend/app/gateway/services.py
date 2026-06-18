@@ -102,12 +102,17 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _resolve_request_access_token(request: Request) -> str | None:
-    """Return the caller's bearer/access token when available.
+    """Return the caller's InS bearer token when available.
 
-    This is used only to propagate the already-authenticated user token into
-    sandboxed data-access tools so they can call InS directly without
-    re-authenticating via username/password.
+    Only returns a token for the ``ins_base`` auth provider, where the
+    bearer token in the Authorization header *is* the InS access token.
+    For local auth the bearer token is a DeerFlow JWT which cannot be
+    used to call InS — the subprocess must fall back to the server-level
+    ``INS_ACCESS_TOKEN`` environment variable instead.
     """
+    if get_auth_config().provider != "ins_base":
+        return None
+
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
@@ -124,9 +129,6 @@ def _resolve_request_access_token(request: Request) -> str | None:
         if token:
             return token
 
-    # Local auth does not expose a reusable upstream data token.
-    if get_auth_config().provider != "ins_base":
-        return None
     return None
 
 

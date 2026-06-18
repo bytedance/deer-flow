@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Annotated, Any
 
 from langchain.tools import tool
@@ -126,6 +127,8 @@ def report_direct_execute(
 
         token = config.get("context", {}).get("access_token")
         access_token = token.strip() if isinstance(token, str) and token.strip() else None
+        if access_token is None:
+            access_token = os.environ.get("INS_ACCESS_TOKEN")
 
         executor = DirectReportExecutor(output_dir=output_dir, access_token=access_token)
 

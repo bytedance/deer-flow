@@ -244,8 +244,10 @@ class DirectReportExecutor:
             "REPORT_RUN_ID": getattr(self, "_current_run_id", ""),
             "FEATURES_TOOL_ROOT": f"{self._skills_root}/custom/features-tool",
         }
-        if self._access_token:
-            env["INS_ACCESS_TOKEN"] = self._access_token
+        # Prefer request-scoped token; fall back to server-level env var.
+        token = self._access_token or os.environ.get("INS_ACCESS_TOKEN")
+        if token:
+            env["INS_ACCESS_TOKEN"] = token
         try:
             result = subprocess.run(
                 cmd,

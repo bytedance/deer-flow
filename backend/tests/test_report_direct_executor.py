@@ -270,3 +270,31 @@ class TestDirectReportExecutor:
         assert "FEATURES_TOOL_ROOT" in first_call_kwargs["env"]
         assert first_call_kwargs["env"]["FEATURES_TOOL_ROOT"].endswith("custom/features-tool")
         assert first_call_kwargs["env"]["INS_ACCESS_TOKEN"] == "bearer-token"
+
+    @patch("subprocess.run")
+    def test_execute_falls_back_to_env_access_token(self, mock_run, tmp_path, monkeypatch):
+        """Test that report subprocess falls back to the server token when runtime token is absent."""
+        monkeypatch.setenv("INS_ACCESS_TOKEN", "env-token")
+        executor = DirectReportExecutor(output_dir=str(tmp_path))
+
+        data_file = tmp_path / "daily_data.json"
+        data_file.write_text("{}")
+        kpi_file = tmp_path / "daily_kpi.json"
+        kpi_file.write_text("{}")
+        report_file = tmp_path / "daily_report.md"
+        report_file.write_text("")
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(data_file)}), stderr=""),
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(kpi_file)}), stderr=""),
+            MagicMock(returncode=0, stdout=json.dumps({"output": str(report_file)}), stderr=""),
+        ]
+
+        result = executor.execute(
+            report_type="daily",
+            scope={"report_date": "2026-06-08"},
+        )
+
+        assert result["status"] == "success"
+        first_call_kwargs = mock_run.call_args_list[0][1]
+        assert first_call_kwargs["env"]["INS_ACCESS_TOKEN"] == "env-token"

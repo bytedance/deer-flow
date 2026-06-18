@@ -171,3 +171,33 @@ class TestReportDirectExecuteTool:
 
         constructor_kwargs = mock_executor_class.call_args.kwargs
         assert constructor_kwargs["access_token"] == "bearer-token"
+
+    @patch("deerflow.tools.builtins.report_direct_tools.DirectReportExecutor")
+    @patch("deerflow.tools.builtins.report_direct_tools.get_config")
+    def test_tool_falls_back_to_env_access_token(self, mock_get_config, mock_executor_class, monkeypatch):
+        """Test tool uses the server token when runtime context has no access token."""
+        monkeypatch.setenv("INS_ACCESS_TOKEN", "env-token")
+        mock_get_config.return_value = {
+            "configurable": {"thread_id": "test-thread"},
+            "context": {},
+        }
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {
+            "report_run_id": "rr_test999",
+            "artifacts": [],
+            "status": "success",
+        }
+        mock_executor_class.return_value = mock_executor
+
+        result = report_direct_execute.invoke(
+            {
+                "report_type": "daily",
+                "scope": {"report_date": "2026-06-08"},
+            }
+        )
+
+        result_data = json.loads(result)
+        assert result_data["status"] == "success"
+
+        constructor_kwargs = mock_executor_class.call_args.kwargs
+        assert constructor_kwargs["access_token"] == "env-token"
