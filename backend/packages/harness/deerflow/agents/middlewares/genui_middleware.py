@@ -67,6 +67,7 @@ class InteractionStore:
         self._records: dict[str, InteractionRecord] = {}
         self._lock = threading.Lock()
         self._persist_path = self._PERSIST_DIR / "callbacks.json"
+        self._loaded_mtime_ns: int | None = None
         self._load()
 
     # ── Persistence ──────────────────────────────────────────────────
@@ -76,16 +77,21 @@ class InteractionStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _load(self) -> None:
-        """Load persisted callbacks from disk, dropping expired ones."""
+    def _load_records_from_disk(self) -> tuple[dict[str, InteractionRecord], int | None]:
+        """Read persisted callbacks from disk, dropping expired ones."""
         path = self._persist_path
         if not path.exists():
-            return
+            return {}, None
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return
+            return {}, mtime_ns
         now = time.time()
+        records: dict[str, InteractionRecord] = {}
         for key, raw in data.items():
             record = InteractionRecord(
                 callback_id=raw["callback_id"],
@@ -99,9 +105,35 @@ class InteractionStore:
                 continue  # drop expired
             if record.submitted:
                 record = record.with_submission(raw.get("payload", {}))
-            self._records[key] = record
+            records[key] = record
+        return records, mtime_ns
+
+    def _load(self) -> None:
+        """Load persisted callbacks from disk, dropping expired ones."""
+        records, mtime_ns = self._load_records_from_disk()
+        self._records.update(records)
+        self._loaded_mtime_ns = mtime_ns
         if self._records:
-            logger.info("InteractionStore restored %d callbacks from %s", len(self._records), path)
+            logger.info(
+                "InteractionStore restored %d callbacks from %s",
+                len(self._records),
+                self._persist_path,
+            )
+
+    def _refresh_from_disk_locked(self, force: bool = False) -> None:
+        """Merge callbacks saved by another process into this store instance."""
+        try:
+            mtime_ns = self._persist_path.stat().st_mtime_ns
+        except OSError:
+            return
+
+        if not force and self._loaded_mtime_ns == mtime_ns:
+            return
+
+        records, loaded_mtime_ns = self._load_records_from_disk()
+        if records:
+            self._records.update(records)
+        self._loaded_mtime_ns = loaded_mtime_ns
 
     def _save(self) -> None:
         """Persist current callbacks to disk (called under _lock by caller)."""
@@ -122,6 +154,10 @@ class InteractionStore:
             tmp = self._persist_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data), encoding="utf-8")
             tmp.replace(self._persist_path)
+            try:
+                self._loaded_mtime_ns = self._persist_path.stat().st_mtime_ns
+            except OSError:
+                self._loaded_mtime_ns = None
         except OSError:
             logger.debug("Failed to persist InteractionStore", exc_info=True)
 
@@ -145,6 +181,7 @@ class InteractionStore:
             timeout=timeout,
         )
         with self._lock:
+            self._refresh_from_disk_locked()
             self._records[self._make_key(thread_id, callback_id)] = record
             self._save()
         logger.debug("Registered interaction callback %s for thread %s", callback_id, thread_id)
@@ -152,7 +189,12 @@ class InteractionStore:
 
     def get(self, thread_id: str, callback_id: str) -> InteractionRecord | None:
         with self._lock:
-            return self._records.get(self._make_key(thread_id, callback_id))
+            key = self._make_key(thread_id, callback_id)
+            record = self._records.get(key)
+            if record is not None:
+                return record
+            self._refresh_from_disk_locked(force=True)
+            return self._records.get(key)
 
     def submit(
         self,
@@ -162,8 +204,12 @@ class InteractionStore:
     ) -> InteractionRecord | None:
         """Mark a callback as submitted. Returns the updated record or None if not found."""
         with self._lock:
+            self._refresh_from_disk_locked()
             key = self._make_key(thread_id, callback_id)
             record = self._records.get(key)
+            if record is None:
+                self._refresh_from_disk_locked(force=True)
+                record = self._records.get(key)
             if record is None:
                 return None
             updated = record.with_submission(payload)
@@ -190,6 +236,7 @@ class InteractionStore:
 
     def remove(self, thread_id: str, callback_id: str) -> bool:
         with self._lock:
+            self._refresh_from_disk_locked()
             existed = self._records.pop(self._make_key(thread_id, callback_id), None) is not None
             if existed:
                 self._save()

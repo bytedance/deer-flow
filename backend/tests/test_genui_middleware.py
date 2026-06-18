@@ -124,6 +124,11 @@ InteractionStore = genui_middleware.InteractionStore
 process_interaction = genui_middleware.process_interaction
 
 
+def _new_store(tmp_path: Path) -> InteractionStore:
+    genui_middleware.InteractionStore._PERSIST_DIR = tmp_path / ".interaction_store"
+    return InteractionStore()
+
+
 def test_interaction_store_scopes_same_callback_id_by_thread() -> None:
     store = InteractionStore()
 
@@ -160,3 +165,18 @@ def test_process_interaction_uses_thread_scoped_callback_lookup(monkeypatch) -> 
     record_b = store.get("thread-b", "daily-report-scope")
     assert record_a is not None and record_a.submitted is False
     assert record_b is not None and record_b.submitted is True
+
+
+def test_interaction_store_refreshes_callbacks_registered_by_another_instance(tmp_path: Path) -> None:
+    api_store = _new_store(tmp_path)
+    render_store = _new_store(tmp_path)
+
+    assert api_store.get("thread-a", "fd-pump-device") is None
+
+    render_store.register("fd-pump-device", "thread-a", "checkpoint-a")
+
+    record = api_store.get("thread-a", "fd-pump-device")
+
+    assert record is not None
+    assert record.callback_id == "fd-pump-device"
+    assert record.thread_id == "thread-a"

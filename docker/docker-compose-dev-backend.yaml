@@ -111,7 +111,7 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-postgres redis}
     container_name: deer-flow-gateway
-    command: sh -c "{ cd backend && (uv sync $${UV_EXTRAS:+--extra $$UV_EXTRAS} || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync $${UV_EXTRAS:+--extra $$UV_EXTRAS})) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
+    command: sh -c "{ cd backend && opts=''; for e in $$UV_EXTRAS; do opts=\"$$opts --extra $$e\"; done; (uv sync $$opts || (echo '[startup] uv sync failed; recreating .venv and retrying once' && uv venv --allow-existing .venv && uv sync $$opts)) && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env'; } > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       - gateway-venv:/app/backend/.venv
