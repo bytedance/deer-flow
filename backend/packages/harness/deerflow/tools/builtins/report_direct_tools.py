@@ -124,7 +124,10 @@ def report_direct_execute(
         thread_id = config.get("configurable", {}).get("thread_id", "unknown")
         output_dir = _get_output_dir(thread_id)
 
-        executor = DirectReportExecutor(output_dir=output_dir)
+        token = config.get("context", {}).get("access_token")
+        access_token = token.strip() if isinstance(token, str) and token.strip() else None
+
+        executor = DirectReportExecutor(output_dir=output_dir, access_token=access_token)
 
         result = executor.execute(
             report_type=report_type,

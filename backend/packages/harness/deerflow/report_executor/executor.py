@@ -43,9 +43,10 @@ class DirectReportExecutor:
         },
     }
 
-    def __init__(self, output_dir: str = "/mnt/user-data/outputs", skills_root: str | None = None):
+    def __init__(self, output_dir: str = "/mnt/user-data/outputs", skills_root: str | None = None, access_token: str | None = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._access_token = access_token.strip() if access_token else None
         if skills_root is not None:
             self._skills_root = skills_root
         else:
@@ -243,6 +244,8 @@ class DirectReportExecutor:
             "REPORT_RUN_ID": getattr(self, "_current_run_id", ""),
             "FEATURES_TOOL_ROOT": f"{self._skills_root}/custom/features-tool",
         }
+        if self._access_token:
+            env["INS_ACCESS_TOKEN"] = self._access_token
         try:
             result = subprocess.run(
                 cmd,

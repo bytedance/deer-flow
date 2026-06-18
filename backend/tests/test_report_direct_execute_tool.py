@@ -142,3 +142,32 @@ class TestReportDirectExecuteTool:
         assert call_kwargs["equipment_ids"] == ["P-203A", "T-501A"]
         assert call_kwargs["equipment_labels"] == ["进料泵P-203A", "塔T-501A"]
         assert call_kwargs["kpi_keys"] == ["runtime_rate", "alarm_count"]
+
+    @patch("deerflow.tools.builtins.report_direct_tools.DirectReportExecutor")
+    @patch("deerflow.tools.builtins.report_direct_tools.get_config")
+    def test_tool_passes_access_token_from_runtime_context(self, mock_get_config, mock_executor_class):
+        """Test tool forwards runtime access token to direct executor."""
+        mock_get_config.return_value = {
+            "configurable": {"thread_id": "test-thread"},
+            "context": {"access_token": "  bearer-token  "},
+        }
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = {
+            "report_run_id": "rr_test789",
+            "artifacts": [],
+            "status": "success",
+        }
+        mock_executor_class.return_value = mock_executor
+
+        result = report_direct_execute.invoke(
+            {
+                "report_type": "daily",
+                "scope": {"report_date": "2026-06-08"},
+            }
+        )
+
+        result_data = json.loads(result)
+        assert result_data["status"] == "success"
+
+        constructor_kwargs = mock_executor_class.call_args.kwargs
+        assert constructor_kwargs["access_token"] == "bearer-token"

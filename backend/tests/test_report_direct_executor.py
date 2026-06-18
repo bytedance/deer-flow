@@ -237,8 +237,8 @@ class TestDirectReportExecutor:
 
     @patch("subprocess.run")
     def test_execute_passes_report_run_id_env(self, mock_run, tmp_path):
-        """Test that REPORT_RUN_ID is passed to subprocess environment."""
-        executor = DirectReportExecutor(output_dir=str(tmp_path))
+        """Test that report subprocess receives runtime environment variables."""
+        executor = DirectReportExecutor(output_dir=str(tmp_path), access_token="  bearer-token  ")
 
         # Create dummy output files
         data_file = tmp_path / "daily_data.json"
@@ -269,3 +269,4 @@ class TestDirectReportExecutor:
         assert first_call_kwargs["env"]["REPORT_RUN_ID"] == result["report_run_id"]
         assert "FEATURES_TOOL_ROOT" in first_call_kwargs["env"]
         assert first_call_kwargs["env"]["FEATURES_TOOL_ROOT"].endswith("custom/features-tool")
+        assert first_call_kwargs["env"]["INS_ACCESS_TOKEN"] == "bearer-token"
