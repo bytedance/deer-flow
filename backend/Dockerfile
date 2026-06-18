@@ -98,13 +98,14 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
 
 # Install weasyprint runtime dependencies (shared libs for cairo/pango/gdk-pixbuf)
 # and a basic font family so PDF text renders correctly.
+# Note: libgobject-2.0-0 was merged into libglib2.0-0 in bookworm; it's pulled in
+# transitively by libpango/libcairo, so no need to list it explicitly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libgdk-pixbuf-2.0-0 \
     libpangoft2-1.0-0 \
-    libgobject-2.0-0 \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
