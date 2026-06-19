@@ -110,10 +110,21 @@ class MemoryRunStore(RunStore):
         completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
-            model = r.get("model_name") or "unknown"
-            entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
-            entry["tokens"] += r.get("total_tokens", 0)
-            entry["runs"] += 1
+            usage_by_model = r.get("token_usage_by_model") or {}
+            if usage_by_model:
+                for model, usage in usage_by_model.items():
+                    entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                    entry["tokens"] += usage.get("total_tokens", 0)
+                    entry["runs"] += 1
+            else:
+                # Fallback for rows written before per-model accounting landed:
+                # attribute the whole run to its single ``model_name``. Keeps
+                # the legacy lead-only behavior for old data instead of
+                # silently dropping it.
+                model = r.get("model_name") or "unknown"
+                entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                entry["tokens"] += r.get("total_tokens", 0)
+                entry["runs"] += 1
         return {
             "total_tokens": sum(r.get("total_tokens", 0) for r in completed),
             "total_input_tokens": sum(r.get("total_input_tokens", 0) for r in completed),

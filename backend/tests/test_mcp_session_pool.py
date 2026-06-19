@@ -1,6 +1,7 @@
 """Tests for the MCP persistent-session pool."""
 
 import asyncio
+import stat
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -259,6 +260,293 @@ async def test_session_pool_tool_wrapping():
 
 
 @pytest.mark.asyncio
+async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
+    """Stdio MCP subprocesses should write relative and temp outputs under user-data."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"KEEP": "1"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
+    tmp_dir = workspace / _MCP_TMP_SUBDIR
+
+    assert session_connection["cwd"] == str(workspace)
+    assert session_connection["env"]["KEEP"] == "1"
+    assert session_connection["env"]["TMPDIR"] == str(tmp_dir)
+    assert session_connection["env"]["TMP"] == str(tmp_dir)
+    assert session_connection["env"]["TEMP"] == str(tmp_dir)
+    assert tmp_dir.is_dir()
+    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
+    """An operator-provided TMPDIR must win over our injected default."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"TMPDIR": "/operator/tmp"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
+    assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
+    assert session_connection["env"]["TMP"].endswith(_MCP_TMP_SUBDIR)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
+    """An operator-provided cwd must win over our injected workspace default."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    operator_cwd = str(tmp_path / "operator-cwd")
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "cwd": operator_cwd}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
+    tmp_dir = workspace / _MCP_TMP_SUBDIR
+
+    assert session_connection["cwd"] == operator_cwd
+    assert session_connection["env"]["TMPDIR"] == str(tmp_dir)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_skips_fs_work_for_non_stdio_transport(tmp_path):
+    """SSE/HTTP transports must not get a pinned cwd/temp env or workspace dirs."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "sse", "url": "http://localhost:9000/sse", "env": {"KEEP": "1"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths) as get_paths,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "srv", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    assert "cwd" not in session_connection
+    assert session_connection["env"] == {"KEEP": "1"}
+    # No filesystem work at all: get_paths() is never consulted and no thread
+    # workspace directory is created for non-stdio transports.
+    get_paths.assert_not_called()
+    assert not paths.sandbox_work_dir("thread-42", user_id="user-7").exists()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_skips_after_walk_when_no_text_content(tmp_path):
+    """With no text content to rewrite, the post-call snapshot diff must be skipped."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    # An image-only result carries no text, so bare-filename correlation has
+    # nothing to do and the second recursive walk should not run.
+    from mcp.types import ImageContent
+
+    image_result = MagicMock(content=[ImageContent(type="image", data="QUJD", mimeType="image/png")], isError=False, structuredContent=None)
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=image_result)
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": []}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch("deerflow.mcp.tools._changed_workspace_files") as changed_files,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    changed_files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_runs_after_walk_when_text_content_present(tmp_path):
+    """A text result must trigger the post-call snapshot diff for path rewriting."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    from mcp.types import TextContent
+
+    text_result = MagicMock(content=[TextContent(type="text", text="Saved as shot.png")], isError=False, structuredContent=None)
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=text_result)
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": []}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch("deerflow.mcp.tools._changed_workspace_files", return_value=[]) as changed_files,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    changed_files.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_session_pool_tool_forwards_interceptor_headers():
     """Regression for PR #3294: when an interceptor sets ``request.headers``, the
     pooled stdio call must forward them via ``meta={"headers": ...}`` so downstream
@@ -423,8 +711,10 @@ async def test_session_pool_tool_extracts_thread_id():
         await wrapped.coroutine(runtime=mock_runtime, x=1)
 
     # Verify the session was created with the correct scope key.
+    # The scope key is "{user_id}:{thread_id}"; the autouse fixture sets
+    # the effective user to "test-user-autouse".
     pool = get_session_pool()
-    assert ("server", "from-config") in pool._entries
+    assert ("server", "test-user-autouse:from-config") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -459,7 +749,7 @@ async def test_session_pool_tool_default_scope():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "default") in pool._entries
+    assert ("server", "test-user-autouse:default") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -499,7 +789,7 @@ async def test_session_pool_tool_get_config_fallback():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "from-langgraph-config") in pool._entries
+    assert ("server", "test-user-autouse:from-langgraph-config") in pool._entries
 
 
 def test_session_pool_tool_sync_wrapper_path_is_safe():
