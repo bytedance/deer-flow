@@ -7,11 +7,14 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
+
+_ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
 
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
@@ -78,27 +81,6 @@ class McpCacheResetResponse(BaseModel):
 
 
 _MASKED_VALUE = "***"
-
-
-async def _require_admin_user(request: Request) -> None:
-    """Require the authenticated caller to be an admin user.
-
-    ``AuthMiddleware`` normally stamps ``request.state.user`` before the
-    request reaches this router. Falling back to the strict dependency keeps
-    this route safe even in tests or alternative ASGI compositions that mount
-    the router without the global middleware.
-    """
-    user = getattr(request.state, "user", None)
-    if user is None:
-        from app.gateway.deps import get_current_user_from_request
-
-        user = await get_current_user_from_request(request)
-
-    if getattr(user, "system_role", None) != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required to manage MCP configuration.",
-        )
 
 
 def _allowed_stdio_commands() -> set[str]:
@@ -269,7 +251,7 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
         }
         ```
     """
-    await _require_admin_user(request)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
     config = get_extensions_config()
 
@@ -290,7 +272,7 @@ async def reset_mcp_tools_cache_endpoint(request: Request) -> McpCacheResetRespo
     servers. This affects all threads and users in the current Gateway process,
     and avoids relying on extensions_config.json mtime changes.
     """
-    await _require_admin_user(request)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     reset_mcp_tools_cache()
     return McpCacheResetResponse(
         success=True,
@@ -337,7 +319,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         ```
     """
     try:
-        await _require_admin_user(request)
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
 
         # Get the current config path (or determine where to save it)

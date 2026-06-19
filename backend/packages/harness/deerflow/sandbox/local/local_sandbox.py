@@ -2,9 +2,11 @@ import errno
 import logging
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import NamedTuple
 
@@ -83,6 +85,52 @@ class LocalSandbox(Sandbox):
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
 
+    # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
+    # sorted views and compiled path-rewrite patterns below are stable for the
+    # sandbox's lifetime. Caching them avoids re-sorting and re-compiling these
+    # regexes on every bash/read_file/write_file call (the agent's hot path).
+
+    @cached_property
+    def _command_pattern(self) -> re.Pattern[str] | None:
+        """Compiled matcher for container paths in shell commands (shell-aware boundaries)."""
+        mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
+        if not mappings:
+            return None
+        # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
+        # preventing /mnt/skills from matching inside /mnt/skills-extra.
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        return re.compile("|".join(f"({p})" for p in patterns))
+
+    @cached_property
+    def _content_pattern(self) -> re.Pattern[str] | None:
+        """Compiled matcher for container paths in plain file content (text boundaries)."""
+        mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
+        if not mappings:
+            return None
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        return re.compile("|".join(f"({p})" for p in patterns))
+
+    @cached_property
+    def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
+        """Compiled matchers for local paths in command output (longest local path first)."""
+        return [re.compile(re.escape(self._resolved_local_paths[m]) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in self._mappings_by_local_specificity]
+
+    @cached_property
+    def _resolved_local_paths(self) -> dict[PathMapping, str]:
+        """Filesystem-resolved local root per mapping. ``Path.resolve()`` hits the
+        disk, and the mounted directories don't move, so resolve once and reuse."""
+        return {m: str(Path(m.local_path).resolve()) for m in self.path_mappings}
+
+    @cached_property
+    def _mappings_by_container_specificity(self) -> list[PathMapping]:
+        """Mappings ordered most-specific-container-first (for forward resolution)."""
+        return sorted(self.path_mappings, key=lambda m: len(m.container_path.rstrip("/") or "/"), reverse=True)
+
+    @cached_property
+    def _mappings_by_local_specificity(self) -> list[PathMapping]:
+        """Mappings ordered longest-local-path-first (for reverse resolution)."""
+        return sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
+
     def _is_read_only_path(self, resolved_path: str) -> bool:
         """Check if a resolved path is under a read-only mount.
 
@@ -96,7 +144,7 @@ class LocalSandbox(Sandbox):
         best_prefix_len = -1
 
         for mapping in self.path_mappings:
-            local_resolved = str(Path(mapping.local_path).resolve())
+            local_resolved = self._resolved_local_paths[mapping]
             if resolved == local_resolved or resolved.startswith(local_resolved + os.sep):
                 prefix_len = len(local_resolved)
                 if prefix_len > best_prefix_len:
@@ -111,7 +159,7 @@ class LocalSandbox(Sandbox):
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
         path_str = str(path)
 
-        for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path.rstrip("/") or "/"), reverse=True):
+        for mapping in self._mappings_by_container_specificity:
             container_path = mapping.container_path.rstrip("/") or "/"
             if container_path == "/":
                 if path_str.startswith("/"):
@@ -141,7 +189,7 @@ class LocalSandbox(Sandbox):
             return ResolvedPath(path_str, None)
 
         mapping, relative = mapping_match
-        local_root = Path(mapping.local_path).resolve()
+        local_root = Path(self._resolved_local_paths[mapping])
         resolved_path = (local_root / relative).resolve() if relative else local_root
 
         try:
@@ -171,8 +219,8 @@ class LocalSandbox(Sandbox):
         path_str = str(Path(normalized_path).resolve())
 
         # Try each mapping (longest local path first for more specific matches)
-        for mapping in sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True):
-            local_path_resolved = str(Path(mapping.local_path).resolve())
+        for mapping in self._mappings_by_local_specificity:
+            local_path_resolved = self._resolved_local_paths[mapping]
             if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
                 # Replace the local path prefix with container path
                 relative = path_str[len(local_path_resolved) :].lstrip("/")
@@ -192,22 +240,10 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
-        import re
-
-        # Sort mappings by local path length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
-
-        if not sorted_mappings:
-            return output
-
-        # Create pattern that matches absolute paths
-        # Match paths like /Users/... or other absolute paths
+        # Patterns are compiled once per sandbox (longest local path first for
+        # correct prefix matching) and reused across calls.
         result = output
-        for mapping in sorted_mappings:
-            # Escape the local path for use in regex
-            escaped_local = re.escape(str(Path(mapping.local_path).resolve()))
-            # Match the local path followed by optional path components with either separator
-            pattern = re.compile(escaped_local + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        for pattern in self._reverse_output_patterns:
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
@@ -227,21 +263,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Command with container paths resolved to local paths
         """
-        import re
-
-        # Sort mappings by length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
-
-        # Build regex pattern to match all container paths
-        # Match container path followed by optional path components
-        if not sorted_mappings:
+        pattern = self._command_pattern
+        if pattern is None:
             return command
-
-        # Create pattern that matches any of the container paths.
-        # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
-        # preventing /mnt/skills from matching inside /mnt/skills-extra.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in sorted_mappings]
-        pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
@@ -264,14 +288,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Content with container paths resolved to local paths (forward slashes).
         """
-        import re
-
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
-        if not sorted_mappings:
+        pattern = self._content_pattern
+        if pattern is None:
             return content
-
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in sorted_mappings]
-        pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)

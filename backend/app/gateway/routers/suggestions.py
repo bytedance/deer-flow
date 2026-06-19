@@ -31,6 +31,10 @@ class SuggestionsResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list, description="Suggested follow-up questions")
 
 
+class SuggestionsConfigResponse(BaseModel):
+    enabled: bool = Field(..., description="Whether follow-up suggestions are enabled globally")
+
+
 # Matches a complete <think>...</think> block (case-insensitive, spans newlines).
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 # Matches a dangling, unclosed <think> (model truncated at max_tokens mid-thought).
@@ -120,6 +124,18 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
         else:
             parts.append(f"{m.role}: {m.content.strip()}")
     return "\n".join(parts).strip()
+
+
+@router.get(
+    "/suggestions/config",
+    response_model=SuggestionsConfigResponse,
+    summary="Get Suggestions Configuration",
+    description="Returns the global configuration for follow-up suggestions.",
+)
+async def get_suggestions_config(
+    config: AppConfig = Depends(get_config),
+) -> SuggestionsConfigResponse:
+    return SuggestionsConfigResponse(enabled=config.suggestions.enabled)
 
 
 @router.post(

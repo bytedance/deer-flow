@@ -191,10 +191,31 @@ tools:
 
 ### 图像搜索
 
+<Tabs items={["DuckDuckGo（默认）", "InfoQuest", "Serper"]}>
+  <Tabs.Tab>
 ```yaml
 tools:
   - use: deerflow.community.image_search.tools:image_search_tool
 ```
+无需 API Key。默认配置，适合开发和通用用途。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:image_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+需要 InfoQuest API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serper.tools:image_search_tool
+    api_key: $SERPER_API_KEY
+```
+通过 Serper 获取 Google 图片结果。需要 [Serper](https://serper.dev) API Key，与 Serper `web_search` 工具复用同一个 `SERPER_API_KEY`。
+  </Tabs.Tab>
+</Tabs>
 
 ## 工具组
 

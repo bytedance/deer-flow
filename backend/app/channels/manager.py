@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,12 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
+INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
+INBOUND_DEDUPE_MAX_ENTRIES = 4096
+# Only server-stable provider message ids: client-generated ids (client_msg_id,
+# client_id) are not guaranteed identical across a provider's own redelivery, so
+# keying dedupe on them would miss exactly the retries we want to absorb.
+INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -518,6 +525,34 @@ def _safe_user_id_for_run(raw_user_id: str) -> str:
         return make_safe_user_id(raw_user_id)
 
 
+def _channel_storage_user_id(msg: InboundMessage) -> str | None:
+    """Resolve the canonical DeerFlow user id for a channel-triggered message.
+
+    Single source of truth for both the agent **run identity**
+    (``_resolve_run_params`` → ``run_context["user_id"]``) and the **file/artifact
+    storage bucket** (``receive_file`` / ``_ingest_inbound_files`` /
+    ``_prepare_artifact_delivery``), so the bucket the agent reads/writes always
+    matches where channel files are staged. Prefer the bound DeerFlow owner,
+    otherwise fall back to the sanitized raw platform user id. Without that
+    fallback, an unbound auth-enabled channel would run under ``safe(msg.user_id)``
+    but stage files under ``get_effective_user_id()`` (the dispatcher task's unset
+    contextvar → ``"default"``), so uploads would land in ``users/default/...``
+    while the agent reads ``users/{safe_platform_user_id}/...``. Returns ``None``
+    only when neither identity is available, leaving the caller to fall back to the
+    contextvar/default user.
+
+    Distinct from :func:`_owner_headers`, which deliberately sends the *raw* owner
+    id (no sanitize, no platform fallback) over HTTP for gateway to re-resolve;
+    this helper is the in-process, sanitized, filesystem-facing identity.
+    """
+    owner_user_id = _effective_owner_user_id(msg)
+    if owner_user_id:
+        return _safe_user_id_for_run(owner_user_id)
+    if msg.user_id:
+        return _safe_user_id_for_run(msg.user_id)
+    return None
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
@@ -544,7 +579,7 @@ def _resolve_slash_skill_command(
         raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str | None = None) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -558,15 +593,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
+    effective_user_id = user_id or get_effective_user_id()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
             logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
+            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=effective_user_id)
             # Verify the resolved path is actually under the outputs directory
             # (guards against path-traversal even after prefix check)
             try:
@@ -598,13 +633,15 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(thread_id, artifacts, user_id=user_id)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -621,7 +658,7 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
-async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
@@ -636,7 +673,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
     def _prepare_uploads_dir() -> tuple[Path, set[str]]:
         # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
         # blocking filesystem IO that must stay off the event loop.
-        target = ensure_uploads_dir(thread_id)
+        target = ensure_uploads_dir(thread_id, user_id=user_id)
         existing = {entry.name for entry in target.iterdir() if entry.is_file()}
         return target, existing
 
@@ -774,6 +811,10 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        # Insertion order == chronological (keys are never re-inserted), so an
+        # OrderedDict lets us evict expired/overflow entries from the front in
+        # O(k) instead of scanning all entries on every inbound message.
+        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -822,11 +863,12 @@ class ChannelManager:
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
-        owner_user_id = _effective_owner_user_id(msg)
-        if owner_user_id:
-            run_context_identity["user_id"] = _safe_user_id_for_run(owner_user_id)
-        elif msg.user_id:
-            run_context_identity["user_id"] = _safe_user_id_for_run(msg.user_id)
+        # Single source of truth for the run identity: the same helper that scopes
+        # inbound files and outbound artifacts, so the bucket the agent reads/writes
+        # always matches where channel files are staged.
+        run_user_id = _channel_storage_user_id(msg)
+        if run_user_id:
+            run_context_identity["user_id"] = run_user_id
         if msg.user_id:
             run_context_identity["channel_user_id"] = msg.user_id
 
@@ -919,15 +961,93 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+            # Dedupe before logging "received" so a provider retrying an event N
+            # times does not log N accepts; duplicates are logged once as ignored.
+            # Note: this manager-level dedupe only guards the agent run / final
+            # answer. Provider adapters may emit ack side-effects (a "Working on
+            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
+            # intentionally not deduped here.
+            if self._is_duplicate_inbound(msg):
+                continue
             logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text=%r",
+                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
                 msg.channel_name,
                 msg.chat_id,
                 msg.msg_type.value,
-                msg.text[:100] if msg.text else "",
+                len(msg.text or ""),
+                len(msg.files),
             )
             task = asyncio.create_task(self._handle_message(msg))
             task.add_done_callback(self._log_task_error)
+
+    @staticmethod
+    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+        metadata = msg.metadata or {}
+        message_id = None
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = metadata.get(key)
+            if value:
+                message_id = str(value)
+                break
+        if message_id is None:
+            raw_message = metadata.get("raw_message")
+            if isinstance(raw_message, Mapping):
+                for key in INBOUND_DEDUPE_METADATA_KEYS:
+                    value = raw_message.get(key)
+                    if value:
+                        message_id = str(value)
+                        break
+        if message_id is None:
+            return None
+
+        # Fail closed: without a workspace/team/guild identifier we cannot tell two
+        # workspaces apart (e.g. Slack channel ids are not globally unique), so
+        # skip dedupe rather than risk collapsing distinct workspaces' messages.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        if not workspace_id:
+            return None
+        return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
+
+    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+        key = self._inbound_dedupe_key(msg)
+        if key is None:
+            return False
+
+        now = time.monotonic()
+        # Entries are in chronological insertion order, so expired ones cluster at
+        # the front: pop from the front until we hit a still-live entry.
+        while self._recent_inbound_events:
+            _, oldest_at = next(iter(self._recent_inbound_events.items()))
+            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
+                self._recent_inbound_events.popitem(last=False)
+            else:
+                break
+        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
+            self._recent_inbound_events.popitem(last=False)
+
+        if key in self._recent_inbound_events:
+            logger.info(
+                "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                key[-1],
+            )
+            return True
+
+        self._recent_inbound_events[key] = now
+        return False
+
+    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+        """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
+
+        Called only on transient/unexpected handling failures: the key was
+        recorded on receipt so retries arriving *while* the message is being
+        handled are still deduped, but if handling fails we must not turn a
+        recoverable error into a TTL-long black hole for the same message_id.
+        """
+        key = self._inbound_dedupe_key(msg)
+        if key is not None:
+            self._recent_inbound_events.pop(key, None)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -979,6 +1099,10 @@ class ChannelManager:
                 msg.channel_name,
                 msg.chat_id,
             )
+            # Transient/unexpected failure: release the dedupe key so a provider
+            # redelivery of the same message can recover instead of being dropped
+            # for the dedupe TTL.
+            self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -1122,6 +1246,7 @@ class ChannelManager:
             return
 
         client = self._get_client()
+        storage_user_id = _channel_storage_user_id(msg)
 
         # Look up existing DeerFlow thread.
         # topic_id may be None (e.g. Telegram private chats) — the store
@@ -1147,12 +1272,12 @@ class ChannelManager:
             service = get_channel_service()
             channel = service.get_channel(msg.channel_name) if service else None
             logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
-            msg = await channel.receive_file(msg, thread_id) if channel else msg
+            msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
 
         original_text = msg.text
-        uploaded = await _ingest_inbound_files(thread_id, msg)
+        uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
         if uploaded:
             msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
         human_message = _human_input_message(msg.text, original_content=original_text)
@@ -1166,10 +1291,11 @@ class ChannelManager:
                 run_config,
                 run_context,
                 human_message,
+                storage_user_id=storage_user_id,
             )
             return
 
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         run_kwargs: dict[str, Any] = {
             "input": {"messages": [human_message]},
             "config": run_config,
@@ -1203,7 +1329,10 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        # Reuse the storage owner cached at the top of _handle_chat so uploads and
+        # artifact delivery always resolve to the same bucket, even if a future
+        # channel.receive_file returns a rewritten InboundMessage.
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -1235,8 +1364,9 @@ class ChannelManager:
         run_config: dict[str, Any],
         run_context: dict[str, Any],
         human_message: dict[str, Any],
+        storage_user_id: str | None = None,
     ) -> None:
-        logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        logger.info("[Manager] invoking runs.stream(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
 
         last_values: dict[str, Any] | list | None = None
         streamed_buffers: dict[str, str] = {}
@@ -1307,7 +1437,10 @@ class ChannelManager:
             response_text = _extract_response_text(result)
             pending_clarification = _has_current_turn_clarification(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            # Reuse the storage owner resolved by _handle_chat so artifact delivery
+            # matches the upload bucket and we avoid re-running _safe_user_id_for_run
+            # (and its possible filesystem touch) on the streaming-error path.
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
             if not response_text:
                 if attachments:
@@ -1388,9 +1521,9 @@ class ChannelManager:
             thread_id = await self._lookup_thread_id(msg)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif reply is None and command == "models":
-            reply = await self._fetch_gateway("/api/models", "models")
+            reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
+            reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
         elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
@@ -1433,16 +1566,17 @@ class ChannelManager:
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _fetch_gateway(self, path: str, kind: str) -> str:
+    async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""
         import httpx
 
         try:
+            headers = _owner_headers(msg) if msg is not None else None
             async with httpx.AsyncClient() as http:
                 resp = await http.get(
                     f"{self._gateway_url}{path}",
                     timeout=10,
-                    headers=create_internal_auth_headers(),
+                    headers=headers or create_internal_auth_headers(),
                 )
                 resp.raise_for_status()
                 data = resp.json()

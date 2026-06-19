@@ -89,7 +89,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
-    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -107,7 +107,7 @@ class SubagentResult:
         error: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
-        token_usage_records: list[dict[str, int | str]] | None = None,
+        token_usage_records: list[dict[str, int | str | None]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 

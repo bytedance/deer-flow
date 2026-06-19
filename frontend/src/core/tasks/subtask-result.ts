@@ -1,3 +1,5 @@
+import type { Message } from "@langchain/langgraph-sdk";
+
 import type { Subtask } from "./types";
 
 export type SubtaskStatus = Subtask["status"];
@@ -122,6 +124,29 @@ export function parseSubtaskResult(
     update.result = fromText.result;
   }
   return update;
+}
+
+export function hasSubtaskToolResult(
+  toolCallId: string | undefined,
+  messages: Message[],
+) {
+  if (!toolCallId) {
+    return false;
+  }
+  return messages.some(
+    (message) => message.type === "tool" && message.tool_call_id === toolCallId,
+  );
+}
+
+export function derivePendingSubtaskStatus(
+  toolCallId: string | undefined,
+  messages: Message[],
+  isCurrentTurnLoading: boolean,
+): SubtaskStatus {
+  if (isCurrentTurnLoading || hasSubtaskToolResult(toolCallId, messages)) {
+    return "in_progress";
+  }
+  return "failed";
 }
 
 function parseFromText(trimmed: string): SubtaskResultUpdate {

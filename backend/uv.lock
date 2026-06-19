@@ -756,7 +756,7 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "0.1.0"
+version = "2.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -828,7 +828,7 @@ dev = [
 
 [[package]]
 name = "deerflow-harness"
-version = "0.1.0"
+version = "2.1.0"
 source = { editable = "packages/harness" }
 dependencies = [
     { name = "agent-client-protocol" },

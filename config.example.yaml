@@ -522,13 +522,13 @@ tools:
 
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
   # Serper provides real-time Google Search results. Sign up at https://serper.dev
-  # Note: set SERPER_API_KEY in your environment before starting the app, or
-  # uncomment and fill in api_key below (the $VAR syntax is resolved at startup).
+  # Note: set SERPER_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
   # - name: web_search
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
-  #   max_results: 5
-  #   # api_key: $SERPER_API_KEY  # Optional if SERPER_API_KEY env var is set
+  #   max_results: 5   # capped at 10 by the Serper provider
+  #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
@@ -636,6 +636,16 @@ tools:
   #   image_search_time_range: 10
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
+
+  # Image search tool (uses Serper - Google Images API, requires SERPER_API_KEY)
+  # Serper provides real-time Google Images results. Sign up at https://serper.dev
+  # Note: set SERPER_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: image_search
+  #   group: web
+  #   use: deerflow.community.serper.tools:image_search_tool
+  #   max_results: 5   # capped at 10 by the Serper provider
+  #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # File operations tools
   - name: ls
