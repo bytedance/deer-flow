@@ -1,12 +1,16 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { ChevronUpIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Conversation,
   ConversationContent,
 } from "@/components/ai-elements/conversation";
+import {
+  Reasoning,
+  ReasoningTrigger,
+} from "@/components/ai-elements/reasoning";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -179,10 +183,32 @@ export function MessageList({
   isHistoryLoading?: boolean;
 }) {
   const { t } = useI18n();
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
-  const updateSubtask = useUpdateSubtask();
+  const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
+  const prevIsLoading = useRef(thread.isLoading);
+
+  useEffect(() => {
+    if (thread.isLoading && !prevIsLoading.current) {
+      setTurnStartTime(Date.now());
+    }
+    prevIsLoading.current = thread.isLoading;
+  }, [thread.isLoading]);
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
+  const hasActiveAssistantText = useMemo(() => {
+    let lastHumanIndex = -1;
+    for (let i = groupedMessages.length - 1; i >= 0; i--) {
+      if (groupedMessages[i]?.type === "human") {
+        lastHumanIndex = i;
+        break;
+      }
+    }
+    if (lastHumanIndex === -1) return false;
+    return groupedMessages
+      .slice(lastHumanIndex)
+      .some((g) => g.type === "assistant");
+  }, [groupedMessages]);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
+  const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
@@ -296,9 +322,17 @@ export function MessageList({
                     <MessageListItem
                       key={`${group.id}/${msg.id}`}
                       message={msg}
-                      isLoading={thread.isLoading}
+                      isLoading={
+                        thread.isLoading &&
+                        groupIndex === groupedMessages.length - 1
+                      }
                       threadId={threadId}
                       showCopyButton={group.type !== "assistant"}
+                      turnStartTime={
+                        groupIndex === groupedMessages.length - 1
+                          ? turnStartTime
+                          : null
+                      }
                     />
                   );
                 })}
@@ -479,7 +513,13 @@ export function MessageList({
             </div>
           );
         })}
-        {thread.isLoading && <StreamingIndicator className="my-4" />}
+        {thread.isLoading && !hasActiveAssistantText && (
+          <div className="w-full">
+            <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
+              <ReasoningTrigger hasContent={false} />
+            </Reasoning>
+          </div>
+        )}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>
     </Conversation>
