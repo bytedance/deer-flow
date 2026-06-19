@@ -2,9 +2,11 @@ import errno
 import logging
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import NamedTuple
 
@@ -82,6 +84,37 @@ class LocalSandbox(Sandbox):
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
+
+    # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
+    # sorted views and compiled path-rewrite patterns below are stable for the
+    # sandbox's lifetime. Caching them avoids re-sorting and re-compiling these
+    # regexes on every bash/read_file/write_file call (the agent's hot path).
+
+    @cached_property
+    def _command_pattern(self) -> re.Pattern[str] | None:
+        """Compiled matcher for container paths in shell commands (shell-aware boundaries)."""
+        mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
+        if not mappings:
+            return None
+        # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
+        # preventing /mnt/skills from matching inside /mnt/skills-extra.
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        return re.compile("|".join(f"({p})" for p in patterns))
+
+    @cached_property
+    def _content_pattern(self) -> re.Pattern[str] | None:
+        """Compiled matcher for container paths in plain file content (text boundaries)."""
+        mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
+        if not mappings:
+            return None
+        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in mappings]
+        return re.compile("|".join(f"({p})" for p in patterns))
+
+    @cached_property
+    def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
+        """Compiled matchers for local paths in command output (longest local path first)."""
+        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
+        return [re.compile(re.escape(str(Path(m.local_path).resolve())) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in sorted_mappings]
 
     def _is_read_only_path(self, resolved_path: str) -> bool:
         """Check if a resolved path is under a read-only mount.
@@ -192,22 +225,10 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
-        import re
-
-        # Sort mappings by local path length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
-
-        if not sorted_mappings:
-            return output
-
-        # Create pattern that matches absolute paths
-        # Match paths like /Users/... or other absolute paths
+        # Patterns are compiled once per sandbox (longest local path first for
+        # correct prefix matching) and reused across calls.
         result = output
-        for mapping in sorted_mappings:
-            # Escape the local path for use in regex
-            escaped_local = re.escape(str(Path(mapping.local_path).resolve()))
-            # Match the local path followed by optional path components with either separator
-            pattern = re.compile(escaped_local + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        for pattern in self._reverse_output_patterns:
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
@@ -227,21 +248,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Command with container paths resolved to local paths
         """
-        import re
-
-        # Sort mappings by length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
-
-        # Build regex pattern to match all container paths
-        # Match container path followed by optional path components
-        if not sorted_mappings:
+        pattern = self._command_pattern
+        if pattern is None:
             return command
-
-        # Create pattern that matches any of the container paths.
-        # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
-        # preventing /mnt/skills from matching inside /mnt/skills-extra.
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for m in sorted_mappings]
-        pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
@@ -264,14 +273,9 @@ class LocalSandbox(Sandbox):
         Returns:
             Content with container paths resolved to local paths (forward slashes).
         """
-        import re
-
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.container_path), reverse=True)
-        if not sorted_mappings:
+        pattern = self._content_pattern
+        if pattern is None:
             return content
-
-        patterns = [re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>()]*)?" for m in sorted_mappings]
-        pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
