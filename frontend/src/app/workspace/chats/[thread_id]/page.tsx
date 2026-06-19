@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   ChatBox,
@@ -170,16 +171,17 @@ export default function ChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
               isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
-            <div className="flex w-full items-center text-sm font-medium">
+            <SidebarTrigger className="md:hidden" />
+            <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               <TokenUsageIndicator
                 threadId={isNewThread ? undefined : threadId}
                 backendUsage={backendTokenUsage}
@@ -210,14 +212,15 @@ export default function ChatPage() {
             </div>
             <div
               className={cn(
-                "right-0 bottom-0 left-0 z-30 flex justify-center px-4",
+                "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
                 isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
               )}
             >
               <div
                 className={cn(
                   "relative w-full",
-                  isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode &&
+                    "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
                   isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
@@ -248,7 +251,7 @@ export default function ChatPage() {
                   <InputBox
                     className={cn(
                       "bg-background/5 w-full",
-                      isWelcomeMode && "-translate-y-4",
+                      isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
                     )}
                     isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
@@ -280,7 +283,7 @@ export default function ChatPage() {
                     aria-hidden="true"
                     className={cn(
                       "bg-background/5 h-32 w-full rounded-2xl",
-                      isWelcomeMode && "-translate-y-4",
+                      isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
                     )}
                   />
                 )}
