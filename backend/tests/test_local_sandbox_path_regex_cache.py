@@ -65,3 +65,35 @@ def test_reverse_resolve_output_maps_local_back_to_container(tmp_path):
     ws_local = str((tmp_path / "workspace").resolve())
     out = sb._reverse_resolve_paths_in_output(f"wrote {ws_local}/foo.txt ok")
     assert out == "wrote /mnt/user-data/workspace/foo.txt ok"
+
+
+def test_resolved_paths_and_sorted_views_are_cached(tmp_path):
+    sb = _make_sandbox(tmp_path)
+    # Resolved-local map and sorted views are computed once and reused.
+    assert sb._resolved_local_paths is sb._resolved_local_paths
+    assert sb._mappings_by_container_specificity is sb._mappings_by_container_specificity
+    assert sb._mappings_by_local_specificity is sb._mappings_by_local_specificity
+    # Map covers every mapping with its filesystem-resolved local root.
+    assert set(sb._resolved_local_paths.values()) == {
+        str((tmp_path / "workspace").resolve()),
+        str((tmp_path / "skills").resolve()),
+    }
+    # Most-specific (longest) container path is ordered first.
+    assert sb._mappings_by_container_specificity[0].container_path == "/mnt/user-data/workspace"
+
+
+def test_forward_resolution_behavior_unchanged(tmp_path):
+    sb = _make_sandbox(tmp_path)
+    ws_local = str((tmp_path / "workspace").resolve())
+    # Container path resolves to the mapped local path.
+    assert sb._resolve_path("/mnt/user-data/workspace/sub/foo.txt") == f"{ws_local}/sub/foo.txt"
+    # An unmapped path is returned unchanged.
+    assert sb._resolve_path("/etc/hosts") == "/etc/hosts"
+
+
+def test_read_only_mount_detected(tmp_path):
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+    ws_local = str((tmp_path / "workspace").resolve())
+    assert sb._is_read_only_path(f"{skills_local}/a.md") is True
+    assert sb._is_read_only_path(f"{ws_local}/a.txt") is False

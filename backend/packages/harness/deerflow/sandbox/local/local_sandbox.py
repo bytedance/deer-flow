@@ -113,8 +113,23 @@ class LocalSandbox(Sandbox):
     @cached_property
     def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
         """Compiled matchers for local paths in command output (longest local path first)."""
-        sorted_mappings = sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
-        return [re.compile(re.escape(str(Path(m.local_path).resolve())) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in sorted_mappings]
+        return [re.compile(re.escape(self._resolved_local_paths[m]) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in self._mappings_by_local_specificity]
+
+    @cached_property
+    def _resolved_local_paths(self) -> dict[PathMapping, str]:
+        """Filesystem-resolved local root per mapping. ``Path.resolve()`` hits the
+        disk, and the mounted directories don't move, so resolve once and reuse."""
+        return {m: str(Path(m.local_path).resolve()) for m in self.path_mappings}
+
+    @cached_property
+    def _mappings_by_container_specificity(self) -> list[PathMapping]:
+        """Mappings ordered most-specific-container-first (for forward resolution)."""
+        return sorted(self.path_mappings, key=lambda m: len(m.container_path.rstrip("/") or "/"), reverse=True)
+
+    @cached_property
+    def _mappings_by_local_specificity(self) -> list[PathMapping]:
+        """Mappings ordered longest-local-path-first (for reverse resolution)."""
+        return sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True)
 
     def _is_read_only_path(self, resolved_path: str) -> bool:
         """Check if a resolved path is under a read-only mount.
@@ -129,7 +144,7 @@ class LocalSandbox(Sandbox):
         best_prefix_len = -1
 
         for mapping in self.path_mappings:
-            local_resolved = str(Path(mapping.local_path).resolve())
+            local_resolved = self._resolved_local_paths[mapping]
             if resolved == local_resolved or resolved.startswith(local_resolved + os.sep):
                 prefix_len = len(local_resolved)
                 if prefix_len > best_prefix_len:
@@ -144,7 +159,7 @@ class LocalSandbox(Sandbox):
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:
         path_str = str(path)
 
-        for mapping in sorted(self.path_mappings, key=lambda m: len(m.container_path.rstrip("/") or "/"), reverse=True):
+        for mapping in self._mappings_by_container_specificity:
             container_path = mapping.container_path.rstrip("/") or "/"
             if container_path == "/":
                 if path_str.startswith("/"):
@@ -174,7 +189,7 @@ class LocalSandbox(Sandbox):
             return ResolvedPath(path_str, None)
 
         mapping, relative = mapping_match
-        local_root = Path(mapping.local_path).resolve()
+        local_root = Path(self._resolved_local_paths[mapping])
         resolved_path = (local_root / relative).resolve() if relative else local_root
 
         try:
@@ -204,8 +219,8 @@ class LocalSandbox(Sandbox):
         path_str = str(Path(normalized_path).resolve())
 
         # Try each mapping (longest local path first for more specific matches)
-        for mapping in sorted(self.path_mappings, key=lambda m: len(m.local_path), reverse=True):
-            local_path_resolved = str(Path(mapping.local_path).resolve())
+        for mapping in self._mappings_by_local_specificity:
+            local_path_resolved = self._resolved_local_paths[mapping]
             if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
                 # Replace the local path prefix with container path
                 relative = path_str[len(local_path_resolved) :].lstrip("/")
