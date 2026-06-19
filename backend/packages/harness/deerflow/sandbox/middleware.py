@@ -11,7 +11,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import SandboxState, ThreadDataState
+from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.sandbox import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class SandboxMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
-    sandbox: NotRequired[SandboxState | None]
+    sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
 
 

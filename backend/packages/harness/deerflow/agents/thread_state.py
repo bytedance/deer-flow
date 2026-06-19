@@ -39,6 +39,9 @@ def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> Sa
     raise ValueError(f"Conflicting sandbox state updates: {existing_id!r} != {new_id!r}")
 
 
+SandboxStateField = Annotated[NotRequired[SandboxState | None], merge_sandbox]
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -106,7 +109,7 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
 
 
 class ThreadState(AgentState):
-    sandbox: Annotated[NotRequired[SandboxState | None], merge_sandbox]
+    sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
