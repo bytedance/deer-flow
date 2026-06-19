@@ -79,23 +79,71 @@ class TestErrorObservationRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_retry_passes_fresh_session_id(self, sandbox):
-        """The retry call should include a new session id kwarg."""
-        calls = []
+    def test_retry_creates_fresh_session_before_targeting_it(self, sandbox):
+        """Recovery must explicitly create a session, then exec against that id.
+
+        The sandbox image only auto-creates a session when exec_command is
+        called with *no* id; an exec carrying an unknown id returns HTTP 404
+        "Session not found". So the retry must obtain a real, distinct session
+        via create_session() first and target that id, rather than fabricating
+        an id and handing it straight to exec_command (the regression that
+        404'd every recovery and looped runs to the recursion limit).
+        """
+        exec_calls = []
+        created_ids = []
+        cleaned_ids = []
 
         def mock_exec(command, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
+            exec_calls.append(kwargs)
+            if len(exec_calls) == 1:
                 return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
-        sandbox._client.shell.exec_command = mock_exec
+        def mock_create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
 
-        sandbox.execute_command("test")
-        assert len(calls) == 2
-        assert "id" not in calls[0]
-        assert "id" in calls[1]
-        assert len(calls[1]["id"]) == 36  # UUID format
+        def mock_cleanup_session(session_id, **kwargs):
+            cleaned_ids.append(session_id)
+
+        sandbox._client.shell.exec_command = mock_exec
+        sandbox._client.shell.create_session = mock_create_session
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
+
+        result = sandbox.execute_command("test")
+
+        assert result == "ok"
+        assert len(exec_calls) == 2
+        # First attempt runs on the default session (no id).
+        assert "id" not in exec_calls[0]
+        # A fresh session was explicitly created...
+        assert len(created_ids) == 1
+        assert len(created_ids[0]) == 36  # UUID format
+        # ...and the retry targets exactly that created session, never an
+        # uncreated/fabricated id (which would 404).
+        assert exec_calls[1].get("id") == created_ids[0]
+        # ...and that one-shot recovery session is released afterwards so a
+        # sandbox that keeps hitting corruption doesn't accumulate sessions.
+        assert cleaned_ids == [created_ids[0]]
+
+    def test_cleanup_failure_does_not_mask_successful_retry(self, sandbox):
+        """A failure releasing the recovery session must not lose the retry output."""
+
+        def mock_exec(command, **kwargs):
+            if "id" not in kwargs:
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
+            return SimpleNamespace(data=SimpleNamespace(output="recovered"))
+
+        def mock_cleanup_session(session_id, **kwargs):
+            raise RuntimeError("cleanup boom")
+
+        sandbox._client.shell.exec_command = mock_exec
+        sandbox._client.shell.create_session = lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
+
+        # The retry succeeded; the swallowed cleanup error must not turn this
+        # into an "Error: ..." result.
+        assert sandbox.execute_command("test") == "recovered"
 
     def test_no_retry_on_clean_output(self, sandbox):
         """Normal output should not trigger a retry."""

@@ -29,4 +29,45 @@ test.describe("Sidebar navigation", () => {
     await page.waitForURL("**/workspace/agents");
     await expect(page).toHaveURL(/\/workspace\/agents/);
   });
+
+  test("mobile welcome layout stays within viewport and opens sidebar", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    mockLangGraphAPI(page);
+
+    await page.goto("/workspace/chats/new");
+
+    const viewportWidth = page.viewportSize()?.width ?? 390;
+    const expectInsideViewport = async (
+      locator: ReturnType<typeof page.locator>,
+    ) => {
+      await expect(locator).toBeVisible({ timeout: 15_000 });
+      const box = await locator.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(-1);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth + 1);
+    };
+
+    await expectInsideViewport(page.getByText(/Welcome to|欢迎使用/).first());
+    await expectInsideViewport(page.getByRole("textbox").first());
+    await expectInsideViewport(page.locator("[data-slot='suggestions-list']"));
+
+    const mobileSidebarTrigger = page
+      .locator("[data-sidebar='trigger']:visible")
+      .first();
+    await expect(mobileSidebarTrigger).toBeVisible();
+    await mobileSidebarTrigger.click();
+
+    const mobileSidebar = page.locator(
+      "[data-mobile='true'][data-sidebar='sidebar']",
+    );
+    await expect(mobileSidebar).toBeVisible();
+    await expect(
+      mobileSidebar.locator("a[href='/workspace/chats']"),
+    ).toBeVisible();
+    await expect(
+      mobileSidebar.locator("a[href='/workspace/agents']"),
+    ).toBeVisible();
+  });
 });

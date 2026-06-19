@@ -11,6 +11,7 @@ from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
 from deerflow.config import get_app_config
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.config import resolve_subagent_model_name
@@ -253,6 +254,7 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    user_id = None
     metadata: dict = {}
 
     if runtime is not None:
@@ -268,6 +270,9 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
+
+    # Get user_id for tracing (uses standard resolution order)
+    user_id = resolve_runtime_user_id(runtime)
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -306,6 +311,7 @@ async def task_tool(
         "thread_data": thread_data,
         "thread_id": thread_id,
         "trace_id": trace_id,
+        "user_id": user_id,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
