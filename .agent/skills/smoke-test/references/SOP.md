@@ -291,9 +291,9 @@ This document describes the detailed operating steps for each phase of the DeerF
 #### 4.2.2 Start Docker Services
 
 **Steps**:
-1. Run `make docker-start`
+1. Run `make up`
 
-**Description**: This command builds and starts all required Docker containers.
+**Description**: This command builds and starts all required Docker containers in production.
 
 ---
 
