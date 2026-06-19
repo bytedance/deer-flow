@@ -43,11 +43,12 @@ export function textOfMessage(message: Message) {
   if (typeof message.content === "string") {
     return message.content;
   } else if (Array.isArray(message.content)) {
-    for (const part of message.content) {
-      if (part.type === "text") {
-        return part.text;
-      }
-    }
+    const text = message.content
+      .map((part) =>
+        typeof part === "string" ? part : part.type === "text" ? part.text : "",
+      )
+      .join("");
+    return text.length > 0 ? text : null;
   }
   return null;
 }
