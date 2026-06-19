@@ -82,12 +82,12 @@ smoke-test/
 1. **Check dependencies** - Run `make check`
 2. **Install dependencies** - Run `make install`
 3. **(Optional) Pre-pull the sandbox image** - If needed, run `make setup-sandbox`
-4. **Start services** - Run `make dev-daemon` (background mode, recommended) or `make dev` (foreground mode)
+4. **Start services** - Run `make start` (production mode)
 5. **Wait for startup** - Give all services enough time to start completely (90-120 seconds recommended)
 
 **Docker mode deployment** (if Docker is selected):
 1. **Initialize Docker environment** - Run `make docker-init`
-2. **Start Docker services** - Run `make docker-start`
+2. **Start Docker services** - Run `make up` (production mode)
 3. **Wait for startup** - Give all containers enough time to start completely (60 seconds recommended)
 
 ### Phase 5: Service Health Check
@@ -166,7 +166,7 @@ Smoke test pass criteria (Docker mode):
 - [x] Docker environment check passes
 - [x] Configuration files are set up correctly
 - [x] `make docker-init` completes successfully
-- [x] `make docker-start` completes successfully
+- [x] `make up` completes successfully
 - [x] All Docker containers run normally
 - [x] Frontend page is accessible
 - [x] Frontend route smoke check passes (`/workspace` key routes)
