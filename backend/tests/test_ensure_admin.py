@@ -119,6 +119,29 @@ def test_admin_exists_triggers_migration():
     store.asearch.assert_called_once()
 
 
+def test_admin_exists_triggers_checkpoint_thread_migration():
+    """Admin exists and admin row found → checkpoint-only threads are recovered."""
+    from uuid import uuid4
+
+    admin_row = MagicMock()
+    admin_row.id = uuid4()
+
+    provider = _make_provider(admin_count=1)
+    sf = _make_session_factory(admin_row=admin_row)
+    store = AsyncMock()
+    store.asearch = AsyncMock(return_value=[])
+    app = _make_app_stub(store=store)
+
+    with patch("app.gateway.deps.get_local_provider", return_value=provider):
+        with patch("deerflow.persistence.engine.get_session_factory", return_value=sf):
+            with patch("app.gateway.checkpoint_maintenance.migrate_app_checkpoint_threads_to_thread_meta", AsyncMock(return_value=2)) as migrate:
+                from app.gateway.app import _ensure_admin_user
+
+                asyncio.run(_ensure_admin_user(app))
+
+    migrate.assert_awaited_once_with(app, str(admin_row.id))
+
+
 def test_admin_exists_no_admin_row_skips_migration():
     """Admin count > 0 but DB row missing (edge case) → skip migration gracefully."""
     provider = _make_provider(admin_count=2)
