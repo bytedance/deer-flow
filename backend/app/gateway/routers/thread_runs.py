@@ -352,19 +352,24 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
-    # Attach feedback to the last AI message of each run
-    feedback_repo = get_feedback_repo(request)
-    user_id = await get_current_user(request)
-    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
-
-    # Find the last ai_message per run_id
+    # Find the last AI message per run_id. RunJournal persists these with
+    # event_type="llm.ai.response" (see runtime/journal.py), not "ai_message".
     last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
     for i, msg in enumerate(messages):
-        if msg.get("event_type") == "ai_message":
+        if msg.get("event_type") == "llm.ai.response":
             last_ai_per_run[msg["run_id"]] = i
 
-    # Attach feedback field
+    # Attach feedback to the last AI message of each run. Only run the grouped
+    # feedback query when there is at least one AI message to attach it to,
+    # avoiding a wasted DB query on threads/runs with no AI messages yet.
     last_ai_indices = set(last_ai_per_run.values())
+    if last_ai_indices:
+        feedback_repo = get_feedback_repo(request)
+        user_id = await get_current_user(request)
+        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+    else:
+        feedback_map = {}
+
     for i, msg in enumerate(messages):
         if i in last_ai_indices:
             run_id = msg["run_id"]
