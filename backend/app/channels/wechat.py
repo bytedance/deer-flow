@@ -10,6 +10,7 @@ import json
 import logging
 import mimetypes
 import secrets
+import tempfile
 import time
 from collections.abc import Mapping
 from enum import IntEnum
@@ -22,7 +23,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -254,7 +255,6 @@ class WechatChannel(Channel):
         self._state_dir = self._resolve_state_dir(config.get("state_dir"))
         self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
         self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
-        self._connection_repo = config.get("connection_repo")
         self._load_state()
 
     async def start(self) -> None:
@@ -342,27 +342,15 @@ class WechatChannel(Channel):
             "base_info": self._base_info(),
         }
 
-        last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                data = await self._request_json("/ilink/bot/sendmessage", payload)
-                self._ensure_success(data, "sendmessage")
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[WeChat] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
 
-        logger.error("[WeChat] send failed after %d attempts: %s", max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.is_image:
@@ -603,24 +591,16 @@ class WechatChannel(Channel):
             return
 
         chat_id = str(raw_message.get("from_user_id") or raw_message.get("ilink_user_id") or "").strip()
-        if not chat_id or not self._check_user(chat_id):
+        if not chat_id:
             return
 
         text = self._extract_text(raw_message)
-        files = await self._extract_inbound_files(raw_message)
-        if not text and not files:
-            return
-
         context_token = str(raw_message.get("context_token") or "").strip()
-        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
-        if context_token:
-            self._context_tokens_by_chat[chat_id] = context_token
-            if thread_ts:
-                self._context_tokens_by_thread[thread_ts] = context_token
-
-        connect_code = extract_connect_code(text)
-        if connect_code and self._connection_repo is not None:
+        # Handle the connect code before applying allowed_users so a browser-initiated
+        # bind can bootstrap an external identity that is not yet whitelisted.
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
             handled = await self._bind_connection_from_connect_code(
                 chat_id=chat_id,
                 context_token=context_token,
@@ -628,6 +608,20 @@ class WechatChannel(Channel):
             )
             if handled:
                 return
+
+        if not self._check_user(chat_id):
+            return
+
+        files = await self._extract_inbound_files(raw_message)
+        if not text and not files:
+            return
+
+        thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+
+        if context_token:
+            self._context_tokens_by_chat[chat_id] = context_token
+            if thread_ts:
+                self._context_tokens_by_thread[thread_ts] = context_token
 
         inbound = self._make_inbound(
             chat_id=chat_id,
@@ -639,6 +633,7 @@ class WechatChannel(Channel):
             metadata={
                 "context_token": context_token,
                 "ilink_user_id": chat_id,
+                "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
                 "ref_msg": self._extract_ref_message(raw_message),
                 "raw_message": raw_message,
             },
@@ -1382,9 +1377,29 @@ class WechatChannel(Channel):
         if self._auth_path:
             try:
                 self._auth_path.parent.mkdir(parents=True, exist_ok=True)
-                self._auth_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Write through a 0o600 temp file and atomically rename so the
+                # iLink bot_token is never briefly readable at umask defaults
+                # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
+                # uses mkstemp, which creates the file at 0o600 from the start.
+                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                try:
+                    json.dump(data, fd, ensure_ascii=False, indent=2)
+                    fd.close()
+                    Path(fd.name).replace(self._auth_path)
+                except BaseException:
+                    fd.close()
+                    Path(fd.name).unlink(missing_ok=True)
+                    raise
             except OSError:
                 logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+            else:
+                # Hardening only; the destination already inherits 0o600 from the
+                # temp file. A chmod failure on filesystems without POSIX perms
+                # must not masquerade as a persist failure.
+                try:
+                    self._auth_path.chmod(0o600)
+                except OSError:
+                    logger.debug("[WeChat] unable to chmod auth state at %s", self._auth_path, exc_info=True)
         return data
 
     @staticmethod

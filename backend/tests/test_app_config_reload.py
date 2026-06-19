@@ -216,6 +216,45 @@ def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
         reset_app_config()
 
 
+def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config(config_path, model_name="model-a", supports_thinking=False)
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    try:
+        initial = get_app_config()
+        initial_mtime = app_config_module._app_config_mtime
+        initial_signature = app_config_module._app_config_signature
+        assert initial.models[0].name == "model-a"
+        assert initial_signature is not None
+
+        _write_config(config_path, model_name="model-b", supports_thinking=False)
+
+        real_get_config_signature = app_config_module._get_config_signature
+
+        def stale_metadata_signature(path: Path):
+            current_signature = real_get_config_signature(path)
+            assert current_signature is not None
+            return (initial_signature[0], initial_signature[1], current_signature[2])
+
+        monkeypatch.setattr(app_config_module, "_get_config_mtime", lambda _path: initial_mtime)
+        monkeypatch.setattr(app_config_module, "_get_config_signature", stale_metadata_signature)
+
+        reloaded = get_app_config()
+        assert reloaded.models[0].name == "model-b"
+        assert reloaded is not initial
+        assert app_config_module._app_config_signature is not None
+        assert app_config_module._app_config_signature[:2] == initial_signature[:2]
+        assert app_config_module._app_config_signature[2] != initial_signature[2]
+    finally:
+        _reset_config_singletons()
+
+
 def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
     config_a = tmp_path / "config-a.yaml"
     config_b = tmp_path / "config-b.yaml"

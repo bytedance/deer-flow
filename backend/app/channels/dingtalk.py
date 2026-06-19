@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -137,7 +137,6 @@ class DingTalkChannel(Channel):
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -247,32 +246,19 @@ class DingTalkChannel(Channel):
                 self._card_repliers.pop(out_track_id, None)
             return
 
-        # Non-card mode: send sampleMarkdown with retry
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                if conversation_type == _CONVERSATION_TYPE_GROUP:
-                    await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
-                else:
-                    await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[DingTalk] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_markdown() -> None:
+            if conversation_type == _CONVERSATION_TYPE_GROUP:
+                await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
+            else:
+                await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
 
-        logger.error("[DingTalk] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("DingTalk send failed without an exception from any attempt")
-        raise last_exc
+        # Non-card mode: send sampleMarkdown with retry
+        await self._send_with_retry(
+            send_markdown,
+            max_retries=_max_retries,
+            log_prefix="[DingTalk]",
+        )
+        return
 
     async def _send_markdown_fallback(
         self,
@@ -379,26 +365,13 @@ class DingTalkChannel(Channel):
             msg_id = message.message_id or ""
             sender_nick = message.sender_nick or ""
 
-            if self._allowed_users and sender_staff_id not in self._allowed_users:
-                logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
-                return
-
             text = self._extract_text(message)
             if not text:
                 logger.info("[DingTalk] empty text, ignoring message")
                 return
 
-            logger.info(
-                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
-                conversation_type,
-                msg_id,
-                sender_staff_id,
-                sender_nick,
-                text[:100],
-            )
-
-            connect_code = extract_connect_code(text)
-            if connect_code and self._connection_repo is not None:
+            connect_code = self._pending_connect_code(text)
+            if connect_code:
                 if self._main_loop and self._main_loop.is_running():
                     fut = asyncio.run_coroutine_threadsafe(
                         self._bind_connection_from_connect_code(
@@ -414,6 +387,22 @@ class DingTalkChannel(Channel):
                 else:
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
                 return
+
+            if self._allowed_users and sender_staff_id not in self._allowed_users:
+                logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
+                return
+
+            # Log only metadata (length, not content) so message text never reaches
+            # INFO logs, and only after the allowed_users gate so blocked senders are
+            # not logged at all.
+            logger.info(
+                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text_len=%d",
+                conversation_type,
+                msg_id,
+                sender_staff_id,
+                sender_nick,
+                len(text or ""),
+            )
 
             if _is_dingtalk_command(text):
                 msg_type = InboundMessageType.COMMAND
@@ -801,15 +790,6 @@ class DingTalkChannel(Channel):
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
-
-    @staticmethod
-    def _log_future_error(fut: Any, name: str, msg_id: str) -> None:
-        try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[DingTalk] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except (asyncio.CancelledError, asyncio.InvalidStateError):
-            pass
 
 
 class _DingTalkMessageHandler:

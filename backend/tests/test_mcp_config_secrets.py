@@ -12,15 +12,16 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from app.gateway.deps import require_admin_user
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers.mcp import (
+    _ADMIN_REQUIRED_DETAIL,
     _MCP_STDIO_COMMAND_ALLOWLIST_ENV,
     McpConfigUpdateRequest,
     McpOAuthConfigResponse,
     McpServerConfigResponse,
     _mask_server_config,
     _merge_preserving_secrets,
-    _require_admin_user,
     _validate_mcp_update_request,
     reset_mcp_tools_cache_endpoint,
     update_mcp_configuration,
@@ -334,10 +335,10 @@ def _request_with_role(system_role: str):
 @pytest.mark.asyncio
 async def test_mcp_config_requires_admin_user():
     """MCP config is system-level executable configuration, not a normal user setting."""
-    await _require_admin_user(_request_with_role("admin"))
+    await require_admin_user(_request_with_role("admin"), detail=_ADMIN_REQUIRED_DETAIL)
 
     with pytest.raises(HTTPException) as exc_info:
-        await _require_admin_user(_request_with_role("user"))
+        await require_admin_user(_request_with_role("user"), detail=_ADMIN_REQUIRED_DETAIL)
 
     assert exc_info.value.status_code == 403
 
