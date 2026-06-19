@@ -310,4 +310,47 @@ test.describe("Chat workspace", () => {
     });
     await expect(promptForm.getByText("report.docx")).toBeHidden();
   });
+
+  test("does not fetch follow-up suggestions when disabled in config", async ({
+    page,
+  }) => {
+    await page.route("**/api/suggestions/config", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
+      });
+    });
+
+    let suggestionsFetched = false;
+    await page.route("**/api/threads/*/suggestions", (route) => {
+      suggestionsFetched = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ suggestions: [] }),
+      });
+    });
+
+    let streamCalled = false;
+    await page.route("**/runs/stream", (route) => {
+      streamCalled = true;
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("Hello");
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.waitForTimeout(1000);
+    expect(suggestionsFetched).toBe(false);
+  });
 });
