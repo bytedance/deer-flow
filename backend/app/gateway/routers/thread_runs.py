@@ -79,7 +79,10 @@ class RunResponse(BaseModel):
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
     tokens: int = 0
-    runs: int = 0
+    runs: int = Field(
+        default=0,
+        description="Number of runs in which this model appeared; counts are non-exclusive for runs that used multiple models.",
+    )
 
 
 class ThreadTokenUsageCallerBreakdown(BaseModel):
