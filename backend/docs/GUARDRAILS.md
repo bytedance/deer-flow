@@ -260,16 +260,21 @@ Runtime attribution fields are optional. Providers that need richer policy conte
 | Field | Example use |
 |---|---|
 | `user_id` | Attach the authenticated DeerFlow user to a provider-side policy or audit record |
-| `user_role` | Apply simple role-based policy, such as allowing an admin-only tool |
+| `user_role` | Apply simple role-based policy, such as allowing an admin-only tool. Sourced from the authenticated user's `system_role` (renamed for the guardrail-facing surface, not a separate field) |
 | `oauth_provider` | Link a decision to an external identity provider, when present |
 | `oauth_id` | Link a decision to the external provider's subject/user id, when present |
 | `thread_id` | Link a decision back to the conversation thread |
 | `run_id` | Link a decision back to one execution run |
 | `tool_call_id` | Identify the exact tool call that was allowed or denied |
 
+These fields are populated by the Gateway from server-side auth state (`inject_authenticated_user_context` writes `user_id`/`user_role`/`oauth_provider`/`oauth_id` from `request.state.user`; the run worker always sets `thread_id`/`run_id`), and propagated into subagent runs so delegated tool calls are evaluated with the same identity as the lead agent. Client-supplied values cannot override them — the server-side assignment wins.
+
+**Known limitation — IM / internal-auth runs.** `inject_authenticated_user_context` early-returns for the internal system role that IM channel workers (Slack, Discord, Telegram, Feishu, DingTalk) and other internal-auth callers are stamped with, so on those runs `user_role`/`oauth_provider`/`oauth_id` stay `None`. `user_id` still resolves (via the channel-bound owner), but role-based policy cannot be applied to channel-delivered work in this release. Web-authenticated runs are unaffected. Threaded alongside the owner `system_role` in a follow-up if channel-originated role policy is needed.
+
 For example, if your deployment has user-scoped policy requirements, you can opt into a context-aware provider that passes the runtime fields into an external policy file. This keeps business policy out of Python code and `config.yaml`; the provider only normalizes context, evaluates a configured policy, and maps the result back to `GuardrailDecision`.
 
 ```python
+import asyncio
 import json
 from pathlib import Path
 
@@ -289,6 +294,22 @@ class ContextAwareGuardrailProvider:
         self.policy = self._load_policy(self.policy_path)
 
     def evaluate(self, request):
+        decision = self._decide(request)
+        self._write_audit(request, decision)
+        return decision
+
+    async def aevaluate(self, request):
+        # ``_decide`` is in-memory policy work; the audit write is blocking
+        # file I/O, so offload it off the event loop with ``asyncio.to_thread``
+        # (DeerFlow enforces a blocking-IO gate in CI). If your policy
+        # evaluation itself does blocking I/O — external policy service, file
+        # read per call — move that behind ``asyncio.to_thread`` too, or
+        # implement a native async evaluator and await it here.
+        decision = self._decide(request)
+        await asyncio.to_thread(self._write_audit, request, decision)
+        return decision
+
+    def _decide(self, request):
         # 1. Normalize DeerFlow request data into policy context.
         context = {
             "tool_name": request.tool_name,
@@ -313,7 +334,7 @@ class ContextAwareGuardrailProvider:
         result = self._evaluate_policy(self.policy, context)
 
         # 3. Convert the policy result back to DeerFlow's decision object.
-        decision = GuardrailDecision(
+        return GuardrailDecision(
             allow=result["allow"],
             reasons=[
                 GuardrailReason(
@@ -332,11 +353,6 @@ class ContextAwareGuardrailProvider:
                 "tool_call_id": request.tool_call_id,
             },
         )
-        self._write_audit(request, decision)
-        return decision
-
-    async def aevaluate(self, request):
-        return self.evaluate(request)
 
     def _write_audit(self, request, decision):
         event = {

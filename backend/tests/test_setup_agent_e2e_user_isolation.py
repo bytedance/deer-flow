@@ -190,6 +190,40 @@ class TestConfigAssembly:
         assert runtime_ctx["oauth_provider"] is None
         assert runtime_ctx["oauth_id"] is None
 
+    def test_spoofed_context_in_body_config_is_overridden_by_inject(self):
+        """The real spoofing vector is ``body.config.context``: ``build_run_config``
+        copies it wholesale (no whitelist, unlike ``body.context``), so only
+        ``inject_authenticated_user_context``'s unconditional assignment can
+        defeat a client that spoofs ``user_id``/``user_role``/``oauth_*`` there.
+
+        The companion test above spoofs via ``body.context`` and passes because
+        ``merge_run_context_overrides``'s whitelist rejects those keys before
+        ``inject`` ever runs — i.e. for the wrong reason. This test spoofs via
+        ``body.config.context`` so the spoofed values actually reach
+        ``config['context']`` and ``inject``'s overwrite is the only thing
+        standing between them and ``runtime_ctx``.
+        """
+        config = _assemble_config(
+            body_config={
+                "context": {
+                    "user_id": "spoofed-id",
+                    "user_role": "admin",
+                    "oauth_provider": "spoofed-provider",
+                    "oauth_id": "spoofed-subject",
+                },
+            },
+            body_context=None,
+            request_user_id="11111111-2222-3333-4444-555555555555",
+            request_user_role="user",
+            request_oauth_provider="keycloak",
+            request_oauth_id="real-subject",
+        )
+        runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
+        assert runtime_ctx["user_id"] == "11111111-2222-3333-4444-555555555555"
+        assert runtime_ctx["user_role"] == "user"
+        assert runtime_ctx["oauth_provider"] == "keycloak"
+        assert runtime_ctx["oauth_id"] == "real-subject"
+
     def test_unauthenticated_request_does_not_inject(self):
         """If request.state.user is missing (impossible under fail-closed auth, but
         verify defensively), inject must not write user_id and runtime_ctx must
