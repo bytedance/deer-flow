@@ -2,7 +2,7 @@ name: Frontend Unit Tests
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: [ 'main', '2.0.x-dev' ]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 

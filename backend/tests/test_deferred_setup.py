@@ -1,7 +1,8 @@
 from langchain_core.tools import tool as as_tool
 from langgraph.types import Command
 
-from deerflow.tools.builtins.tool_search import DeferredToolCatalog, _is_mcp_tool, build_deferred_tool_setup, build_tool_search_tool
+from deerflow.tools.builtins.tool_search import DeferredToolCatalog, build_deferred_tool_setup, build_tool_search_tool
+from deerflow.tools.mcp_metadata import is_mcp_tool, tag_mcp_tool
 
 
 @as_tool
@@ -16,18 +17,13 @@ def local_echo(text: str) -> str:
     return text
 
 
-def _tag_mcp(t):
-    t.metadata = {**(t.metadata or {}), "deerflow_mcp": True}
-    return t
-
-
 def test_is_mcp_tool_reads_metadata():
-    assert _is_mcp_tool(_tag_mcp(mcp_calc)) is True
-    assert _is_mcp_tool(local_echo) is False
+    assert is_mcp_tool(tag_mcp_tool(mcp_calc)) is True
+    assert is_mcp_tool(local_echo) is False
 
 
 def test_setup_disabled_returns_empty():
-    setup = build_deferred_tool_setup([_tag_mcp(mcp_calc), local_echo], enabled=False)
+    setup = build_deferred_tool_setup([tag_mcp_tool(mcp_calc), local_echo], enabled=False)
     assert setup.tool_search_tool is None
     assert setup.deferred_names == frozenset()
     assert setup.catalog_hash is None
@@ -40,7 +36,7 @@ def test_setup_no_mcp_returns_empty():
 
 
 def test_setup_builds_from_mcp_survivors():
-    setup = build_deferred_tool_setup([_tag_mcp(mcp_calc), local_echo], enabled=True)
+    setup = build_deferred_tool_setup([tag_mcp_tool(mcp_calc), local_echo], enabled=True)
     assert setup.deferred_names == frozenset({"mcp_calc"})
     assert setup.tool_search_tool is not None
     assert setup.tool_search_tool.name == "tool_search"

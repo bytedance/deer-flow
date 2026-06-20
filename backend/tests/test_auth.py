@@ -280,6 +280,74 @@ def test_require_permission_denies_wrong_permission():
             assert "Permission denied" in response.json()["detail"]
 
 
+def _make_internal_owner_check_app():
+    """App with an owner_check route and a thread owned by ``alice``."""
+    import asyncio
+
+    from fastapi import Request
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    app = FastAPI()
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create("alice-thread", user_id="alice"))
+    app.state.thread_store = thread_store
+
+    @app.get("/threads/{thread_id}")
+    @require_permission("threads", "read", owner_check=True)
+    async def endpoint(thread_id: str, request: Request):
+        return {"ok": True}
+
+    return app
+
+
+def _internal_auth_context() -> AuthContext:
+    from types import SimpleNamespace
+
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    user = SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)
+    return AuthContext(user=user, permissions=[Permissions.THREADS_READ])
+
+
+def test_require_permission_internal_role_scoped_by_owner_header():
+    """An internal caller acting for the thread owner passes the owner check."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+    app = _make_internal_owner_check_app()
+    with patch("app.gateway.authz._authenticate", return_value=_internal_auth_context()):
+        with TestClient(app) as client:
+            response = client.get(
+                "/threads/alice-thread",
+                headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "alice"},
+            )
+    assert response.status_code == 200
+
+
+def test_require_permission_internal_role_denied_for_other_owner():
+    """The internal token must not grant access to another user's thread."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+    app = _make_internal_owner_check_app()
+    with patch("app.gateway.authz._authenticate", return_value=_internal_auth_context()):
+        with TestClient(app) as client:
+            response = client.get(
+                "/threads/alice-thread",
+                headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "mallory"},
+            )
+    assert response.status_code == 404
+
+
+def test_require_permission_internal_role_without_header_is_scoped_to_internal_user():
+    """With no owner header, internal callers are scoped like before the bypass."""
+    app = _make_internal_owner_check_app()
+    with patch("app.gateway.authz._authenticate", return_value=_internal_auth_context()):
+        with TestClient(app) as client:
+            response = client.get("/threads/alice-thread")
+    assert response.status_code == 404
+
+
 # ── Weak JWT secret warning ──────────────────────────────────────────────────
 
 

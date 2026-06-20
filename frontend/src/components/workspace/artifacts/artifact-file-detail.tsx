@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
 
 import {
   Artifact,
@@ -20,6 +19,8 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
+import { Button } from "@/components/ui/button";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -43,7 +44,13 @@ import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
-import { checkCodeFile, getFileName } from "@/core/utils/files";
+import {
+  canBrowserPreviewFile,
+  checkCodeFile,
+  getFileExtensionDisplayName,
+  getFileIcon,
+  getFileName,
+} from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -92,6 +99,9 @@ export function ArtifactFileDetail({
     }
     return checkCodeFile(filepath);
   }, [filepath, isWriteFile, isSkillFile]);
+  const canPreviewInBrowser = useMemo(() => {
+    return canBrowserPreviewFile(filepath);
+  }, [filepath]);
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
@@ -303,14 +313,66 @@ export function ArtifactFileDetail({
             readonly
           />
         )}
-        {!isCodeFile && (
+        {!isCodeFile && canPreviewInBrowser && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}
           />
         )}
+        {!isCodeFile && !canPreviewInBrowser && (
+          <ArtifactDownloadFallback
+            filepath={filepath}
+            threadId={threadId}
+            isMock={isMock}
+          />
+        )}
       </ArtifactContent>
     </Artifact>
+  );
+}
+
+function ArtifactDownloadFallback({
+  filepath,
+  threadId,
+  isMock,
+}: {
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+}) {
+  const filename = getFileName(filepath);
+  const fileType = getFileExtensionDisplayName(filepath);
+
+  return (
+    <div className="flex size-full items-center justify-center p-6">
+      <div className="flex max-w-sm flex-col items-center gap-4 text-center">
+        <div className="text-muted-foreground">
+          {getFileIcon(filepath, "size-12")}
+        </div>
+        <div className="space-y-1">
+          <div className="font-medium break-all">{filename}</div>
+          <div className="text-muted-foreground text-sm">{fileType} file</div>
+        </div>
+        <p className="text-muted-foreground text-sm">
+          This file type cannot be previewed in the browser.
+        </p>
+        <Button asChild>
+          <a
+            href={urlOfArtifact({
+              filepath,
+              threadId,
+              download: true,
+              isMock,
+            })}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <DownloadIcon className="size-4" />
+            Download
+          </a>
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -400,13 +462,13 @@ export function ArtifactFilePreview({
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
-        <Streamdown
+        <ClipboardSafeStreamdown
           className="size-full"
           {...streamdownPlugins}
           components={{ a: ArtifactLink }}
         >
           {content ?? ""}
-        </Streamdown>
+        </ClipboardSafeStreamdown>
       </div>
     );
   }

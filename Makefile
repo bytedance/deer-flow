@@ -76,7 +76,8 @@ install:
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
 	@echo "Installing pre-commit hooks..."
-	@$(BACKEND_UV_RUN) --with pre-commit pre-commit install
+	@uv tool install pre-commit
+	@pre-commit install --overwrite
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="
@@ -119,7 +120,6 @@ stop:
 clean: stop
 	@echo "Cleaning up..."
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
-	@-rm -rf backend/.langgraph_api 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"
 
