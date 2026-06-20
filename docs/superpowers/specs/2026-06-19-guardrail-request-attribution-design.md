@@ -1,28 +1,35 @@
-# GuardrailRequest 运行时归因上下文补充
+# GuardrailRequest 运行时用户上下文与归因字段补充
 
 ## 概述
 
-为 `GuardrailRequest` 补充三个可选运行时归因字段 — `user_id`、`run_id`、`tool_call_id` — 使可插拔 `GuardrailProvider` 在做工具调用决策或记录日志时，能访问 DeerFlow 运行时已经掌握的调用上下文。
+为 `GuardrailRequest` 补充可选的运行时用户上下文和工具调用归因字段，使可插拔 `GuardrailProvider` 能访问 DeerFlow 已认证用户、外部身份映射、run/thread/tool-call 定位信息。
+
+本设计不新增治理系统、不定义统一 policy schema，也不改变默认 allow/deny 行为。它只把 DeerFlow 运行时已经掌握的上下文传给 provider。
 
 ## 背景
 
-DeerFlow 已通过 `GuardrailMiddleware` + 插拔式 `GuardrailProvider` 实现了工具调用前的 allow/deny 授权能力。
+DeerFlow 已通过 `GuardrailMiddleware` + 可插拔 `GuardrailProvider` 实现工具调用前授权。当前 `GuardrailDecision` 已能表达 allow/deny、原因、policy_id 和 metadata；缺口在 `GuardrailRequest` 侧：provider 只能看到 `tool_name` 和 `tool_input`，无法可靠知道“谁发起了这次工具调用”以及“这次调用属于哪个 run/tool_call”。
 
-当前 `GuardrailDecision` 已支持表达 allow/deny、原因、policy_id 和扩展 metadata。缺口在于 `GuardrailRequest` 携带的信息仅限于 `tool_name` 和 `tool_input`，缺少调用方的运行时身份和上下文 —— 这些信息 provider 自己无法可靠推断。
+源码中 DeerFlow 已有用户身份模型：
 
-且在可预见的路线中，DeerFlow 正在增强多用户支持（SSO/OIDC #3506）、MCP 工具审计（#3322 提及 per-user credential 隔离）、以及企业权限管理（Q2 RoadMap #1669）。在这些场景下，guardrail provider 需要更多上下文才能做出有意义的决策。
+- `users.id`：DeerFlow 内部稳定用户 ID。
+- `users.system_role`：`admin` / `user`。
+- `users.oauth_provider`、`users.oauth_id`：未来 OAuth/SSO 外部身份映射字段，local user 下可为空。
+
+这些字段当前已存在于认证后的 `request.state.user`，但 run-time middleware/tool 阶段只能通过 `runtime.context` 访问上下文。因此应在 Gateway 构建 run config 时注入 server-authenticated user context，再由 GuardrailMiddleware 消费。
 
 ## 改动范围
 
-三个文件中、总计约 20 行新增代码：
-
-- `guardrails/provider.py` — 数据类扩字段
-- `guardrails/middleware.py` — `_build_request()` 读取并填充
-- `tests/test_guardrail_middleware.py` — 新增测试用例
+- `app/gateway/services.py`：`inject_authenticated_user_context()` 注入更多 authenticated user context。
+- `guardrails/provider.py`：`GuardrailRequest` 新增 optional 字段。
+- `guardrails/middleware.py`：从 `ToolCallRequest.runtime.context` 读取字段。
+- `tests/test_setup_agent_e2e_user_isolation.py`：验证 Gateway 注入到 runtime context。
+- `tests/test_guardrail_middleware.py`：验证 runtime context 进入 `GuardrailRequest`。
+- `backend/docs/GUARDRAILS.md`：更新 custom provider 示例。
 
 ## 设计
 
-### GuardrailRequest 新字段
+### GuardrailRequest 字段
 
 ```python
 @dataclass
@@ -30,100 +37,98 @@ class GuardrailRequest:
     tool_name: str
     tool_input: dict[str, Any]
     agent_id: str | None = None
-    thread_id: str | None = None          # 已存在但从未填充，本次补上
+    thread_id: str | None = None
     is_subagent: bool = False
     timestamp: str = ""
 
-    # 新增：运行时归因（provider 无法自行推断）
     user_id: str | None = None
+    user_role: str | None = None
+    oauth_provider: str | None = None
+    oauth_id: str | None = None
     run_id: str | None = None
     tool_call_id: str | None = None
 ```
 
-所有字段为 optional。现有 `GuardrailDecision` 不做任何变化。
+所有新增字段均为 optional，缺失时保持 `None`。`GuardrailDecision` 不变。
 
 ### 字段来源
 
-每个字段在 `_build_request()` 中从明确位置读取，不引入新的控制面：
-
-| 字段 | 来源 | 兜底 |
+| 字段 | 来源 | 说明 |
 |------|------|------|
-| `user_id` | `request.runtime.context["user_id"]` | 运行时无 context 时为 `None` |
-| `run_id` | `request.runtime.context["run_id"]` | 同上 |
-| `tool_call_id` | `request.tool_call.get("id")` | `tool_call` 无 id 时为 `None` |
-| `thread_id` | `request.runtime.context["thread_id"]` | 同上（修正：当前虽已定义但从未从 context 填充） |
+| `user_id` | `request.state.user.id` → `runtime.context["user_id"]` | DeerFlow 内部稳定用户 ID |
+| `user_role` | `request.state.user.system_role` → `runtime.context["user_role"]` | 可用于简单 role-based policy |
+| `oauth_provider` | `request.state.user.oauth_provider` → `runtime.context["oauth_provider"]` | OAuth/SSO 外部 provider，local user 可为空 |
+| `oauth_id` | `request.state.user.oauth_id` → `runtime.context["oauth_id"]` | 外部 provider subject/user id，local user 可为空 |
+| `run_id` | `_build_runtime_context()` 写入 `runtime.context["run_id"]` | run 级审计归因 |
+| `thread_id` | `_build_runtime_context()` 写入 `runtime.context["thread_id"]` | 修正已有字段未填充问题 |
+| `tool_call_id` | `request.tool_call.get("id")` | 单次 tool call 定位 |
 
-`runtime.context` 由 `_build_runtime_context()`（`runtime/runs/worker.py`）自动写入，包含 `thread_id` 和 `run_id`。`user_id` 由网关的 `inject_authenticated_user_context()`（`app/gateway/services.py`）在认证后写入。因此 guardrail middleware 不需要自行获取任何新数据，只需读取已有信息。
+Gateway 注入只信任服务端认证态 `request.state.user`。客户端 `body.context` 里的 `user_id/user_role/oauth_*` 不应覆盖 authenticated user。
 
-## 各字段收益分析
+## 收益
 
-### user_id：收益高，在 guardrail 核心边界内
+### 稳定审计归因
 
-| 场景 | 没有 user_id | 有 user_id |
-|------|-------------|-----------|
-| Per-user 授权（A 可用 bash、B 不行） | provider 无法区分调用者 | 直接基于 `request.user_id` 做策略 |
-| 多租户审计 + SSO | 审计日志无法关联到具体人 | 每个决策可记录用户身份 |
-| MCP per-user 隔离（#3322） | provider 无法将身份传递给下游 | 可将 `request.user_id` 注入 MCP 调用上下文 |
+`user_id/run_id/thread_id/tool_call_id` 让 provider 或外部审计系统能回答：
 
-`user_id` 是 guardrail provider 做授权决策中最核心的上下文维度之一。**认证**是 auth middleware 的职责，但 **授权**（guardrail 的职责）需要知道认证结果是谁。
+- 哪个 DeerFlow 用户触发了 tool call？
+- 哪个 run 里发生了 deny？
+- 同一轮中多次同名工具调用时，具体是哪一次？
 
-user_id 的运行时链路：
+### 可读的本地策略示例
+
+`user_id` 是 UUID，不适合直接写人工 policy。`user_role` 可以支持简单示例：
+
+```yaml
+field: role_tool_key
+operator: eq
+value: admin:bash
 ```
-AuthMiddleware → request.state.user
-  → inject_authenticated_user_context(config.context["user_id"])
-    → ToolRuntime.context["user_id"]
-      → GuardrailMiddleware._build_request() 读取 → GuardrailRequest.user_id
+
+provider 可派生：
+
+```python
+role_tool_key = f"{request.user_role or ''}:{request.tool_name}"
 ```
 
-### run_id：收益中，在 guardrail 边界外围但无成本
+### 外部身份映射
 
-| 场景 | 没有 run_id | 有 run_id |
-|------|-------------|-----------|
-| 安全审计："工具 X 被拒 50 次" | 只能看到频率 | 可筛选出具体哪个 run 反复触发 deny |
-| 外部 SIEM 关联 | 事件只有 `{tool, policy}` | 事件为 `{tool, policy, user, run}`，可关联到完整 conversation |
-
-`run_id` 极少进入决策公式本身。它的价值在 audit 和调试场景。`GuardrailRequest` 是 provider 观察运行时的唯一信息通道，如果不在此暴露 `run_id`，provider 只能自建不可靠的关联机制（如 timestamp 近似匹配）。
-
-### tool_call_id：收益低，但零成本
-
-| 场景 | 没有 tool_call_id | 有 tool_call_id |
-|------|------------------|-----------------|
-| 同一轮中多次同工具调用（两次 `web_search`） | 日志中两行相同 `(web_search, user_A)`，需 diff args 区分 | 通过 `call_abc` / `call_def` 精确区分 |
-| Provider 缓存决策结果 | 无法精确定位 cache key | 可作为 cache key 的一部分 |
-
-`tool_call_id` 不影响 allow/deny 决策本身（没有 provider 会写"拒绝 call_abc 但允许 call_def"）。但数据已在 `request.tool_call.get("id")` 中，`_build_request` 只需顺手传过去，完全没有额外工作量。
-
-### thread_id：补填已有字段
-
-字段已在 `GuardrailRequest` 数据类中定义，但 `_build_request()` 从未从 `runtime.context` 填充。本次将其来源从空字符串补全为 `runtime.context["thread_id"]`，使接口契约与实际行为一致。
+`oauth_provider/oauth_id` 保留了未来接 OAuth/SSO/IAM 时的外部 subject 信息。当前 OAuth 路由仍是 placeholder，local user 下这些字段通常为 `None`，但字段 optional，不影响现有部署。
 
 ## 兼容性
 
-- 所有新字段 optional
-- 现有 `GuardrailProvider` 实现即使不读取新增字段，也继续正常工作
-- 现有 `GuardrailDecision` 不变
-- 缺少 `runtime`/`context` 时字段保持 `None`
-- 现有 allow/deny 行为不变
-- 现有测试（TestAllowlistProvider、TestGuardrailMiddleware 等）应继续通过，无需修改
+- 所有新增字段 optional。
+- 现有 provider 不读取新字段时行为不变。
+- `GuardrailDecision` 不变。
+- 未认证或无 runtime context 时字段为 `None`。
+- local user 没有 OAuth 信息时 `oauth_provider/oauth_id` 为 `None`。
+- `agent_id` 语义不变，仍保持现有 passport/agent hint 含义。
 
 ## 测试
 
-在 `tests/test_guardrail_middleware.py` 中新增：
+新增或扩展以下测试：
 
-| 测试 | 场景 |
+| 测试 | 覆盖 |
 |------|------|
-| `test_user_id_from_runtime_context` | Mock `runtime.context` 含 `user_id`，验证传递到 `GuardrailRequest` |
-| `test_run_id_from_runtime_context` | Mock `runtime.context` 含 `run_id`，验证传递 |
-| `test_tool_call_id_from_tool_call` | `request.tool_call` 含 `id`，验证传递 |
-| `test_thread_id_from_runtime_context` | 验证 `thread_id` 从 `runtime.context` 填充 |
-| `test_missing_runtime_context` | 不设 `runtime`，验证新增字段保持 `None` |
-| `test_missing_tool_call_id` | `tool_call` 无 `id`，验证 `None` |
-| `test_existing_providers_backward_compat` | 现有 provider 不读取新字段时行为不变 |
+| `TestConfigAssembly::test_authenticated_user_context_includes_role_and_oauth_identity` | Gateway 将 `user_id/user_role/oauth_provider/oauth_id` 注入 runtime context |
+| `TestConfigAssembly::test_client_supplied_user_id_is_overridden` | 客户端伪造 identity context 不覆盖服务端认证态 |
+| `TestGuardrailRequestAttribution::test_authenticated_user_context_present` | `runtime.context` 中用户上下文进入 `GuardrailRequest` |
+| `TestGuardrailRequestAttribution::test_all_attribution_fields_present` | 用户上下文 + run/tool_call 归因字段同时传递 |
+| 缺失 runtime/context 测试 | 字段保持 `None`，向后兼容 |
+
+验证命令：
+
+```bash
+cd backend
+PYTHONPATH=. uv run pytest \
+  tests/test_guardrail_middleware.py::TestGuardrailRequestAttribution \
+  tests/test_setup_agent_e2e_user_isolation.py::TestConfigAssembly -v
+```
 
 ## 未涉及
 
-- 不创建新 governance / 审计子系统
-- 不修改 MCP 配置机制
-- 不修改 GuardrailDecision 结构
-- 不涉及 agent identity 语义（现有 `agent_id` 仍保持 passport 语义）
-- 不对原有 guardrail 测试做任何修改（向后兼容回归基线）
+- 不新增 central governance subsystem。
+- 不新增 DeerFlow 内置 policy schema。
+- 不修改 MCP 配置机制。
+- 不修改 OAuth/SSO 实现状态。
+- 不让 GuardrailMiddleware 直接依赖 FastAPI request、DB 或 auth repository。

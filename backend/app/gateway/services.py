@@ -184,6 +184,9 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     runtime_context = config.setdefault("context", {})
     if isinstance(runtime_context, dict):
         runtime_context["user_id"] = str(user_id)
+        runtime_context["user_role"] = getattr(user, "system_role", None)
+        runtime_context["oauth_provider"] = getattr(user, "oauth_provider", None)
+        runtime_context["oauth_id"] = getattr(user, "oauth_id", None)
 
 
 def resolve_agent_factory(assistant_id: str | None):
