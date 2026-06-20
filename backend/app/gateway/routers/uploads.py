@@ -39,13 +39,37 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
 
 
+class UploadedFileInfo(BaseModel):
+    """Uploaded file metadata exposed by upload and list APIs."""
+
+    filename: str
+    size: int
+    path: str
+    virtual_path: str
+    artifact_url: str
+    extension: str | None = None
+    modified: float | None = None
+    original_filename: str | None = None
+    markdown_file: str | None = None
+    markdown_path: str | None = None
+    markdown_virtual_path: str | None = None
+    markdown_artifact_url: str | None = None
+
+
 class UploadResponse(BaseModel):
     """Response model for file upload."""
 
     success: bool
-    files: list[dict[str, str]]
+    files: list[UploadedFileInfo]
     message: str
     skipped_files: list[str] = Field(default_factory=list)
+
+
+class UploadListResponse(BaseModel):
+    """Response model for uploaded file listing."""
+
+    files: list[UploadedFileInfo]
+    count: int
 
 
 class UploadLimits(BaseModel):
@@ -69,9 +93,28 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
         logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
         return
 
-    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH
     chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
     os.chmod(file_path, writable_mode, **chmod_kwargs)
+
+
+def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
+    """Ensure uploaded files are readable by the sandbox process.
+
+    For Docker sandboxes (AIO), the gateway writes files as root with 0o600
+    permissions, then bind-mounts the host directory into the container. The
+    sandbox process inside the container runs as a non-root user and cannot
+    read those files without group/other read bits. This function adds
+    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content.
+    """
+    file_stat = os.lstat(file_path)
+    if stat.S_ISLNK(file_stat.st_mode):
+        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
+        return
+
+    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, readable_mode, **chmod_kwargs)
 
 
 def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
@@ -237,7 +280,7 @@ async def upload_files(
 
             file_info = {
                 "filename": safe_filename,
-                "size": str(file_size),
+                "size": file_size,
                 "path": str(sandbox_uploads / safe_filename),
                 "virtual_path": virtual_path,
                 "artifact_url": upload_artifact_url(thread_id, safe_filename),
@@ -276,6 +319,16 @@ async def upload_files(
             _cleanup_uploaded_paths(written_paths)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
+    # Uploaded files are created with 0o600 permissions (owner read/write only).
+    # In Docker sandbox deployments the gateway writes as root but the sandbox
+    # process runs as a non-root user (typically UID 1000).  Without group/other
+    # read bits the sandbox cannot access the files — whether the uploads
+    # directory is bind-mounted into the container or synced via
+    # sandbox.update_file.  Always add group/other read bits so every sandbox
+    # configuration can read the uploaded content.
+    for file_path in written_paths:
+        _make_file_sandbox_readable(file_path)
+
     if sync_to_sandbox:
         for file_path, virtual_path in sandbox_sync_targets:
             _make_file_sandbox_writable(file_path)
@@ -304,9 +357,9 @@ async def get_upload_limits(
     return _get_upload_limits(config)
 
 
-@router.get("/list", response_model=dict)
+@router.get("/list", response_model=UploadListResponse)
 @require_permission("threads", "read", owner_check=True)
-async def list_uploaded_files(thread_id: str, request: Request) -> dict:
+async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
     try:
         uploads_dir = get_uploads_dir(thread_id)
@@ -320,7 +373,7 @@ async def list_uploaded_files(thread_id: str, request: Request) -> dict:
     for f in result["files"]:
         f["path"] = str(sandbox_uploads / f["filename"])
 
-    return result
+    return UploadListResponse(**result)
 
 
 @router.delete("/{filename}")

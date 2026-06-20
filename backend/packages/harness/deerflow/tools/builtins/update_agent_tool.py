@@ -17,12 +17,13 @@ from __future__ import annotations
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
+from pydantic import BeforeValidator
 
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
@@ -31,6 +32,8 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+_NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 
 
 def _stage_temp(path: Path, text: str) -> Path:
@@ -67,14 +70,26 @@ def _cleanup_temps(temps: list[Path]) -> None:
             logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
 
 
+def _is_nullish_string(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _NULLISH_STRINGS
+
+
+def _normalize_nullish_string(value: object) -> object:
+    return None if _is_nullish_string(value) else value
+
+
+OptionalText = Annotated[str | None, BeforeValidator(_normalize_nullish_string)]
+OptionalStringList = Annotated[list[str] | None, BeforeValidator(_normalize_nullish_string)]
+
+
 @tool(parse_docstring=True)
 def update_agent(
     runtime: Runtime,
-    soul: str | None = None,
-    description: str | None = None,
-    skills: list[str] | None = None,
-    tool_groups: list[str] | None = None,
-    model: str | None = None,
+    soul: OptionalText = None,
+    description: OptionalText = None,
+    skills: OptionalStringList = None,
+    tool_groups: OptionalStringList = None,
+    model: OptionalText = None,
 ) -> Command:
     """Persist updates to the current custom agent's SOUL.md and config.yaml.
 
@@ -86,7 +101,9 @@ def update_agent(
     semantics, so always start from the current SOUL and apply your edits.
 
     Pass ``skills=[]`` to disable all skills for this agent. Omit ``skills``
-    entirely to keep the existing whitelist.
+    entirely to keep the existing whitelist. Do not pass literal strings like
+    ``"null"`` / ``"none"`` / ``"undefined"`` for unchanged fields; omit those
+    fields instead.
 
     Args:
         soul: Optional full replacement SOUL.md content.
@@ -104,10 +121,10 @@ def update_agent(
     agent_name_raw: str | None = runtime.context.get("agent_name") if runtime.context else None
 
     def _err(message: str) -> Command:
-        return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id)]})
+        return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id, status="error")]})
 
     if soul is None and description is None and skills is None and tool_groups is None and model is None:
-        return _err("No fields provided. Pass at least one of: soul, description, skills, tool_groups, model.")
+        return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
     try:
         agent_name = validate_agent_name(agent_name_raw)

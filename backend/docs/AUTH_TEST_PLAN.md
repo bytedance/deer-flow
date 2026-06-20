@@ -4,10 +4,12 @@
 
 | 模式 | 启动命令 | Auth 层 | 端口 |
 |------|---------|---------|------|
-| 标准模式 | `make dev` | Gateway AuthMiddleware + LangGraph auth | 2026 (nginx) |
-| Gateway 模式 | `make dev-pro` | Gateway AuthMiddleware（全量） | 2026 (nginx) |
+| 标准模式 | `make dev` | Gateway AuthMiddleware（全量） | 2026 (nginx) |
 | 直连 Gateway | `cd backend && make gateway` | Gateway AuthMiddleware | 8001 |
-| 直连 LangGraph | `cd backend && make dev` | LangGraph auth | 2024 |
+| 直连 LangGraph 兼容性 | 手动运行 LangGraph 工具链时使用 | LangGraph auth | 2024 |
+
+`make dev`、Docker dev 和生产部署默认都运行 Gateway embedded runtime。
+`app.gateway.langgraph_auth` 仅用于保留的直连 LangGraph 工具链 / Studio 兼容性测试，不是标准服务启动路径。
 
 每种模式下都需执行以下测试。
 
@@ -21,10 +23,8 @@
 # 清除已有数据
 rm -f backend/.deer-flow/data/deerflow.db
 
-# 选择模式启动
-make dev          # 标准模式
-# 或
-make dev-pro      # Gateway 模式
+# 启动标准模式（Gateway embedded runtime）
+make dev
 ```
 
 **验证点：**
@@ -57,7 +57,7 @@ make dev
 
 ## 二、接口流程测试
 
-> 以下用 `BASE=http://localhost:2026` 为例。标准模式和 Gateway 模式都用此地址。
+> 以下用 `BASE=http://localhost:2026` 为例。标准模式经 nginx 暴露此地址。
 > 直连测试替换为对应端口。
 >
 > **CSRF token 提取**：多处用到从 cookie jar 提取 CSRF token，统一使用：
@@ -211,20 +211,18 @@ curl -s -X POST $BASE/api/threads/search \
 
 **预期：** 返回 0 或仅包含 user2 自己的 thread
 
-### 2.3 标准模式 LangGraph Server 隔离
+### 2.3 LangGraph-compatible Gateway 路由隔离
 
-> 仅在标准模式下测试。Gateway 模式不跑 LangGraph Server。
-
-#### TC-API-10: LangGraph 端点需要 cookie
+#### TC-API-10: LangGraph-compatible 端点需要 cookie
 
 ```bash
-# 不带 cookie 访问 LangGraph 接口
+# 不带 cookie 访问 LangGraph-compatible 接口
 curl -s -w "%{http_code}" $BASE/api/langgraph/threads
 ```
 
 **预期：** 401
 
-#### TC-API-11: LangGraph 带 cookie 可访问
+#### TC-API-11: LangGraph-compatible 路由带 cookie 可访问
 
 ```bash
 curl -s $BASE/api/langgraph/threads -b user1.txt | jq length
@@ -232,10 +230,10 @@ curl -s $BASE/api/langgraph/threads -b user1.txt | jq length
 
 **预期：** 200，返回 user1 的 thread 列表
 
-#### TC-API-12: LangGraph 隔离 — 用户只看到自己的
+#### TC-API-12: LangGraph-compatible 路由隔离 — 用户只看到自己的
 
 ```bash
-# user2 查 LangGraph threads
+# user2 查 threads
 curl -s $BASE/api/langgraph/threads -b user2.txt | jq length
 ```
 
@@ -1234,21 +1232,11 @@ P2=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p2.txt)
 ## 七、模式差异测试
 
 > 以下用 `GW=http://localhost:8001` 表示直连 Gateway，`BASE=http://localhost:2026` 表示经 nginx。
-> Gateway 模式启动命令：`make dev-pro`（或 `./scripts/serve.sh --dev --gateway`）。
+> 标准启动命令：`make dev`（或 `./scripts/serve.sh --dev`）。
 
-### 7.1 标准模式独有
+### 7.1 标准启动模式
 
-> 启动命令：`make dev`（或 `./scripts/serve.sh --dev`）
-
-#### TC-MODE-01: LangGraph Server 独立运行，需 cookie
-
-```bash
-# 无 cookie 访问 LangGraph
-curl -s -w "%{http_code}" -o /dev/null $BASE/api/langgraph/threads/search
-# 预期: 403（LangGraph auth handler 拒绝）
-```
-
-#### TC-MODE-02: LangGraph auth 的 token_version 检查
+#### TC-MODE-01: Gateway AuthMiddleware 的 token_version 检查
 
 ```bash
 # 登录拿 cookie
@@ -1261,9 +1249,9 @@ curl -s -X POST $BASE/api/v1/auth/change-password \
   -b cookies.txt -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
   -d '{"current_password":"正确密码","new_password":"NewPass1!"}' -c new_cookies.txt
 
-# 用旧 cookie 访问 LangGraph
+# 用旧 cookie 访问 LangGraph-compatible 路由
 curl -s -w "%{http_code}" $BASE/api/langgraph/threads/search -b cookies.txt
-# 预期: 403（token_version 不匹配）
+# 预期: 401（token_version 不匹配）
 
 # 用新 cookie 访问
 CSRF2=$(grep csrf_token new_cookies.txt | awk '{print $NF}')
@@ -1272,7 +1260,7 @@ curl -s -w "%{http_code}" -X POST $BASE/api/langgraph/threads/search \
 # 预期: 200
 ```
 
-#### TC-MODE-03: LangGraph auth 的 owner filter 隔离
+#### TC-MODE-02: Gateway owner filter 隔离
 
 ```bash
 # user1 创建 thread
@@ -1297,18 +1285,9 @@ print('OK: user2 sees', len(threads), 'threads, none belong to user1')
 "
 ```
 
-### 7.2 Gateway 模式独有
-
-> 启动命令：`make dev-pro`（或 `./scripts/serve.sh --dev --gateway`）
-> 无 LangGraph Server 进程，agent runtime 嵌入 Gateway。
-
-#### TC-MODE-04: 所有请求经 AuthMiddleware
+#### TC-MODE-03: 所有请求经 AuthMiddleware
 
 ```bash
-# 确认 LangGraph Server 未运行
-curl -s -w "%{http_code}" -o /dev/null http://localhost:2024/ok
-# 预期: 000（连接被拒）
-
 # Gateway API 受保护
 curl -s -w "%{http_code}" -o /dev/null $BASE/api/models
 # 预期: 401
@@ -1319,7 +1298,7 @@ curl -s -w "%{http_code}" -o /dev/null -X POST $BASE/api/langgraph/threads/searc
 # 预期: 401
 ```
 
-#### TC-MODE-05: Gateway 模式下完整 auth 流程
+#### TC-MODE-04: 标准模式下完整 auth 流程
 
 ```bash
 # 登录
@@ -1334,7 +1313,7 @@ curl -s -X POST $BASE/api/langgraph/threads \
   -d '{"metadata":{}}' | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_id'])"
 # 预期: 返回 thread_id
 
-# CSRF 保护（Gateway 模式下 CSRFMiddleware 直接覆盖所有路由）
+# CSRF 保护（CSRFMiddleware 覆盖所有 Gateway 路由）
 curl -s -w "%{http_code}" -o /dev/null -X POST $BASE/api/langgraph/threads \
   -b cookies.txt -H "Content-Type: application/json" -d '{"metadata":{}}'
 # 预期: 403（CSRF token missing）
@@ -1433,7 +1412,7 @@ done
 
 ### 7.4 Docker 部署
 
-> 启动命令：`./scripts/deploy.sh`（标准）或 `./scripts/deploy.sh --gateway`（Gateway 模式）
+> 启动命令：`./scripts/deploy.sh`
 > Docker Compose 文件：`docker/docker-compose.yaml`
 >
 > 前置条件：
@@ -1542,16 +1521,16 @@ docker logs deer-flow-gateway 2>&1 | grep -iE "Password: .{15,}" && echo "FAIL: 
 - 容器日志输出**路径**（不是密码本身），符合 CodeQL `py/clear-text-logging-sensitive-data` 规则
 - `grep "Password:"` 在日志中**应当无匹配**（旧行为已废弃，simplify pass 移除了日志泄露路径）
 
-#### TC-DOCKER-06: Gateway 模式 Docker 部署
+#### TC-DOCKER-06: Docker 部署
 
 ```bash
-# Gateway 模式：无 langgraph 容器
-./scripts/deploy.sh --gateway
+# 标准 Docker 模式：runtime 嵌入 gateway 容器
+./scripts/deploy.sh
 sleep 15
 
-# 确认 langgraph 容器不存在
-docker ps --filter name=deer-flow-langgraph --format '{{.Names}}' | wc -l
-# 预期: 0
+# 确认 gateway 容器存在
+docker ps --filter name=deer-flow-gateway --format '{{.Names}}'
+# 预期: deer-flow-gateway
 
 # auth 流程正常：未登录受保护接口返回 401
 curl -s -w "%{http_code}" -o /dev/null $BASE/api/models

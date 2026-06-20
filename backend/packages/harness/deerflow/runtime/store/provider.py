@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections.abc import Iterator
 
 from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import get_app_config
+from deerflow.config.checkpointer_config import ensure_config_loaded
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,7 @@ def _sync_store_from_database(db_config) -> Iterator[BaseStore]:
 
 _store: BaseStore | None = None
 _store_ctx = None  # open context manager keeping the connection alive
+_store_lock = threading.Lock()
 
 
 def get_store() -> BaseStore:
@@ -161,39 +164,47 @@ def get_store() -> BaseStore:
     if _store is not None:
         return _store
 
-    # Lazily load app config, mirroring the checkpointer singleton pattern so
-    # that tests that set the global checkpointer config explicitly remain isolated.
+    # Config loading can reset both persistence singletons. Keep it outside
+    # this provider lock to avoid cross-provider lock-order inversion.
+    ensure_config_loaded()
+
     import deerflow.config.app_config as app_config_module
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
-    config = get_checkpointer_config()
     app_config = app_config_module._app_config
-
-    if config is None and app_config is None:
+    if get_checkpointer_config() is None:
         try:
             app_config = get_app_config()
         except FileNotFoundError:
             pass
+
+    with _store_lock:
+        if _store is not None:
+            return _store
+
         config = get_checkpointer_config()
+        if config is None and app_config is not None:
+            config = getattr(app_config, "checkpointer", None)
 
-    if config is None and app_config is not None:
-        config = getattr(app_config, "checkpointer", None)
+        if config is not None:
+            store_ctx = _sync_store_cm(config)
+            store = store_ctx.__enter__()
+            _store_ctx = store_ctx
+            _store = store
+            return _store
 
-    if config is not None:
-        _store_ctx = _sync_store_cm(config)
-        _store = _store_ctx.__enter__()
-        return _store
+        db_config = getattr(app_config, "database", None) if app_config is not None else None
+        if db_config is not None and db_config.backend != "memory":
+            store_ctx = _sync_store_from_database(db_config)
+            store = store_ctx.__enter__()
+            _store_ctx = store_ctx
+            _store = store
+            return _store
 
-    db_config = getattr(app_config, "database", None) if app_config is not None else None
-    if db_config is not None and db_config.backend != "memory":
-        _store_ctx = _sync_store_from_database(db_config)
-        _store = _store_ctx.__enter__()
-        return _store
+        from langgraph.store.memory import InMemoryStore
 
-    from langgraph.store.memory import InMemoryStore
-
-    logger.warning("No persistent store backend configured — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-    _store = InMemoryStore()
+        logger.warning("No persistent store backend configured — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
+        _store = InMemoryStore()
     return _store
 
 
@@ -204,13 +215,14 @@ def reset_store() -> None:
     Useful in tests or after a configuration change.
     """
     global _store, _store_ctx
-    if _store_ctx is not None:
-        try:
-            _store_ctx.__exit__(None, None, None)
-        except Exception:
-            logger.warning("Error during store cleanup", exc_info=True)
-        _store_ctx = None
-    _store = None
+    with _store_lock:
+        if _store_ctx is not None:
+            try:
+                _store_ctx.__exit__(None, None, None)
+            except Exception:
+                logger.warning("Error during store cleanup", exc_info=True)
+            _store_ctx = None
+        _store = None
 
 
 # ---------------------------------------------------------------------------

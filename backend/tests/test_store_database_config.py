@@ -13,11 +13,11 @@ from deerflow.runtime.store.provider import reset_store
 
 @pytest.fixture(autouse=True)
 def reset_store_state():
-    app_config_module._app_config = None
+    app_config_module.reset_app_config()
     set_checkpointer_config(None)
     reset_store()
     yield
-    app_config_module._app_config = None
+    app_config_module.reset_app_config()
     set_checkpointer_config(None)
     reset_store()
 
@@ -105,11 +105,9 @@ def test_get_store_uses_unified_postgres_database_config():
     mock_store_cls.from_conn_string.return_value = mock_cm
     mock_module = MagicMock()
     mock_module.PostgresStore = mock_store_cls
+    app_config_module.set_app_config(config)
 
-    with (
-        patch("deerflow.runtime.store.provider.get_app_config", return_value=config),
-        patch.dict(sys.modules, {"langgraph.store.postgres": mock_module}),
-    ):
+    with patch.dict(sys.modules, {"langgraph.store.postgres": mock_module}):
         store = get_store()
 
     assert store is mock_store

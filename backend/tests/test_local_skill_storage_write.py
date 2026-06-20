@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 
 import pytest
 
@@ -41,6 +42,20 @@ def test_write_is_atomic_overwrite(tmp_path, storage):
     storage.write_custom_skill("demo-skill", "SKILL.md", "first")
     storage.write_custom_skill("demo-skill", "SKILL.md", "second")
     assert (tmp_path / "custom" / "demo-skill" / "SKILL.md").read_text() == "second"
+
+
+def test_write_makes_written_path_sandbox_readable(tmp_path, storage):
+    skill_dir = tmp_path / "custom" / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    skill_dir.chmod(0o700)
+
+    storage.write_custom_skill("demo-skill", "references/ref.md", "# ref")
+
+    ref_dir = skill_dir / "references"
+    ref_file = ref_dir / "ref.md"
+    assert stat.S_IMODE(skill_dir.stat().st_mode) & 0o055 == 0o055
+    assert stat.S_IMODE(ref_dir.stat().st_mode) & 0o055 == 0o055
+    assert stat.S_IMODE(ref_file.stat().st_mode) & 0o044 == 0o044
 
 
 # ---------------------------------------------------------------------------

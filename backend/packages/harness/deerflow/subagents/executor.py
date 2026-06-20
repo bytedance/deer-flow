@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
@@ -12,7 +13,7 @@ from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
@@ -27,6 +28,14 @@ from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+
+if TYPE_CHECKING:
+    # Imported lazily at runtime inside _build_initial_state: importing
+    # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
+    # `from deerflow.subagents import SubagentExecutor`, which re-enters this
+    # still-initializing package. Type-only here keeps the annotation precise.
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +89,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
-    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -98,7 +107,7 @@ class SubagentResult:
         error: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
-        token_usage_records: list[dict[str, int | str]] | None = None,
+        token_usage_records: list[dict[str, int | str | None]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -279,6 +288,7 @@ class SubagentExecutor:
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
+        user_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -293,6 +303,8 @@ class SubagentExecutor:
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
+            user_id: User ID captured from the parent tool's runtime context.
+                When None, the tracing layer falls back to DEFAULT_USER_ID.
         """
         self.config = config
         self.app_config = app_config
@@ -309,6 +321,7 @@ class SubagentExecutor:
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
+        self.user_id = user_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -319,17 +332,22 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self, tools: list[BaseTool] | None = None):
-        """Create the agent instance."""
+    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+        """Create the agent instance.
+
+        ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
+        deferred MCP tool names + catalog hash so the subagent gets the same
+        DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+        """
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -339,6 +357,7 @@ class SubagentExecutor:
             middleware=middlewares,
             system_prompt=None,
             state_schema=ThreadState,
+            checkpointer=False,
         )
 
     async def _load_skills(self) -> list[Skill]:
@@ -403,19 +422,35 @@ class SubagentExecutor:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
 
         Args:
             task: The task description.
 
         Returns:
-            Initial state dictionary and tools filtered by loaded skill metadata.
+            ``(state, final_tools, deferred_setup)``. ``final_tools`` is the
+            policy-filtered tool list with the ``tool_search`` tool appended when
+            deferral applies; ``deferred_setup`` is consumed by ``_create_agent``
+            so the agent build and the injected ``<available-deferred-tools>``
+            section share one catalog/hash.
         """
+        # Lazy import: see the TYPE_CHECKING note at the top of this module -
+        # importing tool_search runs tools/builtins/__init__, which would
+        # re-enter this package during its own initialization.
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
 
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
+        # Assemble deferred tool_search AFTER policy filtering (fail-closed),
+        # mirroring the lead path so subagents stop binding full MCP schemas.
+        # The generated tool_search helper is intentionally not subject to the
+        # subagent's name-level allow/deny (config.tools / disallowed_tools):
+        # its catalog is built from the already-filtered list, so it can never
+        # surface a tool the policy denied. This matches the lead agent.
+        enabled = (self.app_config or get_app_config()).tool_search.enabled
+        final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
         skill_messages = await self._load_skill_messages(skills)
 
         # Combine system_prompt and skills into a single SystemMessage.
@@ -426,6 +461,11 @@ class SubagentExecutor:
             system_parts.append(self.config.system_prompt)
         for skill_msg in skill_messages:
             system_parts.append(skill_msg.content)
+        # Name the deferred MCP tools in the prompt; their schemas stay withheld
+        # until tool_search promotes them. Empty set -> "" -> appends nothing.
+        deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
+        if deferred_section:
+            system_parts.append(deferred_section)
 
         messages: list[Any] = []
         if system_parts:
@@ -444,7 +484,7 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
-        return state, filtered_tools
+        return state, final_tools, deferred_setup
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -475,8 +515,8 @@ class SubagentExecutor:
 
         collector: SubagentTokenCollector | None = None
         try:
-            state, filtered_tools = await self._build_initial_state(task)
-            agent = self._create_agent(filtered_tools)
+            state, final_tools, deferred_setup = await self._build_initial_state(task)
+            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"
@@ -488,6 +528,36 @@ class SubagentExecutor:
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
+
+            # Inject tracing callbacks at the graph level so a single subagent run
+            # produces one trace with all node / LLM / tool calls as child spans.
+            # This mirrors the lead agent pattern: graph-level tracing paired with
+            # attach_tracing=False on the model avoids double-counted traces.
+            tracing_callbacks = build_tracing_callbacks()
+            if tracing_callbacks:
+                existing_callbacks = list(run_config.get("callbacks") or [])
+                run_config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+            # Normalize subagent name for tracing so it matches the lead-agent
+            # naming shape (lowercase, hyphens only). Inline because there is no
+            # shared helper — runtime/runs/naming.py only handles lead-agent runs.
+            if self.config.name:
+                normalized_name = self.config.name.strip().lower().replace("_", "-")
+                assistant_id = f"subagent:{normalized_name}"
+            else:
+                assistant_id = "subagent"
+
+            # Inject Langfuse trace-attribute metadata so the subagent trace
+            # links to the parent thread and carries the correct session/user IDs.
+            inject_langfuse_metadata(
+                run_config,
+                thread_id=self.thread_id,
+                user_id=self.user_id,
+                assistant_id=assistant_id,
+                model_name=self.model_name,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            )
+
             context: dict[str, Any] = {}
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}

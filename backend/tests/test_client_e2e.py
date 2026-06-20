@@ -144,14 +144,14 @@ def e2e_env(tmp_path, monkeypatch):
     #    non-determinism and cost to E2E tests (title generation is already
     #    disabled via TitleConfig above, but the middleware still participates
     #    in the chain and can interfere with event ordering).
-    from deerflow.agents.lead_agent.agent import _build_middlewares as _original_build_middlewares
+    from deerflow.agents.lead_agent.agent import build_middlewares as _original_build_middlewares
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
     def _sync_safe_build_middlewares(*args, **kwargs):
         mws = _original_build_middlewares(*args, **kwargs)
         return [m for m in mws if not isinstance(m, TitleMiddleware)]
 
-    monkeypatch.setattr("deerflow.client._build_middlewares", _sync_safe_build_middlewares)
+    monkeypatch.setattr("deerflow.client.build_middlewares", _sync_safe_build_middlewares)
 
     return {"tmp_path": tmp_path}
 

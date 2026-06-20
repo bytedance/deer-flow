@@ -20,6 +20,7 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type KeyboardEvent,
 } from "react";
 
 import {
@@ -59,6 +60,9 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import type { Skill } from "@/core/skills";
+import { useSkills } from "@/core/skills/hooks";
+import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -85,6 +89,48 @@ import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+const MAX_SKILL_SUGGESTIONS = 6;
+
+function getLeadingSlashSkillQuery(value: string): string | null {
+  if (!value.startsWith("/")) {
+    return null;
+  }
+
+  const query = value.slice(1);
+  if (query.includes("/") || /\s/.test(query)) {
+    return null;
+  }
+
+  return query;
+}
+
+function getMatchingSkillSuggestions(skills: Skill[], query: string): Skill[] {
+  const normalizedQuery = query.toLowerCase();
+
+  return skills
+    .map((skill, index) => ({
+      skill,
+      index,
+      name: skill.name.toLowerCase(),
+    }))
+    .filter(({ skill, name }) => {
+      if (!skill.enabled) {
+        return false;
+      }
+      return !normalizedQuery || name.includes(normalizedQuery);
+    })
+    .sort((a, b) => {
+      const aStartsWith = a.name.startsWith(normalizedQuery);
+      const bStartsWith = b.name.startsWith(normalizedQuery);
+      if (aStartsWith !== bStartsWith) {
+        return aStartsWith ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .slice(0, MAX_SKILL_SUGGESTIONS)
+    .map(({ skill }) => skill);
+}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -153,11 +199,18 @@ export function InputBox({
   const { models } = useModels();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
+  const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
+  const { data: suggestionsConfig } = useSuggestionsConfig();
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
+  const [textareaFocused, setTextareaFocused] = useState(false);
+  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
+    useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
   const messagesRef = useRef(thread.messages);
@@ -347,9 +400,98 @@ export function InputBox({
     setTimeout(() => requestFormSubmit(), 0);
   }, [pendingSuggestion, requestFormSubmit, textInput]);
 
+  const slashSkillQuery = useMemo(
+    () => getLeadingSlashSkillQuery(textInput.value ?? ""),
+    [textInput.value],
+  );
+  const skillSuggestions = useMemo(
+    () =>
+      slashSkillQuery === null
+        ? []
+        : getMatchingSkillSuggestions(skills, slashSkillQuery),
+    [skills, slashSkillQuery],
+  );
+  const showSkillSuggestions =
+    !disabled &&
+    textareaFocused &&
+    slashSkillQuery !== null &&
+    skillSuggestions.length > 0 &&
+    dismissedSkillSuggestionValue !== textInput.value;
+
+  useEffect(() => {
+    setSkillSuggestionIndex(0);
+  }, [slashSkillQuery, skillSuggestions.length]);
+
+  const applySkillSuggestion = useCallback(
+    (skill: Skill) => {
+      const nextValue = `/${skill.name} `;
+      textInput.setInput(nextValue);
+      setDismissedSkillSuggestionValue(nextValue);
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(nextValue.length, nextValue.length);
+      });
+    },
+    [textInput],
+  );
+
+  const handleSkillSuggestionKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (!showSkillSuggestions) {
+        return;
+      }
+
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSkillSuggestionIndex(
+          (index) => (index + 1) % skillSuggestions.length,
+        );
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSkillSuggestionIndex(
+          (index) =>
+            (index - 1 + skillSuggestions.length) % skillSuggestions.length,
+        );
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        if (event.shiftKey) {
+          return;
+        }
+        event.preventDefault();
+        const selectedSkill = skillSuggestions[skillSuggestionIndex];
+        if (selectedSkill) {
+          applySkillSuggestion(selectedSkill);
+        }
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissedSkillSuggestionValue(textInput.value);
+      }
+    },
+    [
+      applySkillSuggestion,
+      showSkillSuggestions,
+      skillSuggestionIndex,
+      skillSuggestions,
+      textInput.value,
+    ],
+  );
+
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
+    !showSkillSuggestions &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
@@ -384,6 +526,9 @@ export function InputBox({
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
+    if (suggestionsConfig === undefined) {
+      return;
+    }
     lastGeneratedForAiIdRef.current = lastAiId;
 
     const recent = messagesRef.current
@@ -397,6 +542,11 @@ export function InputBox({
       .slice(-6);
 
     if (recent.length === 0) {
+      return;
+    }
+
+    if (!suggestionsConfig?.enabled) {
+      setFollowups([]);
       return;
     }
 
@@ -436,13 +586,20 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, threadId]);
+  }, [
+    context.model_name,
+    disabled,
+    isMock,
+    status,
+    threadId,
+    suggestionsConfig?.enabled,
+  ]);
 
   return (
     <div
       ref={promptRootRef}
       className={cn(
-        "relative flex flex-col",
+        "relative flex min-w-0 flex-col",
         isWelcomeMode ? "gap-4" : "gap-2",
       )}
     >
@@ -478,6 +635,48 @@ export function InputBox({
           </div>
         </div>
       )}
+      {showSkillSuggestions && (
+        <div className="absolute right-0 bottom-full left-0 z-40 mb-2 px-1">
+          <div
+            aria-label="Skill suggestions"
+            className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
+            role="listbox"
+          >
+            {skillSuggestions.map((skill, index) => {
+              const selected = index === skillSuggestionIndex;
+              return (
+                <button
+                  aria-selected={selected}
+                  className={cn(
+                    "flex min-h-12 w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
+                    selected
+                      ? "bg-accent text-accent-foreground"
+                      : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
+                  )}
+                  key={skill.name}
+                  onClick={() => applySkillSuggestion(skill)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setSkillSuggestionIndex(index)}
+                  role="option"
+                  type="button"
+                >
+                  <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      /{skill.name}
+                    </span>
+                    {skill.description && (
+                      <span className="text-muted-foreground block truncate text-xs">
+                        {skill.description}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <PromptInput
         className={cn(
           "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
@@ -506,10 +705,14 @@ export function InputBox({
             placeholder={t.inputBox.placeholder}
             autoFocus={autoFocus}
             defaultValue={initialValue}
+            onBlur={() => setTextareaFocused(false)}
+            onFocus={() => setTextareaFocused(true)}
+            onKeyDown={handleSkillSuggestionKeyDown}
+            ref={textareaRef}
           />
         </PromptInputBody>
-        <PromptInputFooter className="flex">
-          <PromptInputTools>
+        <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
+          <PromptInputTools className="min-w-0 flex-1 flex-wrap">
             {/* TODO: Add more connectors here
           <PromptInputActionMenu>
             <PromptInputActionMenuTrigger className="px-2!" />
@@ -531,7 +734,7 @@ export function InputBox({
                     : "flash"
                 }
               >
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="max-w-28 gap-1! px-2! sm:max-w-none">
                   <div>
                     {context.mode === "flash" && <ZapIcon className="size-3" />}
                     {context.mode === "thinking" && (
@@ -546,7 +749,7 @@ export function InputBox({
                   </div>
                   <div
                     className={cn(
-                      "text-xs font-normal",
+                      "truncate text-xs font-normal",
                       context.mode === "ultra" ? "golden-text" : "",
                     )}
                   >
@@ -693,7 +896,7 @@ export function InputBox({
             </PromptInputActionMenu>
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="hidden gap-1! px-2! sm:inline-flex">
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
                     {context.reasoning_effort === "minimal" &&
@@ -808,13 +1011,13 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
           </PromptInputTools>
-          <PromptInputTools>
+          <PromptInputTools className="min-w-0 justify-end">
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
               <ModelSelectorTrigger asChild>
-                <PromptInputButton>
+                <PromptInputButton className="max-w-40 min-w-0 sm:max-w-56">
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}
@@ -860,11 +1063,13 @@ export function InputBox({
         )}
       </PromptInput>
 
-      {isWelcomeMode && searchParams.get("mode") !== "skill" && (
-        <div className="flex items-center justify-center pt-2">
-          <SuggestionList />
-        </div>
-      )}
+      {isWelcomeMode &&
+        searchParams.get("mode") !== "skill" &&
+        !showSkillSuggestions && (
+          <div className="flex items-center justify-center pt-2">
+            <SuggestionList />
+          </div>
+        )}
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
@@ -915,7 +1120,7 @@ function SuggestionList() {
     [textInput],
   );
   return (
-    <Suggestions className="min-h-16 w-fit items-start">
+    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
       <ConfettiButton
         className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
         variant="outline"

@@ -122,6 +122,26 @@ class TestListMessages:
         messages = await store.list_messages("t1", limit=3)
         assert [m["seq"] for m in messages] == [8, 9, 10]
 
+    @pytest.mark.anyio
+    async def test_pagination_with_interleaved_trace_events(self, store):
+        # Messages and non-message events interleave, so message seqs are
+        # non-contiguous (1, 3, 5, 7, 9). Seq-window pagination must still be
+        # correct over the messages-only projection, including when the cursor
+        # lands in a gap or exactly on a message seq (exclusive bound).
+        for i in range(10):
+            category = "message" if i % 2 == 0 else "trace"
+            await store.put(thread_id="t1", run_id="r1", event_type="e", category=category, content=str(i))
+
+        assert [m["seq"] for m in await store.list_messages("t1")] == [1, 3, 5, 7, 9]
+        # before_seq in a gap: seq < 6 -> [1, 3, 5], last 2
+        assert [m["seq"] for m in await store.list_messages("t1", before_seq=6, limit=2)] == [3, 5]
+        # before_seq on a message seq is exclusive: seq < 5 -> [1, 3]
+        assert [m["seq"] for m in await store.list_messages("t1", before_seq=5, limit=5)] == [1, 3]
+        # after_seq in a gap: seq > 4 -> [5, 7, 9], first 2
+        assert [m["seq"] for m in await store.list_messages("t1", after_seq=4, limit=2)] == [5, 7]
+        # after_seq on a message seq is exclusive: seq > 5 -> [7, 9]
+        assert [m["seq"] for m in await store.list_messages("t1", after_seq=5, limit=5)] == [7, 9]
+
 
 # -- list_events --
 

@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
+import { MCPConfigRequestError } from "@/core/mcp/api";
 import { useMCPConfig, useEnableMCPServer } from "@/core/mcp/hooks";
 import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
@@ -18,6 +19,8 @@ import { SettingsSection } from "./settings-section";
 export function ToolSettingsPage() {
   const { t } = useI18n();
   const { config, isLoading, error } = useMCPConfig();
+  const adminRequired =
+    error instanceof MCPConfigRequestError && error.isAdminRequired;
   return (
     <SettingsSection
       title={t.settings.tools.title}
@@ -25,6 +28,10 @@ export function ToolSettingsPage() {
     >
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
+      ) : adminRequired ? (
+        <div className="text-muted-foreground text-sm">
+          {t.settings.tools.adminRequired}
+        </div>
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
@@ -37,12 +44,21 @@ export function ToolSettingsPage() {
 function MCPServerList({
   servers,
 }: {
-  servers: Record<string, MCPServerConfig>;
+  servers?: Record<string, MCPServerConfig>;
 }) {
+  const { t } = useI18n();
   const { mutate: enableMCPServer } = useEnableMCPServer();
+  const entries = Object.entries(servers ?? {});
+  if (entries.length === 0) {
+    return (
+      <div className="text-muted-foreground text-sm">
+        {t.settings.tools.empty}
+      </div>
+    );
+  }
   return (
     <div className="flex w-full flex-col gap-4">
-      {Object.entries(servers).map(([name, config]) => (
+      {entries.map(([name, config]) => (
         <Item className="w-full" variant="outline" key={name}>
           <ItemContent>
             <ItemTitle>

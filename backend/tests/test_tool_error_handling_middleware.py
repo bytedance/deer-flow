@@ -134,8 +134,16 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    assert len(middlewares) == 6
-    assert isinstance(middlewares[-1], ToolErrorHandlingMiddleware)
+    # 7 baseline (ToolOutputBudget, ThreadData, Sandbox, DanglingToolCall,
+    # LLMErrorHandling, SandboxAudit, ToolErrorHandling)
+    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+
+    assert len(middlewares) == 8
+    assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
+    assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
+    assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 
 
 def test_wrap_tool_call_passthrough_on_success():
@@ -245,3 +253,45 @@ def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
     assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
+
+
+def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_names(monkeypatch):
+    """A subagent built with deferred MCP tools gets DeferredToolFilterMiddleware, positioned before SafetyFinishReasonMiddleware (mirrors the lead ordering)."""
+    from langchain_core.tools import tool as as_tool
+
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    @as_tool
+    def mcp_thing(x: str) -> str:
+        "deferred mcp tool"
+        return x
+
+    setup = build_deferred_tool_setup([tag_mcp_tool(mcp_thing)], enabled=True)
+    assert setup.deferred_names  # sanity: populated setup
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
+
+    filters = [m for m in middlewares if isinstance(m, DeferredToolFilterMiddleware)]
+    assert len(filters) == 1
+    filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert filter_idx < safety_idx
+
+
+def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeypatch):
+    """No deferred setup (disabled / no MCP tool) -> no DeferredToolFilterMiddleware."""
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    for setup in (None, DeferredToolSetup(None, frozenset(), None)):
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
+        assert not any(isinstance(m, DeferredToolFilterMiddleware) for m in middlewares)

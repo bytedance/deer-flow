@@ -14,6 +14,7 @@ the real implementation in isolation.
 """
 
 import asyncio
+import importlib
 import sys
 import threading
 from datetime import datetime
@@ -39,6 +40,21 @@ _MOCKED_MODULE_NAMES = [
 ]
 
 
+def _default_app_config():
+    return SimpleNamespace(tool_search=SimpleNamespace(enabled=False))
+
+
+def _patch_default_get_app_config(executor_module):
+    executor_module.get_app_config = _default_app_config
+    return executor_module
+
+
+def _clear_stale_executor_package_attr() -> None:
+    subagents_pkg = sys.modules.get("deerflow.subagents")
+    if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
+        delattr(subagents_pkg, "executor")
+
+
 @pytest.fixture(autouse=True)
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
@@ -53,6 +69,7 @@ def _setup_executor_classes():
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
         del sys.modules["deerflow.subagents.executor"]
+    _clear_stale_executor_package_attr()
 
     # Set up mocks
     for name in _MOCKED_MODULE_NAMES:
@@ -70,6 +87,14 @@ def _setup_executor_classes():
         SubagentResult,
         SubagentStatus,
     )
+
+    executor_module = sys.modules["deerflow.subagents.executor"]
+
+    # Most tests in this module patch _create_agent and exercise executor
+    # control flow only. Keep those tests hermetic: CI checkouts do not include
+    # the gitignored config.yaml, and deferral-specific tests override this
+    # default explicitly.
+    _patch_default_get_app_config(executor_module)
 
     # Store classes in a dict to yield
     classes = {
@@ -282,11 +307,17 @@ class TestAgentConstruction:
             "name": "parent-model",
             "thinking_enabled": False,
             "app_config": app_config,
+            # attach_tracing=False pairs with graph-root tracing callbacks
+            # injected in _aexecute (see TestSubagentTracingWiring). Without
+            # this the subagent would emit both a model-level trace and a
+            # graph-level trace per call.
+            "attach_tracing": False,
         }
         assert captured["middlewares"] == {
             "app_config": app_config,
             "model_name": "parent-model",
             "lazy_init": True,
+            "deferred_setup": None,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
@@ -359,7 +390,7 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state, _filtered_tools = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
@@ -397,7 +428,7 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state, _filtered_tools = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -439,7 +470,7 @@ class TestAgentConstruction:
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
 
-        state, _filtered_tools = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -448,6 +479,192 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert "Skill content" in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_defers_mcp_tools_when_tool_search_enabled(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """tool_search enabled + a surviving MCP tool: _build_initial_state appends
+        the tool_search tool, withholds the MCP schema, and injects the
+        <available-deferred-tools> section into the SystemMessage."""
+        from langchain_core.tools import tool as as_tool
+
+        from deerflow.subagents import executor as executor_module
+        from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
+
+        @as_tool
+        def mcp_calc(expression: str) -> str:
+            "Evaluate arithmetic."
+            return expression
+
+        executor = SubagentExecutor(config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread")
+
+        state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert "tool_search" in [t.name for t in final_tools]
+        assert deferred_setup.deferred_names == frozenset({"mcp_calc"})
+
+        system_message = state["messages"][0]
+        assert "<available-deferred-tools>" in system_message.content
+        assert "mcp_calc" in system_message.content
+        # The base system_prompt is still present alongside the injected section.
+        assert base_config.system_prompt in system_message.content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_no_deferral_when_tool_search_disabled(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """tool_search disabled: no tool_search tool, no section - pure no-op even
+        with an MCP-tagged tool present."""
+        from langchain_core.tools import tool as as_tool
+
+        from deerflow.subagents import executor as executor_module
+        from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=False)))
+
+        @as_tool
+        def mcp_calc(expression: str) -> str:
+            "Evaluate arithmetic."
+            return expression
+
+        executor = SubagentExecutor(config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread")
+
+        state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert "tool_search" not in [t.name for t in final_tools]
+        assert deferred_setup.deferred_names == frozenset()
+        assert "<available-deferred-tools>" not in state["messages"][0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_deferral_respects_tool_policy_and_tool_search_is_infra(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Adversarial-review follow-up (#3341): tool_search is appended AFTER the
+        subagent tool-policy filter, mirroring the lead's intentional decision
+        (test_tool_search_appended_after_policy_but_never_exposes_denied_tool).
+        Lock the safe-by-construction property:
+
+        - an MCP tool denied by ``disallowed_tools`` never enters the deferred
+          catalog, so tool_search can never promote/expose it;
+        - tool_search itself is infrastructure: naming it in ``disallowed_tools``
+          does not remove it, because its catalog derives from the already-
+          filtered list and carries no access the policy didn't already grant.
+        """
+        from langchain_core.tools import tool as as_tool
+
+        from deerflow.subagents import executor as executor_module
+        from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
+
+        @as_tool
+        def active_tool(x: str) -> str:
+            "active"
+            return x
+
+        @as_tool
+        def mcp_allowed(x: str) -> str:
+            "allowed mcp tool"
+            return x
+
+        @as_tool
+        def mcp_denied(x: str) -> str:
+            "denied mcp tool"
+            return x
+
+        config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+            disallowed_tools=["mcp_denied", "tool_search"],
+        )
+        executor = SubagentExecutor(
+            config=config,
+            tools=[active_tool, tag_mcp_tool(mcp_allowed), tag_mcp_tool(mcp_denied)],
+            thread_id="test-thread",
+        )
+
+        _state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+
+        names = {t.name for t in final_tools}
+        # The policy-denied MCP tool is gone and never reaches the catalog.
+        assert "mcp_denied" not in names
+        assert "mcp_denied" not in deferred_setup.deferred_names
+        assert deferred_setup.deferred_names == frozenset({"mcp_allowed"})
+        # tool_search is infra: present despite being named in disallowed_tools.
+        assert "tool_search" in names
+
+    def test_create_agent_threads_deferred_setup_to_middlewares(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A deferred setup passed to _create_agent flows into the subagent
+        middleware factory (so DeferredToolFilterMiddleware can attach)."""
+        from deerflow.subagents import executor as executor_module
+        from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        captured: dict[str, object] = {}
+
+        def fake_build_subagent_runtime_middlewares(**kwargs):
+            captured["middlewares"] = kwargs
+            return [object()]
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=fake_build_subagent_runtime_middlewares,
+            ),
+        )
+
+        deferred_setup = DeferredToolSetup(object(), frozenset({"mcp_calc"}), "hash123")
+        executor = SubagentExecutor(config=base_config, tools=[], app_config=app_config, parent_model="parent-model")
+
+        executor._create_agent(tools=[], deferred_setup=deferred_setup)
+
+        assert captured["middlewares"]["deferred_setup"] is deferred_setup
 
 
 # -----------------------------------------------------------------------------
@@ -692,7 +909,7 @@ class TestAsyncExecutionPath:
         if system_messages:
             assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
             # The consolidated SystemMessage must carry both the system_prompt
-            # and all skill content — nothing should be split across two messages.
+            # and all skill content; nothing should be split across two messages.
             assert base_config.system_prompt in system_messages[0].content
             assert "Skill instruction text" in system_messages[0].content
 
@@ -1128,11 +1345,9 @@ class TestThreadSafety:
     @pytest.fixture
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
@@ -1254,11 +1469,9 @@ class TestCleanupBackgroundTask:
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
         # Re-import to get the real module with cleanup_background_task
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""
@@ -1399,11 +1612,9 @@ class TestCooperativeCancellation:
     @pytest.fixture
     def executor_module(self, _setup_executor_classes):
         """Import the executor module with real classes."""
-        import importlib
+        executor = importlib.import_module("deerflow.subagents.executor")
 
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
+        return _patch_default_get_app_config(importlib.reload(executor))
 
     @pytest.mark.anyio
     async def test_aexecute_cancelled_before_streaming(self, classes, base_config, mock_agent, msg):
@@ -1756,3 +1967,286 @@ class TestCooperativeCancellation:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+
+# -----------------------------------------------------------------------------
+# Subagent Tracing Wiring
+# -----------------------------------------------------------------------------
+#
+# Regression coverage for the asymmetry fix: subagent runs must mirror the
+# lead agent pattern so a single subagent execution produces one trace with
+# the parent thread's session_id and user_id, not an isolated top-level trace.
+# Three things must hold simultaneously:
+#   1. ``build_tracing_callbacks()`` is appended to ``run_config["callbacks"]``
+#      so the Langfuse handler sees ``on_chain_start(parent_run_id=None)`` and
+#      actually promotes ``langfuse_*`` metadata onto the root trace.
+#   2. ``inject_langfuse_metadata(run_config, ...)`` carries the parent
+#      thread_id (-> session_id) and the captured user_id (-> user_id).
+#   3. The subagent's model is built with ``attach_tracing=False`` so the
+#      model-level handler does not double-count (covered separately by
+#      ``test_create_agent_threads_explicit_app_config_to_model_and_middlewares``).
+
+
+class _FakeStreamAgent:
+    """Stand-in agent that records the ``config`` passed to ``astream``.
+
+    Yields no chunks so ``_aexecute`` takes the ``final_state is None`` path
+    and finishes without exercising message-handling code that is unrelated
+    to the tracing wiring under test.
+    """
+
+    def __init__(self) -> None:
+        self.captured_config: dict | None = None
+        self.captured_context: dict | None = None
+
+    async def astream(self, state, *, config, context, stream_mode):  # noqa: ARG002 - signature parity
+        self.captured_config = config
+        self.captured_context = context
+        return
+        yield  # pragma: no cover - make this an async generator
+
+
+class TestSubagentTracingWiring:
+    """Verify the subagent graph-root tracing wiring matches the lead agent."""
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        executor = importlib.import_module("deerflow.subagents.executor")
+        return _patch_default_get_app_config(importlib.reload(executor))
+
+    @pytest.fixture(autouse=True)
+    def _clear_langfuse_env(self, monkeypatch):
+        """Reset tracing config and env between tests so monkeypatched env
+        vars do not leak across tests in this class or the rest of the suite.
+        """
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        reset_tracing_config()
+        yield
+        reset_tracing_config()
+
+    def _make_executor(self, classes, *, user_id=None, name="general-purpose", parent_model="test-model"):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        config = SubagentConfig(
+            name=name,
+            description="Tracing test agent",
+            system_prompt="You are a tracing test agent.",
+            max_turns=5,
+            timeout_seconds=30,
+        )
+        return SubagentExecutor(
+            config=config,
+            tools=[],
+            parent_model=parent_model,
+            thread_id="thread-trace-1",
+            trace_id="trace-1",
+            user_id=user_id,
+        )
+
+    @pytest.mark.anyio
+    async def test_aexecute_appends_tracing_callbacks_to_run_config(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """``build_tracing_callbacks()`` output must be appended (not replace)
+        to the existing callbacks so the SubagentTokenCollector keeps working.
+        """
+        SubagentStatus = classes["SubagentStatus"]
+
+        sentinel_handler = object()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [sentinel_handler])
+
+        executor = self._make_executor(classes, user_id="alice")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        result = await executor._aexecute("do something")
+
+        assert fake_agent.captured_config is not None
+        callbacks = fake_agent.captured_config.get("callbacks") or []
+        assert sentinel_handler in callbacks, "tracing handler must reach run_config['callbacks']"
+        # SubagentTokenCollector must survive the append (graph-root tracing
+        # cannot displace the token-accounting callback).
+        assert len(callbacks) >= 2, "existing callbacks must be preserved when tracing is injected"
+        assert result.status.value == SubagentStatus.COMPLETED.value
+
+    @pytest.mark.anyio
+    async def test_aexecute_injects_langfuse_session_user_and_trace_name(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """When Langfuse is enabled, ``run_config['metadata']`` must carry the
+        parent thread_id (-> session_id), the constructor-supplied user_id, and
+        a ``subagent:<name>`` trace name so the subagent trace groups under
+        the parent thread's session card.
+        """
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+
+        class _Sentinel:
+            pass
+
+        sentinel = _Sentinel()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [sentinel])
+
+        executor = self._make_executor(classes, user_id="alice", name="general_purpose")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        assert metadata.get("langfuse_session_id") == "thread-trace-1", "subagent trace must inherit parent thread_id as session_id"
+        assert metadata.get("langfuse_user_id") == "alice", "subagent trace must carry the user_id captured at task_tool layer"
+        # Underscores are normalized to hyphens so the trace name matches the
+        # lead-agent naming shape.
+        assert metadata.get("langfuse_trace_name") == "subagent:general-purpose"
+        tags = metadata.get("langfuse_tags") or []
+        assert any(t.startswith("model:") for t in tags), "model tag must be emitted for cost attribution"
+
+    @pytest.mark.anyio
+    async def test_aexecute_skips_langfuse_metadata_when_disabled(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """When Langfuse is not in the enabled providers, ``inject_langfuse_metadata``
+        must be a no-op and ``run_config['metadata']`` must not carry langfuse_*
+        keys. LangSmith-only deployments are unaffected.
+        """
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+
+        executor = self._make_executor(classes, user_id="alice")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        for key in ("langfuse_session_id", "langfuse_user_id", "langfuse_trace_name", "langfuse_tags"):
+            assert key not in metadata, f"{key} must be absent when Langfuse is disabled"
+
+    @pytest.mark.anyio
+    async def test_user_id_defaults_when_not_supplied(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """When ``user_id`` is None at construction (parent did not capture
+        one), the tracing layer must fall back to DEFAULT_USER_ID so the
+        Langfuse Users page still groups the trace.
+        """
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+
+        executor = self._make_executor(classes, user_id=None)
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        # DEFAULT_USER_ID is "default" (see deerflow.runtime.user_context).
+        assert metadata.get("langfuse_user_id") == "default"
+
+    @pytest.mark.anyio
+    async def test_trace_name_falls_back_when_config_name_empty(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """A subagent config without ``name`` must still produce a non-empty
+        trace name so Langfuse does not render the trace as unnamed.
+        """
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        config = SubagentConfig(
+            name="",  # empty name exercises the fallback branch
+            description="No name",
+            system_prompt="",
+            max_turns=5,
+            timeout_seconds=30,
+        )
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="thread-trace-2",
+            trace_id="trace-2",
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        assert metadata.get("langfuse_trace_name") == "subagent"
+
+    @pytest.mark.anyio
+    async def test_environment_tag_emitted_from_deer_flow_env(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """``DEER_FLOW_ENV`` must surface as an ``env:<value>`` tag so Langfuse
+        cost aggregation can split traces by deployment environment.
+        """
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        monkeypatch.setenv("DEER_FLOW_ENV", "staging")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+
+        executor = self._make_executor(classes, user_id="alice")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        tags = metadata.get("langfuse_tags") or []
+        assert "env:staging" in tags
+
+    async def _noop_build_initial_state(self, task):  # noqa: ARG002 - signature parity
+        """Return a minimal state tuple so ``_aexecute`` reaches ``astream``
+        without loading skills, MCP tools, or the real config.
+        """
+        from langchain_core.messages import HumanMessage
+
+        return ({"messages": [HumanMessage(content=task)]}, [], None)
