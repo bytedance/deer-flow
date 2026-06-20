@@ -403,6 +403,7 @@ class TestGuardrailRequestAttribution:
                 "oauth_provider": "google",
                 "oauth_id": "google_123",
                 "run_id": "run_xyz",
+                "is_subagent": True,
             }
         )
         req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_all"})
@@ -415,6 +416,7 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.oauth_id == "google_123"
         assert guardrail_request.run_id == "run_xyz"
         assert guardrail_request.tool_call_id == "call_all"
+        assert guardrail_request.is_subagent is True
 
     def test_partial_attribution_fields_present(self):
         runtime = self._make_runtime_mock(context={"user_id": "user_partial"})

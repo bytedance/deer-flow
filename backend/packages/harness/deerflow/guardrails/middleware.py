@@ -41,6 +41,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             tool_input=request.tool_call.get("args", {}),
             agent_id=self.passport,
             thread_id=context.get("thread_id"),
+            is_subagent=bool(context.get("is_subagent")),
             timestamp=datetime.now(UTC).isoformat(),
             user_id=context.get("user_id"),
             user_role=context.get("user_role"),

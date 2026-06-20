@@ -170,16 +170,19 @@ class TestConfigAssembly:
         runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
         assert runtime_ctx["user_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-    def test_client_supplied_user_id_is_overridden(self):
-        """Spoofed client identity fields must not override the authenticated user."""
+    def test_body_context_user_id_is_overridden(self):
+        """``body.context`` may carry a legacy/non-web user_id, but server auth wins.
+
+        This covers the whitelisted ``body.context`` merge path only. Full
+        identity spoofing coverage lives in the ``body.config.context`` test
+        below, because that path copies arbitrary context keys before inject
+        overwrites them.
+        """
         config = _assemble_config(
             body_config={"recursion_limit": 1000},
             body_context={
                 "agent_name": "myagent",
                 "user_id": "spoofed",
-                "user_role": "admin",
-                "oauth_provider": "spoofed",
-                "oauth_id": "spoofed",
             },
             request_user_id="11111111-2222-3333-4444-555555555555",
             request_user_role="user",
@@ -196,11 +199,9 @@ class TestConfigAssembly:
         ``inject_authenticated_user_context``'s unconditional assignment can
         defeat a client that spoofs ``user_id``/``user_role``/``oauth_*`` there.
 
-        The companion test above spoofs via ``body.context`` and passes because
-        ``merge_run_context_overrides``'s whitelist rejects those keys before
-        ``inject`` ever runs — i.e. for the wrong reason. This test spoofs via
-        ``body.config.context`` so the spoofed values actually reach
-        ``config['context']`` and ``inject``'s overwrite is the only thing
+        The companion test above covers only ``body.context.user_id``. This
+        test spoofs via ``body.config.context`` so all spoofed values actually
+        reach ``config['context']`` and ``inject``'s overwrite is the only thing
         standing between them and ``runtime_ctx``.
         """
         config = _assemble_config(

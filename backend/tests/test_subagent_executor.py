@@ -2330,6 +2330,7 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_provider") == "keycloak"
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
+        assert context.get("is_subagent") is True
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(
