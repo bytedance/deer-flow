@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+AI_RESPONSE_EVENT_TYPE = "llm.ai.response"
+
 
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
@@ -295,7 +297,7 @@ class RunJournal(BaseCallbackHandler):
 
             # Trace event: llm_response (OpenAI completion format)
             self._put(
-                event_type="llm.ai.response",
+                event_type=AI_RESPONSE_EVENT_TYPE,
                 category="message",
                 content=message.model_dump(),
                 metadata={
