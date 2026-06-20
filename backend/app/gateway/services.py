@@ -19,7 +19,7 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 
-from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
@@ -284,6 +284,65 @@ def build_run_config(
     return config
 
 
+async def apply_checkpoint_to_run_config(
+    config: dict[str, Any],
+    *,
+    body: Any,
+    thread_id: str,
+    request: Request,
+) -> None:
+    """Validate an optional run checkpoint and attach it to RunnableConfig."""
+    checkpoint = getattr(body, "checkpoint", None)
+    checkpoint_id = getattr(body, "checkpoint_id", None)
+    checkpoint_ns = ""
+    checkpoint_map = None
+
+    if checkpoint:
+        if not isinstance(checkpoint, Mapping):
+            raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        checkpoint_thread_id = checkpoint.get("thread_id")
+        if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+        raw_checkpoint_id = checkpoint.get("checkpoint_id")
+        if raw_checkpoint_id:
+            checkpoint_id = str(raw_checkpoint_id)
+        raw_checkpoint_ns = checkpoint.get("checkpoint_ns")
+        if raw_checkpoint_ns is not None:
+            checkpoint_ns = str(raw_checkpoint_ns)
+        checkpoint_map = checkpoint.get("checkpoint_map")
+
+    if not checkpoint_id:
+        return
+
+    read_config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": str(checkpoint_id),
+        }
+    }
+    if checkpoint_map is not None:
+        read_config["configurable"]["checkpoint_map"] = checkpoint_map
+
+    checkpointer = get_checkpointer(request)
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(read_config)
+    except Exception as exc:
+        logger.exception("Failed to validate checkpoint %s for thread %s", checkpoint_id, sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to validate checkpoint") from exc
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
+
+    configurable = config.setdefault("configurable", {})
+    if not isinstance(configurable, dict):
+        raise HTTPException(status_code=400, detail="request config configurable must be an object")
+    configurable["thread_id"] = thread_id
+    configurable["checkpoint_ns"] = checkpoint_ns
+    configurable["checkpoint_id"] = str(checkpoint_id)
+    if checkpoint_map is not None:
+        configurable["checkpoint_map"] = checkpoint_map
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -396,6 +455,7 @@ async def start_run(
         agent_factory = resolve_agent_factory(body.assistant_id)
         graph_input = normalize_input(body.input)
         config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer
