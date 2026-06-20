@@ -87,10 +87,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     if not api_key:
         if not _api_key_warned:
             _api_key_warned = True
-            logger.warning(
-                "GroundRoute API key is not set. Set GROUNDROUTE_API_KEY in your environment "
-                "or provide api_key in config.yaml. Get a free key at https://groundroute.ai/keys"
-            )
+            logger.warning("GroundRoute API key is not set. Set GROUNDROUTE_API_KEY in your environment or provide api_key in config.yaml. Get a free key at https://groundroute.ai/keys")
         return json.dumps(
             {"error": "GROUNDROUTE_API_KEY is not configured", "query": query},
             ensure_ascii=False,

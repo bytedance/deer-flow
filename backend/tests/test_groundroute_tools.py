@@ -177,9 +177,7 @@ class TestWebSearchTool:
 
     def test_http_error_returns_structured_error(self, mock_config_with_key):
         mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "402", request=MagicMock(), response=MagicMock(status_code=402, text="Payment Required")
-        )
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError("402", request=MagicMock(), response=MagicMock(status_code=402, text="Payment Required"))
         patcher, _ = _patch_post(mock_resp)
         try:
             from deerflow.community.groundroute.tools import web_search_tool
