@@ -232,13 +232,16 @@ function MessageContent_({
     | undefined;
 
   const [cachedDuration, setCachedDuration] = useState<number | undefined>(
-    () => (message.id ? clientTurnDurations.get(message.id) : undefined),
+    () =>
+      message.id
+        ? clientTurnDurations.get(`${threadId}:${message.id}`)
+        : undefined,
   );
   const turnDuration = rawTurnDuration ?? cachedDuration;
 
   useEffect(() => {
     if (rawTurnDuration !== undefined && message.id) {
-      clientTurnDurations.set(message.id, rawTurnDuration);
+      clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
       setCachedDuration(rawTurnDuration);
     }
   }, [rawTurnDuration, message.id]);
@@ -246,7 +249,7 @@ function MessageContent_({
   const handleDurationChange = useCallback(
     (d: number | undefined) => {
       if (d !== undefined && message.id) {
-        clientTurnDurations.set(message.id, d);
+        clientTurnDurations.set(`${threadId}:${message.id}`, d);
         setCachedDuration(d);
       }
     },
@@ -255,7 +258,11 @@ function MessageContent_({
 
   useEffect(() => {
     return () => {
-      clientTurnDurations.clear();
+      for (const key of clientTurnDurations.keys()) {
+        if (key.startsWith(`${threadId}:`)) {
+          clientTurnDurations.delete(key);
+        }
+      }
     };
   }, [threadId]);
 

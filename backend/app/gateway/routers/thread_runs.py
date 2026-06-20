@@ -685,9 +685,9 @@ async def list_thread_messages(
             if isinstance(content, dict) and content.get("type") == "ai":
                 rid = msg.get("run_id")
                 if rid and rid in run_durations:
-                    if "additional_kwargs" not in msg:
-                        msg["additional_kwargs"] = {}
-                    msg["additional_kwargs"]["turn_duration"] = run_durations[rid]
+                    if "additional_kwargs" not in content:
+                        content["additional_kwargs"] = {}
+                    content["additional_kwargs"]["turn_duration"] = run_durations[rid]
 
     return messages
 

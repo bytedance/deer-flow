@@ -273,3 +273,45 @@ def test_list_run_messages_injects_turn_duration():
 
     assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
     assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_thread_messages_injects_turn_duration():
+    """Verify that list_thread_messages injects turn_duration into the inner content."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[mock_run])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
+    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
