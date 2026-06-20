@@ -29,6 +29,7 @@ export interface RunMessage {
   content: Message;
   metadata: {
     caller: string;
+    [key: string]: unknown;
   };
   created_at: string;
 }

@@ -39,6 +39,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    regenerate: string;
   };
 
   home: {
