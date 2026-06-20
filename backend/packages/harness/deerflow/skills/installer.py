@@ -13,6 +13,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
         reserved = True
         for child in staging_target.iterdir():
             shutil.move(str(child), target / child.name)
+        make_skill_tree_sandbox_readable(target)
         installed = True
     except FileExistsError as e:
         raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e
@@ -151,7 +153,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
-        content = path.read_text(encoding="utf-8")
+        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
     except UnicodeDecodeError as e:
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
@@ -172,15 +174,17 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
 
+def _collect_scannable_files(skill_dir: Path) -> list[Path]:
+    """Enumerate archive files for scanning (blocking; run off the event loop)."""
+    return [candidate for candidate in sorted(skill_dir.rglob("*")) if candidate.is_file()]
+
+
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
     """Run the skill security scanner against all installable text and script files."""
     skill_md = skill_dir / "SKILL.md"
     await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
 
-    for path in sorted(skill_dir.rglob("*")):
-        if not path.is_file():
-            continue
-
+    for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
         if rel_path == Path("SKILL.md"):
             continue

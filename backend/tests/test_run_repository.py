@@ -3,8 +3,6 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
-import re
-
 import pytest
 from sqlalchemy.dialects import postgresql
 
@@ -52,6 +50,9 @@ class _CustomRunStoreWithoutProgress(RunStore):
     async def list_pending(self, *args, **kwargs):
         return []
 
+    async def list_inflight(self, *args, **kwargs):
+        return []
+
     async def aggregate_tokens_by_thread(self, *args, **kwargs):
         return {}
 
@@ -76,6 +77,19 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_put_is_idempotent_for_retried_writes(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", assistant_id="old-agent", status="pending")
+
+        await repo.put("r1", thread_id="t1", assistant_id="new-agent", status="running", error="retry")
+
+        row = await repo.get("r1")
+        assert row["assistant_id"] == "new-agent"
+        assert row["status"] == "running"
+        assert row["error"] == "retry"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_get_missing_returns_none(self, tmp_path):
         repo = await _make_repo(tmp_path)
         assert await repo.get("nope") is None
@@ -85,9 +99,17 @@ class TestRunRepository:
     async def test_update_status(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")
-        await repo.update_status("r1", "running")
+        updated = await repo.update_status("r1", "running")
         row = await repo.get("r1")
+        assert updated is True
         assert row["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_status_returns_false_for_missing_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        updated = await repo.update_status("missing", "error", error="lost")
+        assert updated is False
         await _cleanup()
 
     @pytest.mark.anyio
@@ -147,10 +169,23 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_inflight_returns_pending_and_running_before_cutoff(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("pending-old", thread_id="t1", status="pending", created_at="2026-01-01T00:00:00+00:00")
+        await repo.put("running-old", thread_id="t1", status="running", created_at="2026-01-01T00:00:01+00:00")
+        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:02+00:00")
+        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:03+00:00")
+
+        inflight = await repo.list_inflight(before="2026-01-01T00:00:02+00:00")
+
+        assert [row["run_id"] for row in inflight] == ["pending-old", "running-old"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_run_completion(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="running")
-        await repo.update_run_completion(
+        updated = await repo.update_run_completion(
             "r1",
             status="success",
             total_input_tokens=100,
@@ -165,6 +200,7 @@ class TestRunRepository:
             first_human_message="What is the meaning?",
         )
         row = await repo.get("r1")
+        assert updated is True
         assert row["status"] == "success"
         assert row["total_tokens"] == 150
         assert row["llm_call_count"] == 2
@@ -172,6 +208,13 @@ class TestRunRepository:
         assert row["message_count"] == 3
         assert row["last_ai_message"] == "The answer is 42"
         assert row["first_human_message"] == "What is the meaning?"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_completion_returns_false_for_missing_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        updated = await repo.update_run_completion("missing", status="error", total_tokens=1)
+        assert updated is False
         await _cleanup()
 
     @pytest.mark.anyio
@@ -406,7 +449,11 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_aggregate_tokens_by_thread_reuses_shared_model_name_expression(self):
+    async def test_aggregate_tokens_by_thread_returns_zeros_when_no_rows(self):
+        """Empty thread aggregates to all-zero totals, no model buckets, and a
+        single query — replaces the older test that pinned the now-removed
+        ``GROUP BY coalesce(model_name)`` shape (issue #3645 reduces by_model
+        in Python from each row's per-model JSON column instead)."""
         captured = []
 
         class FakeResult:
@@ -438,17 +485,44 @@ class TestRunRepository:
         }
         assert len(captured) == 1
 
-        stmt = captured[0]
-        compiled_sql = str(stmt.compile(dialect=postgresql.dialect()))
-        select_sql, group_by_sql = compiled_sql.split(" GROUP BY ", maxsplit=1)
-        model_expr_pattern = r"coalesce\(runs\.model_name, %\(([^)]+)\)s\)"
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_compiles_on_postgres_dialect(self):
+        """Compile-smoke the new SELECT on the postgres dialect.
 
-        select_match = re.search(model_expr_pattern + r" AS model", select_sql)
-        group_by_match = re.fullmatch(model_expr_pattern, group_by_sql.strip())
+        The project ships both SQLite and Postgres backends. The new aggregation
+        projects ``RunRow.token_usage_by_model`` (a JSON column) directly into
+        the row set instead of grouping on a scalar, so the SQL needs to compile
+        cleanly under PG's JSON/JSONB binding too. Pins:
+          * the JSON column is selected by name (PG would otherwise need a
+            ``::jsonb`` cast or coalesce around it)
+          * there is no GROUP BY / aggregate function left (the per-model
+            reduction now happens in Python — see issue #3645)
+        """
 
-        assert select_match is not None
-        assert group_by_match is not None
-        assert select_match.group(1) == group_by_match.group(1)
+        captured = []
+
+        class FakeResult:
+            def all(self):
+                return []
+
+        class FakeSession:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return FakeResult()
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        repo = RunRepository(lambda: FakeSessionContext())
+        await repo.aggregate_tokens_by_thread("t1")
+
+        compiled = str(captured[0].compile(dialect=postgresql.dialect()))
+        assert "token_usage_by_model" in compiled
+        assert "GROUP BY" not in compiled.upper()
 
     @pytest.mark.anyio
     async def test_run_manager_hydrates_store_only_run_from_sql(self, tmp_path):

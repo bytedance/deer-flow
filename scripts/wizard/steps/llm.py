@@ -25,8 +25,8 @@ class LLMStepResult:
     extra_model_config: dict | None = None
 
 
-def _ask_model_capabilities(provider: LLMProvider) -> dict:
-    extra_model_config = dict(provider.extra_config)
+def _ask_model_capabilities(provider: LLMProvider, model_name: str) -> dict:
+    extra_model_config = provider.extra_config_for(model_name)
     if not provider.ask_supports_thinking:
         return extra_model_config
 
@@ -49,10 +49,11 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
 
     print()
 
-    # Model selection (show list, default to first)
+    # Model selection (show list, default to provider preference)
     if len(provider.models) > 1:
         print_info(f"Available models for {provider.display_name}:")
-        model_idx = ask_choice("Select model", provider.models, default=0)
+        default_model_idx = provider.models.index(provider.default_model)
+        model_idx = ask_choice("Select model", provider.models, default=default_model_idx)
         model_name = provider.models[model_idx]
     else:
         model_name = provider.models[0]
@@ -61,12 +62,14 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
     base_url: str | None = None
     if provider.name in {"openrouter", "vllm"}:
         base_url = provider.extra_config.get("base_url")
-    if provider.name == "other":
-        print_header(f"{step_label} · Connection details")
-        base_url = ask_text("Base URL (e.g. https://api.openai.com/v1)", required=True)
-        model_name = ask_text("Model name", default=provider.default_model)
 
-    extra_model_config = _ask_model_capabilities(provider)
+    if provider.base_url_prompt:
+        print_header(f"{step_label} · Connection details")
+        base_url = ask_text(provider.base_url_prompt, default=base_url or "", required=True)
+        if provider.model_prompt:
+            model_name = ask_text(provider.model_prompt, default=model_name)
+
+    extra_model_config = _ask_model_capabilities(provider, model_name)
 
     if provider.auth_hint:
         print_header(f"{step_label} · Authentication")

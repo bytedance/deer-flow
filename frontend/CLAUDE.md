@@ -48,6 +48,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `threads/` — Thread creation, streaming, state management (hooks + types)
   - `api/` — LangGraph client singleton
   - `artifacts/` — Artifact loading and caching
+  - `channels/` — IM channel connections (provider catalog, connect/runtime-config API + hooks)
   - `i18n/` — Internationalization (en-US, zh-CN)
   - `settings/` — User preferences in localStorage
   - `memory/` — Persistent user memory system
@@ -88,7 +89,11 @@ Backend API URLs are optional; an nginx proxy is used by default:
 
 ```
 NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
-NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:2024
+NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
+
+Leave these unset for the standard `make dev` / Docker flow, where nginx serves
+the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*`
+routes.
 
 Requires Node.js 22+ and pnpm 10.26.2+.

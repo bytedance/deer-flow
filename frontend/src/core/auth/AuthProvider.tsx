@@ -10,6 +10,8 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { isStaticWebsiteOnly } from "../static-mode";
+
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -24,6 +26,7 @@ interface AuthContextType {
   isLoading: boolean;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  applyUser: (user: User | null) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -46,14 +49,26 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
+  const staticMode = isStaticWebsiteOnly();
 
   const isAuthenticated = user !== null;
+
+  /**
+   * Apply a user value supplied by a caller (e.g. banner probe) that has
+   * already fetched it. Equivalent to setUser, exposed with a stable name
+   * so consumers don't reach into React internals.
+   */
+  const applyUser = useCallback((next: User | null) => {
+    setUser(next);
+  }, []);
 
   /**
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
   const refreshUser = useCallback(async () => {
+    if (staticMode) return;
+
     try {
       setIsLoading(true);
       const res = await fetch("/api/v1/auth/me", {
@@ -77,29 +92,50 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [pathname, router]);
+  }, [staticMode, pathname, router]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
    * Per RFC-001: Immediately clear local state, don't wait for server confirmation
+   *
+   * When the gateway is unreachable the fetch silently fails — the SPA
+   * router.push("/") would leave the user on "/" still holding stale
+   * React state and any in-flight SSE / fetch / query subscriptions.
+   * We therefore fall back to a hard navigation (window.location.href),
+   * which discards all client state the same way the legacy form-POST
+   * logout used to.
    */
   const logout = useCallback(async () => {
     // Immediately clear local state to prevent UI flicker
     setUser(null);
 
+    if (staticMode) {
+      router.push("/");
+      return;
+    }
+
+    let logoutFailed = false;
     try {
-      await fetch("/api/v1/auth/logout", {
+      const res = await fetch("/api/v1/auth/logout", {
         method: "POST",
         credentials: "include",
       });
+      if (!res.ok) logoutFailed = true;
     } catch (err) {
       console.error("Logout request failed:", err);
-      // Still redirect even if logout request fails
+      logoutFailed = true;
+    }
+
+    if (logoutFailed && typeof window !== "undefined") {
+      // Hard navigation ensures every in-flight subscription is torn down,
+      // matching the legacy form-POST logout behaviour during a gateway outage.
+      window.location.href = "/";
+      return;
     }
 
     // Redirect to home page
     router.push("/");
-  }, [router]);
+  }, [staticMode, router]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
@@ -108,6 +144,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const lastCheckRef = React.useRef(0);
 
   useEffect(() => {
+    if (staticMode) return;
+
     const handleVisibilityChange = () => {
       if (document.visibilityState !== "visible" || user === null) return;
       const now = Date.now();
@@ -120,7 +158,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [user, refreshUser]);
+  }, [staticMode, user, refreshUser]);
 
   const value: AuthContextType = {
     user,
@@ -128,6 +166,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     isLoading,
     logout,
     refreshUser,
+    applyUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -155,6 +194,8 @@ export function useRequireAuth(): AuthContextType {
   const pathname = usePathname();
 
   useEffect(() => {
+    if (isStaticWebsiteOnly()) return;
+
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
       router.push(buildLoginUrl(pathname || "/workspace"));

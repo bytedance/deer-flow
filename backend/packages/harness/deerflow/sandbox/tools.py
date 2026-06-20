@@ -1,4 +1,5 @@
 import asyncio
+import os
 import posixpath
 import re
 import shlex
@@ -23,6 +24,11 @@ from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_
 from deerflow.tools.types import Runtime
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
+# in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
+# ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
+_IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
@@ -43,6 +49,16 @@ _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
 _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
+
+# Maximum bytes accepted in a single non-append write_file call (issue #3189).
+# Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
+# because the tool-call JSON payload (which the model must emit as one
+# continuous stream) grows past the safe window. 80 KB ≈ 20K tokens, a
+# comfortable headroom under the factory-default 240s stream_chunk_timeout.
+# Deployments can override via env var DEERFLOW_WRITE_FILE_MAX_BYTES; set to
+# 0 (or negative) to disable the guard entirely.
+_WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
+_WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
 _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
@@ -927,6 +943,54 @@ def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState)
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
+def _braces_are_identifier_placeholders_only(fragment: str) -> bool:
+    """Return True only if every ``{...}`` block is a single identifier placeholder.
+
+    Identifier-only blocks (``{id}``, ``{port}``) come from REST templates and
+    f-strings and are text. Bash brace expansion (``{passwd,shadow}``, ``{,.bak}``,
+    ``{etc,var}``) reconstitutes real host paths at runtime, so it must NOT be
+    exempted. Stray, empty, or nested braces are rejected too (each ``{``/``}``
+    must belong to one balanced single-placeholder block).
+
+    ``${VAR}`` shell variable expansion (e.g. ``/home/${USER}/.ssh/id_rsa``) also
+    expands to a real host path at runtime, so a ``${`` anywhere disqualifies the
+    fragment even though the inner name is identifier-shaped.
+    """
+    if "${" in fragment:
+        return False
+    blocks = _IDENTIFIER_BRACE_BLOCK_PATTERN.findall(fragment)
+    # Every brace must be part of a balanced ``{...}`` block (no stray/nested braces).
+    if fragment.count("{") != len(blocks) or fragment.count("}") != len(blocks):
+        return False
+    return all(_IDENTIFIER_PATTERN.fullmatch(inner) for inner in blocks)
+
+
+def _is_non_path_literal_fragment(fragment: str) -> bool:
+    """Return True if a ``/segment`` match is almost certainly text, not a path.
+
+    The absolute-path scan runs over the raw command string, so it also matches
+    ``/segment`` sequences sitting inside string literals, f-strings, and
+    templates (e.g. ``python -c "print(f'/端口{port}')"`` or a REST template
+    like ``/devices/{id}/port``). Non-ASCII characters and single identifier-like
+    ``{placeholder}`` braces do not appear in real host filesystem paths a command
+    would open, so treating such fragments as text removes those false positives.
+
+    Bash brace expansion (``cat /etc/{passwd,shadow}``) is deliberately NOT
+    exempted: it expands to plain host paths at runtime, so only braces that are
+    single identifier placeholders are treated as text (see
+    :func:`_braces_are_identifier_placeholders_only`).
+
+    This guard is best-effort, not a security boundary (see
+    :func:`validate_local_bash_command_paths`): plain ASCII host paths such as
+    ``/etc/passwd`` contain none of these markers and are still rejected.
+    """
+    if any(ord(ch) > 127 for ch in fragment):
+        return True
+    if "{" in fragment or "}" in fragment:
+        return _braces_are_identifier_placeholders_only(fragment)
+    return False
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -959,6 +1023,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         absolute_path = match.group()
+        if _is_non_path_literal_fragment(absolute_path):
+            continue
         if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
@@ -1654,6 +1720,12 @@ def read_file_tool(
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
+    except UnicodeDecodeError:
+        return (
+            f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
+            "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
+            "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
+        )
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
@@ -1671,6 +1743,23 @@ async def _read_file_tool_async(
 read_file_tool.coroutine = _read_file_tool_async
 
 
+def _effective_write_file_max_bytes() -> int:
+    """Return the active size cap for non-append write_file calls.
+
+    Reads ``DEERFLOW_WRITE_FILE_MAX_BYTES`` at call time (not import time)
+    so tests and runtime tweaks take effect without restart. Falls back to
+    the default on missing/malformed values. A non-positive value disables
+    the guard.
+    """
+    raw = os.environ.get(_WRITE_FILE_MAX_BYTES_ENV)
+    if raw is None:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+
+
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: Runtime,
@@ -1679,14 +1768,47 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file. By default this overwrites the target file; set append to true to add content to the end without replacing existing content.
+    """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    SIZE POLICY (issue #3189):
+    A single non-append write_file call must not exceed 80 KB of UTF-8 content.
+    Oversized single-shot writes correlate with LLM streaming chunk-gap
+    timeouts because the tool-call JSON payload — which the model must emit as
+    one continuous stream — grows past the safe window. For larger documents,
+    use ONE of these strategies (write_file rejects oversized payloads with an
+    actionable error):
+
+      1. INCREMENTAL EDIT (preferred for revisions): after the initial write,
+         use `str_replace` to surgically update sections. This is the same
+         pattern Claude Code's Write+Edit and OpenAI Codex's apply_patch use,
+         and keeps each tool call's payload small.
+      2. APPEND-IN-CHUNKS (for new long-form content): split the document into
+         sections, each well under 80 KB. First call uses append=False to
+         create the file; subsequent calls use append=True. The 80 KB cap does
+         NOT apply to append=True calls.
+
+    Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
+    (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
+        append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    if not append:
+        max_bytes = _effective_write_file_max_bytes()
+        if max_bytes > 0:
+            content_bytes = len(content.encode("utf-8"))
+            if content_bytes > max_bytes:
+                return (
+                    f"Error: write_file content ({content_bytes} bytes) exceeds the "
+                    f"{max_bytes}-byte single-call limit. Split the content into smaller "
+                    "pieces: either (a) write the first section now, then use `str_replace` "
+                    "for further edits, or (b) call write_file again with append=True "
+                    "carrying the next section. See SIZE POLICY in the tool docstring "
+                    "or issue #3189 for the rationale."
+                )
     try:
         requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)

@@ -227,6 +227,110 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+
+
+def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
+    """Normalize a single fact entry from a model-produced memory update."""
+    if not isinstance(fact, dict):
+        return None
+
+    raw_content = fact.get("content")
+    if not isinstance(raw_content, str):
+        return None
+    content = raw_content.strip()
+    if not content:
+        return None
+
+    raw_category = fact.get("category")
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "context"
+
+    raw_confidence = fact.get("confidence", 0.5)
+    if isinstance(raw_confidence, bool):
+        return None
+    if isinstance(raw_confidence, str):
+        raw_confidence = raw_confidence.strip()
+        if not raw_confidence:
+            return None
+        try:
+            raw_confidence = float(raw_confidence)
+        except ValueError:
+            return None
+    elif isinstance(raw_confidence, (int, float)):
+        raw_confidence = float(raw_confidence)
+    else:
+        return None
+
+    if not math.isfinite(raw_confidence):
+        return None
+
+    normalized_fact = {
+        "content": content,
+        "category": category,
+        "confidence": raw_confidence,
+    }
+    source_error = fact.get("sourceError")
+    if isinstance(source_error, str):
+        normalized_source_error = source_error.strip()
+        if normalized_source_error:
+            normalized_fact["sourceError"] = normalized_source_error
+
+    return normalized_fact
+
+
+def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce parsed memory update data into the shape consumed by _apply_updates."""
+    user = update_data.get("user")
+    history = update_data.get("history")
+    new_facts = update_data.get("newFacts")
+    facts_to_remove = update_data.get("factsToRemove")
+    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
+    normalized_new_facts = []
+    dropped_new_fact = not isinstance(new_facts, list)
+    if isinstance(new_facts, list):
+        for fact in new_facts:
+            normalized_fact = _normalize_memory_update_fact(fact)
+            if normalized_fact is not None:
+                normalized_new_facts.append(normalized_fact)
+            else:
+                dropped_new_fact = True
+
+    if normalized_facts_to_remove and dropped_new_fact:
+        raise json.JSONDecodeError(
+            "Unsafe partial memory update: factsToRemove with malformed newFacts",
+            json.dumps(update_data, ensure_ascii=False),
+            0,
+        )
+
+    return {
+        "user": user if isinstance(user, dict) else {},
+        "history": history if isinstance(history, dict) else {},
+        "newFacts": normalized_new_facts,
+        "factsToRemove": normalized_facts_to_remove,
+    }
+
+
+def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
+    """Parse the first valid memory-update JSON object from an LLM response.
+
+    Some providers may wrap JSON in thinking traces, prose, or markdown fences
+    even when prompted to return JSON only. This parser accepts safely
+    extractable JSON objects but does not repair truncated or malformed JSON.
+    """
+    response_text = _extract_text(response_content).strip()
+    decoder = json.JSONDecoder()
+
+    for match in re.finditer(r"\{", response_text):
+        try:
+            parsed, _end = decoder.raw_decode(response_text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS.issubset(parsed):
+            return _normalize_memory_update_data(parsed)
+
+    raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
+
+
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -353,13 +457,7 @@ class MemoryUpdater:
         user_id: str | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
-        response_text = _extract_text(response_content).strip()
-
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-        update_data = json.loads(response_text)
+        update_data = _parse_memory_update_response(response_content)
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)

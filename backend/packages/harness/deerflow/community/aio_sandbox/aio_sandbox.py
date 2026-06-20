@@ -39,10 +39,62 @@ class AioSandbox(Sandbox):
         self._client = AioSandboxClient(base_url=base_url, timeout=600)
         self._home_dir = home_dir
         self._lock = threading.Lock()
+        self._closed = False
 
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def close(self) -> None:
+        """Best-effort close of the host-side HTTP client owned by this sandbox.
+
+        The agent_sandbox SDK is Fern-generated and exposes no ``close()`` /
+        ``__exit__``, so we reach the socket-owning ``httpx.Client`` explicitly
+        through its attribute chain::
+
+            Sandbox._client_wrapper        -> SyncClientWrapper
+                .httpx_client              -> Fern HttpClient (a wrapper, NOT httpx.Client)
+                    .httpx_client          -> httpx.Client     <- the real socket owner
+
+        Closing it releases pooled sockets so long-running provider lifecycles
+        do not accumulate unreclaimed host-side resources (#2872).
+
+        Resolution is most-specific-first with graceful degradation: if a future
+        SDK adds a top-level ``Sandbox.close()`` it is picked up automatically
+        without changing this code. Idempotent, thread-safe, and non-fatal:
+        failures during teardown are logged and swallowed so provider/backend
+        cleanup is never blocked.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            client = self._client
+            # Drop the reference under the lock for use-after-close safety: any
+            # later command on this instance fails loudly instead of reusing a
+            # half-closed client.
+            self._client = None
+
+        if client is None:
+            return
+
+        # Walk from the real httpx.Client up to the top-level client, picking the
+        # first object that actually exposes close().
+        wrapper = getattr(client, "_client_wrapper", None)
+        fern_http = getattr(wrapper, "httpx_client", None)
+        real_httpx = getattr(fern_http, "httpx_client", None)
+        target = next(
+            (c for c in (real_httpx, fern_http, client) if c is not None and hasattr(c, "close")),
+            None,
+        )
+        if target is None:
+            logger.debug("AioSandbox %s: no closable client found, nothing to release", self.id)
+            return
+
+        try:
+            target.close()
+        except Exception as e:
+            logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
 
     @property
     def home_dir(self) -> str:
@@ -80,10 +132,22 @@ class AioSandbox(Sandbox):
                 output = result.data.output if result.data else ""
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
-                    logger.warning("ErrorObservation detected in sandbox output, retrying with a fresh session")
+                    logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
+                    # exec_command only auto-creates a session when called with
+                    # no id, so the recovery session must be created explicitly
+                    # before we target it on retry.
                     fresh_id = str(uuid.uuid4())
-                    result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                    output = result.data.output if result.data else ""
+                    self._client.shell.create_session(id=fresh_id)
+                    try:
+                        result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                        output = result.data.output if result.data else ""
+                    finally:
+                        # Release the one-shot recovery session, best-effort, so
+                        # repeated corruption can't accumulate sessions.
+                        try:
+                            self._client.shell.cleanup_session(fresh_id)
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to release recovery session {fresh_id}: {cleanup_error}")
 
                 return output if output else "(no output)"
             except Exception as e:

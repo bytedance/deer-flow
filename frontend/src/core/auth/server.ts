@@ -1,6 +1,10 @@
 import { cookies } from "next/headers";
 
+import { isStaticWebsiteOnly } from "../static-mode";
+
+import { AUTH_DISABLED_USER, isAuthDisabledMode } from "./auth-disabled-user";
 import { getGatewayConfig } from "./gateway-config";
+import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
 
 const SSR_AUTH_TIMEOUT_MS = 5_000;
@@ -10,15 +14,17 @@ const SSR_AUTH_TIMEOUT_MS = 5_000;
  * Returns a tagged AuthResult — callers use exhaustive switch, no try/catch.
  */
 export async function getServerSideUser(): Promise<AuthResult> {
-  if (process.env.DEER_FLOW_AUTH_DISABLED === "1") {
+  if (isStaticWebsiteOnly()) {
     return {
       tag: "authenticated",
-      user: {
-        id: "e2e-user",
-        email: "e2e@test.local",
-        system_role: "admin",
-        needs_setup: false,
-      },
+      user: STATIC_WEBSITE_USER,
+    };
+  }
+
+  if (isAuthDisabledMode()) {
+    return {
+      tag: "authenticated",
+      user: AUTH_DISABLED_USER,
     };
   }
 

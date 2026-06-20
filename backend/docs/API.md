@@ -228,10 +228,13 @@ Get current MCP server configurations.
 GET /api/mcp/config
 ```
 
+Requires an authenticated admin session. Sensitive env/header/OAuth secret
+values are masked in the response.
+
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -255,10 +258,15 @@ PUT /api/mcp/config
 Content-Type: application/json
 ```
 
+Requires an authenticated admin session. API-managed `stdio` MCP servers may
+only use allowed executable names for `command` (default: `npx`, `uvx`). Set
+`DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` to a comma-separated list when a
+deployment needs additional trusted launchers.
+
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -276,8 +284,38 @@ Content-Type: application/json
 **Response:**
 ```json
 {
+  "mcp_servers": {
+    "github": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "***"
+      },
+      "description": "GitHub operations"
+    }
+  }
+}
+```
+
+#### Reset MCP Tools Cache
+
+Clear cached MCP tools and persistent MCP sessions process-wide. This affects
+all threads and users in the current Gateway process. Tools are loaded again
+from configured MCP servers on the next agent run or tool lookup.
+
+```http
+POST /api/mcp/cache/reset
+```
+
+Requires an authenticated admin session.
+
+**Response:**
+```json
+{
   "success": true,
-  "message": "MCP configuration updated"
+  "message": "MCP tools cache reset. Tools will reload on next use."
 }
 ```
 

@@ -2,7 +2,7 @@ name: Lint Check
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: [ 'main', '2.0.x-dev' ]
   pull_request:
     branches: [ '*' ]
 
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  lint-backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

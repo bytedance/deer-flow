@@ -25,6 +25,60 @@ def test_parse_json_string_list_rejects_non_list():
     assert suggestions._parse_json_string_list(text) is None
 
 
+def test_strip_think_blocks_removes_complete_block():
+    text = "<think>\nreasoning here\n</think>\nanswer"
+    assert suggestions._strip_think_blocks(text) == "answer"
+
+
+def test_strip_think_blocks_is_case_insensitive():
+    text = "<Think>reasoning</THINK>\nanswer"
+    assert suggestions._strip_think_blocks(text) == "answer"
+
+
+def test_strip_think_blocks_drops_unclosed_block():
+    # Reasoning models truncated at max_tokens emit an unclosed <think>.
+    text = "<think>\nreasoning that never finished because tokens ran out"
+    assert suggestions._strip_think_blocks(text) == ""
+
+
+def test_strip_think_blocks_keeps_text_without_think():
+    text = '["a", "b"]'
+    assert suggestions._strip_think_blocks(text) == '["a", "b"]'
+
+
+def test_parse_json_string_list_ignores_brackets_inside_think_block():
+    # MiniMax-M3 inlines its chain-of-thought as <think>...</think> in content
+    # (reasoning_split=false). When that reasoning contains '[' / ']', the old
+    # find('[')/rfind(']') logic grabbed the wrong span and parsing failed.
+    text = '<think>\nMaybe a list like ["x", "y"] could work. Let me craft 3.\n</think>\n["Q1", "Q2", "Q3"]'
+    assert suggestions._parse_json_string_list(text) == ["Q1", "Q2", "Q3"]
+
+
+def test_parse_json_string_list_strips_think_then_code_fence():
+    text = '<think>reasoning</think>\n```json\n["Q1", "Q2"]\n```'
+    assert suggestions._parse_json_string_list(text) == ["Q1", "Q2"]
+
+
+def test_generate_suggestions_strips_inline_think_block(monkeypatch):
+    # End-to-end: model returns thinking inline followed by the JSON array.
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="介绍深度学习"),
+            suggestions.SuggestionMessage(role="assistant", content="深度学习是机器学习的分支。"),
+        ],
+        n=3,
+        model_name=None,
+    )
+    content = '<think>\nThe user asked about deep learning. Options: maybe [1] frameworks, [2] math basics.\n</think>\n["深度学习和机器学习的区别？", "常用框架有哪些？", "需要什么数学基础？"]'
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=content))
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
+
+    assert result.suggestions == ["深度学习和机器学习的区别？", "常用框架有哪些？", "需要什么数学基础？"]
+
+
 def test_format_conversation_formats_roles():
     messages = [
         suggestions.SuggestionMessage(role="User", content="Hi"),
@@ -49,7 +103,7 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
     fake_model.ainvoke.assert_awaited_once()
@@ -71,7 +125,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -93,7 +147,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -112,6 +166,43 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_returns_empty_when_disabled(monkeypatch):
+    """Ensure suggestions are bypassed and returned an empty list when disabled in config."""
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=3,
+        model_name=None,
+    )
+
+    mock_config = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("Model should not be called."))
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=mock_config))
+
+    assert result.suggestions == []
+    fake_model.ainvoke.assert_not_called()
+
+
+def test_get_suggestions_config():
+    """Ensure the GET /config endpoint correctly returns the boolean state."""
+
+    # Test when enabled
+    mock_config_true = SimpleNamespace(suggestions=SimpleNamespace(enabled=True))
+    result_true = asyncio.run(suggestions.get_suggestions_config(config=mock_config_true))
+    assert result_true.enabled is True
+
+    # Test when disabled
+    mock_config_false = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+    result_false = asyncio.run(suggestions.get_suggestions_config(config=mock_config_false))
+    assert result_false.enabled is False

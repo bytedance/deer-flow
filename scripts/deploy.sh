@@ -71,7 +71,7 @@ if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then
     export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
 
-if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     # Try to seed from repo (config.example.yaml is the canonical template)
     if [ -f "$REPO_ROOT/config.example.yaml" ]; then
         cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
@@ -140,6 +140,38 @@ if [ -z "$BETTER_AUTH_SECRET" ]; then
     fi
 fi
 
+# ── DEER_FLOW_INTERNAL_AUTH_TOKEN ────────────────────────────────────────────
+# Shared by all Gateway workers so channel workers can call internal Gateway
+# APIs even when the request is handled by a different Uvicorn worker.
+
+_internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
+if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+    if [ -f "$_internal_auth_token_file" ]; then
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
+    else
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        if command -v python3 > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_INTERNAL_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_INTERNAL_AUTH_TOKEN manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        echo "$DEER_FLOW_INTERNAL_AUTH_TOKEN" > "$_internal_auth_token_file"
+        chmod 600 "$_internal_auth_token_file"
+        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
+    fi
+fi
+
 # ── detect_sandbox_mode ───────────────────────────────────────────────────────
 
 detect_sandbox_mode() {
@@ -183,9 +215,9 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
     export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
     export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
-    export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+    export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
     "${COMPOSE_CMD[@]}" down
     exit 0
 fi
@@ -198,11 +230,6 @@ if [ "$CMD" = "build" ]; then
     echo "  DeerFlow — Building Images"
     echo "=========================================="
     echo ""
-
-    # Docker socket is needed for compose to parse volume specs
-    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
-    fi
 
     "${COMPOSE_CMD[@]}" build
 
@@ -237,20 +264,25 @@ if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
 fi
 
-# ── DEER_FLOW_DOCKER_SOCKET ───────────────────────────────────────────────────
+# ── DEER_FLOW_DOCKER_SOCKET (aio / pure-DooD mode only) ──────────────────────
+# Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+# Docker socket. It is mounted via the opt-in docker-compose.dood.yaml overlay,
+# appended here, so the default (local) and provisioner modes never expose the
+# host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
 if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
     export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
 fi
 
-if [ "$sandbox_mode" != "local" ]; then
+if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
         echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
         echo "  AioSandboxProvider (DooD) will not work."
         exit 1
-    else
-        echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
     fi
+    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+    COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
 
 echo ""

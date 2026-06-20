@@ -2,7 +2,7 @@
 
 import { BotIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { type ComponentProps, type ReactElement, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -23,12 +23,81 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { cn } from "@/lib/utils";
 
 interface AgentCardProps {
   agent: Agent;
+}
+
+/**
+ * Reveals the full text in a tooltip ONLY when its trigger is actually clipped.
+ * Clipping is measured on pointer enter against the trigger's own box, covering
+ * both single-line `truncate` (width) and multi-line `line-clamp` (height), so
+ * untruncated content never pops a redundant tooltip.
+ */
+function TruncatedTooltip({
+  text,
+  children,
+}: {
+  text: string;
+  children: ReactElement;
+}) {
+  const [truncated, setTruncated] = useState(false);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        asChild
+        onPointerEnter={(e) => {
+          const el = e.currentTarget;
+          setTruncated(
+            el.scrollWidth > el.clientWidth ||
+              el.scrollHeight > el.clientHeight,
+          );
+        }}
+      >
+        {children}
+      </TooltipTrigger>
+      {truncated && (
+        <TooltipContent className="max-w-xs text-wrap break-words">
+          {text}
+        </TooltipContent>
+      )}
+    </Tooltip>
+  );
+}
+
+/**
+ * Long, user-controlled labels (agent model, skills, tool groups) that must
+ * never break the card layout: width is capped to the parent and the text is
+ * truncated with an ellipsis, with the full value revealed on hover.
+ */
+function TruncatedBadge({
+  label,
+  variant,
+  className,
+}: {
+  label: string;
+  variant: ComponentProps<typeof Badge>["variant"];
+  className?: string;
+}) {
+  return (
+    <TruncatedTooltip text={label}>
+      <Badge
+        variant={variant}
+        className={cn("block max-w-full truncate", className)}
+      >
+        {label}
+      </Badge>
+    </TruncatedTooltip>
+  );
 }
 
 export function AgentCard({ agent }: AgentCardProps) {
@@ -55,27 +124,33 @@ export function AgentCard({ agent }: AgentCardProps) {
     <>
       <Card className="group flex flex-col transition-shadow hover:shadow-md">
         <CardHeader className="pb-3">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-start justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
               <div className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
                 <BotIcon className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <CardTitle className="truncate text-base">
-                  {agent.name}
-                </CardTitle>
+                <TruncatedTooltip text={agent.name}>
+                  <CardTitle className="truncate text-base">
+                    {agent.name}
+                  </CardTitle>
+                </TruncatedTooltip>
                 {agent.model && (
-                  <Badge variant="secondary" className="mt-0.5 text-xs">
-                    {agent.model}
-                  </Badge>
+                  <TruncatedBadge
+                    label={agent.model}
+                    variant="secondary"
+                    className="mt-0.5 text-xs"
+                  />
                 )}
               </div>
             </div>
           </div>
           {agent.description && (
-            <CardDescription className="mt-2 line-clamp-2 text-sm">
-              {agent.description}
-            </CardDescription>
+            <TruncatedTooltip text={agent.description}>
+              <CardDescription className="mt-2 line-clamp-2 text-sm">
+                {agent.description}
+              </CardDescription>
+            </TruncatedTooltip>
           )}
         </CardHeader>
 
@@ -83,22 +158,20 @@ export function AgentCard({ agent }: AgentCardProps) {
           <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups?.map((group) => (
-                <Badge
+                <TruncatedBadge
                   key={`tg:${group}`}
+                  label={group}
                   variant="outline"
                   className="text-xs"
-                >
-                  {group}
-                </Badge>
+                />
               ))}
               {agent.skills?.map((skill) => (
-                <Badge
+                <TruncatedBadge
                   key={`sk:${skill}`}
+                  label={skill}
                   variant="secondary"
                   className="text-xs"
-                >
-                  {skill}
-                </Badge>
+                />
               ))}
             </div>
           </CardContent>

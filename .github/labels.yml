@@ -1,0 +1,119 @@
+# Declarative label source of truth for DeerFlow.
+#
+# This file is the single source of truth for repository labels used by the
+# auto-labeling workflows (.github/workflows/pr-labeler.yml, pr-triage.yml,
+# issue-triage.yml). Auto-labelers can only apply labels that already exist,
+# so every label referenced by a workflow MUST be declared here.
+#
+# Apply with:  uv run --with pyyaml python scripts/sync_labels.py [--repo OWNER/NAME]
+# CI keeps it in sync via .github/workflows/label-sync.yml (runs on changes here).
+#
+# Sync is additive/update-only: it creates or updates the labels listed below
+# and never deletes labels that are not listed.
+#
+# Color = 6-digit hex without the leading '#'.
+
+labels:
+  # ── Type ─────────────────────────────────────────────────────────────────
+  # Mostly GitHub defaults; declared here so colors/descriptions stay stable
+  # and so issue templates can rely on them existing.
+  - name: bug
+    color: d73a4a
+    description: Something isn't working
+  - name: enhancement
+    color: a2eeef
+    description: New feature or request
+  - name: documentation
+    color: 0075ca
+    description: Improvements or additions to documentation
+  - name: question
+    color: d876e3
+    description: Further information is requested
+
+  # ── Area (auto, by changed paths — see .github/labeler.yml) ───────────────
+  # Mirrors the "Surface area" section of the pull request template.
+  - name: "area:frontend"
+    color: c5def5
+    description: Next.js frontend under frontend/
+  - name: "area:backend"
+    color: c5def5
+    description: Gateway / runtime / core backend under backend/
+  - name: "area:agents"
+    color: c5def5
+    description: Agents, subagents, graph wiring, prompts, langgraph.json
+  - name: "area:sandbox"
+    color: c5def5
+    description: Sandboxed execution and docker/
+  - name: "area:skills"
+    color: c5def5
+    description: Skills under skills/ or the skills harness
+  - name: "area:mcp"
+    color: c5def5
+    description: Model Context Protocol integration
+  - name: "area:ci"
+    color: c5def5
+    description: GitHub Actions, CI config, repo tooling
+  - name: "area:docs"
+    color: c5def5
+    description: Documentation and Markdown only
+  - name: "area:deps"
+    color: c5def5
+    description: Dependency manifests / lockfiles
+
+  # ── Size (auto, by additions + deletions — see pr-triage.yml) ─────────────
+  - name: "size/XS"
+    color: "009900"
+    description: PR changes < 20 lines
+  - name: "size/S"
+    color: 77bb00
+    description: PR changes 20-100 lines
+  - name: "size/M"
+    color: eebb00
+    description: PR changes 100-300 lines
+  - name: "size/L"
+    color: ee9900
+    description: PR changes 300-700 lines
+  - name: "size/XL"
+    color: ee5500
+    description: PR changes 700+ lines
+
+  # ── Risk (auto, by changed paths — see pr-triage.yml) ─────────────────────
+  - name: "risk:low"
+    color: 0e8a16
+    description: "Low risk: docs / i18n / assets only"
+  - name: "risk:medium"
+    color: fbca04
+    description: "Medium risk: regular code changes"
+  - name: "risk:high"
+    color: b60205
+    description: "High risk: backend API, agents, sandbox, auth, deps, CI"
+
+  # ── Priority (manual) ─────────────────────────────────────────────────────
+  - name: P0
+    color: b60205
+    description: Critical priority
+  - name: P1
+    color: d93f0b
+    description: Major priority
+  - name: P2
+    color: e99695
+    description: Normal priority
+
+  # ── Status (auto + manual) ────────────────────────────────────────────────
+  - name: needs-triage
+    color: fef2c0
+    description: Awaiting maintainer triage
+  - name: needs-validation
+    color: d4c5f9
+    description: Touches front/back contract surface; needs real-path validation
+  - name: skip-validation
+    color: cccccc
+    description: "Maintainer override: do not auto-add needs-validation on this PR"
+  - name: reviewing
+    color: 5319e7
+    description: A maintainer is reviewing this PR
+
+  # ── Contributor ───────────────────────────────────────────────────────────
+  - name: first-time-contributor
+    color: c2e0c6
+    description: First contribution to this repository — be welcoming

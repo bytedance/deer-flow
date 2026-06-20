@@ -17,10 +17,28 @@ PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
 
+case "$PORT" in
+    ''|*[!0-9]*)
+        echo "Port must be a numeric TCP port: $PORT" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Port must be between 1 and 65535: $PORT" >&2
+    exit 1
+fi
+
 elapsed=0
 interval=1
 
 is_port_listening() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if WAIT_FOR_PORT_PORT="$PORT" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$ErrorActionPreference='SilentlyContinue'; \$Port = [int]\$env:WAIT_FOR_PORT_PORT; if (Get-NetTCPConnection -LocalPort \$Port -State Listen) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
     if command -v lsof >/dev/null 2>&1; then
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
