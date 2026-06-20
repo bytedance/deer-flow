@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 # ── Import the module under test ──────────────────────────────────────────────
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.models.mindie_provider import (
     MindIEChatModel,
     _fix_messages,
@@ -131,6 +132,32 @@ class TestFixMessages:
         content = result[0].content
         assert "<function=fn&lt;&amp;&gt;>" in content
         assert "<parameter=k&lt;&amp;&gt;>v&lt;&amp;&gt;</parameter>" in content
+
+    def test_completed_large_write_file_args_are_compacted_before_xml_serialization(self):
+        large_content = "<html>" + ("x" * 3000) + "</html>"
+        middleware = ToolArgsCompactionMiddleware()
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {"path": "/mnt/user-data/report.html", "content": large_content, "append": False},
+                        "id": "call_write",
+                    }
+                ],
+            ),
+            ToolMessage(content="ok", tool_call_id="call_write"),
+        ]
+
+        patched = middleware._build_compacted_messages(msgs)
+        assert patched is not None
+
+        result = _fix_messages(patched)
+        serialized = result[0].content
+        assert large_content not in serialized
+        assert "[write_file content omitted in model context: " in serialized
+        assert len(serialized) < len(large_content)
 
     # ── ToolMessage → HumanMessage ────────────────────────────────────────────
 
