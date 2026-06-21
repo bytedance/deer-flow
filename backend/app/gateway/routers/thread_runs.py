@@ -646,6 +646,10 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
+    # Resolve the caller once; it is needed both to scope the feedback query
+    # below and to list the thread's runs for turn-duration injection.
+    user_id = await get_current_user(request)
+
     # Find the last AI message per run_id. AI messages are persisted by
     # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
     # the event store returns that value verbatim, so match on it here.
@@ -660,7 +664,6 @@ async def list_thread_messages(
     feedback_map: dict[str, dict] = {}
     if last_ai_per_run:
         feedback_repo = get_feedback_repo(request)
-        user_id = await get_current_user(request)
         feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
 
     last_ai_indices = set(last_ai_per_run.values())

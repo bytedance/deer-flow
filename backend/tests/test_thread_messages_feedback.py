@@ -29,6 +29,12 @@ def _make_app(messages, feedback_grouped):
     feedback_repo.list_by_thread_grouped = AsyncMock(return_value=feedback_grouped)
     app.state.feedback_repo = feedback_repo
 
+    # list_thread_messages also calls run_manager.list_by_thread to inject
+    # turn durations; stub it to return no runs so that path stays inert.
+    run_manager = MagicMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+    app.state.run_manager = run_manager
+
     return app, feedback_repo
 
 
