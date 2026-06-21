@@ -1,0 +1,32 @@
+---
+title: Introduction
+description: DeerFlow is a runtime harness for building long-horizon agent systems with skills, memory, tools, and sandboxed execution.
+---
+
+import { Cards } from "nextra/components";
+
+# Introduction
+
+Welcome to DeerFlow!
+
+DeerFlow is a framework for building and operating agent systems. Rather than treating an AI agent as a simple text generator or a hardcoded workflow graph, DeerFlow provides a robust **runtime harness** that packages the core components required for agents to perform meaningful, long-horizon work.
+
+## What is DeerFlow?
+
+DeerFlow bridges the gap between raw LLMs and production-ready agent workflows. It focuses on the capabilities necessary to complete complex tasks:
+
+- **Long-Horizon Planning**: Keeping agents on-track and coherent across multiple reasoning cycles and tool invocations.
+- **Decomposition via Subagents**: Breaking complex work into parallel, isolated tasks that don't overwhelm the main agent's context window.
+- **Sandboxed Execution**: Giving agents a safe, isolated filesystem environment where they can write files, run tests, and execute code.
+- **Modular Skills & Tools**: Loading capabilities dynamically so the agent's core stays general while adapting to specific workloads (e.g. deep research or data analysis).
+- **Persistent Memory & Context Engineering**: Managing what the agent remembers, summarizes, or forgets across turns and sessions.
+
+## Section Contents
+
+To help you build the right mental model before diving into implementation:
+
+<Cards num={3}>
+  <Cards.Card title="Why DeerFlow" href="/docs/introduction/why-deerflow" />
+  <Cards.Card title="Core Concepts" href="/docs/introduction/core-concepts" />
+  <Cards.Card title="Harness vs App" href="/docs/introduction/harness-vs-app" />
+</Cards>
