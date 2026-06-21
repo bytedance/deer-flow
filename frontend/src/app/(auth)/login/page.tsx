@@ -10,6 +10,7 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
 /**
  * Validate next parameter
@@ -49,6 +50,7 @@ export default function LoginPage() {
   const searchParams = useSearchParams();
   const { isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
+  const { t } = useI18n();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -59,16 +61,11 @@ export default function LoginPage() {
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
-  const errorMessages: Record<string, string> = {
-    sso_failed: "SSO login failed. Please try again or use email login.",
-    sso_cancelled: "SSO login was cancelled.",
-    sso_account_exists:
-      "An account with this email already exists. Please sign in with your password or contact your administrator.",
-    sso_not_allowed:
-      "SSO login is not allowed for your account. Contact your administrator.",
-  };
   const [error, setError] = useState(
-    errorParam ? (errorMessages[errorParam] ?? "Authentication failed.") : "",
+    errorParam
+      ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
+          t.login.authFailed)
+      : "",
   );
   // Soft hint shown after a failed login when SSO is configured: an SSO-only
   // account has no local password, so the backend returns a generic
@@ -164,7 +161,7 @@ export default function LoginPage() {
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.login.networkError);
     } finally {
       setLoading(false);
     }
@@ -186,34 +183,34 @@ export default function LoginPage() {
         <div className="text-center">
           <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            {isLogin ? "Sign in to your account" : "Create a new account"}
+            {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
-              Email
+              {t.login.email}
             </label>
             <Input
               id="email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              placeholder={t.login.emailPlaceholder}
               required
             />
           </div>
           <div className="flex flex-col space-y-1">
             <label htmlFor="password" className="text-sm font-medium">
-              Password
+              {t.login.password}
             </label>
             <Input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="•••••••"
+              placeholder={t.login.passwordPlaceholder}
               required
               minLength={isLogin ? 6 : 8}
             />
@@ -223,10 +220,10 @@ export default function LoginPage() {
 
           <Button type="submit" className="w-full" disabled={loading}>
             {loading
-              ? "Please wait..."
+              ? t.login.pleaseWait
               : isLogin
-                ? "Sign In"
-                : "Create Account"}
+                ? t.login.signIn
+                : t.login.createAccount}
           </Button>
         </form>
 
@@ -239,15 +236,14 @@ export default function LoginPage() {
                 </div>
                 <div className="relative flex justify-center text-xs uppercase">
                   <span className="bg-background text-muted-foreground px-2">
-                    Or continue with
+                    {t.login.orContinueWith}
                   </span>
                 </div>
               </div>
             )}
             {showSsoHint && (
               <p className="text-muted-foreground text-center text-sm">
-                If your account uses single sign-on, sign in with the option
-                below instead.
+                {t.login.ssoHint}
               </p>
             )}
             {ssoProviders.map((provider) => (
@@ -261,7 +257,7 @@ export default function LoginPage() {
                   window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
                 }}
               >
-                Continue with {provider.display_name}
+                {t.login.continueWith(provider.display_name)}
               </Button>
             ))}
           </div>
@@ -277,15 +273,13 @@ export default function LoginPage() {
             }}
             className="text-blue-500 hover:underline"
           >
-            {isLogin
-              ? "Don't have an account? Sign up"
-              : "Already have an account? Sign in"}
+            {isLogin ? t.login.noAccountSignUp : t.login.haveAccountSignIn}
           </button>
         </div>
 
         <div className="text-muted-foreground text-center text-xs">
           <Link href="/" className="hover:underline">
-            ← Back to home
+            {t.login.backToHome}
           </Link>
         </div>
       </div>
