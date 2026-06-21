@@ -289,6 +289,10 @@ class SubagentExecutor:
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
+        user_role: str | None = None,
+        oauth_provider: str | None = None,
+        oauth_id: str | None = None,
+        run_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -305,6 +309,12 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
                 When None, the tracing layer falls back to DEFAULT_USER_ID.
+            user_role: Authenticated user's role, propagated so GuardrailMiddleware
+                on the subagent can apply role-aware policy to delegated calls.
+            oauth_provider: External identity provider, when authenticated via SSO.
+            oauth_id: Subject id at the external identity provider.
+            run_id: Parent run id, so delegated guardrail decisions attribute to
+                the same run as the lead agent.
         """
         self.config = config
         self.app_config = app_config
@@ -322,6 +332,11 @@ class SubagentExecutor:
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
+        # Guardrail attribution propagated from the parent runtime context.
+        self.user_role = user_role
+        self.oauth_provider = oauth_provider
+        self.oauth_id = oauth_id
+        self.run_id = run_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -564,6 +579,16 @@ class SubagentExecutor:
                 context["thread_id"] = self.thread_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            # Propagate guardrail attribution so delegated tool calls are
+            # evaluated with the parent run's identity (role-aware policy,
+            # audit). user_id reuses the resolved tracing id; on every
+            # authenticated/IM path this equals the parent context value.
+            context["user_id"] = self.user_id
+            context["user_role"] = self.user_role
+            context["oauth_provider"] = self.oauth_provider
+            context["oauth_id"] = self.oauth_id
+            context["run_id"] = self.run_id
+            context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
