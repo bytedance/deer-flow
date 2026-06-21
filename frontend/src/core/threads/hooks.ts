@@ -59,6 +59,17 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+type RegeneratePrepareResponse = {
+  input: Partial<AgentThreadState>;
+  checkpoint: {
+    checkpoint_ns: string;
+    checkpoint_id: string;
+    checkpoint_map: Record<string, unknown> | null;
+  };
+  metadata: Record<string, unknown>;
+  target_run_id: string;
+};
+
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
   messages: [],
@@ -119,6 +130,69 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     }
     return lastIndexByIdentity.get(identity) === index;
   });
+}
+
+function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
+  const lastIndexByIdentity = new Map<string, number>();
+  messages.forEach((message, index) => {
+    const identity = messageIdentity(message.content);
+    if (identity) {
+      lastIndexByIdentity.set(`${message.run_id}:${identity}`, index);
+    }
+  });
+
+  return messages.filter((message, index) => {
+    const identity = messageIdentity(message.content);
+    if (!identity) {
+      return true;
+    }
+    return lastIndexByIdentity.get(`${message.run_id}:${identity}`) === index;
+  });
+}
+
+export function getSupersededRunIds(
+  runs: Run[] | undefined,
+  pendingSupersededRunIds?: ReadonlySet<string>,
+) {
+  const ids = new Set(pendingSupersededRunIds ?? []);
+  for (const run of runs ?? []) {
+    if (run.status !== "success") {
+      continue;
+    }
+    const metadata = run.metadata;
+    if (metadata && typeof metadata === "object") {
+      const fromRunId = Reflect.get(metadata, "regenerate_from_run_id");
+      if (typeof fromRunId === "string" && fromRunId) {
+        ids.add(fromRunId);
+      }
+    }
+  }
+  return ids;
+}
+
+export function removeSetItems<T>(
+  values: ReadonlySet<T>,
+  itemsToRemove: Iterable<T>,
+) {
+  const next = new Set(values);
+  for (const item of itemsToRemove) {
+    next.delete(item);
+  }
+  return next;
+}
+
+export function buildVisibleHistoryMessages(
+  messageRows: RunMessage[],
+  supersededRunIds: ReadonlySet<string>,
+  appendedMessages: Message[],
+) {
+  const visibleRows = messageRows.filter(
+    (message) => !supersededRunIds.has(message.run_id),
+  );
+  return dedupeMessagesByIdentity([
+    ...visibleRows.map((message) => message.content),
+    ...appendedMessages,
+  ]);
 }
 
 export function findLatestUnloadedRunIndex(
@@ -399,6 +473,21 @@ function getStreamErrorMessage(error: unknown): string {
   return "Request failed.";
 }
 
+async function readResponseErrorMessage(
+  response: Response,
+  fallback = "Request failed.",
+) {
+  try {
+    const data = await response.json();
+    if (typeof data?.detail === "string" && data.detail.trim()) {
+      return data.detail;
+    }
+  } catch {
+    // Use the fallback below when the response body is not JSON.
+  }
+  return response.statusText || fallback;
+}
+
 function getHttpStatus(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) {
     return undefined;
@@ -449,6 +538,11 @@ export function useThreadStream({
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
+  const [pendingSupersededRunIds, setPendingSupersededRunIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
+    useState<ReadonlySet<string>>(() => new Set());
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
@@ -470,7 +564,10 @@ export function useThreadStream({
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
     appendMessages,
-  } = useThreadHistory(onStreamThreadId ?? "", { enabled: !isMock });
+  } = useThreadHistory(onStreamThreadId ?? "", {
+    enabled: !isMock,
+    pendingSupersededRunIds,
+  });
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -686,6 +783,8 @@ export function useThreadStream({
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      setPendingSupersededRunIds(new Set());
+      setPendingSupersededMessageIds(new Set());
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -711,6 +810,9 @@ export function useThreadStream({
       });
       if (threadIdRef.current && !isMock) {
         void queryClient.invalidateQueries({
+          queryKey: ["thread", threadIdRef.current],
+        });
+        void queryClient.invalidateQueries({
           queryKey: threadTokenUsageQueryKey(threadIdRef.current),
         });
       }
@@ -720,8 +822,14 @@ export function useThreadStream({
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
   const persistedMessages = useMemo(
-    () => (hasVisibleStreamState ? thread.messages : []),
-    [hasVisibleStreamState, thread.messages],
+    () =>
+      hasVisibleStreamState
+        ? thread.messages.filter(
+            (message) =>
+              !message.id || !pendingSupersededMessageIds.has(message.id),
+          )
+        : [],
+    [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
   );
   const visibleHistory = useMemo(
     () => (threadId ? history : []),
@@ -751,6 +859,8 @@ export function useThreadStream({
     messagesRef.current = [];
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
+    setPendingSupersededRunIds(new Set());
+    setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
@@ -1011,6 +1121,113 @@ export function useThreadStream({
     ],
   );
 
+  const regenerateMessage = useCallback(
+    async (
+      threadId: string,
+      messageId: string,
+      supersededMessageIds: string[] = [messageId],
+    ) => {
+      if (sendInFlightRef.current || !threadId || !messageId) {
+        return;
+      }
+      sendInFlightRef.current = true;
+      prevHumanMsgCountRef.current = humanMessageCount;
+      pendingUsageBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+      setLiveMessagesThreadId(threadId);
+      listeners.current.onSend?.(threadId);
+      let preparedSupersededRunId: string | null = null;
+      let preparedSupersededMessageIds: string[] = [];
+
+      try {
+        const response = await fetch(
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+            threadId,
+          )}/runs/regenerate/prepare`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            credentials: "include",
+            body: JSON.stringify({ message_id: messageId }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await readResponseErrorMessage(response));
+        }
+        const prepared = (await response.json()) as RegeneratePrepareResponse;
+        preparedSupersededRunId = prepared.target_run_id;
+        preparedSupersededMessageIds = supersededMessageIds;
+        setPendingSupersededRunIds((current) => {
+          const next = new Set(current);
+          next.add(prepared.target_run_id);
+          return next;
+        });
+        setPendingSupersededMessageIds((current) => {
+          const next = new Set(current);
+          for (const id of supersededMessageIds) {
+            next.add(id);
+          }
+          return next;
+        });
+
+        await thread.submit(prepared.input, {
+          threadId,
+          checkpoint: prepared.checkpoint,
+          metadata: prepared.metadata,
+          streamSubgraphs: true,
+          streamResumable: true,
+          config: {
+            recursion_limit: 1000,
+          },
+          context: {
+            ...context,
+            thinking_enabled: context.mode !== "flash",
+            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
+            subagent_enabled: context.mode === "ultra",
+            reasoning_effort:
+              context.reasoning_effort ??
+              (context.mode === "ultra"
+                ? "high"
+                : context.mode === "pro"
+                  ? "medium"
+                  : context.mode === "thinking"
+                    ? "low"
+                    : undefined),
+            thread_id: threadId,
+          },
+        });
+        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        void queryClient.invalidateQueries({
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        });
+        void queryClient.invalidateQueries({
+          queryKey: threadTokenUsageQueryKey(threadId),
+        });
+      } catch (error) {
+        setLiveMessagesThreadId(null);
+        if (preparedSupersededRunId) {
+          const supersededRunId = preparedSupersededRunId;
+          setPendingSupersededRunIds((current) =>
+            removeSetItems(current, [supersededRunId]),
+          );
+          setPendingSupersededMessageIds((current) =>
+            removeSetItems(current, preparedSupersededMessageIds),
+          );
+        }
+        toast.error(getStreamErrorMessage(error));
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    },
+    [context, humanMessageCount, persistedMessages, queryClient, thread],
+  );
+
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
   // and to allow access to the full message list in onUpdateEvent without causing re-renders.
   if (persistedMessages.length >= messagesRef.current.length) {
@@ -1047,6 +1264,7 @@ export function useThreadStream({
     thread: mergedThread,
     pendingUsageMessages,
     sendMessage,
+    regenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -1056,11 +1274,12 @@ export function useThreadStream({
 
 type ThreadHistoryOptions = {
   enabled?: boolean;
+  pendingSupersededRunIds?: ReadonlySet<string>;
 };
 
 export function useThreadHistory(
   threadId: string,
-  { enabled = true }: ThreadHistoryOptions = {},
+  { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
 ) {
   const runs = useThreadRuns(threadId, { enabled });
   const threadIdRef = useRef(threadId);
@@ -1073,7 +1292,20 @@ export function useThreadHistory(
   const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
+  const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
+
+  const supersededRunIds = useMemo(() => {
+    return getSupersededRunIds(runs.data, pendingSupersededRunIds);
+  }, [pendingSupersededRunIds, runs.data]);
+
+  const messages = useMemo(() => {
+    return buildVisibleHistoryMessages(
+      messageRows,
+      supersededRunIds,
+      appendedMessages,
+    );
+  }, [appendedMessages, messageRows, supersededRunIds]);
 
   const loadMessages = useCallback(async () => {
     if (!enabled) {
@@ -1139,11 +1371,11 @@ export function useThreadHistory(
         ) {
           return;
         }
-        const _messages = result.data
-          .filter((m) => !m.metadata.caller?.startsWith("middleware:"))
-          .map((m) => m.content);
-        setMessages((prev) =>
-          dedupeMessagesByIdentity([..._messages, ...prev]),
+        const _messages = result.data.filter(
+          (m) => !m.metadata.caller?.startsWith("middleware:"),
+        );
+        setMessageRows((prev) =>
+          dedupeRunMessagesByIdentity([..._messages, ...prev]),
         );
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {
@@ -1197,7 +1429,8 @@ export function useThreadHistory(
       runBeforeSeqRef.current = new Map();
       loadingRef.current = false;
       setLoading(false);
-      setMessages([]);
+      setMessageRows([]);
+      setAppendedMessages([]);
     }
 
     if (!enabled) {
@@ -1217,7 +1450,7 @@ export function useThreadHistory(
   }, [enabled, threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
-    setMessages((prev) => {
+    setAppendedMessages((prev) => {
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);

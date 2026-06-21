@@ -9,7 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
@@ -65,7 +65,6 @@ class SlackChannel(Channel):
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
-        self._connection_repo = config.get("connection_repo")
         self._web_client_factory = config.get("web_client_factory")
         self._connection_web_clients: dict[str, tuple[str, Any]] = {}
         configured_bot_user_id = config.get("bot_user_id")
@@ -90,15 +89,8 @@ class SlackChannel(Channel):
         bot_token = self.config.get("bot_token", "")
         app_token = self.config.get("app_token", "")
 
-        if self._connection_repo is not None and self.config.get("event_delivery") == "http":
-            if not bot_token:
-                logger.error("Slack HTTP Events mode requires bot_token")
-                return
-            await self._initialize_operator_web_client(str(bot_token))
-            self._loop = asyncio.get_event_loop()
-            self._running = True
-            self.bus.subscribe_outbound(self._on_outbound)
-            logger.info("Slack channel started in HTTP Events mode")
+        if self.config.get("event_delivery") == "http":
+            logger.error("Slack HTTP Events mode is not supported by this channel adapter; use Socket Mode with app_token")
             return
 
         if not bot_token or not app_token:
@@ -141,49 +133,38 @@ class SlackChannel(Channel):
         if msg.thread_ts:
             kwargs["thread_ts"] = msg.thread_ts
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await asyncio.to_thread(web_client.chat_postMessage, **kwargs)
-                # Add a completion reaction to the thread root
-                if msg.thread_ts:
-                    await asyncio.to_thread(
-                        self._add_reaction_with_client,
-                        web_client,
-                        msg.chat_id,
-                        msg.thread_ts,
-                        "white_check_mark",
-                    )
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Slack] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-
-        logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
-        # Add failure reaction on error
-        if msg.thread_ts:
-            try:
+        async def post_message() -> None:
+            await asyncio.to_thread(web_client.chat_postMessage, **kwargs)
+            # Add a completion reaction to the thread root
+            if msg.thread_ts:
                 await asyncio.to_thread(
                     self._add_reaction_with_client,
                     web_client,
                     msg.chat_id,
                     msg.thread_ts,
-                    "x",
+                    "white_check_mark",
                 )
-            except Exception:
-                pass
-        if last_exc is None:
-            raise RuntimeError("Slack send failed without an exception from any attempt")
-        raise last_exc
+
+        try:
+            await self._send_with_retry(
+                post_message,
+                max_retries=_max_retries,
+                log_prefix="[Slack]",
+            )
+        except Exception:
+            # Add failure reaction on error
+            if msg.thread_ts:
+                try:
+                    await asyncio.to_thread(
+                        self._add_reaction_with_client,
+                        web_client,
+                        msg.chat_id,
+                        msg.thread_ts,
+                        "x",
+                    )
+                except Exception:
+                    pass
+            raise
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         web_client = await self._get_web_client_for_message(msg)
@@ -313,28 +294,29 @@ class SlackChannel(Channel):
 
         user_id = event.get("user", "")
 
-        # Check allowed users
-        if self._allowed_users and user_id not in self._allowed_users:
-            logger.debug("Ignoring message from non-allowed user: %s", user_id)
-            return
-
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
         if not text:
             return
 
-        connect_code = extract_connect_code(text)
+        connect_code = self._pending_connect_code(text)
         if connect_code:
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     self._bind_connection_from_connect_code(
                         event=event,
-                        team_id=str(team_id or event.get("team") or ""),
+                        team_id=str(team_id or ""),
                         code=connect_code,
                     ),
                     self._loop,
                 )
+            return
+
+        # Check allowed users after connect-code handling so browser-initiated
+        # binding can bootstrap a new external identity.
+        if self._allowed_users and user_id not in self._allowed_users:
+            logger.debug("Ignoring message from non-allowed user: %s", user_id)
             return
 
         channel_id = event.get("channel", "")
@@ -354,6 +336,12 @@ class SlackChannel(Channel):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            metadata={
+                # team_id is already resolved (payload team_id/team, else event team) by the caller.
+                "team_id": team_id,
+                "message_id": event.get("ts"),
+                "client_msg_id": event.get("client_msg_id"),
+            },
         )
         inbound.topic_id = thread_ts
 

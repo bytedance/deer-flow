@@ -5,7 +5,35 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
-from app.channels.message_bus import InboundMessage, MessageBus
+from app.channels.base import Channel
+from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage
+
+
+class _StubChannel(Channel):
+    """Minimal concrete Channel used to exercise base-class helpers directly."""
+
+    async def start(self) -> None:  # pragma: no cover - not exercised
+        pass
+
+    async def stop(self) -> None:  # pragma: no cover - not exercised
+        pass
+
+    async def send(self, msg: OutboundMessage) -> None:  # pragma: no cover - not exercised
+        pass
+
+
+def test_pending_connect_code_extracts_code_when_connections_configured():
+    channel = _StubChannel(name="stub", bus=MessageBus(), config={"connection_repo": object()})
+    # A connect command yields its code; ordinary text does not.
+    assert channel._pending_connect_code("/connect abc123") == "abc123"
+    assert channel._pending_connect_code("hello world") is None
+
+
+def test_pending_connect_code_is_none_when_connections_disabled():
+    # With no connection repo, binding is not configured and connect codes are
+    # ignored so the message falls through to normal handling.
+    channel = _StubChannel(name="stub", bus=MessageBus(), config={})
+    assert channel._pending_connect_code("/connect abc123") is None
 
 
 async def _make_repo(tmp_path, name: str):

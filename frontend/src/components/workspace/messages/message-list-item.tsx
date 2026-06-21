@@ -10,6 +10,7 @@ import {
   useCallback,
   useMemo,
   useState,
+  useEffect,
   type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
@@ -124,6 +125,7 @@ export function MessageListItem({
   runId,
   threadId,
   showCopyButton = true,
+  turnStartTime,
 }: {
   className?: string;
   message: Message;
@@ -132,6 +134,7 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  turnStartTime?: number | null;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -144,6 +147,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        turnStartTime={turnStartTime}
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -211,14 +215,20 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
+  turnStartTime,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  turnStartTime?: number | null;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
+  const [wasLoading, setWasLoading] = useState(isLoading);
+  useEffect(() => {
+    if (isLoading) setWasLoading(true);
+  }, [isLoading]);
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -324,6 +334,14 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
+      {!isHuman && (!!reasoningContent || wasLoading) && (
+        <Reasoning isStreaming={isLoading} startTimeProp={turnStartTime}>
+          <ReasoningTrigger hasContent={!!reasoningContent} />
+          {reasoningContent && (
+            <ReasoningContent>{reasoningContent}</ReasoningContent>
+          )}
+        </Reasoning>
+      )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}

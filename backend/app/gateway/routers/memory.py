@@ -1,8 +1,9 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory.updater import (
     clear_memory_data,
     create_memory_fact,
@@ -13,9 +14,32 @@ from deerflow.agents.memory.updater import (
     update_memory_fact,
 )
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
+
+
+def _resolve_memory_user_id(request: Request) -> str:
+    """Resolve the memory owner for this request.
+
+    Honors the trusted internal owner header that channel workers attach when
+    acting for a connection owner, so an IM ``/memory`` command reads the bound
+    owner's memory instead of the synthetic internal user. The header is only
+    honored after ``AuthMiddleware`` validated the internal token (see
+    ``get_trusted_internal_owner_user_id``). Browser/API callers are never
+    internal, so this falls back to the normal contextvar-based effective user.
+
+    The trusted owner header carries the *raw* owner id, so sanitize it through
+    ``make_safe_user_id`` (the same normalization the channel file pipeline applies
+    via ``_safe_user_id_for_run``/``prepare_user_dir_for_raw_id``). This keeps the
+    memory bucket aligned with the owner's file/upload bucket and avoids a 500 when
+    the raw id contains characters ``_validate_user_id`` would reject.
+    """
+    raw_owner = get_trusted_internal_owner_user_id(request)
+    if raw_owner:
+        return make_safe_user_id(raw_owner)
+    return get_effective_user_id()
 
 
 class ContextSection(BaseModel):
@@ -115,7 +139,7 @@ class MemoryStatusResponse(BaseModel):
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
-async def get_memory() -> MemoryResponse:
+async def get_memory(http_request: Request) -> MemoryResponse:
     """Get the current global memory data.
 
     Returns:
@@ -149,7 +173,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
     return MemoryResponse(**memory_data)
 
 
@@ -160,7 +184,7 @@ async def get_memory() -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
-async def reload_memory() -> MemoryResponse:
+async def reload_memory(http_request: Request) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -169,7 +193,7 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data(user_id=get_effective_user_id())
+    memory_data = reload_memory_data(user_id=_resolve_memory_user_id(http_request))
     return MemoryResponse(**memory_data)
 
 
@@ -180,10 +204,10 @@ async def reload_memory() -> MemoryResponse:
     summary="Clear All Memory Data",
     description="Delete all saved memory data and reset the memory structure to an empty state.",
 )
-async def clear_memory() -> MemoryResponse:
+async def clear_memory(http_request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
-        memory_data = clear_memory_data(user_id=get_effective_user_id())
+        memory_data = clear_memory_data(user_id=_resolve_memory_user_id(http_request))
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -197,14 +221,14 @@ async def clear_memory() -> MemoryResponse:
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
-async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
+async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
     """Create a single fact manually."""
     try:
         memory_data = create_memory_fact(
             content=request.content,
             category=request.category,
             confidence=request.confidence,
-            user_id=get_effective_user_id(),
+            user_id=_resolve_memory_user_id(http_request),
         )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
@@ -221,10 +245,10 @@ async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryRespo
     summary="Delete Memory Fact",
     description="Delete a single saved memory fact by its fact id.",
 )
-async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
+async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
-        memory_data = delete_memory_fact(fact_id, user_id=get_effective_user_id())
+        memory_data = delete_memory_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
@@ -240,7 +264,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     summary="Patch Memory Fact",
     description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
+async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
         memory_data = update_memory_fact(
@@ -248,7 +272,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
             content=request.content,
             category=request.category,
             confidence=request.confidence,
-            user_id=get_effective_user_id(),
+            user_id=_resolve_memory_user_id(http_request),
         )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
@@ -267,9 +291,9 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
     summary="Export Memory Data",
     description="Export the current global memory data as JSON for backup or transfer.",
 )
-async def export_memory() -> MemoryResponse:
+async def export_memory(http_request: Request) -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
     return MemoryResponse(**memory_data)
 
 
@@ -280,10 +304,10 @@ async def export_memory() -> MemoryResponse:
     summary="Import Memory Data",
     description="Import and overwrite the current global memory data from a JSON payload.",
 )
-async def import_memory(request: MemoryResponse) -> MemoryResponse:
+async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
     """Import and persist memory data."""
     try:
-        memory_data = import_memory_data(request.model_dump(), user_id=get_effective_user_id())
+        memory_data = import_memory_data(request.model_dump(), user_id=_resolve_memory_user_id(http_request))
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -336,14 +360,14 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status() -> MemoryStatusResponse:
+async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_data(user_id=get_effective_user_id())
+    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

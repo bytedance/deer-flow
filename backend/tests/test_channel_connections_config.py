@@ -7,6 +7,7 @@ def test_channel_connections_disabled_by_default():
     config = ChannelConnectionsConfig()
 
     assert config.enabled is False
+    assert config.require_bound_identity is True
     assert config.slack.enabled is False
     assert config.telegram.enabled is False
     assert config.discord.enabled is False
@@ -41,6 +42,13 @@ def test_enabled_channel_connections_do_not_require_public_url_or_encryption_key
     assert config.provider_status("dingtalk") == {"enabled": True, "configured": True}
     assert config.provider_status("wechat") == {"enabled": True, "configured": True}
     assert config.provider_status("wecom") == {"enabled": True, "configured": True}
+
+
+def test_require_bound_identity_can_be_disabled_for_legacy_open_bot_mode():
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "require_bound_identity": False})
+
+    assert config.enabled is True
+    assert config.require_bound_identity is False
 
 
 def test_provider_status_reports_disabled_and_unknown_providers():

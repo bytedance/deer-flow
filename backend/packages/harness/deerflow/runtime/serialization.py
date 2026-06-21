@@ -35,6 +35,20 @@ def serialize_lc_object(obj: Any) -> Any:
             return obj.dict()
         except Exception:
             pass
+    # Interrupt is a __slots__ class — no model_dump/dict/__dict__, so it
+    # would reach str() and produce a malformed payload.
+    try:
+        from langgraph.types import Interrupt
+    except ImportError:
+        pass
+    else:
+        if isinstance(obj, Interrupt):
+            return serialize_lc_object(
+                {
+                    "value": obj.value,
+                    "id": getattr(obj, "id", None),
+                }
+            )
     # Last resort
     try:
         return str(obj)
@@ -45,12 +59,13 @@ def serialize_lc_object(obj: Any) -> Any:
 def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
     """Serialize channel values, stripping internal LangGraph keys.
 
-    Internal keys like ``__pregel_*`` and ``__interrupt__`` are removed
-    to match what the LangGraph Platform API returns.
+    Only ``__pregel_*`` keys are removed — ``__interrupt__`` is deliberately
+    preserved so the LangGraph SDK can detect interrupt events from values
+    chunks (see issue #3595).
     """
     result: dict[str, Any] = {}
     for key, value in channel_values.items():
-        if key.startswith("__pregel_") or key == "__interrupt__":
+        if key.startswith("__pregel_"):
             continue
         result[key] = serialize_lc_object(value)
     return result
@@ -118,11 +133,14 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
     """Serialize LangChain objects with mode-specific handling.
 
     * ``messages`` — obj is ``(message_chunk, metadata_dict)``
-    * ``values`` — obj is the full state dict; ``__pregel_*`` keys stripped
+    * ``values`` — obj is the full state dict; ``__pregel_*`` keys stripped and
+      base64 ``data:`` image blocks dropped from hide_from_ui messages
     * everything else — recursive ``model_dump()`` / ``dict()`` fallback
     """
     if mode == "messages":
         return serialize_messages_tuple(obj)
     if mode == "values":
-        return serialize_channel_values(obj) if isinstance(obj, dict) else serialize_lc_object(obj)
+        # ``values`` snapshots stream the full state to the frontend, so they
+        # must drop base64 image payloads the same way the REST endpoints do.
+        return serialize_channel_values_for_api(obj) if isinstance(obj, dict) else serialize_lc_object(obj)
     return serialize_lc_object(obj)
