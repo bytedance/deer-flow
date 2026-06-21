@@ -197,12 +197,30 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
 
     config = AppConfig.from_file(str(config_path))
 
-    # Each present-but-null object section falls back to its default config.
-    assert config.memory is not None
-    assert config.summarization is not None
-    assert config.guardrails is not None
-    assert config.tool_output is not None
-    assert config.run_events is not None
+    # Each present-but-null object section falls back to a real default config
+    # object of the expected type (not merely non-None).
+    assert type(config.memory).__name__ == "MemoryConfig"
+    assert type(config.summarization).__name__ == "SummarizationConfig"
+    assert type(config.guardrails).__name__ == "GuardrailsConfig"
+    assert type(config.tool_output).__name__ == "ToolOutputConfig"
+    assert type(config.run_events).__name__ == "RunEventsConfig"
+
+
+def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
+    """A present-but-null *required* section still errors.
+
+    ``sandbox`` has no default, so dropping a ``sandbox: null`` key leaves the
+    required field absent — there is nothing to fall back to (per
+    ``_drop_null_config_sections``), unlike the optional object sections above.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(yaml.safe_dump({"sandbox": None}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    with pytest.raises(ValidationError):
+        AppConfig.from_file(str(config_path))
 
 
 def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):

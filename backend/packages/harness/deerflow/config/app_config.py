@@ -171,9 +171,11 @@ class AppConfig(BaseModel):
         Dropping the ``None`` lets each field fall back to its default: list
         sections become ``[]`` via ``default_factory=list`` and object sections
         get their default config. This generalizes the earlier list-only
-        handling (and the ``database`` special-case in ``from_file``) to every
-        section. Required sections without a default (``sandbox``) intentionally
-        still error when null — there is nothing to fall back to.
+        handling to every section that defines a default. The ``database``
+        section is independent and still owned by ``_apply_database_defaults``
+        (in ``from_file``), which applies concrete defaults beyond null-coercion.
+        Required sections without a default (``sandbox``) intentionally still
+        error when null — there is nothing to fall back to.
         """
         if isinstance(data, dict):
             return {key: value for key, value in data.items() if value is not None}
