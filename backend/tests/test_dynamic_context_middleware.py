@@ -122,6 +122,42 @@ def test_skips_injection_if_already_present():
     assert result is None  # no update needed
 
 
+def test_second_turn_with_memory_does_not_reinject():
+    """Regression: a dateless memory reminder must not shadow the date reminder.
+
+    Reproduces the scrambled-messages / wrong-answer bug (thread
+    9be75d63): production persists the injected context as TWO flagged
+    messages — a date SystemMessage and a separate dateless <memory>
+    HumanMessage. On a later turn ``_last_injected_date`` scans in reverse
+    and hits the memory message first; because it has no <current_date> it
+    must keep scanning to find the real date. If it stops and returns None,
+    the middleware falsely treats this as the first turn, re-injects, picks
+    the previous turn's ``__user`` message as the target, and the model
+    re-answers the stale turn instead of the new one.
+    """
+    mw = _make_middleware()
+    date_reminder = "<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>"
+    state = {
+        "messages": [
+            SystemMessage(
+                content=date_reminder,
+                id="msg-1",
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            ),
+            _reminder_msg("<memory>\nUser prefers Python.\n</memory>", "msg-1__memory"),
+            HumanMessage(content="test", id="msg-1__user", name="user-input"),
+            AIMessage(content="Test received"),
+            HumanMessage(content="tell me the weather", id="msg-2", name="user-input"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="<memory>\nUser prefers Python.\n</memory>"), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is None  # same day already injected → must NOT re-inject
+
+
 def test_injects_only_into_first_human_message_not_later_ones():
     """Reminder targets the first HumanMessage; subsequent messages are not touched."""
     mw = _make_middleware()

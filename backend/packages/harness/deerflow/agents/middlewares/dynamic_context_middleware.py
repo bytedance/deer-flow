@@ -75,11 +75,18 @@ def _last_injected_date(messages: list) -> str | None:
     Detection uses the ``dynamic_context_reminder`` additional_kwargs flag rather
     than content substring matching, so user messages containing ``<system-reminder>``
     are not mistakenly treated as injected reminders.
+
+    A flagged reminder without a ``<current_date>`` (e.g. the separate ``<memory>``
+    HumanMessage) is skipped so it does not shadow the real date reminder that sits
+    earlier in history — otherwise a later turn is mistaken for the first turn and
+    the context is wrongly re-injected.
     """
     for msg in reversed(messages):
         if is_dynamic_context_reminder(msg):
             content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
-            return _extract_date(content_str)
+            date = _extract_date(content_str)
+            if date is not None:
+                return date
     return None
 
 
