@@ -109,6 +109,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // treated as control messages for this merged view; hidden messages carrying
   // independent tracing/task semantics should use a distinct id or a custom
   // stream/state channel instead of relying on message dedupe preservation.
+  const preservedTurnDurations = new Map<string, number>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
@@ -116,20 +117,44 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
       if (!isHiddenFromUIMessage(message)) {
         lastVisibleIndexByIdentity.set(identity, index);
       }
+      if (message.additional_kwargs?.turn_duration !== undefined) {
+        preservedTurnDurations.set(
+          identity,
+          message.additional_kwargs.turn_duration as number,
+        );
+      }
     }
   });
 
-  return messages.filter((message, index) => {
-    const identity = messageIdentity(message);
-    if (!identity) {
-      return true;
-    }
-    const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-    if (visibleIndex !== undefined) {
-      return visibleIndex === index;
-    }
-    return lastIndexByIdentity.get(identity) === index;
-  });
+  return messages
+    .filter((message, index) => {
+      const identity = messageIdentity(message);
+      if (!identity) {
+        return true;
+      }
+      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
+      if (visibleIndex !== undefined) {
+        return visibleIndex === index;
+      }
+      return lastIndexByIdentity.get(identity) === index;
+    })
+    .map((message) => {
+      const identity = messageIdentity(message);
+      if (
+        identity &&
+        preservedTurnDurations.has(identity) &&
+        message.additional_kwargs?.turn_duration === undefined
+      ) {
+        return {
+          ...message,
+          additional_kwargs: {
+            ...message.additional_kwargs,
+            turn_duration: preservedTurnDurations.get(identity),
+          },
+        } as Message;
+      }
+      return message;
+    });
 }
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
@@ -279,6 +304,18 @@ export function mergeMessages(
   // are UI control messages in this path, not observability records; any hidden
   // message that must survive as task/tracing data should use custom events or a
   // separate state channel instead of participating in this overlap heuristic.
+
+  const savedTurnDurations = new Map<string, number>();
+  for (const msg of historyMessages) {
+    const identity = messageIdentity(msg);
+    if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
+      savedTurnDurations.set(
+        identity,
+        msg.additional_kwargs.turn_duration as number,
+      );
+    }
+  }
+
   const threadMessageIds = new Set(
     threadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
@@ -303,11 +340,29 @@ export function mergeMessages(
     }
   }
 
-  return dedupeMessagesByIdentity([
+  const merged = dedupeMessagesByIdentity([
     ...historyMessages.slice(0, cutoff),
     ...threadMessages,
     ...optimisticMessages,
   ]);
+
+  return merged.map((message) => {
+    const identity = messageIdentity(message);
+    if (
+      identity &&
+      savedTurnDurations.has(identity) &&
+      message.additional_kwargs?.turn_duration === undefined
+    ) {
+      return {
+        ...message,
+        additional_kwargs: {
+          ...message.additional_kwargs,
+          turn_duration: savedTurnDurations.get(identity),
+        },
+      } as Message;
+    }
+    return message;
+  });
 }
 
 function getMessagesAfterBaseline(
