@@ -274,6 +274,20 @@ async def task_tool(
     # Get user_id for tracing (uses standard resolution order)
     user_id = resolve_runtime_user_id(runtime)
 
+    # Propagate the authenticated runtime context so delegated tool calls are
+    # evaluated by GuardrailMiddleware with the same identity/attribution as
+    # the lead agent. Sourced from the server-side context written by
+    # inject_authenticated_user_context (and run_id by the run worker); stays
+    # None when absent (e.g. internal-auth runs) so guardrail behavior is
+    # unchanged. Without this, role-aware policy silently mis-attributes any
+    # tool call delegated to a subagent (user_role=None).
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    user_role = parent_context.get("user_role")
+    oauth_provider = parent_context.get("oauth_provider")
+    oauth_id = parent_context.get("oauth_id")
+    run_id = parent_context.get("run_id")
+
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
@@ -312,6 +326,10 @@ async def task_tool(
         "thread_id": thread_id,
         "trace_id": trace_id,
         "user_id": user_id,
+        "user_role": user_role,
+        "oauth_provider": oauth_provider,
+        "oauth_id": oauth_id,
+        "run_id": run_id,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config

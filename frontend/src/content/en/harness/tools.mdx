@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -173,11 +173,24 @@ Firecrawl-powered search and crawl. Requires a [Firecrawl](https://firecrawl.dev
 Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_search_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+GroundRoute is a meta search layer: one API in front of six engines (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). Routes each query to the cheapest engine that clears a quality bar and fails over if one is down. Pricing is gain-share, you keep about half of any cache savings.
+
+Requires a [GroundRoute](https://groundroute.ai) API key. Also supports `web_fetch`.
+
+Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
+
+  </Tabs.Tab>
 </Tabs>
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -206,6 +219,13 @@ tools:
 tools:
   - use: deerflow.community.firecrawl.tools:web_fetch_tool
     api_key: $FIRECRAWL_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_fetch_tool
+    api_key: $GROUNDROUTE_API_KEY
 ```
   </Tabs.Tab>
 </Tabs>
