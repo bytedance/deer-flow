@@ -192,7 +192,7 @@ def test_build_acp_section_uses_explicit_app_config_without_global_config(monkey
 
 def test_get_memory_context_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(
-        memory=SimpleNamespace(enabled=True, injection_enabled=True, max_injection_tokens=1234),
+        memory=SimpleNamespace(enabled=True, injection_enabled=True, max_injection_tokens=1234, token_counting="tiktoken"),
     )
     captured: dict[str, object] = {}
 
@@ -204,9 +204,10 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         captured["user_id"] = user_id
         return {"facts": []}
 
-    def fake_format_memory_for_injection(memory_data, *, max_tokens):
+    def fake_format_memory_for_injection(memory_data, *, max_tokens, use_tiktoken=True):
         captured["memory_data"] = memory_data
         captured["max_tokens"] = max_tokens
+        captured["use_tiktoken"] = use_tiktoken
         return "remember this"
 
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
@@ -223,6 +224,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         "user_id": "user-1",
         "memory_data": {"facts": []},
         "max_tokens": 1234,
+        "use_tiktoken": True,
     }
 
 
@@ -373,3 +375,44 @@ def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog):
 
     assert warmed is False
     assert "Timed out waiting" in caplog.text
+
+
+def test_system_prompt_template_contains_file_editing_workflow_rule():
+    """The File Editing Workflow rule must remain in the system prompt
+    template so the planner picks the right tool (str_replace for edits,
+    write_file + append=True for long new content) and avoids mid-stream
+    chunk-gap timeouts on oversized single-shot writes. See issue #3189
+    / PR #3195.
+
+    We deliberately do NOT assert on any specific byte / word threshold
+    here — that would re-introduce the docstring-lock-in pattern the
+    reviewers flagged. The numeric cap lives in the server-side guard
+    (see test_write_file_tool_size_guard.py), which is where it belongs.
+    """
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    # Section anchor — keeps the rule discoverable in the assembled prompt.
+    assert "File Editing Workflow" in template
+    # Behavioural anchors — if either of these disappears, the model will
+    # silently regress to single-shot write_file calls for long content.
+    assert "str_replace" in template
+    assert "append=True" in template
+
+
+def test_system_prompt_template_preserves_placeholders():
+    """Ensure the chunking-rule edit didn't drop any f-string placeholder
+    consumed by apply_prompt_template(). A missing placeholder would
+    crash prompt rendering at runtime.
+    """
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    for ph in (
+        "{agent_name}",
+        "{soul}",
+        "{self_update_section}",
+        "{subagent_thinking}",
+        "{skills_section}",
+        "{deferred_tools_section}",
+        "{subagent_section}",
+        "{acp_section}",
+        "{subagent_reminder}",
+    ):
+        assert ph in template, f"placeholder {ph} accidentally removed"

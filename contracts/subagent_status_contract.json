@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "description": "Cross-language contract test fixture for the subagent status field. The backend stamps ToolMessage.additional_kwargs.subagent_status using these prefixes; the frontend reads the structured field and falls back to the same prefixes. Both sides' tests load this file and must agree.",
+  "valid_status_values": ["completed", "failed", "cancelled", "timed_out", "polling_timed_out"],
+  "cases": [
+    {
+      "name": "succeeded",
+      "origin": "task_tool.py succeeded path",
+      "content": "Task Succeeded. Result: investigated and produced a 3-page report",
+      "expected_status": "completed",
+      "expected_error_contains": null
+    },
+    {
+      "name": "failed",
+      "origin": "task_tool.py failed path",
+      "content": "Task failed. Error: underlying tool raised RuntimeError",
+      "expected_status": "failed",
+      "expected_error_contains": "RuntimeError"
+    },
+    {
+      "name": "cancelled",
+      "origin": "task_tool.py cancelled path",
+      "content": "Task cancelled by user.",
+      "expected_status": "cancelled",
+      "expected_error_contains": null
+    },
+    {
+      "name": "timed_out",
+      "origin": "task_tool.py timed_out path",
+      "content": "Task timed out. Error: 900 seconds",
+      "expected_status": "timed_out",
+      "expected_error_contains": "900"
+    },
+    {
+      "name": "polling_timed_out",
+      "origin": "task_tool.py polling timeout safety-net path",
+      "content": "Task polling timed out after 15 minutes. This may indicate the background task is stuck. Status: RUNNING",
+      "expected_status": "polling_timed_out",
+      "expected_error_contains": "15"
+    },
+    {
+      "name": "polling_timed_out_other_n",
+      "origin": "varied N coverage",
+      "content": "Task polling timed out after 1 minutes. Status: RUNNING",
+      "expected_status": "polling_timed_out",
+      "expected_error_contains": null
+    },
+    {
+      "name": "pre_unknown_subagent",
+      "origin": "task_tool.py pre-execution Error path (unknown subagent type)",
+      "content": "Error: Unknown subagent type 'foo'. Available: bash, general-purpose",
+      "expected_status": "failed",
+      "expected_error_contains": "Unknown subagent"
+    },
+    {
+      "name": "pre_bash_disabled",
+      "origin": "task_tool.py pre-execution Error path (host bash disabled)",
+      "content": "Error: Host bash subagent is disabled by configuration",
+      "expected_status": "failed",
+      "expected_error_contains": "disabled"
+    },
+    {
+      "name": "pre_task_disappeared",
+      "origin": "task_tool.py pre-execution Error path (background task disappeared)",
+      "content": "Error: Task 1234 disappeared from background tasks",
+      "expected_status": "failed",
+      "expected_error_contains": "disappeared"
+    },
+    {
+      "name": "wrapper_error",
+      "origin": "ToolErrorHandlingMiddleware wrap on tool exception",
+      "content": "Error: Tool 'task' failed with TypeError: 'AsyncCallbackManager' object is not iterable. Continue with available context, or choose an alternative tool.",
+      "expected_status": "failed",
+      "expected_error_contains": "TypeError"
+    },
+    {
+      "name": "streaming_chunk_unknown",
+      "origin": "non-terminal chunk reaching parser",
+      "content": "Investigating ...",
+      "expected_status": null,
+      "expected_error_contains": null
+    },
+    {
+      "name": "succeeded_with_surrounding_whitespace",
+      "origin": "streaming sometimes prepends/appends newlines",
+      "content": "  Task Succeeded. Result: ok  ",
+      "expected_status": "completed",
+      "expected_error_contains": "ok"
+    },
+    {
+      "name": "cancelled_with_surrounding_whitespace",
+      "origin": "streaming whitespace coverage",
+      "content": "  Task cancelled by user.\n",
+      "expected_status": "cancelled",
+      "expected_error_contains": null
+    }
+  ]
+}

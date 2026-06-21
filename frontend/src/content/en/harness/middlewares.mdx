@@ -218,4 +218,4 @@ class MyMiddleware(AgentMiddleware):
         return state, config
 ```
 
-Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `_build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.
+Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.

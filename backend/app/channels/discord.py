@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -202,10 +204,14 @@ class DiscordChannel(Channel):
             return False
 
         try:
-            fp = open(str(attachment.actual_path), "rb")  # noqa: SIM115
-            file = self._discord_module.File(fp, filename=attachment.filename)
-            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            # Keep the file handle open only for the duration of the upload: discord.py
+            # reads ``fp`` while ``target.send`` runs on ``_discord_loop``; once that
+            # future resolves the bytes are consumed, so closing here is safe and avoids
+            # leaking the handle on both the success and failure paths.
+            with open(str(attachment.actual_path), "rb") as fp:
+                file = self._discord_module.File(fp, filename=attachment.filename)
+                send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
+                await asyncio.wrap_future(send_future)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -286,6 +292,10 @@ class DiscordChannel(Channel):
             text = text.replace(bot_mention or "", "").replace(alt_mention or "", "").replace(standard_mention or "", "").strip()
             # Don't return early if text is empty — still process the mention (e.g., create thread)
 
+        connect_code = self._pending_connect_code(text)
+        if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
+            return
+
         # --- Determine thread/channel routing and typing target ---
         thread_id = None
         chat_id = None
@@ -300,7 +310,7 @@ class DiscordChannel(Channel):
 
             # If this is a known active thread, process normally
             if thread_id in self._active_thread_ids:
-                msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+                msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
                 inbound = self._make_inbound(
                     chat_id=chat_id,
                     user_id=str(message.author.id),
@@ -314,6 +324,7 @@ class DiscordChannel(Channel):
                     },
                 )
                 inbound.topic_id = thread_id
+                inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
                 self._publish(inbound)
                 # Start typing indicator in the thread
                 if typing_target:
@@ -407,7 +418,7 @@ class DiscordChannel(Channel):
             chat_id = channel_id
             typing_target = message.channel  # Type into the channel
 
-        msg_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+        msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
         inbound = self._make_inbound(
             chat_id=chat_id,
             user_id=str(message.author.id),
@@ -421,6 +432,7 @@ class DiscordChannel(Channel):
             },
         )
         inbound.topic_id = thread_id
+        inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
         # Start typing indicator in the correct target (thread or channel)
         if typing_target:
@@ -434,6 +446,60 @@ class DiscordChannel(Channel):
         if self._main_loop and self._main_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
             future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="discord",
+            workspace_id=guild_id,
+            fallback_without_workspace=True,
+        )
+
+    async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
+        if state is None:
+            await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+            return True
+
+        guild = getattr(message, "guild", None)
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        user_id = str(getattr(author, "id", "") or "")
+        if not user_id:
+            await self._send_connection_reply(message, "Discord connection could not be completed from this message.")
+            return True
+
+        guild_id = str(getattr(guild, "id", "") or "") or None
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="discord",
+            external_account_id=user_id,
+            external_account_name=getattr(author, "display_name", None) or getattr(author, "name", None),
+            workspace_id=guild_id,
+            workspace_name=getattr(guild, "name", None) if guild is not None else None,
+            metadata={
+                "guild_id": guild_id,
+                "channel_id": str(getattr(channel, "id", "") or ""),
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(message, "Discord connected to DeerFlow.")
+        return True
+
+    @staticmethod
+    async def _send_connection_reply(message, text: str) -> None:
+        channel = getattr(message, "channel", None)
+        send = getattr(channel, "send", None)
+        if send is None:
+            return
+        try:
+            await send(text)
+        except Exception:
+            logger.exception("[Discord] failed to send connection reply")
 
     def _run_client(self) -> None:
         self._discord_loop = asyncio.new_event_loop()

@@ -39,6 +39,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    regenerate: string;
   };
 
   home: {
@@ -117,6 +118,7 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    channels: string;
   };
 
   // Agents
@@ -172,6 +174,8 @@ export interface Translations {
     contactUs: string;
     about: string;
     logout: string;
+    gatewayUnavailable: string;
+    gatewayUnavailableRetrying: string;
   };
 
   // Conversation
@@ -183,6 +187,33 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    loadMoreToSearch: string;
+    loadingMore: string;
+    loadOlderChats: string;
+  };
+
+  // Channels
+  channels: {
+    title: string;
+    connect: string;
+    modify: string;
+    reconnect: string;
+    disconnect: string;
+    connected: string;
+    notConnected: string;
+    pending: string;
+    revoked: string;
+    disabled: string;
+    unconfigured: string;
+    unavailable: string;
+    unavailableShort: string;
+    setupTitle: (name: string) => string;
+    setupEditTitle: (name: string) => string;
+    setupDescription: string;
+    saveAndConnect: string;
+    saveChanges: string;
+    descriptions: Record<string, string>;
+    connectedAs: (name: string) => string;
   };
 
   // Page titles (document title)
@@ -281,6 +312,7 @@ export interface Translations {
     sections: {
       account: string;
       appearance: string;
+      channels: string;
       memory: string;
       tools: string;
       skills: string;
@@ -375,6 +407,13 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      adminRequired: string;
+      empty: string;
+    };
+    channels: {
+      title: string;
+      description: string;
+      disabled: string;
     };
     skills: {
       title: string;
@@ -401,6 +440,9 @@ export interface Translations {
       role: string;
       changePasswordTitle: string;
       changePasswordDescription: string;
+      ssoProvider: string;
+      ssoPasswordDescription: string;
+      ssoPasswordMessage: string;
       currentPassword: string;
       newPassword: string;
       confirmNewPassword: string;

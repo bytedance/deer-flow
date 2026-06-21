@@ -21,6 +21,7 @@ from langgraph_sdk import Auth
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.jwt import create_access_token, decode_token
 from app.gateway.auth.models import User
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
 from app.gateway.langgraph_auth import add_owner_filter, authenticate
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -57,6 +58,14 @@ def test_no_cookie_raises_401():
         asyncio.run(authenticate(_req()))
     assert exc.value.status_code == 401
     assert "Not authenticated" in str(exc.value.detail)
+
+
+def test_auth_disabled_skips_csrf_and_authenticates_e2e_user(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+
+    identity = asyncio.run(authenticate(_req(method="POST")))
+
+    assert identity == AUTH_DISABLED_USER_ID
 
 
 def test_invalid_jwt_raises_401():

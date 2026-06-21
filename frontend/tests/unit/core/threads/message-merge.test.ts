@@ -3,13 +3,16 @@ import { expect, test } from "vitest";
 
 import {
   buildRunMessagesUrl,
+  buildVisibleHistoryMessages,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
+  getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
+  removeSetItems,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
 } from "@/core/threads/hooks";
@@ -353,6 +356,104 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
+  const runs = [
+    {
+      run_id: "run-new",
+      status: "success",
+      metadata: { regenerate_from_run_id: "run-old" },
+    },
+    {
+      run_id: "run-normal",
+      status: "success",
+      metadata: {},
+    },
+  ] as unknown as Run[];
+
+  expect(getSupersededRunIds(runs, new Set(["run-pending"]))).toEqual(
+    new Set(["run-old", "run-pending"]),
+  );
+});
+
+test("getSupersededRunIds ignores failed regenerate runs but keeps pending ids", () => {
+  const runs = [
+    {
+      run_id: "run-error",
+      status: "error",
+      metadata: { regenerate_from_run_id: "run-old" },
+    },
+    {
+      run_id: "run-interrupted",
+      status: "interrupted",
+      metadata: { regenerate_from_run_id: "run-older" },
+    },
+  ] as unknown as Run[];
+
+  expect(getSupersededRunIds(runs, new Set(["run-pending"]))).toEqual(
+    new Set(["run-pending"]),
+  );
+});
+
+test("removeSetItems removes pending superseded ids after submit failure", () => {
+  expect(
+    removeSetItems(new Set(["run-old", "run-other"]), ["run-old"]),
+  ).toEqual(new Set(["run-other"]));
+});
+
+test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated run", () => {
+  const oldHuman = {
+    id: "human-1",
+    type: "human",
+    content: "question",
+  } as Message;
+  const oldAi = {
+    id: "ai-old",
+    type: "ai",
+    content: "old answer",
+  } as Message;
+  const newHuman = {
+    id: "human-1",
+    type: "human",
+    content: "question",
+  } as Message;
+  const newAi = {
+    id: "ai-new",
+    type: "ai",
+    content: "new answer",
+  } as Message;
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-old",
+      content: oldHuman,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:00Z",
+    },
+    {
+      run_id: "run-old",
+      content: oldAi,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:01Z",
+    },
+    {
+      run_id: "run-new",
+      content: newHuman,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:02Z",
+    },
+    {
+      run_id: "run-new",
+      content: newAi,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-18T00:00:03Z",
+    },
+  ];
+
+  expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]), [])).toEqual([
+    newHuman,
+    newAi,
+  ]);
 });
 
 test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {

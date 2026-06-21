@@ -16,6 +16,13 @@ export const MOCK_THREAD_ID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_THREAD_ID_2 = "00000000-0000-0000-0000-000000000002";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 
+const MOCK_AUTH_USER = {
+  id: "default",
+  email: "default@test.local",
+  system_role: "admin",
+  needs_setup: false,
+};
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -25,6 +32,7 @@ export type MockThread = {
   title?: string;
   updated_at?: string;
   agent_name?: string;
+  metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
 };
@@ -35,10 +43,55 @@ export type MockAgent = {
   system_prompt?: string;
 };
 
+export type MockSkill = {
+  name: string;
+  description: string;
+  category?: string;
+  license?: string | null;
+  enabled?: boolean;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
+  skills?: MockSkill[];
 };
+
+const DEFAULT_SKILLS: MockSkill[] = [
+  {
+    name: "data-analysis",
+    description: "Analyze structured data and produce charts.",
+    category: "public",
+    enabled: true,
+  },
+  {
+    name: "frontend-design",
+    description: "Create polished frontend interfaces.",
+    category: "public",
+    enabled: true,
+  },
+  {
+    name: "disabled-skill",
+    description: "Hidden from slash autocomplete.",
+    category: "public",
+    enabled: false,
+  },
+];
+
+function mockStreamMessages() {
+  return [
+    {
+      type: "human",
+      id: "msg-human-1",
+      content: [{ type: "text", text: "Hello" }],
+    },
+    {
+      type: "ai",
+      id: "msg-ai-1",
+      content: "Hello from DeerFlow!",
+    },
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // mockLangGraphAPI
@@ -50,29 +103,123 @@ export type MockAPIOptions = {
  * for a real backend.
  */
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
-  const threads = options?.threads ?? [];
+  let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
+  const skills = options?.skills ?? DEFAULT_SKILLS;
+
+  const upsertThread = (thread: MockThread) => {
+    threads = [
+      thread,
+      ...threads.filter((existing) => existing.thread_id !== thread.thread_id),
+    ];
+  };
+
+  const threadSearchResult = (thread: MockThread) => ({
+    thread_id: thread.thread_id,
+    created_at: "2025-01-01T00:00:00Z",
+    updated_at: thread.updated_at ?? "2025-01-01T00:00:00Z",
+    metadata: {
+      ...(thread.metadata ?? {}),
+      ...(thread.agent_name ? { agent_name: thread.agent_name } : {}),
+    },
+    status: "idle",
+    values: { title: thread.title ?? "Untitled" },
+  });
+
+  // Auth — keep workspace tests independent from a real gateway session.
+  void page.route("**/api/v1/auth/me", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_AUTH_USER),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/v1/auth/setup-status", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needs_setup: false }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/v1/auth/logout", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({ status: 204 });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/channels/providers", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false, providers: [] }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/channels/connections", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ connections: [] }),
+      });
+    }
+    return route.fallback();
+  });
 
   // Thread search — sidebar thread list & chats list page
-  void page.route("**/api/langgraph/threads/search", (route) => {
-    const body = threads.map((t) => ({
-      thread_id: t.thread_id,
-      created_at: "2025-01-01T00:00:00Z",
-      updated_at: t.updated_at ?? "2025-01-01T00:00:00Z",
-      metadata: t.agent_name ? { agent_name: t.agent_name } : {},
-      status: "idle",
-      values: { title: t.title ?? "Untitled" },
-    }));
+  void page.route("**/api/langgraph/threads/search", async (route) => {
+    const body = threads.map(threadSearchResult);
+
+    let limit: number | undefined;
+    let offset = 0;
+    try {
+      const postData = route.request().postDataJSON() as {
+        limit?: number;
+        offset?: number;
+      } | null;
+      if (postData) {
+        if (typeof postData.limit === "number") {
+          limit = postData.limit;
+        }
+        if (typeof postData.offset === "number") {
+          offset = postData.offset;
+        }
+      }
+    } catch {
+      // No / invalid JSON body — fall back to returning the full list.
+    }
+
+    const sliced =
+      typeof limit === "number" ? body.slice(offset, offset + limit) : body;
+
     return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(body),
+      body: JSON.stringify(sliced),
     });
   });
 
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      upsertThread({
+        thread_id: MOCK_THREAD_ID,
+        title: "New Chat",
+        updated_at: new Date().toISOString(),
+        messages: mockStreamMessages(),
+      });
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -91,11 +238,46 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Thread update (PATCH) — metadata update after creation
   void page.route("**/api/langgraph/threads/*", (route) => {
+    const threadId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+    );
+    const matchingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+    if (route.request().method() === "GET") {
+      if (!matchingThread) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Thread not found" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(threadSearchResult(matchingThread)),
+      });
+    }
     if (route.request().method() === "PATCH") {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ thread_id: MOCK_THREAD_ID }),
+      });
+    }
+    if (route.request().method() === "DELETE") {
+      threads = threads.filter((thread) => thread.thread_id !== threadId);
+      return route.fulfill({
+        status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/[^/]+$/, (route) => {
+    if (route.request().method() === "DELETE") {
+      return route.fulfill({
+        status: 204,
       });
     }
     return route.fallback();
@@ -241,8 +423,21 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   );
 
   // Run stream — returns a minimal SSE response with an AI message
-  void page.route("**/api/langgraph/runs/stream", handleRunStream);
-  void page.route("**/api/langgraph/threads/*/runs/stream", handleRunStream);
+  const handleMockRunStream = (route: Route) => {
+    upsertThread({
+      thread_id: MOCK_THREAD_ID,
+      title: "New Chat",
+      updated_at: new Date().toISOString(),
+      messages: mockStreamMessages(),
+    });
+    return handleRunStream(route);
+  };
+
+  void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
+  void page.route(
+    "**/api/langgraph/threads/*/runs/stream",
+    handleMockRunStream,
+  );
 
   // Models list — model picker dropdown
   void page.route("**/api/models", (route) => {
@@ -254,6 +449,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           models: [],
           token_usage: { enabled: false },
         }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Skills list — settings page and slash autocomplete
+  void page.route("**/api/skills", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ skills }),
       });
     }
     return route.fallback();
@@ -321,18 +528,7 @@ export function handleRunStream(route: Route) {
     {
       event: "values",
       data: {
-        messages: [
-          {
-            type: "human",
-            id: "msg-human-1",
-            content: [{ type: "text", text: "Hello" }],
-          },
-          {
-            type: "ai",
-            id: "msg-ai-1",
-            content: "Hello from DeerFlow!",
-          },
-        ],
+        messages: mockStreamMessages(),
       },
     },
     { event: "end", data: {} },

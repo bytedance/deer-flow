@@ -179,3 +179,43 @@ def build_deferred_tool_setup(filtered_tools: list[BaseTool], *, enabled: bool) 
         return DeferredToolSetup(None, frozenset(), None)
     catalog = DeferredToolCatalog(tuple(deferred))
     return DeferredToolSetup(build_tool_search_tool(catalog), catalog.names, catalog.hash)
+
+
+def assemble_deferred_tools(filtered_tools: list[BaseTool], *, enabled: bool) -> tuple[list[BaseTool], DeferredToolSetup]:
+    """Build the final tool list + deferred setup from a POLICY-FILTERED list.
+
+    Call AFTER tool-policy filtering so the deferred catalog never exposes a tool
+    the agent is not allowed to use. Fail-closed: if tool_search is enabled and
+    MCP tools survived filtering but no deferred set was recovered, raise rather
+    than silently binding their full schemas to the model.
+
+    Shared by every agent-build path (lead, embedded client, subagent) so they
+    all get the same fail-closed guarantee from one place.
+    """
+    deferred_setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
+    if enabled and not deferred_setup.deferred_names and any(is_mcp_tool(t) for t in filtered_tools):
+        raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered - refusing to bind MCP schemas (fail-closed).")
+    final_tools = list(filtered_tools)
+    if deferred_setup.tool_search_tool:
+        final_tools.append(deferred_setup.tool_search_tool)
+    return final_tools, deferred_setup
+
+
+# Prompt rendering
+
+
+def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozenset()) -> str:
+    """Generate <available-deferred-tools> from an explicit deferred-name set.
+
+    Lists only names so the agent knows what exists and can use tool_search to
+    load them. Returns empty string when there are no deferred tools. The set is
+    computed at agent build time (after tool-policy filtering) and passed in.
+
+    Lives here, next to the assembly that produces ``deferred_names``, so every
+    agent-build path (lead, embedded client, subagent) renders the section the
+    same way without coupling back to ``lead_agent.prompt``.
+    """
+    if not deferred_names:
+        return ""
+    names = "\n".join(sorted(deferred_names))
+    return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"

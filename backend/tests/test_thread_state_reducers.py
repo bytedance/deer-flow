@@ -7,12 +7,49 @@ overwrites the previously accumulated value.
 
 from typing import get_type_hints
 
+import pytest
+
 from deerflow.agents.thread_state import (
     ThreadState,
     merge_artifacts,
+    merge_sandbox,
     merge_todos,
     merge_viewed_images,
 )
+
+
+class TestMergeSandbox:
+    """Reducer for ThreadState.sandbox - allows idempotent concurrent writes."""
+
+    def test_none_new_preserves_existing(self):
+        existing = {"sandbox_id": "sandbox-1"}
+        assert merge_sandbox(existing, None) == existing
+
+    def test_none_existing_accepts_new(self):
+        new = {"sandbox_id": "sandbox-1"}
+        assert merge_sandbox(None, new) == new
+
+    def test_same_sandbox_id_is_idempotent(self):
+        existing = {"sandbox_id": "sandbox-1"}
+        new = {"sandbox_id": "sandbox-1"}
+        assert merge_sandbox(existing, new) == existing
+
+    def test_both_none_sandbox_id_is_idempotent(self):
+        existing = {"sandbox_id": None}
+        new = {"sandbox_id": None}
+        assert merge_sandbox(existing, new) == existing
+
+    def test_omitted_sandbox_id_is_idempotent(self):
+        """An omitted sandbox_id represents uninitialized sandbox state."""
+        existing = {}
+        new = {}
+        assert merge_sandbox(existing, new) == existing
+
+    def test_conflicting_sandbox_ids_raise(self):
+        existing = {"sandbox_id": "sandbox-1"}
+        new = {"sandbox_id": "sandbox-2"}
+        with pytest.raises(ValueError, match="Conflicting sandbox state updates"):
+            merge_sandbox(existing, new)
 
 
 class TestMergeTodos:
@@ -95,3 +132,13 @@ class TestThreadStateAnnotations:
         """Sanity check that existing reducer wiring is preserved."""
         hints = get_type_hints(ThreadState, include_extras=True)
         assert merge_artifacts in hints["artifacts"].__metadata__
+
+    def test_sandbox_field_is_wired_to_merge_sandbox(self):
+        """ThreadState.sandbox must merge idempotent lazy-init updates.
+
+        Without this Annotated binding, concurrent sandbox tools that all
+        persist the same lazily acquired sandbox_id can trigger LangGraph's
+        INVALID_CONCURRENT_GRAPH_UPDATE error.
+        """
+        hints = get_type_hints(ThreadState, include_extras=True)
+        assert merge_sandbox in hints["sandbox"].__metadata__
