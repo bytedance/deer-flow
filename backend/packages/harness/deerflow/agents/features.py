@@ -32,7 +32,7 @@ class RuntimeFeatures:
     auto_title: bool | AgentMiddleware = False
     guardrail: Literal[False] | AgentMiddleware = False
     loop_detection: bool | AgentMiddleware = True
-    token_budget: bool | AgentMiddleware = True
+    token_budget: bool | AgentMiddleware = False
 
 
 # ---------------------------------------------------------------------------

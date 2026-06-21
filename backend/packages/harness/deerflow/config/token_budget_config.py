@@ -19,23 +19,3 @@ class TokenBudgetConfig(BaseModel):
         if self.hard_stop_threshold < self.warn_threshold:
             raise ValueError("hard_stop_threshold must be >= warn_threshold")
         return self
-
-
-_token_budget_config: TokenBudgetConfig = TokenBudgetConfig()
-
-
-def get_token_budget_config() -> TokenBudgetConfig:
-    """Get the current token budget configuration."""
-    return _token_budget_config
-
-
-def set_token_budget_config(config: TokenBudgetConfig) -> None:
-    """Set the token budget configuration."""
-    global _token_budget_config
-    _token_budget_config = config
-
-
-def load_token_budget_config_from_dict(config_dict: dict) -> None:
-    """Load token budget configuration from a dictionary."""
-    global _token_budget_config
-    _token_budget_config = TokenBudgetConfig(**config_dict)

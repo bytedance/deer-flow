@@ -922,7 +922,7 @@ requires-dist = [
     { name = "tavily-python", specifier = ">=0.7.17" },
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
-provides-extras = ["ollama", "postgres", "pymupdf"]
+provides-extras = ["groundroute", "ollama", "postgres", "pymupdf"]
 
 [[package]]
 name = "defusedxml"

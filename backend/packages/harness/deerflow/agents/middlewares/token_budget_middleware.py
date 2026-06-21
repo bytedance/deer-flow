@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, override
@@ -47,6 +48,20 @@ class TokenUsage:
     total: int = 0
 
 
+class BoundedDict(OrderedDict):
+    """A bounded dictionary to prevent unbounded state growth on abandoned runs."""
+
+    def __init__(self, maxsize=1000, *args, **kwds):
+        self.maxsize = maxsize
+        super().__init__(*args, **kwds)
+
+    def __setitem__(self, key, value):
+        if key not in self:
+            if len(self) >= self.maxsize:
+                self.popitem(last=False)
+        super().__setitem__(key, value)
+
+
 class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
     """Enforce per-run token budget limits."""
 
@@ -55,11 +70,11 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         self._config = config
         self._lock = threading.Lock()
 
-        # (thread_id, run_id) -> bool (whether warned)
-        self._warned: dict[tuple[str, str], bool] = {}
-
-        # (thread_id, run_id) -> list of warning texts to inject
-        self._pending_warnings: dict[tuple[str, str], list[str]] = {}
+        # Keyed strictly by run_id (clobber-safe) and bounded (leak-safe)
+        self._warned: BoundedDict[str, bool] = BoundedDict(1000)
+        self._pending_warnings: BoundedDict[str, list[str]] = BoundedDict(1000)
+        self._seen_messages: BoundedDict[str, dict[str, tuple[int, int]]] = BoundedDict(1000)
+        self._cumulative_usage: BoundedDict[str, TokenUsage] = BoundedDict(1000)
 
     @classmethod
     def from_config(cls, config: TokenBudgetConfig) -> TokenBudgetMiddleware:
@@ -69,37 +84,43 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             self._warned.clear()
             self._pending_warnings.clear()
-
-    @staticmethod
-    def _get_thread_id(runtime: Runtime) -> str:
-        ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict):
-            return ctx.get("thread_id", "default")
-        return "default"
+            self._seen_messages.clear()
+            self._cumulative_usage.clear()
 
     @staticmethod
     def _get_run_id(runtime: Runtime) -> str:
         ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict):
-            return ctx.get("run_id", "default")
-        return "default"
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            return ctx["run_id"]
+        # Fallback to runtime object ID to prevent collisions across embedded client runs
+        return str(id(runtime))
 
-    def _clear_run_state(self, key: tuple[str, str]) -> None:
-        self._warned.pop(key, None)
-        self._pending_warnings.pop(key, None)
+    def _clear_run_state(self, run_id: str) -> None:
+        self._warned.pop(run_id, None)
+        self._pending_warnings.pop(run_id, None)
+        self._seen_messages.pop(run_id, None)
+        self._cumulative_usage.pop(run_id, None)
 
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> None:
+        if not self._config.enabled:
+            return
 
-        thread_id = self._get_thread_id(runtime)
+        # Mark all old messages from previous runss as 'seen' so they don't count toward THIS run's budget
+        messages = state.get("messages", [])
+        if not messages:
+            return
+
         run_id = self._get_run_id(runtime)
+        seen = self._seen_messages.setdefault(run_id, {})
+        self._cumulative_usage.setdefault(run_id, TokenUsage())
 
-        with self._lock:
-            # clear any stale state from prior runs on this thread
-            stale_keys = [k for k in self._warned if k[0] == thread_id and k[1] != run_id]
-            stale_keys.extend([k for k in self._pending_warnings if k[0] == thread_id and k[1] != run_id])
-            for key in stale_keys:
-                self._clear_run_state(key)
+        for msg in messages:
+            if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
+                usage = msg.usage_metadata or {}
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+                seen[msg.id] = (input_tokens, output_tokens)
 
     @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -107,10 +128,9 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def after_agent(self, state: AgentState, runtime: Runtime) -> None:
-        thread_id = self._get_thread_id(runtime)
-        run_id = self._get_run_id(runtime)
-        with self._lock:
-            self._clear_run_state((thread_id, run_id))
+        if not self._config.enabled:
+            return
+        self._clear_run_state(self._get_run_id(runtime))
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -149,6 +169,9 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         return {"messages": [stopped_msg]}
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+        if not self._config.enabled:
+            return None
+
         messages = state.get("messages", [])
         if not messages:
             return None
@@ -157,63 +180,67 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         if not isinstance(last_msg, AIMessage):
             return None
 
-        current = TokenUsage()
+        run_id = self._get_run_id(runtime)
+
+        seen = self._seen_messages.setdefault(run_id, {})
+        usage_accum = self._cumulative_usage.setdefault(run_id, TokenUsage())
+
         for msg in messages:
-            if isinstance(msg, AIMessage) and hasattr(msg, "usage_metadata"):
+            if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
                 usage = msg.usage_metadata or {}
 
                 input_tokens = usage.get("input_tokens", 0)
                 output_tokens = usage.get("output_tokens", 0)
-                total_tokens = usage.get("total_tokens")
 
-                if total_tokens is None:
-                    total_tokens = input_tokens + output_tokens
+                # Check what previously recorded for this exact message
+                prev_input, prev_output = seen.get(msg.id, (0, 0))
 
-                current.input += input_tokens
-                current.output += output_tokens
-                current.total += total_tokens
+                # Calculate if any new tokens were added (handles retroactive subagent tokens)
+                diff_input = max(0, input_tokens - prev_input)
+                diff_output = max(0, output_tokens - prev_output)
 
-        if current.total <= 0:
+                if diff_input > 0 or diff_output > 0:
+                    usage_accum.input += diff_input
+                    usage_accum.output += diff_output
+                    usage_accum.total += diff_input + diff_output
+                    seen[msg.id] = (input_tokens, output_tokens)
+
+        if usage_accum.total <= 0:
             return None
 
-        thread_id = self._get_thread_id(runtime)
-        run_id = self._get_run_id(runtime)
-        key = (thread_id, run_id)
+        fractions = [("total", usage_accum.total, self._config.max_tokens)]
+        if self._config.max_input_tokens:
+            fractions.append(("input", usage_accum.input, self._config.max_input_tokens))
+        if self._config.max_output_tokens:
+            fractions.append(("output", usage_accum.output, self._config.max_output_tokens))
 
-        with self._lock:
-            fractions = [("total", current.total, self._config.max_tokens)]
-            if self._config.max_input_tokens:
-                fractions.append(("input", current.input, self._config.max_input_tokens))
-            if self._config.max_output_tokens:
-                fractions.append(("output", current.output, self._config.max_output_tokens))
+        highest_fraction = 0.0
+        trigger_reason = ""
+        trigger_used = 0
+        trigger_budget = 0
 
-            highest_fraction = 0.0
-            trigger_reason = ""
-            trigger_used = 0
-            trigger_budget = 0
+        for reason, used, limit in fractions:
+            frac = used / limit
+            if frac > highest_fraction:
+                highest_fraction = frac
+                trigger_reason = reason
+                trigger_used = used
+                trigger_budget = limit
 
-            for reason, used, limit in fractions:
-                frac = used / limit
-                if frac > highest_fraction:
-                    highest_fraction = frac
-                    trigger_reason = reason
-                    trigger_used = used
-                    trigger_budget = limit
+        if highest_fraction >= self._config.hard_stop_threshold:
+            logger.warning("Token budget hard stop triggered for run %s: %s limit exceeded", run_id, trigger_reason)
+            stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
+            return self._build_hard_stop_update(last_msg, stop_text)
 
-            if highest_fraction >= self._config.hard_stop_threshold:
-                logger.warning("Token budget hard stop triggered for thread %s run %s: %s limit exceeded", thread_id, run_id, trigger_reason)
-                stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
-                return self._build_hard_stop_update(last_msg, stop_text)
-
-            if highest_fraction >= self._config.warn_threshold and not self._warned.get(key, False):
-                self._warned[key] = True
-                percent = highest_fraction * 100
-                warn_text = _BUDGET_WARNING_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget, percent=percent)
-                logger.info("Token budget warning triggered for thread %s run %s: %s limit at %.1f%%", thread_id, run_id, trigger_reason, percent)
-                # queue warning for wrap_model_call
-                warnings = self._pending_warnings.setdefault(key, [])
-                warnings.append(warn_text)
-                return None
+        if highest_fraction >= self._config.warn_threshold and not self._warned.get(run_id, False):
+            self._warned[run_id] = True
+            percent = highest_fraction * 100
+            warn_text = _BUDGET_WARNING_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget, percent=percent)
+            logger.info("Token budget warning triggered for run %s: %s limit at %.1f%%", run_id, trigger_reason, percent)
+            # queue warning for wrap_model_call
+            warnings = self._pending_warnings.setdefault(run_id, [])
+            warnings.append(warn_text)
+            return None
 
         return None
 
@@ -226,13 +253,12 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         return self._apply(state, runtime)
 
     def _drain_pending_warnings(self, runtime: Runtime) -> list[str]:
-        thread_id = self._get_thread_id(runtime)
-        run_id = self._get_run_id(runtime)
-        key = (thread_id, run_id)
+        if not self._config.enabled:
+            return []
 
-        with self._lock:
-            warnings = self._pending_warnings.pop(key, None)
-            return warnings or []
+        run_id = self._get_run_id(runtime)
+        warnings = self._pending_warnings.pop(run_id, None)
+        return warnings or []
 
     def _inject_warnings(self, request: ModelRequest, warnings: list[str]) -> ModelRequest:
         if not warnings:
