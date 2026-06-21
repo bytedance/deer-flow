@@ -646,18 +646,23 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
-    # Attach feedback to the last AI message of each run
-    feedback_repo = get_feedback_repo(request)
-    user_id = await get_current_user(request)
-    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
-
-    # Find the last ai_message per run_id
+    # Find the last AI message per run_id. AI messages are persisted by
+    # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
+    # the event store returns that value verbatim, so match on it here.
     last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
     for i, msg in enumerate(messages):
-        if msg.get("event_type") == "ai_message":
+        if msg.get("event_type") == "llm.ai.response":
             last_ai_per_run[msg["run_id"]] = i
 
-    # Attach feedback field
+    # Attach feedback to the last AI message of each run. Only query when there
+    # is an AI message to attach it to — threads with no completed AI turn yet
+    # would otherwise pay for a grouped feedback lookup whose result is unused.
+    feedback_map: dict[str, dict] = {}
+    if last_ai_per_run:
+        feedback_repo = get_feedback_repo(request)
+        user_id = await get_current_user(request)
+        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+
     last_ai_indices = set(last_ai_per_run.values())
     for i, msg in enumerate(messages):
         if i in last_ai_indices:
