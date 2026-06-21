@@ -148,9 +148,18 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # Absolute temp/home roots used for per-run isolation (macOS + Linux + DEER_FLOW_HOME tmp).
 _PATH_RE = re.compile(r"(?:/private)?/(?:var/folders|tmp)/[^\s\"']*")
 
+# InputSanitizationMiddleware wraps user content in plain-text boundary markers.
+# This is a transport-layer transformation, not a semantic change — strip the
+# wrapper (including its surrounding newlines) before hashing so fixtures
+# recorded before the middleware remain valid.
+_BOUNDARY_BEGIN_RE = re.compile(r"--- BEGIN USER INPUT ---\n?")
+_BOUNDARY_END_RE = re.compile(r"\n?--- END USER INPUT ---")
+
 
 def _normalize_text(text: str) -> str:
     text = _SYSTEM_REMINDER_RE.sub("", text)
+    text = _BOUNDARY_BEGIN_RE.sub("", text)
+    text = _BOUNDARY_END_RE.sub("", text)
     text = _UUID_RE.sub("<UUID>", text)
     text = _ISO_TS_RE.sub("<TS>", text)
     text = _DATE_RE.sub("<DATE>", text)
