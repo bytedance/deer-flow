@@ -84,7 +84,7 @@ export const Reasoning = memo(
           setStartTime(Date.now());
         }
       } else if (startTime !== null) {
-        setDuration(Math.ceil((Date.now() - startTime) / MS_IN_S));
+        setDuration(Math.floor((Date.now() - startTime) / MS_IN_S));
         setStartTime(null);
       }
     }, [isStreaming, startTimeProp, startTime, setDuration]);
@@ -138,7 +138,7 @@ const LiveTimer = ({ startTime }: { startTime: number }) => {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    const calculateElapsed = () => Math.ceil((Date.now() - startTime) / 1000);
+    const calculateElapsed = () => Math.floor((Date.now() - startTime) / 1000);
     setElapsed(calculateElapsed());
 
     const interval = setInterval(() => {
