@@ -130,18 +130,24 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
         "deerflow.agents.middlewares.sandbox_audit_middleware",
         _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=FakeMiddleware),
+    )
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 7 baseline (ToolOutputBudget, ThreadData, Sandbox, DanglingToolCall,
-    # LLMErrorHandling, SandboxAudit, ToolErrorHandling)
+    # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
+    # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
     # + 1 SafetyFinishReasonMiddleware (enabled by default).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 8
-    assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
+    assert len(middlewares) == 9
+    assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
+    assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 

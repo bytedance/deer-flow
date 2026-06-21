@@ -3,11 +3,11 @@
 The system prompt is kept fully static for maximum prefix-cache reuse across users
 and sessions.  The current date is always injected.  Per-user memory is also injected
 when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
-per conversation as a dedicated <system-reminder> HumanMessage inserted before the
+per conversation as a dedicated <system-reminder> SystemMessage inserted before the
 first user message (frozen-snapshot pattern).
 
 When a conversation spans midnight the middleware detects the date change and injects
-a lightweight date-update reminder as a separate HumanMessage before the current turn.
+a lightweight date-update reminder as a separate SystemMessage before the current turn.
 This correction is persisted so subsequent turns on the new day see a consistent history
 and do not re-inject.
 
@@ -36,7 +36,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
@@ -63,7 +63,10 @@ def _extract_date(content: str) -> str | None:
 
 def is_dynamic_context_reminder(message: object) -> bool:
     """Return whether *message* is a hidden dynamic-context reminder."""
-    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
+    # DEPRECATED: HumanMessage reminders only exist in pre-PR checkpoints.
+    # Once all active checkpoints are migrated, the HumanMessage branch can be
+    # removed and this function can check SystemMessage exclusively.
+    return isinstance(message, (HumanMessage, SystemMessage)) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
 
 
 def _last_injected_date(messages: list) -> str | None:
@@ -86,7 +89,7 @@ def _is_user_injection_target(message: object) -> bool:
 
 
 class DynamicContextMiddleware(AgentMiddleware):
-    """Inject memory and current date into HumanMessages as a <system-reminder>.
+    """Inject memory and current date as a SystemMessage <system-reminder>.
 
     First turn
     ----------
@@ -108,22 +111,31 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> str:
+    def _build_full_reminder(self) -> tuple[str, str | None]:
+        """Return (date_reminder, memory_block | None).
+
+        Framework-owned data (date) is separated from user-owned data (memory)
+        so the downstream SystemMessage carries only framework authority and
+        memory stays at role:user — preventing untrusted content from gaining
+        system privilege (OWASP LLM01).
+        """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        # Memory injection is gated by injection_enabled; date is always included.
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
         memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
-        lines: list[str] = ["<system-reminder>"]
-        if memory_context:
-            lines.append(memory_context.strip())
-            lines.append("")  # blank line separating memory from date
-        lines.append(f"<current_date>{current_date}</current_date>")
-        lines.append("</system-reminder>")
+        date_reminder = "\n".join(
+            [
+                "<system-reminder>",
+                f"<current_date>{current_date}</current_date>",
+                "</system-reminder>",
+            ]
+        )
 
-        return "\n".join(lines)
+        memory_block = memory_context.strip() if memory_context else None
+
+        return date_reminder, memory_block
 
     def _build_date_update_reminder(self) -> str:
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
@@ -136,29 +148,51 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
 
     @staticmethod
-    def _make_reminder_and_user_messages(original: HumanMessage, reminder_content: str) -> tuple[HumanMessage, HumanMessage]:
-        """Return (reminder_msg, user_msg) using the ID-swap technique.
+    def _make_reminder_and_user_messages(
+        original: HumanMessage,
+        reminder_content: str,
+        memory_content: str | None = None,
+    ) -> list[SystemMessage | HumanMessage]:
+        """Return messages using the ID-swap technique.
 
-        reminder_msg takes the original message's ID so that add_messages replaces it
-        in-place (preserving position).  user_msg carries the original content with a
-        derived ``{id}__user`` ID and is appended immediately after by add_messages.
+        SystemMessage carries framework-owned data (date, metadata) — takes
+        the original ID so add_messages replaces it in-place.  Optional
+        HumanMessage carries user-owned memory content with ``{id}__memory``.
+        The actual user message gets ``{id}__user``.
 
-        If the original message has no ID a stable UUID is generated so the derived
-        ``{id}__user`` ID never collapses to the ambiguous ``None__user`` string.
+        SystemMessage is used — system context must not masquerade as user
+        input (#3630).  Memory is deliberately kept as HumanMessage so
+        user-influenceable content does not gain system authority (OWASP LLM01).
         """
         stable_id = original.id or str(uuid.uuid4())
-        reminder_msg = HumanMessage(
-            content=reminder_content,
-            id=stable_id,
-            additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+        messages: list[SystemMessage | HumanMessage] = []
+
+        messages.append(
+            SystemMessage(
+                content=reminder_content,
+                id=stable_id,
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            )
         )
-        user_msg = HumanMessage(
-            content=original.content,
-            id=f"{stable_id}__user",
-            name=original.name,
-            additional_kwargs=original.additional_kwargs,
+
+        if memory_content:
+            messages.append(
+                HumanMessage(
+                    content=memory_content,
+                    id=f"{stable_id}__memory",
+                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                )
+            )
+
+        messages.append(
+            HumanMessage(
+                content=original.content,
+                id=f"{stable_id}__user",
+                name=original.name,
+                additional_kwargs=original.additional_kwargs,
+            )
         )
-        return reminder_msg, user_msg
+        return messages
 
     def _inject(self, state) -> dict | None:
         messages = list(state.get("messages", []))
@@ -175,32 +209,31 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
 
         if last_date is None:
-            # ── First turn: inject full reminder as a separate HumanMessage ─────
+            # ── First turn: inject full reminder as a SystemMessage ─────
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            full_reminder = self._build_full_reminder()
+            date_reminder, memory_block = self._build_full_reminder()
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (len=%d, has_memory=%s) into first HumanMessage id=%r",
-                len(full_reminder),
-                "<memory>" in full_reminder,
+                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
+                memory_block is not None,
                 messages[first_idx].id,
             )
-            reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[first_idx], full_reminder)
-            return {"messages": [reminder_msg, user_msg]}
+            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block)
+            return {"messages": result_msgs}
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
             return None
 
-        # ── Midnight crossed: inject date-update reminder as a separate HumanMessage ──
+        # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
         last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
             return None
 
-        reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
+        result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
-        return {"messages": [reminder_msg, user_msg]}
+        return {"messages": result_msgs}
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:

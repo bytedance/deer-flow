@@ -7,7 +7,7 @@ the first HumanMessage exactly once per session (frozen-snapshot pattern).
 from types import SimpleNamespace
 from unittest import mock
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
@@ -26,7 +26,11 @@ def _fake_runtime():
 
 
 def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
-    """Build a reminder HumanMessage the way the middleware would produce it."""
+    """Build a pre-PR HumanMessage reminder — simulates historical checkpoints.
+
+    Uses HumanMessage (DEPRECATED format) to exercise the backward-compat
+    path in ``is_dynamic_context_reminder``.  New reminders are SystemMessage.
+    """
     return HumanMessage(
         content=content,
         id=msg_id,
@@ -52,7 +56,7 @@ def test_injects_system_reminder_into_first_human_message():
     assert len(updated_msgs) == 2
 
     reminder_msg = updated_msgs[0]
-    assert isinstance(reminder_msg, HumanMessage)
+    assert isinstance(reminder_msg, SystemMessage)
     assert reminder_msg.id == "msg-1"  # takes the original ID (position swap)
     assert reminder_msg.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
     assert _SYSTEM_REMINDER_TAG in reminder_msg.content
@@ -79,11 +83,18 @@ def test_memory_included_when_present():
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
         result = mw.before_agent(state, _fake_runtime())
 
-    # Reminder is the first returned message; user query is the second
-    reminder_content = result["messages"][0].content
-    assert "User prefers Python." in reminder_content
-    assert "<current_date>2026-05-08, Friday</current_date>" in reminder_content
-    assert result["messages"][1].content == "Hi"
+    # Memory is a separate HumanMessage — not merged into SystemMessage (OWASP LLM01)
+    msgs = result["messages"]
+    assert len(msgs) == 3  # date SystemMessage + memory HumanMessage + user HumanMessage
+
+    assert isinstance(msgs[0], SystemMessage)
+    assert "<current_date>2026-05-08, Friday</current_date>" in msgs[0].content
+    assert "User prefers Python." not in msgs[0].content  # memory NOT in system role
+
+    assert isinstance(msgs[1], HumanMessage)
+    assert "User prefers Python." in msgs[1].content
+
+    assert msgs[2].content == "Hi"
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +290,9 @@ def test_midnight_crossing_injects_date_update_as_separate_message():
     msgs = result["messages"]
     assert len(msgs) == 2
 
+    # Midnight-cross reminder is also a SystemMessage — both paths are covered
+    assert isinstance(msgs[0], SystemMessage)
+
     # Date-update reminder takes the current message's ID
     assert msgs[0].id == "msg-2"
     assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
@@ -308,6 +322,44 @@ def test_midnight_crossing_id_swap():
 
     assert result["messages"][0].id == "msg-2"
     assert result["messages"][1].id == "msg-2__user"
+
+
+def test_memory_message_carries_reminder_key_for_title_eligibility():
+    """Regression: memory HumanMessage must carry _DYNAMIC_CONTEXT_REMINDER_KEY.
+
+    Without it, title_middleware._is_user_message_for_title counts the memory
+    block as a second user message and skips title generation entirely.
+    Similarly, summarization_middleware._preserve_dynamic_context_reminders
+    would not rescue the memory block from summary compression.
+    """
+    from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="<memory>\nUser prefers Python.\n</memory>",
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    msgs = result["messages"]
+    # Memory message must be recognized as a dynamic-context reminder
+    memory_msg = msgs[1]
+    assert isinstance(memory_msg, HumanMessage)
+    assert memory_msg.id == "msg-1__memory"
+    assert is_dynamic_context_reminder(memory_msg) is True
+
+    # Only the actual user message is title-eligible
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    title_eligible = [m for m in msgs if TitleMiddleware._is_user_message_for_title(m)]
+    assert len(title_eligible) == 1
+    assert title_eligible[0].content == "Hi"
 
 
 def test_no_second_midnight_injection_once_date_updated():

@@ -59,6 +59,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
@@ -533,6 +534,7 @@ export function InputBox({
 
     const recent = messagesRef.current
       .filter((m) => m.type === "human" || m.type === "ai")
+      .filter((m) => !isHiddenFromUIMessage(m))
       .map((m) => {
         const role = m.type === "human" ? "user" : "assistant";
         const content = textOfMessage(m) ?? "";

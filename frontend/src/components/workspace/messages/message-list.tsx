@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
-import { ChevronUpIcon, Loader2Icon } from "lucide-react";
+import { ChevronUpIcon, Loader2Icon, RefreshCcwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { CopyButton } from "../copy-button";
 import { StreamingIndicator } from "../streaming-indicator";
+import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
@@ -172,6 +173,8 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  onRegenerateMessage,
+  canRegenerate = false,
 }: {
   className?: string;
   threadId: string;
@@ -181,6 +184,11 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  onRegenerateMessage?: (
+    messageId: string,
+    supersededMessageIds: string[],
+  ) => void | Promise<void>;
+  canRegenerate?: boolean;
 }) {
   const { t } = useI18n();
   const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
@@ -194,6 +202,9 @@ export function MessageList({
   }, [thread.isLoading]);
   const messages = thread.messages;
   const groupedMessages = getMessageGroups(messages);
+  const [regeneratingMessageId, setRegeneratingMessageId] = useState<
+    string | null
+  >(null);
   const hasActiveAssistantText = useMemo(() => {
     let lastHumanIndex = -1;
     for (let i = groupedMessages.length - 1; i >= 0; i--) {
@@ -226,21 +237,86 @@ export function MessageList({
     [messages, thread.getMessagesMetadata, thread.isLoading],
   );
 
-  const renderAssistantCopyButton = useCallback(
-    (messages: Message[], isStreaming: boolean) => {
-      const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
+  const latestAssistantGroupId = useMemo(() => {
+    if (thread.isLoading) {
+      return null;
+    }
+    for (let i = groupedMessages.length - 1; i >= 0; i -= 1) {
+      const group = groupedMessages[i];
+      if (group?.type === "assistant") {
+        return group.id;
+      }
+    }
+    return null;
+  }, [groupedMessages, thread.isLoading]);
 
-      if (!clipboardData) {
+  const renderAssistantActions = useCallback(
+    (
+      messages: Message[],
+      isStreaming: boolean,
+      enableRegenerateForTurn: boolean,
+    ) => {
+      const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
+      const regenerateTarget = [...messages]
+        .reverse()
+        .find((message) => message.type === "ai" && message.id);
+      const supersededMessageIds = messages
+        .filter((message) => message.type === "ai" && message.id)
+        .map((message) => message.id)
+        .filter((id): id is string => typeof id === "string");
+
+      if (!clipboardData && !regenerateTarget) {
         return null;
       }
 
       return (
-        <div className="mt-2 flex justify-start opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
-          <CopyButton clipboardData={clipboardData} />
+        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+          {clipboardData && <CopyButton clipboardData={clipboardData} />}
+          {enableRegenerateForTurn &&
+            regenerateTarget?.id &&
+            onRegenerateMessage && (
+              <Tooltip content={t.common.regenerate}>
+                <Button
+                  aria-label={t.common.regenerate}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={
+                    !canRegenerate ||
+                    regeneratingMessageId === regenerateTarget.id
+                  }
+                  onClick={() => {
+                    const targetId = regenerateTarget.id;
+                    if (!targetId) {
+                      return;
+                    }
+                    setRegeneratingMessageId(targetId);
+                    void Promise.resolve(
+                      onRegenerateMessage?.(targetId, supersededMessageIds),
+                    ).finally(() => {
+                      setRegeneratingMessageId(null);
+                    });
+                  }}
+                >
+                  <RefreshCcwIcon
+                    className={cn(
+                      "size-3",
+                      regeneratingMessageId === regenerateTarget.id &&
+                        "animate-spin",
+                    )}
+                  />
+                </Button>
+              </Tooltip>
+            )}
         </div>
       );
     },
-    [],
+    [
+      canRegenerate,
+      onRegenerateMessage,
+      regeneratingMessageId,
+      t.common.regenerate,
+    ],
   );
 
   const renderTokenUsage = useCallback(
@@ -341,12 +417,13 @@ export function MessageList({
                   turnUsageMessages,
                 })}
                 {group.type === "assistant" &&
-                  renderAssistantCopyButton(
+                  renderAssistantActions(
                     group.messages,
                     isAssistantMessageGroupStreaming(
                       group.messages,
                       streamingMessages,
                     ),
+                    group.id === latestAssistantGroupId,
                   )}
               </div>
             );
