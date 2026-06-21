@@ -527,6 +527,12 @@ class SubagentExecutor:
         if ai_messages is None:
             ai_messages = []
             result.ai_messages = ai_messages
+        # O(1) duplicate detection for streamed AI messages. ``stream_mode="values"``
+        # re-yields the full state every super-step, so the same trailing message is
+        # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
+        # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
+        # over a run, which reaches max_turns=150 for deep-research subagents).
+        seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -633,14 +639,16 @@ class SubagentExecutor:
                         # Only add if it's not already in the list (avoid duplicates)
                         # Check by comparing message IDs if available, otherwise compare full dict
                         message_id = message_dict.get("id")
-                        is_duplicate = False
                         if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in ai_messages)
+                            is_duplicate = message_id in seen_message_ids
                         else:
+                            # id-less messages can't be keyed; fall back to a full-dict compare
                             is_duplicate = message_dict in ai_messages
 
                         if not is_duplicate:
                             ai_messages.append(message_dict)
+                            if message_id:
+                                seen_message_ids.add(message_id)
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
