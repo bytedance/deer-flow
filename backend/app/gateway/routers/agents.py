@@ -152,7 +152,13 @@ async def check_agent_name(name: str) -> dict:
     # Treat the name as taken if either the per-user path or the legacy shared
     # path holds an agent — picking a name that collides with an unmigrated
     # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+    # Require config.yaml to confirm a genuine agent directory (see #3390),
+    # not a leftover from memory/storage writes (memory.json only).
+    user_agent_path = paths.user_agent_dir(user_id, normalized)
+    user_has_agent = user_agent_path.exists() and (user_agent_path / "config.yaml").exists()
+    legacy_agent_path = paths.agent_dir(normalized)
+    legacy_has_agent = legacy_agent_path.exists() and (legacy_agent_path / "config.yaml").exists()
+    available = not user_has_agent and not legacy_has_agent
     return {"available": available, "name": normalized}
 
 
