@@ -9,12 +9,12 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def reset_api_key_warned():
-    """Reset the module-level warning flag before each test."""
+    """Reset the per-tool warning set before and after each test."""
     import deerflow.community.groundroute.tools as gr_mod
 
-    gr_mod._api_key_warned = False
+    gr_mod._api_key_warned = set()
     yield
-    gr_mod._api_key_warned = False
+    gr_mod._api_key_warned = set()
 
 
 @pytest.fixture
@@ -50,6 +50,18 @@ def _patch_post(mock_resp: MagicMock):
     return patcher, mock_client_cls
 
 
+def _per_tool_config(**by_tool):
+    """Build a get_app_config mock whose get_tool_config returns a distinct config per tool name."""
+    configs = {}
+    for tool_name, extra in by_tool.items():
+        cfg = MagicMock()
+        cfg.model_extra = extra
+        configs[tool_name] = cfg
+    app = MagicMock()
+    app.get_tool_config.side_effect = lambda name: configs.get(name)
+    return app
+
+
 class TestGetApiKey:
     def test_returns_config_key_when_present(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
@@ -59,7 +71,7 @@ class TestGetApiKey:
 
             from deerflow.community.groundroute.tools import _get_api_key
 
-            assert _get_api_key() == "from-config"
+            assert _get_api_key("web_search") == "from-config"
 
     def test_falls_back_to_env_when_config_key_empty(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
@@ -69,7 +81,7 @@ class TestGetApiKey:
             with patch.dict("os.environ", {"GROUNDROUTE_API_KEY": "env-key"}, clear=True):
                 from deerflow.community.groundroute.tools import _get_api_key
 
-                assert _get_api_key() == "env-key"
+                assert _get_api_key("web_search") == "env-key"
 
     def test_returns_none_when_no_key_anywhere(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
@@ -77,7 +89,19 @@ class TestGetApiKey:
             with patch.dict("os.environ", {}, clear=True):
                 from deerflow.community.groundroute.tools import _get_api_key
 
-                assert _get_api_key() is None
+                assert _get_api_key("web_search") is None
+
+    def test_reads_the_named_tools_config_block(self):
+        """web_fetch must read the web_fetch block, not web_search (multi-engine flows)."""
+        with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
+            mock.return_value = _per_tool_config(
+                web_search={"api_key": "search-key"},
+                web_fetch={"api_key": "fetch-key"},
+            )
+            from deerflow.community.groundroute.tools import _get_api_key
+
+            assert _get_api_key("web_search") == "search-key"
+            assert _get_api_key("web_fetch") == "fetch-key"
 
 
 class TestWebSearchTool:
@@ -108,21 +132,57 @@ class TestWebSearchTool:
         }
         assert {r["source_engine"] for r in parsed} == {"serper", "exa"}
 
-    def test_sends_bearer_auth_and_query_body(self, mock_config_with_key):
-        payload = {"results": [{"url": "https://x.com", "title": "T", "snippet": "d", "source_engine": "brave"}]}
+    def test_uses_web_search_config_key(self):
+        """web_search authenticates with the web_search config block's key."""
+        with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
+            mock.return_value = _per_tool_config(
+                web_search={"api_key": "search-key"},
+                web_fetch={"api_key": "fetch-key"},
+            )
+            payload = {"results": [{"url": "u", "title": "t", "snippet": "s", "source_engine": "exa"}]}
+            patcher, mock_client_cls = _patch_post(_make_search_response(payload))
+            try:
+                from deerflow.community.groundroute.tools import web_search_tool
+
+                web_search_tool.invoke({"query": "hello world"})
+                call = mock_client_cls.return_value.__enter__.return_value.post.call_args
+            finally:
+                patcher.stop()
+
+        assert call.kwargs["headers"]["Authorization"] == "Bearer search-key"
+        assert call.kwargs["json"]["query"] == "hello world"
+
+    def test_agent_max_results_is_honored_over_config(self):
+        """A caller-supplied max_results wins over the config value (not silently discarded)."""
+        with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"api_key": "k", "max_results": 5}
+            mock.return_value.get_tool_config.return_value = tool_config
+            payload = {"results": [{"url": "u", "title": "t", "snippet": "s", "source_engine": "exa"}]}
+            patcher, mock_client_cls = _patch_post(_make_search_response(payload))
+            try:
+                from deerflow.community.groundroute.tools import web_search_tool
+
+                web_search_tool.invoke({"query": "test", "max_results": 20})
+                body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+            finally:
+                patcher.stop()
+
+        assert body["max_results"] == 20
+
+    def test_config_max_results_used_when_caller_omits(self, mock_config_with_key):
+        """When the caller omits max_results, the configured value is used."""
+        payload = {"results": [{"url": "u", "title": "t", "snippet": "s", "source_engine": "exa"}]}
         patcher, mock_client_cls = _patch_post(_make_search_response(payload))
         try:
             from deerflow.community.groundroute.tools import web_search_tool
 
-            web_search_tool.invoke({"query": "hello world"})
-            post = mock_client_cls.return_value.__enter__.return_value.post
-            call = post.call_args
+            web_search_tool.invoke({"query": "test"})
+            body = mock_client_cls.return_value.__enter__.return_value.post.call_args.kwargs["json"]
         finally:
             patcher.stop()
 
-        assert call.kwargs["headers"]["Authorization"] == "Bearer test-gr-key"
-        assert call.kwargs["json"]["query"] == "hello world"
-        assert call.kwargs["json"]["max_results"] == 5
+        assert body["max_results"] == 5
 
     def test_max_results_clamped_to_cap(self):
         with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
@@ -229,6 +289,25 @@ class TestWebFetchTool:
         # web_fetch uses mode=page with the URL as the query.
         assert body["mode"] == "page"
         assert body["query"] == "https://ex.com"
+
+    def test_fetch_uses_web_fetch_config_key(self):
+        """web_fetch must authenticate with the web_fetch config block's key, not web_search's."""
+        with patch("deerflow.community.groundroute.tools.get_app_config") as mock:
+            mock.return_value = _per_tool_config(
+                web_search={"api_key": "search-key"},
+                web_fetch={"api_key": "fetch-key"},
+            )
+            payload = {"results": [{"title": "P", "content": "b", "url": "https://ex.com"}]}
+            patcher, mock_client_cls = _patch_post(_make_search_response(payload))
+            try:
+                from deerflow.community.groundroute.tools import web_fetch_tool
+
+                web_fetch_tool.invoke({"url": "https://ex.com"})
+                call = mock_client_cls.return_value.__enter__.return_value.post.call_args
+            finally:
+                patcher.stop()
+
+        assert call.kwargs["headers"]["Authorization"] == "Bearer fetch-key"
 
     def test_fetch_missing_key_returns_error(self, mock_config_no_key):
         with patch.dict("os.environ", {}, clear=True):

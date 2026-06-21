@@ -33,15 +33,22 @@ _DEFAULT_MAX_RESULTS = 5
 _MAX_RESULTS_CAP = 50
 _TIMEOUT_S = 30.0
 _FETCH_SNIPPET_LIMIT = 4096
-_api_key_warned = False
+# Warn at most once per tool ("web_search" / "web_fetch") about a missing key.
+_api_key_warned: set[str] = set()
 
 
-def _get_api_key() -> str | None:
-    config = get_app_config().get_tool_config("web_search")
+def _get_api_key(tool_name: str) -> str | None:
+    """Resolve the GroundRoute key from a given tool's config block, then the env var.
+
+    `tool_name` is the config section to read (web_search vs web_fetch) so a flow that
+    runs GroundRoute for fetch but a different engine for search still reads the right
+    key. Mirrors serper/exa/firecrawl, which all take the tool name.
+    """
+    config = get_app_config().get_tool_config(tool_name)
     if config is not None:
         api_key = (config.model_extra or {}).get("api_key")
         if isinstance(api_key, str) and api_key.strip():
-            return api_key
+            return api_key.strip()
     return os.getenv("GROUNDROUTE_API_KEY")
 
 
@@ -52,6 +59,16 @@ def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -
         logger.warning("Invalid GroundRoute max_results=%r; using default %s", value, default)
         coerced = default
     return max(1, min(coerced, _MAX_RESULTS_CAP))
+
+
+def _missing_key_error(tool_name: str, **context: str) -> str:
+    if tool_name not in _api_key_warned:
+        _api_key_warned.add(tool_name)
+        logger.warning(
+            "GroundRoute API key is not set for '%s'. Set GROUNDROUTE_API_KEY in your environment or provide api_key in config.yaml. Get a free key at https://groundroute.ai/keys",
+            tool_name,
+        )
+    return json.dumps({"error": "GROUNDROUTE_API_KEY is not configured", **context}, ensure_ascii=False)
 
 
 def _post_search(api_key: str, body: dict) -> dict:
@@ -66,7 +83,7 @@ def _post_search(api_key: str, body: dict) -> dict:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5) -> str:
+def web_search_tool(query: str, max_results: int | None = None) -> str:
     """Search the web for information using GroundRoute.
 
     GroundRoute routes the query across six search engines and returns the result
@@ -74,24 +91,18 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
-        max_results: Maximum number of search results to return. Default is 5.
+        max_results: Maximum number of search results to return. If omitted, uses the configured value (default 5). Clamped to 1-50.
     """
-    global _api_key_warned
+    # Honor the caller-supplied max_results; fall back to config only when omitted.
+    if max_results is None:
+        config = get_app_config().get_tool_config("web_search")
+        if config is not None:
+            max_results = (config.model_extra or {}).get("max_results")
+    count = _DEFAULT_MAX_RESULTS if max_results is None else _coerce_max_results(max_results)
 
-    config = get_app_config().get_tool_config("web_search")
-    if config is not None and "max_results" in (config.model_extra or {}):
-        max_results = config.model_extra["max_results"]
-    count = _coerce_max_results(max_results)
-
-    api_key = _get_api_key()
+    api_key = _get_api_key("web_search")
     if not api_key:
-        if not _api_key_warned:
-            _api_key_warned = True
-            logger.warning("GroundRoute API key is not set. Set GROUNDROUTE_API_KEY in your environment or provide api_key in config.yaml. Get a free key at https://groundroute.ai/keys")
-        return json.dumps(
-            {"error": "GROUNDROUTE_API_KEY is not configured", "query": query},
-            ensure_ascii=False,
-        )
+        return _missing_key_error("web_search", query=query)
 
     try:
         data = _post_search(api_key, {"query": query, "max_results": count})
@@ -132,12 +143,9 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    api_key = _get_api_key()
+    api_key = _get_api_key("web_fetch")
     if not api_key:
-        return json.dumps(
-            {"error": "GROUNDROUTE_API_KEY is not configured", "url": url},
-            ensure_ascii=False,
-        )
+        return _missing_key_error("web_fetch", url=url)
 
     try:
         data = _post_search(api_key, {"query": url, "mode": "page", "max_results": 1})
