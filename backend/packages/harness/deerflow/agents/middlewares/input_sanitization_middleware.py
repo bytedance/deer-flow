@@ -31,6 +31,8 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MESSAGE_NAME = "summary"
@@ -233,11 +235,15 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             else:
                 new_content = processed
 
+            # Preserve original content for UI display (prevents wrapper leaking into chat)
+            additional_kwargs = dict(msg.additional_kwargs or {})
+            additional_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
+
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,
                 name=msg.name,
-                additional_kwargs=msg.additional_kwargs,
+                additional_kwargs=additional_kwargs,
             )
             logger.debug(
                 "InputSanitizationMiddleware: original=%r -> processed=%r",
