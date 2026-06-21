@@ -511,6 +511,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="fastcrw",
+        display_name="fastCRW",
+        description="Firecrawl-compatible web scraper, single binary, self-host or cloud",
+        use="deerflow.community.fastcrw.tools:web_search_tool",
+        env_var="CRW_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="brave",
         display_name="Brave Search",
         description="Independent index, official API, API key required",
@@ -553,6 +561,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Search-grade crawl with markdown output, API key required",
         use="deerflow.community.firecrawl.tools:web_fetch_tool",
         env_var="FIRECRAWL_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="fastcrw",
+        display_name="fastCRW",
+        description="Firecrawl-compatible web scraper with markdown output, self-host or cloud",
+        use="deerflow.community.fastcrw.tools:web_fetch_tool",
+        env_var="CRW_API_KEY",
         tool_name="web_fetch",
     ),
 ]
