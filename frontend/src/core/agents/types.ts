@@ -18,6 +18,7 @@ export interface Agent {
   description: string;
   display_name: string | null;
   icon: string | null;
+  visibility?: "public" | "hidden" | string | null;
   model: string | null;
   tool_groups: string[] | null;
   skills: string[] | null;

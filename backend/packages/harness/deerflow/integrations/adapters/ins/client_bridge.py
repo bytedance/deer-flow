@@ -7,6 +7,7 @@ to provide a unified interface for the InsAdapter.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from deerflow.rpc.rpc_client import RpcClient, get_rpc_client
@@ -17,6 +18,25 @@ SERVICE_NAME_BUS = "ins-bus-rpc"
 SERVICE_NAME_BASE = "ins-base-rpc"
 PATH_PREFIX_MACHINE = "/ins-bus-rpc/machineModel"
 PATH_PREFIX_COMPONENT = "/ins-bus-rpc/componentModel"
+
+
+def _resolve_features_tool_root() -> str:
+    explicit = os.environ.get("FEATURES_TOOL_ROOT", "").strip()
+    if explicit:
+        return explicit
+
+    candidates = [
+        os.environ.get("DEER_FLOW_SKILLS_PATH", "").strip(),
+        "/app/skills",
+        "/mnt/skills",
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        root = os.path.join(base, "custom", "features-tool")
+        if os.path.isdir(root):
+            return root
+    return "/mnt/skills/custom/features-tool"
 
 
 class InsClientBridge:
@@ -32,6 +52,7 @@ class InsClientBridge:
         self._factory_id = factory_id
         self._rpc: RpcClient | None = None
         self._features_client: Any = None
+        self._features_client_token: str | None = None
 
     async def initialize(self) -> None:
         """Initialize the bridge, connecting to RPC services and features-tool."""
@@ -39,19 +60,10 @@ class InsClientBridge:
         if self._rpc is None:
             raise RuntimeError("RPC client is not configured")
 
-        # Load features-tool client — required for all data capabilities
+        # Validate features-tool client import. The actual client is created per
+        # token on demand so user-token auth is not leaked across users.
         try:
-            import os
-            import sys
-
-            features_root = os.environ.get("FEATURES_TOOL_ROOT", "/mnt/skills/custom/features-tool")
-            if features_root and features_root not in sys.path:
-                sys.path.insert(0, features_root)
-
-            from ins import InsApiClient, load_ins_settings  # type: ignore[import-not-found]
-
-            settings = load_ins_settings()
-            self._features_client = InsApiClient(settings)
+            self._load_features_client_classes()
             logger.info("features-tool InsApiClient loaded for %s", self._system_key)
         except Exception as e:
             logger.warning(
@@ -69,6 +81,45 @@ class InsClientBridge:
             except Exception:
                 pass
             self._features_client = None
+            self._features_client_token = None
+
+    def _load_features_client_classes(self):
+        import sys
+
+        features_root = _resolve_features_tool_root()
+        if features_root and features_root not in sys.path:
+            sys.path.insert(0, features_root)
+
+        from ins import InsApiClient, load_ins_settings  # type: ignore[import-not-found]
+
+        return InsApiClient, load_ins_settings
+
+    @staticmethod
+    def _token_from_headers(extra_headers: dict[str, str] | None = None) -> str | None:
+        if not extra_headers:
+            return None
+        raw = extra_headers.get("Authorization") or extra_headers.get("authorization") or ""
+        raw = raw.strip()
+        if raw.lower().startswith("bearer "):
+            return raw[7:].strip() or None
+        return raw or None
+
+    async def _get_features_client(self, extra_headers: dict[str, str] | None = None):
+        InsApiClient, load_ins_settings = self._load_features_client_classes()
+        settings = load_ins_settings()
+        token = self._token_from_headers(extra_headers) or settings.access_token
+        if self._features_client is not None and self._features_client_token == token:
+            return self._features_client
+
+        if self._features_client is not None:
+            try:
+                await self._features_client.close()
+            except Exception:
+                pass
+
+        self._features_client = InsApiClient(settings, access_token=token)
+        self._features_client_token = token
+        return self._features_client
 
     async def health_check(self) -> dict[str, bool]:
         """Check connectivity to Ins services.
@@ -182,9 +233,12 @@ class InsClientBridge:
     async def get_slim_components(
         self,
         equipment_id: str,
+        *,
+        extra_headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch slim component tree for an equipment via features-tool."""
-        if self._features_client is None:
+        client = await self._get_features_client(extra_headers)
+        if client is None:
             from deerflow.integrations.errors import IntegrationUnavailableError
 
             raise IntegrationUnavailableError(
@@ -193,7 +247,7 @@ class InsClientBridge:
                 capability_key="asset.context",
             )
 
-        return await self._features_client.get_slim_components(equipment_id)
+        return await client.get_slim_components(equipment_id)
 
     async def get_trend_data(
         self,
@@ -209,7 +263,8 @@ class InsClientBridge:
         """Fetch trend data from InS via features-tool."""
         fid = factory_id or self._factory_id
 
-        if self._features_client is None:
+        client = await self._get_features_client(extra_headers)
+        if client is None:
             from deerflow.integrations.errors import IntegrationUnavailableError
 
             raise IntegrationUnavailableError(
@@ -218,11 +273,10 @@ class InsClientBridge:
                 capability_key="monitoring.trend",
             )
 
-        return await self._features_client.get_trend_data(
+        return await client.get_trend_data(
             component_ids, start_ms, end_ms, features,
             endpoint_series=endpoint_series,
             factory_id=fid,
-            extra_headers=extra_headers,
         )
 
     async def get_machine_drops(
@@ -236,7 +290,8 @@ class InsClientBridge:
         extra_headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch machine drop events (alarm history) via features-tool."""
-        if self._features_client is None:
+        client = await self._get_features_client(extra_headers)
+        if client is None:
             from deerflow.integrations.errors import IntegrationUnavailableError
 
             raise IntegrationUnavailableError(
@@ -245,7 +300,7 @@ class InsClientBridge:
                 capability_key="monitoring.alarm_history",
             )
 
-        return await self._features_client.get_machine_drops(
+        return await client.get_machine_drops(
             equipment_id, start_ms, end_ms, event_types,
             endpoint_series=endpoint_series,
             factory_id=self._factory_id,
@@ -255,12 +310,15 @@ class InsClientBridge:
         self,
         component_id: str,
         endpoint_series: str = "8k",
+        *,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fetch waveform data.
 
         Requires features-tool; no RPC fallback.
         """
-        if self._features_client is None:
+        client = await self._get_features_client(extra_headers)
+        if client is None:
             from deerflow.integrations.errors import IntegrationUnavailableError
 
             raise IntegrationUnavailableError(
@@ -269,7 +327,7 @@ class InsClientBridge:
                 capability_key="monitoring.waveform",
             )
 
-        return await self._features_client.get_waveform(
+        return await client.get_waveform(
             component_id,
             endpoint_series=endpoint_series,
             factory_id=self._factory_id,
@@ -279,12 +337,15 @@ class InsClientBridge:
         self,
         component_id: str,
         endpoint_series: str = "8k",
+        *,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fetch orbit data.
 
         Requires features-tool; no RPC fallback.
         """
-        if self._features_client is None:
+        client = await self._get_features_client(extra_headers)
+        if client is None:
             from deerflow.integrations.errors import IntegrationUnavailableError
 
             raise IntegrationUnavailableError(
@@ -293,7 +354,7 @@ class InsClientBridge:
                 capability_key="monitoring.orbit",
             )
 
-        return await self._features_client.get_orbit(
+        return await client.get_orbit(
             component_id,
             endpoint_series=endpoint_series,
             factory_id=self._factory_id,

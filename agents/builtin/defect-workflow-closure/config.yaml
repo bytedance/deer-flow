@@ -1,0 +1,31 @@
+name: defect-workflow-closure
+display_name: "缺陷闭环"
+description: "处理闭环平台中的缺陷流程待办，辅助查看详情、补充设备资料并提交当前节点表单"
+icon: "✅"
+order: 5
+model: null
+plan_mode: false
+tool_groups:
+  - industrial:asset
+data_tools:
+  - monitoring_get_trend
+  - monitoring_get_alarm_history
+exclude_tools:
+  - create_closure_ticket
+  - list_closure_tickets
+  - update_closure_ticket
+  - close_closure_ticket
+  - http_connector
+skills: []
+mcp_servers: null
+tags:
+  - defect
+  - workflow
+  - closed-loop
+  - task
+starters:
+  - label: "查看缺陷待办"
+    prompt: "加载我的缺陷待办列表"
+    auto_start: true
+advanced:
+  subagent_enabled: false

@@ -348,6 +348,19 @@ const agentHandoffPropsSchema = z.object({
   handoff_data: z.record(z.string(), z.unknown()),
 });
 
+const stringOrNumberSchema = z.union([z.string().max(200), z.number()]);
+
+const defectWorkflowTodoListPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  page_size: z.number().min(1).max(100).optional(),
+});
+
+const defectWorkflowTaskDetailPropsSchema = z.object({
+  title: z.string().max(200).optional(),
+  defect_id: stringOrNumberSchema.optional(),
+  task_id: stringOrNumberSchema.optional(),
+});
+
 const propsSchemas: Record<string, z.ZodType> = {
   chart: chartPropsSchema,
   echart: echartPropsSchema,
@@ -372,6 +385,8 @@ const propsSchemas: Record<string, z.ZodType> = {
   "point-selector-multi": pointSelectorMultiPropsSchema,
   "abnormal-list-selector": abnormalListSelectorPropsSchema,
   "agent_handoff": agentHandoffPropsSchema,
+  "defect-workflow-todo-list": defectWorkflowTodoListPropsSchema,
+  "defect-workflow-task-detail": defectWorkflowTaskDetailPropsSchema,
 };
 
 export function validateProps(

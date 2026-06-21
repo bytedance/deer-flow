@@ -25,8 +25,45 @@ export function useAgents() {
   return { agents: data ?? [], isLoading, error };
 }
 
+export function isAgentVisible(agent: Agent): boolean {
+  return agent.visibility !== "hidden";
+}
+
+export function useVisibleAgents() {
+  const { agents, isLoading, error } = useAgents();
+  const visibleAgents = useMemo(
+    () => agents.filter(isAgentVisible),
+    [agents],
+  );
+  return { agents: visibleAgents, allAgents: agents, isLoading, error };
+}
+
 export function useGroupedAgents() {
   const { agents, isLoading, error } = useAgents();
+
+  const groups = useMemo((): AgentGroup[] => {
+    const builtin: Agent[] = [];
+    const tenant: Agent[] = [];
+    const user: Agent[] = [];
+
+    for (const agent of agents) {
+      if (agent.source === "builtin") builtin.push(agent);
+      else if (agent.source === "tenant") tenant.push(agent);
+      else user.push(agent);
+    }
+
+    const result: AgentGroup[] = [];
+    if (user.length > 0) result.push({ label: "My Agents", source: "user", agents: user });
+    if (tenant.length > 0) result.push({ label: "Team Agents", source: "tenant", agents: tenant });
+    if (builtin.length > 0) result.push({ label: "Built-in", source: "builtin", agents: builtin });
+    return result;
+  }, [agents]);
+
+  return { groups, agents, isLoading, error };
+}
+
+export function useVisibleGroupedAgents() {
+  const { agents, isLoading, error } = useVisibleAgents();
 
   const groups = useMemo((): AgentGroup[] => {
     const builtin: Agent[] = [];
@@ -121,7 +158,7 @@ export function useAgentChildren(parentName: string | null | undefined) {
   return useMemo(
     () =>
       agents
-        .filter((a) => a.parent === parentName && a.enabled)
+        .filter((a) => a.parent === parentName && a.enabled && isAgentVisible(a))
         .sort((a, b) => (a.order ?? 999) - (b.order ?? 999)),
     [agents, parentName],
   );

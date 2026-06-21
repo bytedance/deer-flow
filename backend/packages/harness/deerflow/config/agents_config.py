@@ -66,6 +66,7 @@ class AgentConfig(BaseModel):
     parent: str | None = None
     order: int | None = None
     tool_groups: list[str] | None = None
+    data_tools: list[str] | None = None
     exclude_tools: list[str] | None = None
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
@@ -84,6 +85,7 @@ class AgentInfo(BaseModel):
     description: str = ""
     display_name: str | None = None
     icon: str | None = None
+    visibility: str = "public"
     source: str = "user"
     tenant_id: str | None = None
     editable: bool = True
@@ -93,6 +95,7 @@ class AgentInfo(BaseModel):
     order: int | None = None
     tags: list[str] | None = None
     tool_groups: list[str] | None = None
+    data_tools: list[str] | None = None
     skills: list[str] | None = None
     mcp_servers: list[str] | None = None
     starters: list[StarterConfig] | None = None
@@ -106,6 +109,7 @@ def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool =
         description=config.description,
         display_name=config.display_name,
         icon=config.icon,
+        visibility=config.visibility,
         source=source,
         tenant_id=tenant_id,
         editable=editable,
@@ -115,6 +119,7 @@ def to_agent_info(config: AgentConfig, *, source: str = "user", editable: bool =
         order=config.order,
         tags=config.tags,
         tool_groups=config.tool_groups,
+        data_tools=config.data_tools,
         skills=config.skills,
         mcp_servers=config.mcp_servers,
         starters=config.starters,

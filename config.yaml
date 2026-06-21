@@ -67,6 +67,7 @@ tool_groups:
 - name: file:read
 - name: file:write
 - name: bash
+- name: industrial:asset
 tools:
 - name: web_search
   group: web
@@ -103,6 +104,12 @@ tools:
 - name: bash
   group: bash
   use: deerflow.sandbox.tools:bash_tool
+- name: resolve_component_context
+  group: industrial:asset
+  use: deerflow.tools.industrial_asset_tools:resolve_component_context
+- name: resolve_machine_context
+  group: industrial:asset
+  use: deerflow.tools.industrial_asset_tools:resolve_machine_context
 tool_search:
   enabled: false
 uploads:
@@ -395,6 +402,7 @@ integrations:
         - todo_stats.get
   routes:
     monitoring.trend: ins_prod
+    monitoring.alarm_history: ins_prod
     outbound.query:
       primary_system_key: xsy_prod
     outbound.statistics:

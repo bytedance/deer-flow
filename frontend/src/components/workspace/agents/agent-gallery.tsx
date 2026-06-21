@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAgents } from "@/core/agents";
+import { useVisibleAgents } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { AgentCard } from "./agent-card";
@@ -28,7 +28,7 @@ function AgentCardSkeleton() {
 
 export function AgentGallery() {
   const { t } = useI18n();
-  const { agents, isLoading } = useAgents();
+  const { agents, isLoading } = useVisibleAgents();
   const router = useRouter();
 
   const handleNewAgent = () => {

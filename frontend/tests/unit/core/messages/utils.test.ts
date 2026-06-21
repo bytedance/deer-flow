@@ -102,6 +102,35 @@ test("creates synthetic processing group for orphaned tool messages", () => {
   consoleSpy.mockRestore();
 });
 
+test("hides safety policy block placeholder messages", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "我现在选中的这个缺陷绑定的设备id是什么？",
+    },
+    {
+      id: "human-safety-block",
+      type: "human",
+      content:
+        "[Content blocked by safety policy: Prompt injection detected: obfuscation]",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "设备 ID 是 2067266200919998465。",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+  expect(groups.flatMap((group) => group.messages.map((message) => message.id))).toEqual([
+    "human-1",
+    "ai-1",
+  ]);
+});
+
 test("appending a tool message extends the existing processing group (2.9)", () => {
   const baseMessages = [
     { id: "human-1", type: "human", content: "Search" },

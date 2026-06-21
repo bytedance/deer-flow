@@ -46,6 +46,29 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
 };
 
+function getModelText(
+  text: string,
+  additionalKwargs: Record<string, unknown> | undefined,
+): string {
+  const modelText = additionalKwargs?.model_text;
+  return typeof modelText === "string" && modelText.trim() ? modelText : text;
+}
+
+function getSubmitAdditionalKwargs(
+  additionalKwargs: Record<string, unknown> | undefined,
+  filesForSubmit: FileInMessage[],
+  displayText: string,
+): Record<string, unknown> {
+  const result = { ...(additionalKwargs ?? {}) };
+  delete result.model_text;
+  return {
+    ...result,
+    display_text:
+      typeof result.display_text === "string" ? result.display_text : displayText,
+    ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -560,6 +583,7 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      const modelText = getModelText(text, options?.additionalKwargs);
 
       // Capture current count before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
@@ -687,15 +711,14 @@ export function useThreadStream({
                 content: [
                   {
                     type: "text",
-                    text,
+                    text: modelText,
                   },
                 ],
-                additional_kwargs: {
-                  ...options?.additionalKwargs,
-                  ...(filesForSubmit.length > 0
-                    ? { files: filesForSubmit }
-                    : {}),
-                },
+                additional_kwargs: getSubmitAdditionalKwargs(
+                  options?.additionalKwargs,
+                  filesForSubmit,
+                  text,
+                ),
               },
             ],
           },

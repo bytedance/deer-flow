@@ -99,3 +99,17 @@ class TestOrganizeServiceClient:
         with patch.object(client._rpc, "call_raw", mock_raw):
             result = asyncio.run(client.get_org_tree_by_user_id_and_org_id(user_id=1, org_id=0, tree_type=1))
             assert result == [{"id": "3", "label": "raw"}]
+
+    def test_get_component_path(self):
+        client = OrganizeServiceClient()
+        mock_raw = AsyncMock()
+        mock_raw.return_value = {"code": 0, "msg": "success", "data": {"path": "测试设备/测试子设备"}}
+
+        with patch.object(client._rpc, "call_raw", mock_raw):
+            result = asyncio.run(client.get_component_path("1781744317660112"))
+            assert result == {"path": "测试设备/测试子设备"}
+            call_args = mock_raw.call_args
+            assert call_args.args[0] == "ins-bus-rpc"
+            assert call_args.args[1] == "/ins-bus-rpc/organize/getComponentPath"
+            assert call_args.args[2] == "GET"
+            assert call_args.args[3]["componentId"] == "1781744317660112"

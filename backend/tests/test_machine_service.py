@@ -127,3 +127,27 @@ class TestMachineServiceClient:
         with patch.object(client._rpc, "call_raw", mock_raw):
             result = asyncio.run(client.get_component_info_by_machine_id(99999))
             assert result == []
+
+    def test_get_component_info_by_ids(self):
+        client = MachineServiceClient()
+        mock_raw = AsyncMock()
+        mock_raw.return_value = {
+            "code": 0,
+            "msg": "success",
+            "data": [
+                {
+                    "id": 1781744317660112,
+                    "name": "测试子设备",
+                    "machineId": 2067266200919998465,
+                }
+            ],
+        }
+
+        with patch.object(client._rpc, "call_raw", mock_raw):
+            result = asyncio.run(client.get_component_info_by_ids(["1781744317660112"]))
+            assert result[0]["machineId"] == 2067266200919998465
+            call_args = mock_raw.call_args
+            assert call_args.args[0] == "ins-bus-rpc"
+            assert call_args.args[1] == "/ins-bus-rpc/componentModel/getComponentInfoById"
+            assert call_args.args[2] == "GET"
+            assert call_args.args[3]["componentIds"] == "1781744317660112"

@@ -47,6 +47,7 @@ class AgentResponse(BaseModel):
     description: str = Field(default="", description="Agent description")
     display_name: str | None = Field(default=None, description="Human-readable display name")
     icon: str | None = Field(default=None, description="Icon identifier")
+    visibility: str = Field(default="public", description="Presentation visibility: public | hidden")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
@@ -136,6 +137,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         description=agent_cfg.description,
         display_name=agent_cfg.display_name,
         icon=agent_cfg.icon,
+        visibility=agent_cfg.visibility,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,

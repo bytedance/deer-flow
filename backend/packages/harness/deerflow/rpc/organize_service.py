@@ -78,6 +78,38 @@ class OrganizeServiceClient:
         )
         return self._unwrap_ajax_result(result)
 
+    async def get_component_path(self, component_id: int | str) -> dict[str, Any]:
+        """通过部件/子设备ID获取设备到部件的可读路径。
+
+        Args:
+            component_id: 部件/子设备ID。
+
+        Returns:
+            dict: 例如 {"path": "设备/部件/子部件"}。
+        """
+        result = await self._rpc.call_raw(
+            SERVICE_NAME,
+            f"{PATH_PREFIX}/getComponentPath",
+            "GET",
+            {"componentId": str(component_id)},
+        )
+        data = self._unwrap_ajax_result(result)
+        return data if isinstance(data, dict) else {}
+
+    async def get_component_path_list(self, component_id: int | str) -> list[str]:
+        """通过部件/子设备ID获取路径列表。
+
+        ins-bus-rpc 返回 ResultT<List<String>>，语义是 [子部件, 部件, 设备]。
+        """
+        result = await self._rpc.call_raw(
+            SERVICE_NAME,
+            f"{PATH_PREFIX}/getComponentPathList",
+            "GET",
+            {"componentId": str(component_id)},
+        )
+        data = self._unwrap_ajax_result(result)
+        return data if isinstance(data, list) else []
+
     @staticmethod
     def _unwrap_ajax_result(result: Any) -> Any:
         """Extract data from AjaxResult wrapper {code, msg, data}."""

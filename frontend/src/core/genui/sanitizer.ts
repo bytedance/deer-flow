@@ -78,6 +78,12 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
   "agent_handoff": new Set([
     "target_agent", "target_display_name", "target_icon", "message", "handoff_data",
   ]),
+  "defect-workflow-todo-list": new Set([
+    "title", "page_size",
+  ]),
+  "defect-workflow-task-detail": new Set([
+    "title", "defect_id", "task_id",
+  ]),
 };
 
 function sanitizeValue(value: unknown, depth = 0): unknown {

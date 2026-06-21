@@ -387,6 +387,7 @@ tool_groups:
   - name: rag
   - name: monitoring:pro
   - name: monitoring:ultra
+  - name: industrial:asset
 
 # ============================================================================
 # Tools Configuration
@@ -520,6 +521,16 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # Industrial asset lookup tool
+  # Resolves component/sub-device IDs to owning equipment, component path,
+  # and related measurement points via ins-bus-rpc.
+  # - name: resolve_component_context
+  #   group: industrial:asset
+  #   use: deerflow.tools.industrial_asset_tools:resolve_component_context
+  # - name: resolve_machine_context
+  #   group: industrial:asset
+  #   use: deerflow.tools.industrial_asset_tools:resolve_machine_context
 
   # RAG knowledge base search tool
   # - name: search_knowledge_base

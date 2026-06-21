@@ -32,6 +32,8 @@ const COMPONENT_REGISTRY: Record<string, () => Promise<{ default: LazyComponent 
   // Abnormal judgment components
   "abnormal-list-selector": () => import("@/components/genui/AbnormalListSelectorBlock") as any,
   "agent_handoff": () => import("@/components/genui/AgentHandoffBlock") as any,
+  "defect-workflow-todo-list": () => import("@/components/genui/DefectWorkflowTodoListBlock") as any,
+  "defect-workflow-task-detail": () => import("@/components/genui/DefectWorkflowTaskDetailBlock") as any,
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
 

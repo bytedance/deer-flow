@@ -52,6 +52,23 @@ import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
 
+const DEFECT_WORKFLOW_CONTEXT_RE =
+  /\n*\s*<defect_workflow_selected_context>[\s\S]*?<\/defect_workflow_selected_context>/g;
+const DEFECT_WORKFLOW_INTERNAL_HINT_RE =
+  /\n*\s*请优先基于 defect_workflow_selected_context 回答用户关于当前选中缺陷、任务、设备、节点和表单的问题。不要声称缺少连接器配置；只有当上下文确实没有相关字段时，再说明缺少哪个字段。/g;
+
+function getHumanDisplayContent(message: Message, rawContent: string): string {
+  const displayText = message.additional_kwargs?.display_text;
+  if (typeof displayText === "string" && displayText.trim()) {
+    return displayText.trim();
+  }
+
+  return rawContent
+    .replace(DEFECT_WORKFLOW_CONTEXT_RE, "")
+    .replace(DEFECT_WORKFLOW_INTERNAL_HINT_RE, "")
+    .trim();
+}
+
 function FeedbackButtons({
   threadId,
   runId,
@@ -258,10 +275,13 @@ function MessageContent_({
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
-      return rawContent ? stripDeepLinkParams(stripUploadedFilesTag(rawContent)) : "";
+      const humanContent = getHumanDisplayContent(message, rawContent);
+      return humanContent
+        ? stripDeepLinkParams(stripUploadedFilesTag(humanContent))
+        : "";
     }
     return rawContent ?? "";
-  }, [rawContent, isHuman]);
+  }, [message, rawContent, isHuman]);
 
   const filesList =
     files && files.length > 0 ? (

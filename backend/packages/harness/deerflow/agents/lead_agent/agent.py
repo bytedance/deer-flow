@@ -83,6 +83,51 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
+def _build_agent_data_tools(agent_config, *, app_config: AppConfig, tenant_id: str, user_id: str, token: str | None):
+    data_tools = getattr(agent_config, "data_tools", None) if agent_config else None
+    if not data_tools:
+        return []
+
+    try:
+        from deerflow.integrations.adapters.base import AuthContext
+        from deerflow.integrations.config import IntegrationsConfig
+        from deerflow.integrations.registry import initialize_registry
+        from deerflow.integrations.routing import CapabilityRouter
+        from deerflow.integrations.tools.registry import get_tool_registry, initialize_tool_registry
+        from deerflow.integrations.tools.tool_builder import build_integration_tools
+
+        raw_config = getattr(app_config, "integrations", None)
+        if raw_config is None:
+            logger.warning("Agent %s declares data_tools but integrations config is missing", agent_config.name)
+            return []
+        integration_config = (
+            raw_config
+            if isinstance(raw_config, IntegrationsConfig)
+            else IntegrationsConfig.model_validate(raw_config)
+        )
+        if not integration_config.enabled:
+            logger.info("Agent %s data_tools skipped because integrations are disabled", agent_config.name)
+            return []
+
+        registry = initialize_registry(integration_config)
+        _run_coroutine_sync(registry.initialize_all())
+
+        tool_registry = get_tool_registry()
+        if tool_registry is None:
+            router = CapabilityRouter(registry, integration_config.routes)
+            tool_registry = initialize_tool_registry(integration_config, registry, router)
+        if not getattr(tool_registry, "_initialized", False):
+            _run_coroutine_sync(tool_registry.initialize())
+
+        auth_context = AuthContext(tenant_id=tenant_id, user_id=user_id, token=token)
+        tools = build_integration_tools(auth_context, list(data_tools))
+        logger.info("Agent %s loaded %d data tool(s): %s", agent_config.name, len(tools), data_tools)
+        return tools
+    except Exception:
+        logger.exception("Failed to build data tools for agent %s", getattr(agent_config, "name", "unknown"))
+        return []
+
+
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     resolved_app_config = app_config or get_app_config()
@@ -594,6 +639,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, memory_co
         agent_name=agent_name,
         agent_config=agent_config,
     ) + extra_tools
+
+    if agent_config and agent_config.data_tools:
+        token = cfg.get("access_token") or cfg.get("ins_base_token")
+        tools.extend(
+            _build_agent_data_tools(
+                agent_config,
+                app_config=resolved_app_config,
+                tenant_id=tenant_id,
+                user_id=str(cfg.get("user_id") or ""),
+                token=str(token) if token else None,
+            )
+        )
 
     # Filter out excluded tools specified in agent config
     if agent_config and agent_config.exclude_tools:

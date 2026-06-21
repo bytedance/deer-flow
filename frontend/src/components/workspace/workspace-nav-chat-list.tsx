@@ -26,7 +26,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { type Agent, type NavItem, useAgentChildren, useAgents } from "@/core/agents";
+import { type Agent, type NavItem, isAgentVisible, useAgentChildren, useAgents } from "@/core/agents";
 import { useClosureRefresh, useClosureSummary } from "@/core/closed-loop";
 import { useI18n } from "@/core/i18n/hooks";
 import { useReportThreads } from "@/core/report-templates";
@@ -51,7 +51,7 @@ export function WorkspaceNavChatList() {
   const pathname = usePathname();
   const { agents } = useAgents();
   const enabledAgents = agents
-    .filter((a) => a.enabled && !a.parent)
+    .filter((a) => a.enabled && !a.parent && isAgentVisible(a))
     .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
   const defectClosureEnabled = agents.some(
     (a) => a.name === "defect-closure" && a.enabled,
@@ -68,7 +68,7 @@ export function WorkspaceNavChatList() {
   const dynamicNavItems = useMemo(() => {
     const items: (NavItem & { key: string })[] = [];
     for (const agent of agents) {
-      if (agent.enabled && agent.nav_items?.length) {
+      if (agent.enabled && isAgentVisible(agent) && agent.nav_items?.length) {
         for (const item of agent.nav_items) {
           items.push({ ...item, key: `${agent.name}:${item.path}` });
         }

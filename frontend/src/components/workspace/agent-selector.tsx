@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useGroupedAgents } from "@/core/agents";
+import { useVisibleGroupedAgents } from "@/core/agents";
 import { type Agent } from "@/core/agents/types";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +35,7 @@ export function AgentSelector({
   onSelect,
   selectedAgent,
 }: AgentSelectorProps) {
-  const { groups, isLoading } = useGroupedAgents();
+  const { groups, isLoading } = useVisibleGroupedAgents();
   const [search, setSearch] = useState("");
 
   const filteredGroups = useMemo(() => {

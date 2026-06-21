@@ -161,6 +161,25 @@ class MachineServiceClient:
         )
         return self._unwrap_ajax_result(result)
 
+    async def get_component_info_by_ids(self, component_ids: list[int | str]) -> list[dict]:
+        """通过部件/子设备ID批量查询部件详情。
+
+        Args:
+            component_ids: 部件/子设备ID列表。
+
+        Returns:
+            list[dict]: ComponentInfo 列表。通常包含 id, name, machineId,
+                parentId, type, craftBit, classification, configInfo 等字段。
+        """
+        result = await self._rpc.call_raw(
+            SERVICE_NAME,
+            f"{COMPONENT_PATH_PREFIX}/getComponentInfoById",
+            "GET",
+            {"componentIds": ",".join(str(i) for i in component_ids)},
+        )
+        data = self._unwrap_ajax_result(result)
+        return data if isinstance(data, list) else []
+
     @staticmethod
     def _unwrap_result(result: Any) -> Any:
         """Extract data from ResultT wrapper {code, message, data, success}."""

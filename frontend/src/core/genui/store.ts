@@ -48,6 +48,29 @@ interface BlockStoreState {
   reset: () => void;
 }
 
+function isPersistentLocalBlock(block: UIBlock): boolean {
+  return block.metadata?.source === "agent-home";
+}
+
+function preservePersistentRuntimeProps(existing: UIBlock | undefined, incoming: UIBlock): UIBlock {
+  if (!existing || !isPersistentLocalBlock(existing)) {
+    return incoming;
+  }
+
+  const selectedTaskId = existing.props.selected_task_id;
+  if (selectedTaskId == null) {
+    return incoming;
+  }
+
+  return {
+    ...incoming,
+    props: {
+      ...incoming.props,
+      selected_task_id: selectedTaskId,
+    },
+  };
+}
+
 export const useBlockStore = create<BlockStoreState>((set, get) => ({
   activeThreadId: null,
   blocks: new Map(),
@@ -61,13 +84,18 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       const blocks = new Map<string, UIBlock>();
       // Preserve blocks from OTHER threads
       for (const [key, block] of state.blocks) {
-        if (block.thread_id !== threadId) {
+        if (block.thread_id !== threadId || isPersistentLocalBlock(block)) {
           blocks.set(key, block);
         }
       }
       // Add new blocks, tagged with the correct thread
       for (const block of newBlocks) {
-        blocks.set(block.block_id, { ...block, thread_id: threadId });
+        const existing = state.blocks.get(block.block_id);
+        const nextBlock = preservePersistentRuntimeProps(existing, {
+          ...block,
+          thread_id: threadId,
+        });
+        blocks.set(block.block_id, nextBlock);
       }
 
       const interactions = new Map(state.interactions);
@@ -90,7 +118,12 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
   upsertBlock: (threadId: string, block: UIBlock) =>
     set((state) => {
       const blocks = new Map(state.blocks);
-      blocks.set(block.block_id, { ...block, thread_id: threadId });
+      const existing = blocks.get(block.block_id);
+      const nextBlock = preservePersistentRuntimeProps(existing, {
+        ...block,
+        thread_id: threadId,
+      });
+      blocks.set(block.block_id, nextBlock);
       return { blocks };
     }),
 
@@ -147,5 +180,14 @@ export const useBlockStore = create<BlockStoreState>((set, get) => ({
       return { interactions };
     }),
 
-  reset: () => set({ activeThreadId: null, blocks: new Map(), interactions: new Map() }),
+  reset: () =>
+    set((state) => {
+      const blocks = new Map<string, UIBlock>();
+      for (const [key, block] of state.blocks) {
+        if (isPersistentLocalBlock(block)) {
+          blocks.set(key, block);
+        }
+      }
+      return { activeThreadId: null, blocks, interactions: new Map() };
+    }),
 }));

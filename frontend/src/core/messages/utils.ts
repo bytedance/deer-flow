@@ -499,13 +499,18 @@ export function isHiddenFromUIMessage(message: Message, isLoading?: boolean): bo
   const isStructuredSummary =
     typeof text === "string" &&
     /^\s*##\s+(SESSION\s+INTENT|SUMMARY|ARTIFACTS|NEXT\s+STEPS)\b/i.test(text);
+  const isSafetyPolicyBlock =
+    message.type === "human" &&
+    typeof text === "string" &&
+    /^\s*\[Content blocked by safety policy:[\s\S]*\]\s*$/.test(text);
 
   return (
     message.additional_kwargs?.hide_from_ui === true ||
     message.name === "loop_warning" ||
     hideTransient ||
     isInteractionPayload ||
-    isStructuredSummary
+    isStructuredSummary ||
+    isSafetyPolicyBlock
   );
 }
 

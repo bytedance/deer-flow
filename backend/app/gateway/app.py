@@ -38,8 +38,10 @@ from app.gateway.routers import (
     capabilities,
     channels,
     closure_tickets,
+    component,
     config,
     cost,
+    defect_workflow,
     feedback,
     genui,
     genui_telemetry,
@@ -796,11 +798,17 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Point API (proxy to ins-bus-rpc /pointModel)
     app.include_router(point.router)
 
+    # Component API (proxy to ins-bus-rpc /componentModel, /organize, /pointModel)
+    app.include_router(component.router)
+
     # Abnormal (SMS) proxy for A2UI components
     app.include_router(abnormal.router)
 
     # Workbench API (proxy to external 服务平台)
     app.include_router(workbench.router)
+
+    # EHM defect workflow proxy API
+    app.include_router(defect_workflow.router)
 
     # Closed-loop tickets API
     app.include_router(closure_tickets.router)
