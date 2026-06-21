@@ -526,6 +526,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="BRAVE_SEARCH_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="groundroute",
+        display_name="GroundRoute",
+        description="One key across six engines, price-routed with failover, API key required",
+        use="deerflow.community.groundroute.tools:web_search_tool",
+        env_var="GROUNDROUTE_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -561,6 +569,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Search-grade crawl with markdown output, API key required",
         use="deerflow.community.firecrawl.tools:web_fetch_tool",
         env_var="FIRECRAWL_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="groundroute",
+        display_name="GroundRoute",
+        description="Page fetch via routed engines, API key required",
+        use="deerflow.community.groundroute.tools:web_fetch_tool",
+        env_var="GROUNDROUTE_API_KEY",
         tool_name="web_fetch",
     ),
     WebProvider(

@@ -40,6 +40,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# GroundRoute needs no extra packages (httpx is already a core dependency). This
+# empty extra exists so the documented `uv add 'deerflow-harness[groundroute]'`
+# install command resolves cleanly without an "unknown extra" warning.
+groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",

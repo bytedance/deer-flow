@@ -2250,3 +2250,114 @@ class TestSubagentTracingWiring:
         from langchain_core.messages import HumanMessage
 
         return ({"messages": [HumanMessage(content=task)]}, [], None)
+
+
+class TestSubagentGuardrailAttribution:
+    """GuardrailMiddleware runs on subagents too, so the authenticated runtime
+    context captured at the lead-agent layer must reach the subagent's own
+    ``astream`` context — otherwise delegated tool calls are evaluated with
+    ``user_role=None`` and role-aware policy silently mis-attributes them.
+    """
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        executor = importlib.import_module("deerflow.subagents.executor")
+        return _patch_default_get_app_config(importlib.reload(executor))
+
+    def _make_executor(
+        self,
+        classes,
+        *,
+        user_id=None,
+        user_role=None,
+        oauth_provider=None,
+        oauth_id=None,
+        run_id=None,
+        name="general-purpose",
+        parent_model="test-model",
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        config = SubagentConfig(
+            name=name,
+            description="Guardrail attribution test agent",
+            system_prompt="You are a guardrail attribution test agent.",
+            max_turns=5,
+            timeout_seconds=30,
+        )
+        return SubagentExecutor(
+            config=config,
+            tools=[],
+            parent_model=parent_model,
+            thread_id="thread-attrib-1",
+            trace_id="trace-attrib-1",
+            user_id=user_id,
+            user_role=user_role,
+            oauth_provider=oauth_provider,
+            oauth_id=oauth_id,
+            run_id=run_id,
+        )
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_attribution_to_subagent_context(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The authenticated runtime context captured at task_tool must reach
+        the subagent's ``astream`` context so GuardrailMiddleware sees the
+        same identity/attribution as the lead agent.
+        """
+        executor = self._make_executor(
+            classes,
+            user_id="alice",
+            user_role="admin",
+            oauth_provider="keycloak",
+            oauth_id="subj-123",
+            run_id="run-42",
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None, "subagent context must be passed to astream"
+        assert context.get("user_id") == "alice"
+        assert context.get("user_role") == "admin"
+        assert context.get("oauth_provider") == "keycloak"
+        assert context.get("oauth_id") == "subj-123"
+        assert context.get("run_id") == "run-42"
+        assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_context_defaults_to_none_when_attribution_absent(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """When no authenticated context is propagated (e.g. internal-auth
+        runs), the subagent context still carries the attribution keys as
+        None so GuardrailRequest fields stay None rather than KeyError-ing.
+        """
+        executor = self._make_executor(classes)
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("user_role") is None
+        assert context.get("oauth_provider") is None
+        assert context.get("oauth_id") is None
+        assert context.get("run_id") is None
+
+    async def _noop_build_initial_state(self, task):  # noqa: ARG002 - signature parity
+        from langchain_core.messages import HumanMessage
+
+        return ({"messages": [HumanMessage(content=task)]}, [], None)
