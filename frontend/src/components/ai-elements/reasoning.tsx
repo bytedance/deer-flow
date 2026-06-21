@@ -39,6 +39,7 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   onOpenChange?: (open: boolean) => void;
   duration?: number;
   startTimeProp?: number | null;
+  onTurnDurationChange?: (duration: number | undefined) => void;
 };
 
 const AUTO_CLOSE_DELAY = 1000;
@@ -53,6 +54,7 @@ export const Reasoning = memo(
     onOpenChange,
     duration: durationProp,
     startTimeProp,
+    onTurnDurationChange,
     children,
     ...props
   }: ReasoningProps) => {
@@ -61,9 +63,10 @@ export const Reasoning = memo(
       defaultProp: defaultOpen,
       onChange: onOpenChange,
     });
-    const [duration, setDuration] = useControllableState({
+    const [duration, setDuration] = useControllableState<number | undefined>({
       prop: durationProp,
       defaultProp: undefined,
+      onChange: onTurnDurationChange,
     });
 
     const [hasAutoClosed, setHasAutoClosed] = useState(false);
@@ -81,7 +84,7 @@ export const Reasoning = memo(
           setStartTime(Date.now());
         }
       } else if (startTime !== null) {
-        setDuration(Math.ceil((Date.now() - startTime) / MS_IN_S));
+        setDuration(Math.floor((Date.now() - startTime) / MS_IN_S));
         setStartTime(null);
       }
     }, [isStreaming, startTimeProp, startTime, setDuration]);
@@ -135,7 +138,7 @@ const LiveTimer = ({ startTime }: { startTime: number }) => {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    const calculateElapsed = () => Math.ceil((Date.now() - startTime) / 1000);
+    const calculateElapsed = () => Math.floor((Date.now() - startTime) / 1000);
     setElapsed(calculateElapsed());
 
     const interval = setInterval(() => {

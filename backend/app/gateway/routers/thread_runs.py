@@ -32,6 +32,24 @@ router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 
 
+def compute_run_durations(runs) -> dict[str, int]:
+    """Map run_id -> duration in seconds from run timestamps."""
+    from datetime import datetime
+
+    durations: dict[str, int] = {}
+    for r in runs:
+        if r.created_at and r.updated_at:
+            try:
+                created = datetime.fromisoformat(r.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
+                # Note: updated_at - created_at represents the row's total lifetime,
+                # which can slightly overshoot the actual AI turn end if the row is mutated later.
+                durations[r.run_id] = int((updated - created).total_seconds())
+            except Exception:
+                logger.warning("Failed to parse timestamps for run %s", r.run_id, exc_info=True)
+    return durations
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -657,6 +675,20 @@ async def list_thread_messages(
         else:
             msg["feedback"] = None
 
+    run_mgr = get_run_manager(request)
+    runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    run_durations = compute_run_durations(runs)
+
+    if run_durations:
+        for msg in messages:
+            content = msg.get("content", {})
+            if isinstance(content, dict) and content.get("type") == "ai":
+                rid = msg.get("run_id")
+                if rid and rid in run_durations:
+                    if "additional_kwargs" not in content:
+                        content["additional_kwargs"] = {}
+                    content["additional_kwargs"]["turn_duration"] = run_durations[rid]
+
     return messages
 
 
@@ -683,6 +715,23 @@ async def list_run_messages(
         after_seq=after_seq,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+
+    if data:
+        run_mgr = get_run_manager(request)
+        record = await run_mgr.get(run_id)
+        if record:
+            durations = compute_run_durations([record])
+            duration = durations.get(run_id)
+            if duration is not None:
+                for msg in reversed(data):
+                    content = msg.get("content")
+                    metadata = msg.get("metadata", {})
+                    is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
+                    if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
+                        if "additional_kwargs" not in content:
+                            content["additional_kwargs"] = {}
+                        content["additional_kwargs"]["turn_duration"] = duration
+
     return {"data": data, "has_more": has_more}
 
 
