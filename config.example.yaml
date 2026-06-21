@@ -570,6 +570,18 @@ tools:
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
+  # GroundRoute is a meta search layer: one API in front of six engines (Serper,
+  # Brave, Exa, Tavily, Firecrawl, Perplexity). It routes each query to the cheapest
+  # engine that clears a quality bar and fails over if one is down. Pricing is
+  # gain-share (you keep about half of any cache savings). Get a key at
+  # https://groundroute.ai/keys
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.groundroute.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-50 by GroundRoute
+  #   # api_key: $GROUNDROUTE_API_KEY  # Optional if the env var is set
+  
   # Web search tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
   # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
   # - name: web_search
@@ -630,6 +642,15 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
+  # Fetches a page's extracted text via GroundRoute mode=page.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.groundroute.tools:web_fetch_tool
+  #   # api_key: $GROUNDROUTE_API_KEY
+  
   # Web fetch tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
   # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
   # NOTE: Only one web_fetch provider can be active at a time.
