@@ -1429,3 +1429,53 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# SSO / OIDC Authentication (optional)
+# ============================================================================
+# Enable SSO login via any OIDC-compatible provider (Keycloak, Google, Azure AD, Okta, etc.).
+# When enabled, the login page will show SSO buttons alongside the standard email/password form.
+#
+# Provider configuration:
+#   - issuer:      The OIDC issuer URL (e.g. https://keycloak.example.com/realms/deerflow)
+#   - client_id:   OAuth2 client ID from the provider
+#   - client_secret: OAuth2 client secret ($ENV_VAR references supported)
+#   - redirect_uri: Callback URL. In production, this must match what you configure in
+#                   the provider. Defaults to a self-derived URL in development.
+#
+# Keycloak setup:
+#   1. Create a client with type "confidential" and Standard Flow enabled
+#   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
+#   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
+
+# auth:
+#   oidc:
+#     enabled: true
+#     # Base URL of the frontend, used for redirects after SSO callback.
+#     # In production behind a reverse proxy, set this to the public frontend URL
+#     # (e.g. https://deerflow.example.com). In development, leave unset.
+#     # frontend_base_url: http://localhost:3000
+#     providers:
+#       keycloak:
+#         display_name: Keycloak
+#         issuer: https://keycloak.example.com/realms/deerflow
+#         client_id: deerflow
+#         client_secret: $KEYCLOAK_CLIENT_SECRET
+#         # Optional: explicitly set the callback URL.
+#         # redirect_uri: https://deerflow.example.com/api/v1/auth/callback/keycloak
+#         scopes:
+#           - openid
+#           - email
+#           - profile
+#         token_endpoint_auth_method: client_secret_post
+#
+#         # User provisioning settings (safe defaults shown below):
+#         auto_create_users: true          # Auto-create DeerFlow account on first SSO login
+#         require_verified_email: true     # Reject SSO logins without verified email
+#         # allowed_email_domains:          # Restrict to specific email domains
+#         #   - example.com
+#         admin_emails: []                 # Auto-grant admin role to these emails
+#
+#         # Security features (enabled by default):
+#         pkce_enabled: true               # PKCE (S256) for authorization code flow
+#         nonce_enabled: true              # Nonce validation in ID tokens
