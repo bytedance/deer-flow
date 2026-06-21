@@ -8,7 +8,7 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -162,6 +162,14 @@ class AppConfig(BaseModel):
             field_doc="Stream bridge connecting agent workers to SSE endpoints.",
         ),
     )
+
+    # Name -> config lookup tables, (re)built after validation by
+    # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
+    # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
+    # call. Private attrs are excluded from serialization.
+    _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
+    _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
+    _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -375,6 +383,31 @@ class AppConfig(BaseModel):
             return [cls.resolve_env_variables(item) for item in config]
         return config
 
+    @model_validator(mode="after")
+    def _build_name_indexes(self) -> "AppConfig":
+        """Build name -> config lookup tables for O(1) ``get_*_config``.
+
+        ``get_tool_config`` runs 2-3x per community-tool invocation (e.g.
+        web_search) and ``get_model_config`` several times per agent build, so
+        the previous O(n) ``next(...)`` scans sat on hot paths. Rebuilt here so a
+        config reload (which constructs a fresh ``AppConfig``) refreshes them.
+        ``setdefault`` keeps the first entry on duplicate names, preserving the
+        prior ``next(...)`` first-match semantics.
+        """
+        models_by_name: dict[str, ModelConfig] = {}
+        for model in self.models:
+            models_by_name.setdefault(model.name, model)
+        tools_by_name: dict[str, ToolConfig] = {}
+        for tool in self.tools:
+            tools_by_name.setdefault(tool.name, tool)
+        tool_groups_by_name: dict[str, ToolGroupConfig] = {}
+        for group in self.tool_groups:
+            tool_groups_by_name.setdefault(group.name, group)
+        self._models_by_name = models_by_name
+        self._tools_by_name = tools_by_name
+        self._tool_groups_by_name = tool_groups_by_name
+        return self
+
     def get_model_config(self, name: str) -> ModelConfig | None:
         """Get the model config by name.
 
@@ -384,7 +417,7 @@ class AppConfig(BaseModel):
         Returns:
             The model config if found, otherwise None.
         """
-        return next((model for model in self.models if model.name == name), None)
+        return self._models_by_name.get(name)
 
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
@@ -395,7 +428,7 @@ class AppConfig(BaseModel):
         Returns:
             The tool config if found, otherwise None.
         """
-        return next((tool for tool in self.tools if tool.name == name), None)
+        return self._tools_by_name.get(name)
 
     def get_tool_group_config(self, name: str) -> ToolGroupConfig | None:
         """Get the tool group config by name.
@@ -406,7 +439,7 @@ class AppConfig(BaseModel):
         Returns:
             The tool group config if found, otherwise None.
         """
-        return next((group for group in self.tool_groups if group.name == name), None)
+        return self._tool_groups_by_name.get(name)
 
 
 # Compatibility singleton layer for code paths that have not yet been
