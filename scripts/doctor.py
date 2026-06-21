@@ -468,6 +468,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
+                "fastcrw": "CRW_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "serper": "SERPER_API_KEY",
             },
@@ -475,6 +476,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
+                "fastcrw": "CRW_API_KEY",
             },
             "image_search": {
                 "infoquest": "INFOQUEST_API_KEY",

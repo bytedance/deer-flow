@@ -202,6 +202,43 @@ test.describe("Thread history", () => {
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
   });
 
+  test("new chat resets immediately after a history-only thread URL update", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Message that must disappear in the next new chat");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // A newly created chat changes the URL with history.replaceState so the
+    // active stream is not remounted. Reproduce that history-only transition:
+    // the canonical pathname becomes the UUID while useParams can stay "new".
+    await page.evaluate((threadId) => {
+      history.replaceState(null, "", `/workspace/chats/${threadId}`);
+    }, MOCK_THREAD_ID);
+
+    const newChatLink = page.locator(
+      "[data-sidebar='sidebar'] a[href='/workspace/chats/new']",
+    );
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+    );
+    await expect(newChatLink).toHaveAttribute("data-active", "false");
+
+    // One click must reset the chat without a second click or unrelated UI
+    // interaction forcing another render.
+    await newChatLink.click();
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+    await expect(textarea).toBeVisible();
+  });
+
   test("deleting the active newly created chat returns to the new chat screen", async ({
     page,
   }) => {
