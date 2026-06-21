@@ -170,6 +170,59 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
     assert config.tool_groups == []
 
 
+def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch):
+    """Commenting out every entry under an object key makes PyYAML parse it as None.
+
+    Same documented ``cp config.example.yaml config.yaml`` flow as the list
+    sections: object sections (memory, summarization, ...) must fall back to
+    their defaults instead of raising ``Input should be a valid dictionary``.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "memory": None,
+                "summarization": None,
+                "guardrails": None,
+                "tool_output": None,
+                "run_events": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    # Each present-but-null object section falls back to a real default config
+    # object of the expected type (not merely non-None).
+    assert type(config.memory).__name__ == "MemoryConfig"
+    assert type(config.summarization).__name__ == "SummarizationConfig"
+    assert type(config.guardrails).__name__ == "GuardrailsConfig"
+    assert type(config.tool_output).__name__ == "ToolOutputConfig"
+    assert type(config.run_events).__name__ == "RunEventsConfig"
+
+
+def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
+    """A present-but-null *required* section still errors.
+
+    ``sandbox`` has no default, so dropping a ``sandbox: null`` key leaves the
+    required field absent — there is nothing to fall back to (per
+    ``_drop_null_config_sections``), unlike the optional object sections above.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(yaml.safe_dump({"sandbox": None}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    with pytest.raises(ValidationError):
+        AppConfig.from_file(str(config_path))
+
+
 def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
