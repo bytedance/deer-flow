@@ -512,8 +512,12 @@ export const zhCN: Translations = {
       profileTitle: "个人信息",
       email: "邮箱",
       role: "角色",
+      ssoProvider: "SSO",
       changePasswordTitle: "修改密码",
       changePasswordDescription: "更新你的账号密码。",
+      ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
+      ssoPasswordMessage:
+        "此账号通过 {provider} 登录，DeerFlow 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
       currentPassword: "当前密码",
       newPassword: "新密码",
       confirmNewPassword: "确认新密码",

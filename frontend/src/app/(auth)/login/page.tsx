@@ -53,7 +53,28 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLogin, setIsLogin] = useState(true);
-  const [error, setError] = useState("");
+  const [ssoProviders, setSsoProviders] = useState<
+    { id: string; display_name: string; type: string }[]
+  >([]);
+
+  // Extract error from query params (e.g., ?error=sso_failed)
+  const errorParam = searchParams.get("error");
+  const errorMessages: Record<string, string> = {
+    sso_failed: "SSO login failed. Please try again or use email login.",
+    sso_cancelled: "SSO login was cancelled.",
+    sso_account_exists:
+      "An account with this email already exists. Please sign in with your password or contact your administrator.",
+    sso_not_allowed:
+      "SSO login is not allowed for your account. Contact your administrator.",
+  };
+  const [error, setError] = useState(
+    errorParam ? (errorMessages[errorParam] ?? "Authentication failed.") : "",
+  );
+  // Soft hint shown after a failed login when SSO is configured: an SSO-only
+  // account has no local password, so the backend returns a generic
+  // "incorrect email or password" (deliberately, to avoid account enumeration).
+  // Nudge the user toward the SSO buttons without confirming the account exists.
+  const [showSsoHint, setShowSsoHint] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // Get next parameter for validated redirect
@@ -82,6 +103,22 @@ export default function LoginPage() {
         // Ignore errors; user stays on login page
       });
 
+    // Fetch SSO providers
+    void fetch("/api/v1/auth/providers")
+      .then((r) => r.json())
+      .then(
+        (data: {
+          providers: { id: string; display_name: string; type: string }[];
+        }) => {
+          if (!cancelled) {
+            setSsoProviders(data.providers ?? []);
+          }
+        },
+      )
+      .catch(() => {
+        // Ignore errors; no SSO providers shown
+      });
+
     return () => {
       cancelled = true;
     };
@@ -90,6 +127,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setShowSsoHint(false);
     setLoading(true);
 
     try {
@@ -115,6 +153,11 @@ export default function LoginPage() {
         const data = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
+        // On a failed login with SSO configured, surface a hint pointing at the
+        // SSO buttons — the "wrong password" may really mean "this is an SSO account".
+        if (isLogin && ssoProviders.length > 0) {
+          setShowSsoHint(true);
+        }
         return;
       }
 
@@ -187,12 +230,50 @@ export default function LoginPage() {
           </Button>
         </form>
 
+        {ssoProviders.length > 0 && (
+          <div className="space-y-2">
+            {isLogin && (
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-background text-muted-foreground px-2">
+                    Or continue with
+                  </span>
+                </div>
+              </div>
+            )}
+            {showSsoHint && (
+              <p className="text-muted-foreground text-center text-sm">
+                If your account uses single sign-on, sign in with the option
+                below instead.
+              </p>
+            )}
+            {ssoProviders.map((provider) => (
+              <Button
+                key={provider.id}
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={loading}
+                onClick={() => {
+                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
+                }}
+              >
+                Continue with {provider.display_name}
+              </Button>
+            ))}
+          </div>
+        )}
+
         <div className="text-center text-sm">
           <button
             type="button"
             onClick={() => {
               setIsLogin(!isLogin);
               setError("");
+              setShowSsoHint(false);
             }}
             className="text-blue-500 hover:underline"
           >

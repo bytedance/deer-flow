@@ -440,6 +440,9 @@ export interface Translations {
       role: string;
       changePasswordTitle: string;
       changePasswordDescription: string;
+      ssoProvider: string;
+      ssoPasswordDescription: string;
+      ssoPasswordMessage: string;
       currentPassword: string;
       newPassword: string;
       confirmNewPassword: string;
