@@ -73,6 +73,14 @@ class _RecordModelInput(AgentMiddleware):
         return await handler(request)
 
 
+def _msg_text(msg: Any) -> str:
+    """Flatten a message's content (string or list-of-blocks) to plain text."""
+    content = msg.content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return content
+
+
 def _last_human_text(messages: list[Any]) -> str:
     """Text of the last genuine (non-hidden, non-reminder) human message."""
     for msg in reversed(messages):
@@ -80,15 +88,24 @@ def _last_human_text(messages: list[Any]) -> str:
             continue
         if msg.additional_kwargs.get("hide_from_ui") or is_dynamic_context_reminder(msg):
             continue
-        content = msg.content
-        if isinstance(content, list):
-            content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
-        return content
+        return _msg_text(msg)
     return ""
 
 
 def _assert_stream_well_formed(messages: list[Any], *, newest_user_text: str) -> None:
-    """Structural invariants the multi-turn message stream must satisfy."""
+    """Structural invariants the multi-turn message stream must satisfy.
+
+    Checked semantic-first: the primary guarantee (the newest user message is the
+    latest human turn) fails before the structural id checks, so the regression
+    surfaces as a meaning-level failure rather than only an id-shape artifact.
+    """
+    # The newest user message must be the latest human turn the model reasons about.
+    assert _last_human_text(messages) == newest_user_text, "newest user message is not the latest human turn (stranded / stale re-answer)"
+
+    # ...and it must appear exactly once (not stranded earlier + re-appended).
+    occurrences = sum(1 for m in messages if isinstance(m, HumanMessage) and _msg_text(m) == newest_user_text)
+    assert occurrences == 1, f"newest user message appears {occurrences} times, expected 1"
+
     ids = [m.id for m in messages if m.id is not None]
     assert len(ids) == len(set(ids)), f"duplicate message ids in stream: {ids}"
 
@@ -97,19 +114,11 @@ def _assert_stream_well_formed(messages: list[Any], *, newest_user_text: str) ->
     # message — the #3684 signature.
     assert not any("__user__user" in (mid or "") for mid in ids), f"id-suffix explosion (re-injection): {ids}"
 
-    # The newest user message must be the latest human turn the model reasons about.
-    assert _last_human_text(messages) == newest_user_text, "newest user message is not the latest human turn (stranded / stale re-answer)"
 
-    # The newest user message appears exactly once (not stranded + duplicated).
-    occurrences = sum(1 for m in messages if isinstance(m, HumanMessage) and _msg_text(m) == newest_user_text)
-    assert occurrences == 1, f"newest user message appears {occurrences} times, expected 1"
-
-
-def _msg_text(msg: Any) -> str:
-    content = msg.content
-    if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
-    return content
+# State-touching middlewares under test, as zero-arg factories. Widen the net by
+# adding more here (e.g. InputSanitizationMiddleware, SummarizationMiddleware) — the
+# invariants in _assert_stream_well_formed apply to the whole composition.
+_STREAM_MIDDLEWARES: tuple[type[AgentMiddleware], ...] = (DynamicContextMiddleware,)
 
 
 def _run_two_turns() -> tuple[dict, _RecordModelInput]:
@@ -118,8 +127,8 @@ def _run_two_turns() -> tuple[dict, _RecordModelInput]:
         model=_FakeModel(responses=[AIMessage(content="ack-1"), AIMessage(content="ack-2")]),
         tools=[],
         # Recorder first so its wrap_model_call observes the final request;
-        # DynamicContextMiddleware does its work in before_agent.
-        middleware=[recorder, DynamicContextMiddleware()],
+        # the state-touching middlewares do their work in before_agent.
+        middleware=[recorder, *(make() for make in _STREAM_MIDDLEWARES)],
         checkpointer=InMemorySaver(),
     )
     cfg = {"configurable": {"thread_id": "stream-invariants-1"}}
