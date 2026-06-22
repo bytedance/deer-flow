@@ -217,6 +217,11 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
   const [error, setError] = useState<string | null>(null);
   const [targetNotice, setTargetNotice] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const selectedTaskIdRef = useRef<string | number | null>(selectedTaskId);
+
+  useEffect(() => {
+    selectedTaskIdRef.current = selectedTaskId;
+  }, [selectedTaskId]);
 
   const deepLinkTarget = useMemo<DefectWorkflowDeepLinkTarget>(
     () => ({
@@ -241,9 +246,12 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
 
   useEffect(() => {
     if (selected_task_id == null) return;
-    if (String(selected_task_id) === String(selectedTaskId)) return;
-    setSelectedTaskId(selected_task_id);
-  }, [selected_task_id, selectedTaskId]);
+    setSelectedTaskId((current) => {
+      if (String(selected_task_id) === String(current)) return current;
+      writeStoredSelectedTaskId(block.thread_id, selected_task_id);
+      return selected_task_id;
+    });
+  }, [block.thread_id, selected_task_id]);
 
   useEffect(() => {
     emitSelectedContext(
@@ -275,7 +283,6 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
 
   useEffect(() => {
     const controller = new AbortController();
-    attemptedTargetKeyRef.current = null;
     setLoading(true);
     setHasLoadedTodos(false);
     setError(null);
@@ -286,7 +293,8 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
         setRows(page.rows ?? []);
         setTotal(page.total);
         setHasLoadedTodos(true);
-        if (selectedTaskId && !(page.rows ?? []).some((row) => String(row.taskId) === String(selectedTaskId))) {
+        const currentSelectedTaskId = selectedTaskIdRef.current;
+        if (currentSelectedTaskId && !(page.rows ?? []).some((row) => String(row.taskId) === String(currentSelectedTaskId))) {
           setSelectedTaskId(null);
           updateBlockProps(block.block_id, { selected_task_id: null });
           writeStoredSelectedTaskId(block.thread_id, null);
@@ -301,7 +309,7 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [page_size, reloadKey, selectedTaskId]);
+  }, [block.block_id, block.thread_id, page_size, reloadKey, updateBlockProps]);
 
   const refresh = () => setReloadKey((key) => key + 1);
 

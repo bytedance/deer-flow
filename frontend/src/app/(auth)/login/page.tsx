@@ -51,19 +51,25 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [ehmAutoLogin, setEhmAutoLogin] = useState(false);
   const ehmAttemptedRef = useRef(false);
+  const lastEhmTokenRef = useRef<string>("");
 
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
 
   useEffect(() => {
     if (isAuthenticated) {
-      router.push(redirectPath);
+      // Use a full navigation so deep-link query strings survive auth hydration.
+      window.location.href = redirectPath;
     }
-  }, [isAuthenticated, redirectPath, router]);
+  }, [isAuthenticated, redirectPath]);
 
   // EHM token auto-login: set cookie and redirect (no backend call)
   useEffect(() => {
     const ehmToken = searchParams.get("ehm_token");
+    if (ehmToken && ehmToken !== lastEhmTokenRef.current) {
+      lastEhmTokenRef.current = ehmToken;
+      ehmAttemptedRef.current = false;
+    }
     if (!ehmToken || ehmAttemptedRef.current || isAuthenticated) return;
     ehmAttemptedRef.current = true;
 

@@ -150,6 +150,108 @@ describe("DefectWorkflowTodoListBlock", () => {
     expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("更新后的维修方案");
   });
 
+  it("switches the detail panel when another todo row is selected", async () => {
+    const { default: DefectWorkflowTodoListBlock } = await import("@/components/genui/DefectWorkflowTodoListBlock");
+    mocks.listDefectWorkflowTodos.mockResolvedValue({
+      rows: [
+        {
+          taskId: "90055",
+          nodeName: "工程师确认",
+          allowedActions: ["SUBMIT"],
+          claimedByCurrentUser: true,
+          defect: {
+            defectId: "defect-001",
+            defectCode: "QX-001",
+            title: "第一条缺陷",
+            status: "CONFIRMING",
+            equipment: { deviceName: "P-101" },
+          },
+        },
+        {
+          taskId: "90056",
+          nodeName: "班长确认",
+          allowedActions: ["SUBMIT"],
+          claimedByCurrentUser: true,
+          defect: {
+            defectId: "defect-002",
+            defectCode: "QX-002",
+            title: "第二条缺陷",
+            status: "TREATING",
+            equipment: { deviceName: "P-102" },
+          },
+        },
+      ],
+      total: 2,
+    });
+    mocks.getDefectWorkflowDetail.mockImplementation((defectId: string | number) => Promise.resolve({
+      defect: {
+        id: defectId,
+        title: String(defectId) === "defect-002" ? "第二条缺陷" : "第一条缺陷",
+        status: String(defectId) === "defect-002" ? "TREATING" : "CONFIRMING",
+        equipment: { deviceName: String(defectId) === "defect-002" ? "P-102" : "P-101" },
+      },
+      currentTask: {
+        taskId: String(defectId) === "defect-002" ? "90056" : "90055",
+        nodeName: String(defectId) === "defect-002" ? "班长确认" : "工程师确认",
+        allowedActions: ["SUBMIT"],
+        claimedByCurrentUser: true,
+      },
+    }));
+    mocks.getDefectWorkflowFormContext.mockImplementation((taskId: string | number) => Promise.resolve({
+      formSchema: {
+        widgetList: [
+          {
+            type: "textarea",
+            options: {
+              name: "treatmentPlan",
+              label: "处理方案",
+            },
+          },
+        ],
+      },
+      effectiveFormData: { treatmentPlan: String(taskId) === "90056" ? "第二方案" : "第一方案" },
+    }));
+
+    React.act(() => {
+      root.render(
+        React.createElement(DefectWorkflowTodoListBlock, {
+          block: {
+            block_id: "defect-workflow-closure:todo-list:test-thread",
+            props: {
+              title: "缺陷待办",
+              page_size: 5,
+              target_task_id: "90055",
+              target_defect_id: "defect-001",
+              target_defect_no: "QX-001",
+              auto_open_detail: true,
+            },
+          },
+        }),
+      );
+    });
+    await flushEffects();
+
+    const detailButtons = Array.from(container.querySelectorAll("button"))
+      .filter((button) => button.textContent?.includes("详情"));
+    expect(detailButtons).toHaveLength(2);
+
+    React.act(() => {
+      detailButtons[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("第一方案");
+
+    React.act(() => {
+      detailButtons[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(mocks.getDefectWorkflowDetail).toHaveBeenCalledWith("defect-002");
+    expect(mocks.getDefectWorkflowFormContext).toHaveBeenCalledWith("90056");
+    expect(container.textContent).toContain("任务：90056");
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("第二方案");
+  });
+
   it("restores the selected detail from block props after remount", async () => {
     const { default: DefectWorkflowTodoListBlock } = await import("@/components/genui/DefectWorkflowTodoListBlock");
 
