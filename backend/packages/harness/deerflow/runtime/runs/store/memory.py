@@ -133,7 +133,10 @@ class MemoryRunStore(RunStore):
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
+        # Use the thread index for an O(runs-in-thread) lookup instead of
+        # scanning every run in the process (mirrors ``list_by_thread``).
+        run_ids = self._runs_by_thread.get(thread_id) or ()
+        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             model = r.get("model_name") or "unknown"
