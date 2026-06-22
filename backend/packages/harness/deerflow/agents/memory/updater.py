@@ -652,7 +652,12 @@ class MemoryUpdater:
                     continue
                 normalized_content = raw_content.strip()
                 fact_key = _fact_content_key(normalized_content)
-                if fact_key is not None and fact_key in existing_fact_keys:
+                if fact_key is None:
+                    # Empty / whitespace-only content: skip it the same way the
+                    # non-string guard above does, instead of appending a blank
+                    # fact that violates the non-empty-content invariant.
+                    continue
+                if fact_key in existing_fact_keys:
                     continue
 
                 fact_entry = {
