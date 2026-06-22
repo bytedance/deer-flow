@@ -69,11 +69,15 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 │ Layer 2: Subagent (执行层)                                 │
 │ config.yaml → custom_agents.sqlbot-report                  │
 │   - system_prompt: 10 步流水线                              │
-│   - tools: bash, read_file, write_file, str_replace,        │
-│            ask_clarification                                │
+│   - tools: bash, read_file, write_file, str_replace         │
+│   - allowed_tools_extra: ask_clarification                  │
+│     （general-purpose 把 ask_clarification 列入 disallowed,   │
+│       sqlbot-report 必须显式允许才能在 L3 触发）              │
+│   - disallowed_tools: task  （禁止子 subagent 嵌套）          │
 │   - max_turns: 80                                            │
 │   - timeout_seconds: 900                                    │
 │   - confidence_threshold: 0.6                               │
+│     （L2 模糊匹配单候选阈值；F6 用 top1-top2 差 < 0.1 触发 L3） │
 └──────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────┐
@@ -363,8 +367,8 @@ report.docx:
 | F2 | SQLBot 配置缺失 | `.env` 无 `SQLBOT_BASE_URL` / `SQLBOT_API_KEY` | subagent 中断，返回 `{status: "error", reason: "SQLBOT_CONFIG_MISSING"}` |
 | F3 | SQLBot 网络/API 失败 | HTTP 5xx / 超时 / 4xx | 重试 3 次（指数退避 1s/2s/4s）；仍失败 → 中断 |
 | F4 | SQLBot 0 候选 | 某些 `{{指标}}` 在 SQLBot 中无任何匹配 | 标 `unmatched`，继续；不影响流水线 |
-| F5 | L2 低置信度 + 无歧义 | top-1 < 0.6 且第二名差距大 | 用 top-1，confidence=低，标 `low_confidence`，继续 |
-| F6 | L2 低置信度 + 多候选歧义 | top-1 与 top-2 差距 < 0.1 | L3：调 `ask_clarification` |
+| F5 | L2 低置信度 + 无歧义 | top-1 < 0.6 且 `top1.score - top2.score > 0.1` | 用 top-1，confidence=低，标 `low_confidence`，继续 |
+| F6 | L2 低置信度 + 多候选歧义 | top-1 < 0.6 且 `top1.score - top2.score ≤ 0.1` | L3：调 `ask_clarification` |
 | F7 | 用户取消澄清 | 用户拒绝 / 给 "跳过" | 标 `user_skipped` → 继续 |
 | F8 | 描述生成失败 | LLM API 失败 | 重试 1 次，仍失败 → `description.zh = 原中文 + " [TRANSLATION_FAILED]"` |
 | F9 | DOCX 渲染失败 | python-docx 异常 | 返回 JSON + log，flag `render_error`，用户可手动重跑 `render_docx.py` |
@@ -397,15 +401,21 @@ def call_sqlbot_search(keyword: str) -> list[Indicator]:
 }
 ```
 
-| subagent status | lead agent 行为 |
-|----------------|----------------|
-| `success` | present_files 三件套 |
-| `partial` | present_files 可用的 + 简述未完成部分 |
-| `error` | 不 present_files，告知用户失败原因 + 检查清单 |
+| subagent status | 判定标准 | lead agent 行为 |
+|----------------|---------|----------------|
+| `success` | `unmatched_count == 0` 且 `error_class == null` | present_files 三件套 |
+| `partial` | `0 < match_rate < 1.0` 且无 error_class | present_files 可用的 + 简述未匹配项数 |
+| `error` | `error_class in F1..F11` | 不 present_files，告知用户失败原因 + 检查清单 |
 
 ### 取消 & 续跑
 
-subagent 每完成一个 step 写一个 checkpoint 到 `.checkpoints/`。LangGraph 检测到 HTTP cancel 时当前 step 跑完后立即退出，已完成的 checkpoint 保留。续跑时 subagent 检测到 checkpoint → 询问"续跑/重新跑"。
+subagent 每完成一个 step 写一个 checkpoint 到 `.checkpoints/`。LangGraph 检测到 HTTP cancel 时当前 step 跑完后立即退出，已完成的 checkpoint 保留。
+
+续跑语义（Phase 1 实现）：
+- subagent 启动时检查 `.checkpoints/` 目录
+- 若存在 `05_final.json`，说明上次已完成，跳到 step 10 重跑渲染
+- 若存在部分 checkpoint（如 `03_matched.json`），step 4-7 重跑（覆盖）
+- **不询问用户**（Phase 1 不做交互式续跑，简化逻辑；Phase 2 可加 ask_clarification 询问）
 
 ## 检查点文件结构
 
