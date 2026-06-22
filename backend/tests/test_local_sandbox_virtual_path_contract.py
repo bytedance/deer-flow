@@ -364,3 +364,76 @@ def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
     assert "a" in provider._thread_sandboxes
     assert "b" not in provider._thread_sandboxes
     assert {"a", "c", "d"} == set(provider._thread_sandboxes.keys())
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 7. User-id scoping: per-user path isolation contract (#3024 / #2873)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _get_workspace_local_path(provider: LocalSandboxProvider, thread_id: str) -> str | None:
+    """Return the local host path for /mnt/user-data/workspace from the cached sandbox."""
+    sb = provider._thread_sandboxes.get(thread_id)
+    if sb is None:
+        return None
+    for m in sb.path_mappings:
+        if m.container_path == "/mnt/user-data/workspace":
+            return m.local_path
+    return None
+
+
+def test_per_user_isolation_different_users_same_thread(provider, isolated_paths, monkeypatch):
+    """Two different users acquiring the same thread_id must get distinct host paths."""
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "alice")
+    provider.acquire("thread-shared")
+    alice_path = _get_workspace_local_path(provider, "thread-shared")
+
+    # Evict cached sandbox so a fresh acquire rebuilds paths for bob.
+    with provider._lock:
+        provider._thread_sandboxes.pop("thread-shared", None)
+
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "bob")
+    provider.acquire("thread-shared")
+    bob_path = _get_workspace_local_path(provider, "thread-shared")
+
+    assert alice_path is not None
+    assert bob_path is not None
+    assert alice_path != bob_path
+    assert "alice" in alice_path
+    assert "bob" in bob_path
+
+
+def test_per_user_workspace_maps_to_user_scoped_directory(provider, isolated_paths, monkeypatch):
+    """/mnt/user-data/workspace must resolve under users/{user_id}/threads/{thread_id}/."""
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "carol")
+    provider.acquire("t-carol")
+
+    local_path = _get_workspace_local_path(provider, "t-carol")
+    assert local_path is not None
+    assert "carol" in local_path
+    assert "t-carol" in local_path
+
+
+def test_user_a_writes_invisible_to_user_b_on_same_thread_id(provider, isolated_paths, monkeypatch):
+    """A file written by user A must not appear in user B's sandbox view of the same thread_id."""
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-a")
+    provider.acquire("shared-thread")
+    sandbox_a = provider.get("local:shared-thread")
+    assert sandbox_a is not None
+    sandbox_a.write_file("/mnt/user-data/workspace/secret.txt", "user-a-data")
+
+    # Evict and rebuild for user-b.
+    with provider._lock:
+        provider._thread_sandboxes.pop("shared-thread", None)
+
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-b")
+    provider.acquire("shared-thread")
+    sandbox_b = provider.get("local:shared-thread")
+    assert sandbox_b is not None
+
+    try:
+        content = sandbox_b.read_file("/mnt/user-data/workspace/secret.txt")
+    except FileNotFoundError:
+        pass  # expected: user-b's workspace is a different host directory
+    else:
+        assert "user-a-data" not in content, "user-b can read user-a's file — per-user isolation is broken"
