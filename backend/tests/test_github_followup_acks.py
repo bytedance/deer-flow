@@ -203,3 +203,30 @@ async def test_busy_github_run_reacts_eyes_on_the_triggering_comment(ack_channel
     assert any(item.text == THREAD_BUSY_MESSAGE for item in outbound)
     assert ack_channel.acks == [("queued", message.metadata["followup_ack"])]
     assert list(manager._followup_buffers["gh-thread-buf"].values())[0].text == "comment 7"
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_an_in_flight_acknowledgement(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _SlowChannel(_AckChannel):
+        async def acknowledge_followup(self, target, *, kind: str) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    channel = _SlowChannel()
+    monkeypatch.setattr("app.channels.service.get_channel_service", lambda: _Service(channel))
+    manager = _manager()
+    await manager.start()
+    manager._buffer_followup("thread-1", _message(1))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await manager.stop()
+
+    assert cancelled.is_set()
+    assert manager._followup_ack_tasks == set()
+    assert len(manager._followup_buffers["thread-1"]) == 1

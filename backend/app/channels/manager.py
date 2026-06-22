@@ -2313,8 +2313,9 @@ class ChannelManager:
         Admission closes immediately, but workers keep processing the accepted
         queue for ``shutdown_grace_period_seconds`` so provider acknowledgments
         are normally followed by a final response. Once that grace expires,
-        workers are cancelled. A successful return means no worker or follow-up
-        watcher can continue using channel resources. The Gateway lifespan owns
+        workers are cancelled.         A successful return means no worker, follow-up
+        watcher, or in-flight follow-up acknowledgement can continue using
+        channel resources. The Gateway lifespan owns
         the process-level timeout; if it cancels this coroutine, transports stay
         attached to the service and shutdown can be retried.
         """
@@ -2337,6 +2338,8 @@ class ChannelManager:
             drained = join_task in done and not join_task.cancelled() and join_task.exception() is None
         except asyncio.CancelledError:
             for task in worker_tasks:
+                task.cancel()
+            for task in list(self._followup_ack_tasks):
                 task.cancel()
             discarded_messages = self.bus.discard_pending_inbound()
             if not join_task.done():
@@ -2364,7 +2367,14 @@ class ChannelManager:
         if not join_task.done():
             join_task.cancel()
 
-        owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, join_task) if not task.done()}
+        # Workers may have queued an acknowledgement during the grace window.
+        # Cancel it here so stop() does not return while a provider call is
+        # still in flight. The comment itself stays buffered.
+        ack_tasks = list(self._followup_ack_tasks)
+        for task in ack_tasks:
+            task.cancel()
+
+        owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, *ack_tasks, join_task) if not task.done()}
         if owned_tasks:
             await asyncio.gather(*owned_tasks, return_exceptions=True)
 
@@ -2374,6 +2384,9 @@ class ChannelManager:
         for task in tuple(self._followup_watcher_tasks):
             if task.done():
                 self._followup_watcher_tasks.discard(task)
+        for task in tuple(self._followup_ack_tasks):
+            if task.done():
+                self._followup_ack_tasks.discard(task)
 
         if invalidated_reservations or discarded_messages:
             logger.warning(
