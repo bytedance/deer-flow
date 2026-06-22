@@ -1,5 +1,5 @@
-import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient } from "@tanstack/react-query";
 
 rs.mock("@/core/api/fetcher", () => ({
   fetch: rs.fn(),

@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test, rs } from "@rstest/core";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 const ENV_KEYS = [
   "NEXT_PUBLIC_BACKEND_BASE_URL",

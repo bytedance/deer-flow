@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test, rs } from "@rstest/core";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 import { AUTH_DISABLED_USER } from "@/core/auth/auth-disabled-user";
 import { STATIC_WEBSITE_USER } from "@/core/auth/static-user";
