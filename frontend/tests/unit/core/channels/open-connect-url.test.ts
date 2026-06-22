@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 import {
   closeConnectWindow,
@@ -8,17 +8,17 @@ import {
 
 type PopupStub = {
   closed: boolean;
-  close: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof rs.fn>;
   location: {
-    replace: ReturnType<typeof vi.fn>;
+    replace: ReturnType<typeof rs.fn>;
   };
   opener: unknown;
 };
 
 function stubWindow(openResult: PopupStub | null) {
-  const assign = vi.fn();
-  const open = vi.fn(() => openResult);
-  vi.stubGlobal("window", {
+  const assign = rs.fn();
+  const open = rs.fn(() => openResult);
+  rs.stubGlobal("window", {
     open,
     location: { assign },
   });
@@ -28,14 +28,14 @@ function stubWindow(openResult: PopupStub | null) {
 function makePopup(): PopupStub {
   return {
     closed: false,
-    close: vi.fn(),
-    location: { replace: vi.fn() },
+    close: rs.fn(),
+    location: { replace: rs.fn() },
     opener: {},
   };
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  rs.unstubAllGlobals();
 });
 
 describe("channel connect window helpers", () => {

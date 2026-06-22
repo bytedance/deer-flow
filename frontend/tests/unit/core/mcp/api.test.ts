@@ -13,13 +13,13 @@
  * so the React Query hook's `error` branch can render a friendly empty
  * state (admin-required for 403) instead of crashing.
  */
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
-vi.mock("@/core/config", () => ({
+rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
 
@@ -30,7 +30,7 @@ import {
   updateMCPConfig,
 } from "@/core/mcp/api";
 
-const mockedFetch = vi.mocked(fetcher);
+const mockedFetch = rs.mocked(fetcher);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

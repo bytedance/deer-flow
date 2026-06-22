@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "@rstest/core";
 
 import {
   extractContentFromMessage,

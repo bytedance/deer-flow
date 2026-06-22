@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 
 import {
   SUBAGENT_ERROR_KEY,
@@ -24,13 +24,9 @@ interface ContractFile {
   cases: ContractCase[];
 }
 
-// The frontend package is ESM (`"type": "module"`), so `__dirname` is not
-// defined. Resolve the cross-language fixture relative to this module URL.
-const CONTRACT_PATH = fileURLToPath(
-  new URL(
-    "../../../../../contracts/subagent_status_contract.json",
-    import.meta.url,
-  ),
+const CONTRACT_PATH = resolve(
+  __dirname,
+  "../../../../../contracts/subagent_status_contract.json",
 );
 const CONTRACT: ContractFile = JSON.parse(
   readFileSync(CONTRACT_PATH, "utf-8"),
