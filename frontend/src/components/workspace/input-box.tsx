@@ -66,6 +66,7 @@ import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import {
@@ -203,6 +204,8 @@ export function InputBox({
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptHistoryIndexRef = useRef<number | null>(null);
+  const promptHistoryDraftRef = useRef("");
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -261,6 +264,44 @@ export function InputBox({
     [selectedModel],
   );
 
+  const promptHistory = useMemo(() => {
+    const history: string[] = [];
+    for (const message of thread.messages) {
+      if (message.type !== "human") {
+        continue;
+      }
+      const additionalKwargs = message.additional_kwargs;
+      if (
+        additionalKwargs &&
+        typeof additionalKwargs === "object" &&
+        Reflect.get(additionalKwargs, "hide_from_ui") === true
+      ) {
+        continue;
+      }
+      const text = textOfMessage(message)?.trim();
+      if (!text) {
+        continue;
+      }
+      if (history.at(-1) !== text) {
+        history.push(text);
+      }
+    }
+    return history;
+  }, [thread.messages]);
+
+  useEffect(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, [threadId]);
+
+  useEffect(() => {
+    const currentIndex = promptHistoryIndexRef.current;
+    if (currentIndex !== null && currentIndex >= promptHistory.length) {
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+    }
+  }, [promptHistory.length]);
+
   const handleModelSelect = useCallback(
     (model_name: string) => {
       const model = models.find((m) => m.name === model_name);
@@ -315,6 +356,8 @@ export function InputBox({
       if (!message.text.trim() && message.files.length === 0) {
         return;
       }
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
@@ -488,6 +531,91 @@ export function InputBox({
       textInput.value,
     ],
   );
+
+  const setPromptHistoryValue = useCallback(
+    (value: string) => {
+      textInput.setInput(value);
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(value.length, value.length);
+      });
+    },
+    [textInput],
+  );
+
+  const handlePromptHistoryKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        isIMEComposing(event) ||
+        promptHistory.length === 0 ||
+        (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+      ) {
+        return;
+      }
+
+      const currentValue = textInput.value ?? "";
+      const currentHistoryIndex = promptHistoryIndexRef.current;
+      const isBrowsingHistory = currentHistoryIndex !== null;
+
+      if (!isBrowsingHistory && currentValue.length > 0) {
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        const nextIndex = isBrowsingHistory
+          ? Math.max(currentHistoryIndex - 1, 0)
+          : promptHistory.length - 1;
+        if (!isBrowsingHistory) {
+          promptHistoryDraftRef.current = currentValue;
+        }
+        promptHistoryIndexRef.current = nextIndex;
+        setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+        return;
+      }
+
+      if (!isBrowsingHistory) {
+        return;
+      }
+
+      event.preventDefault();
+      if (currentHistoryIndex >= promptHistory.length - 1) {
+        promptHistoryIndexRef.current = null;
+        setPromptHistoryValue(promptHistoryDraftRef.current);
+        promptHistoryDraftRef.current = "";
+        return;
+      }
+
+      const nextIndex = currentHistoryIndex + 1;
+      promptHistoryIndexRef.current = nextIndex;
+      setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+    },
+    [promptHistory, setPromptHistoryValue, textInput.value],
+  );
+
+  const handlePromptTextareaKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      handleSkillSuggestionKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handlePromptHistoryKeyDown(event);
+    },
+    [handlePromptHistoryKeyDown, handleSkillSuggestionKeyDown],
+  );
+
+  const handlePromptTextareaChange = useCallback(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, []);
 
   const showFollowups =
     !disabled &&
@@ -708,8 +836,9 @@ export function InputBox({
             autoFocus={autoFocus}
             defaultValue={initialValue}
             onBlur={() => setTextareaFocused(false)}
+            onChange={handlePromptTextareaChange}
             onFocus={() => setTextareaFocused(true)}
-            onKeyDown={handleSkillSuggestionKeyDown}
+            onKeyDown={handlePromptTextareaKeyDown}
             ref={textareaRef}
           />
         </PromptInputBody>
