@@ -73,6 +73,23 @@ class MemoryConfig(BaseModel):
             "CJK-aware character-based estimate and never touches tiktoken."
         ),
     )
+    decay_half_life_days: int = Field(
+        default=90,
+        ge=7,
+        le=365,
+        description=("Half-life in days for temporal decay of fact relevance. A fact's decay factor halves every this many days since creation. Set to 365 for near-zero decay."),
+    )
+    category_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "correction": 1.5,
+            "goal": 1.2,
+            "preference": 1.0,
+            "knowledge": 1.0,
+            "context": 1.0,
+            "behavior": 1.0,
+        },
+        description=("Per-category weight multipliers for fact relevance scoring. Higher weight = harder to evict. Categories not listed default to 1.0."),
+    )
 
 
 # Global configuration instance
