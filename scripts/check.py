@@ -135,10 +135,8 @@ def main() -> int:
             print(f"  OK nginx {nginx_version}")
         else:
             print("  INFO nginx (version unknown)")
-    elif shutil.which("docker"):
-        print("  OK nginx via Docker fallback (native nginx not found)")
     else:
-        print("  FAIL nginx not found (and no Docker fallback)")
+        print("  FAIL nginx not found")
         print("    macOS:   brew install nginx")
         print("    Ubuntu:  sudo apt install nginx")
         print("    Windows: use WSL for local mode or use Docker mode")

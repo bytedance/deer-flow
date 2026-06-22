@@ -41,7 +41,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
-from deerflow.runtime.user_context import get_effective_user_email, get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -613,7 +613,7 @@ class DeerFlowClient:
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
-            user_id=get_effective_user_email() or get_effective_user_id(),
+            user_id=get_effective_user_id(),
             assistant_id=self._agent_name or "lead-agent",
             model_name=configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),

@@ -44,7 +44,6 @@ def build_langfuse_trace_metadata(
         user_id: Effective user id; falls back to ``DEFAULT_USER_ID`` when
             ``None`` so the Langfuse Users page works in no-auth mode.
         assistant_id: Optional agent identifier; defaults to ``"lead-agent"``.
-            Also emitted as ``agent:<name>`` in ``langfuse_tags`` for filtering.
         model_name: Model name; emitted as ``model:<name>`` in ``langfuse_tags``.
         environment: Deployment env (e.g. ``"production"``); emitted as
             ``env:<value>`` in ``langfuse_tags``.
@@ -54,18 +53,13 @@ def build_langfuse_trace_metadata(
 
     from deerflow.runtime.user_context import DEFAULT_USER_ID
 
-    effective_agent = assistant_id or _DEFAULT_TRACE_NAME
     metadata: dict[str, Any] = {
         "langfuse_session_id": thread_id,
         "langfuse_user_id": user_id or DEFAULT_USER_ID,
-        "langfuse_trace_name": effective_agent,
+        "langfuse_trace_name": assistant_id or _DEFAULT_TRACE_NAME,
     }
 
     tags: list[str] = []
-    if effective_agent:
-        tags.append(f"role:{effective_agent}")
-    if user_id and user_id != DEFAULT_USER_ID:
-        tags.append(f"user:{user_id}")
     if environment:
         tags.append(f"env:{environment}")
     if model_name:

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import get_effective_user_email, get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
@@ -238,16 +238,11 @@ async def run_agent(
         # can lift session_id / user_id / trace_name / tags onto the root trace.
         # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
         # in sync; caller-provided metadata wins via setdefault inside the helper.
-        # Resolve the effective agent name: custom agent (from context/configurable)
-        # takes precedence over the generic "lead_agent" assistant_id.
-        _ctx = config.get("context") or config.get("configurable") or {}
-        effective_agent = _ctx.get("agent_name") or record.assistant_id
-
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
-            user_id=get_effective_user_email() or get_effective_user_id(),
-            assistant_id=effective_agent,
+            user_id=get_effective_user_id(),
+            assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
         )
