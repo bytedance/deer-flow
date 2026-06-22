@@ -21,6 +21,7 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 from __future__ import annotations
 
 import logging
+import os
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -312,11 +313,6 @@ def build_middlewares(
 
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
-    # Anti-hallucination: inject DATA AVAILABILITY summary before LLM report generation
-    from deerflow.agents.middlewares.data_availability_middleware import DataAvailabilityMiddleware
-
-    middlewares.append(DataAvailabilityMiddleware())
-
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
     if summarization_middleware is not None:
@@ -370,6 +366,13 @@ def build_middlewares(
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
+
+    # Anti-hallucination: inject DATA AVAILABILITY summary before LLM report generation
+    # Enabled via OBSERVE_AGENT_DATA_AVAILABILITY=1 for observe-agent deployments
+    if os.environ.get("OBSERVE_AGENT_DATA_AVAILABILITY"):
+        from deerflow.agents.middlewares.data_availability_middleware import DataAvailabilityMiddleware
+
+        middlewares.append(DataAvailabilityMiddleware())
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:

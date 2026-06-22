@@ -67,7 +67,6 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
-_DEFAULT_TOTAL_CALL_LIMIT = 80  # force-stop after 80 total calls across all tools
 _MAX_PENDING_WARNINGS_PER_RUN = 4
 
 
@@ -171,9 +170,6 @@ _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. P
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
-_TOTAL_LIMIT_HARD_STOP_MSG = "[FORCED STOP] Total tool calls ({count}) exceeded the safety limit ({limit}). Producing final answer with results collected so far."
-
-
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     """Detects and breaks repetitive tool call loops.
 
@@ -214,7 +210,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
         tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
-        total_call_limit: int = _DEFAULT_TOTAL_CALL_LIMIT,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -223,14 +218,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
-        self.total_call_limit = total_call_limit
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
         self._lock = threading.Lock()
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
         self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
-        self._total_calls: dict[str, int] = defaultdict(int)
         # Per-thread/run queue of warnings to inject at the next model call.
         # Populated by ``after_model`` (detection) and drained by
         # ``wrap_model_call`` (injection); see module docstring.
@@ -249,7 +242,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             tool_freq_warn=config.tool_freq_warn,
             tool_freq_hard_limit=config.tool_freq_hard_limit,
             tool_freq_overrides={name: (o.warn, o.hard_limit) for name, o in config.tool_freq_overrides.items()},
-            total_call_limit=config.total_call_limit,
         )
 
     def _get_thread_id(self, runtime: Runtime) -> str:
@@ -280,7 +272,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._warned.pop(evicted_id, None)
             self._tool_freq.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
-            self._total_calls.pop(evicted_id, None)
             for key in list(self._pending_warnings):
                 if key[0] == evicted_id:
                     self._drop_pending_warning_key_locked(key)
@@ -355,21 +346,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         call_hash = _hash_tool_calls(tool_calls)
 
         with self._lock:
-            # --- Layer 0: total call limit ---
-            if self.total_call_limit > 0:
-                self._total_calls[thread_id] += len(tool_calls)
-                total = self._total_calls[thread_id]
-                if total >= self.total_call_limit:
-                    logger.error(
-                        "Total tool call limit reached — forcing stop",
-                        extra={
-                            "thread_id": thread_id,
-                            "total_calls": total,
-                            "limit": self.total_call_limit,
-                        },
-                    )
-                    return _TOTAL_LIMIT_HARD_STOP_MSG.format(count=total, limit=self.total_call_limit), True
-
             # Touch / create entry (move to end for LRU)
             if thread_id in self._history:
                 self._history.move_to_end(thread_id)
@@ -623,7 +599,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._warned.pop(thread_id, None)
                 self._tool_freq.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
-                self._total_calls.pop(thread_id, None)
                 for key in list(self._pending_warnings):
                     if key[0] == thread_id:
                         self._drop_pending_warning_key_locked(key)
@@ -632,6 +607,5 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._warned.clear()
                 self._tool_freq.clear()
                 self._tool_freq_warned.clear()
-                self._total_calls.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()

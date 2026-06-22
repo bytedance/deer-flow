@@ -62,12 +62,6 @@ class LoopDetectionConfig(BaseModel):
         default_factory=dict,
         description=("Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. Values can be higher or lower than the global defaults. Commonly used to raise thresholds for high-frequency tools like bash."),
     )
-    total_call_limit: int = Field(
-        default=80,
-        ge=0,
-        description="Maximum total tool calls across all tools per thread. 0 disables this check.",
-    )
-
     @model_validator(mode="after")
     def validate_thresholds(self) -> "LoopDetectionConfig":
         """Ensure hard stop cannot happen before the warning threshold."""

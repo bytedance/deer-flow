@@ -457,7 +457,7 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=.:/Users/xiaoblu/repo/Observe-Agent-Demo:${PYTHONPATH:-} uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=.:${OBSERVE_AGENT_PATH:-}:${PYTHONPATH:-} uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
 # 2. Frontend
@@ -465,18 +465,10 @@ run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 3. Nginx (use Docker fallback if native nginx is not installed)
-if command -v nginx >/dev/null 2>&1; then
-    run_service "Nginx" \
-        "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-        2026 10
-else
-    echo "  ℹ️  nginx not found — using Docker nginx instead"
-    docker rm -f deerflow-nginx 2>/dev/null || true
-    run_service "Nginx (Docker)" \
-        "docker run --rm --name deerflow-nginx --add-host=host.docker.internal:host-gateway -p 2026:2026 -v '$REPO_ROOT/docker/nginx/nginx.docker-local.conf:/etc/nginx/nginx.conf:ro' nginx:alpine > logs/nginx.log 2>&1" \
-        2026 15
-fi
+# 3. Nginx
+run_service "Nginx" \
+    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
