@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from deerflow.agents.memory.prompt import _coerce_confidence, format_memory_for_injection
 
 
@@ -458,3 +460,197 @@ def test_strict_confidence_order_when_high_confidence_fact_overflows(monkeypatch
     # The high-confidence fact does not fit, and the low-confidence fact
     # MUST NOT slip in ahead of it.
     assert "Short low" not in result, "Lower-confidence fact should not be selected when a higher-confidence fact ranked before it was skipped (strict ordering)."
+
+
+# ── Regression tests for willem-bd's review on PR #3592 ──────────────────
+
+
+def test_structure_aware_truncation_preserves_guaranteed_on_overflow(monkeypatch) -> None:
+    """[P1] When user context overflows, the trailing ``Facts:\\n...`` block
+    is treated as a protected suffix and only the preceding sections are
+    clipped — guaranteed-category facts can never be silently discarded by
+    a prefix-cut on overflow.
+
+    Locks in the fix for willem-bd's P1 finding on PR #3592.
+    """
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    memory_data = {
+        # Oversized preceding section that would otherwise push Facts past the
+        # effective truncation ceiling.
+        "user": {"workContext": {"summary": "X" * 4000}},
+        "facts": [
+            {
+                "content": "CRITICAL: never use pip",
+                "category": "correction",
+                "confidence": 1.0,
+                "sourceError": "pip is deprecated",
+            },
+            {"content": "B", "category": "knowledge", "confidence": 0.5},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=200,
+        guaranteed_categories=["correction"],
+        guaranteed_token_budget=500,
+        use_tiktoken=False,
+    )
+
+    # Guaranteed correction must survive even when preceding sections are huge.
+    assert "never use pip" in result, f"Guaranteed correction was silently truncated away:\n{result[-200:]}"
+    assert "pip is deprecated" in result
+    # The protected suffix shape: Facts block is at the tail.
+    assert result.rstrip().endswith("(avoid: pip is deprecated)")
+
+
+def test_single_inter_section_separator_between_user_and_facts() -> None:
+    """[P2] Exactly one ``\\n\\n`` separator between ``User Context:`` and
+    ``Facts:`` — never four newlines.
+
+    Locks in the fix for willem-bd's P2 separator finding on PR #3592.
+    """
+    memory_data = {
+        "user": {"workContext": {"summary": "Python developer"}},
+        "history": {},
+        "facts": [
+            {"content": "fact A", "category": "knowledge", "confidence": 0.9},
+            {
+                "content": "fact B",
+                "category": "correction",
+                "confidence": 0.8,
+                "sourceError": "avoid X",
+            },
+        ],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "\n\n\n\n" not in result, f"Found four consecutive newlines between sections:\n{result[:200]!r}"
+    # Exactly one \n\n between User Context: and Facts:.
+    idx_user = result.index("User Context:")
+    idx_facts = result.index("Facts:")
+    between = result[idx_user:idx_facts]
+    assert between.count("\n\n") == 1, f"Expected exactly one \\n\\n between sections, got:\n{between!r}"
+
+
+def test_bare_string_guaranteed_categories_raises_type_error() -> None:
+    """[P2] Passing a bare ``str`` for *guaranteed_categories* must raise
+    ``TypeError`` instead of silently iterating single characters and
+    disabling the guarantee.
+
+    Locks in the fix for willem-bd's P2 bare-string finding on PR #3592.
+    """
+    memory_data = {
+        "facts": [
+            {"content": "CRITICAL", "category": "correction", "confidence": 0.8},
+        ],
+    }
+    with pytest.raises(TypeError, match="iterable"):
+        format_memory_for_injection(
+            memory_data,
+            guaranteed_categories="correction",  # type: ignore[arg-type]
+        )
+
+
+def test_categoryless_fact_not_promoted_into_guaranteed_context_pool(monkeypatch) -> None:
+    """[P2] A fact with a missing/empty ``category`` field is *never*
+    silently promoted into a ``guaranteed_categories=["context"]`` pool —
+    only facts with an *explicit* ``category == "context"`` qualify.
+
+    Strategy: set a guaranteed budget tight enough to fit only the short
+    *explicit* ``context`` fact.  If the legacy (no-category) fact were
+    silently promoted into the guaranteed pool, it would claim the budget
+    first (higher confidence) and push the explicit one out into the
+    regular pool where, under a tight ``max_tokens``, it would be lost.
+    If the fix holds, the explicit fact owns the guaranteed pool alone
+    and survives.
+
+    Locks in the fix for willem-bd's P2 category-less finding on PR #3592.
+    """
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    memory_data = {
+        "facts": [
+            # Long legacy fact with NO category field.
+            {
+                "content": "legacy " + "x" * 80,
+                "confidence": 0.95,
+            },
+            # Short explicit context fact.
+            {
+                "content": "explicit ctx",
+                "category": "context",
+                "confidence": 0.9,
+            },
+        ],
+    }
+
+    # Guaranteed budget sized for the short explicit fact only.
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=200,
+        guaranteed_categories=["context"],
+        guaranteed_token_budget=40,
+        use_tiktoken=False,
+    )
+
+    # The explicit context fact must survive in the guaranteed pool.
+    assert "explicit ctx" in result, f"Explicit 'context' fact was evicted — legacy no-category fact was silently promoted into the guaranteed pool.\n{result!r}"
+
+
+def test_fallback_uses_prefiltered_valid_facts(monkeypatch) -> None:
+    """[P2] When the primary path raises after ``valid_facts`` has been
+    built, the fallback operates on the pre-filtered list (no raw-content
+    facts leak through) and still produces a valid ``Facts:`` section.
+
+    Locks in the fix for willem-bd's P2 fallback-duplication finding on
+    PR #3592.
+    """
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    call_count = {"select": 0}
+    original_select = __import__("deerflow.agents.memory.prompt", fromlist=["_select_fact_lines"])._select_fact_lines
+
+    def raising_select(*args, **kwargs):
+        call_count["select"] += 1
+        if call_count["select"] == 1:
+            raise RuntimeError("primary path failure")
+        return original_select(*args, **kwargs)
+
+    monkeypatch.setattr("deerflow.agents.memory.prompt._select_fact_lines", raising_select)
+
+    memory_data = {
+        "facts": [
+            {"content": "valid fact", "category": "knowledge", "confidence": 0.9},
+            # Malformed: no content field — should be pre-filtered and never
+            # reach the fallback's ranking.
+            {"category": "knowledge", "confidence": 0.95},
+            # Empty content — also pre-filtered.
+            {"content": "   ", "category": "knowledge", "confidence": 0.9},
+        ],
+    }
+
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=2000,
+        guaranteed_categories=["correction"],
+        use_tiktoken=False,
+    )
+
+    # Fallback kicked in and still produced the Facts section.
+    assert "Facts:" in result
+    # The valid fact survived pre-filtering and fallback ranking.
+    assert "valid fact" in result
+    # Malformed facts were pre-filtered and never rendered.
+    assert result.count("- [") == 1

@@ -381,33 +381,40 @@ def _select_fact_lines(
 
 
 def _fallback_format_facts(
-    facts_data: list[Any],
+    valid_facts: list[dict[str, Any]],
     *,
     preceding_section_cost: int,
     max_tokens: int,
     use_tiktoken: bool,
-) -> str | None:
+) -> tuple[str, list[str]] | tuple[None, None]:
     """Confidence-only ranking used when the primary path raises an exception.
 
-    Returns the formatted ``"Facts:\\n..."`` section string, or ``None`` if
-    no facts survive.  *preceding_section_cost* is the tokens already consumed
-    by user-context / history sections (used to derive the remaining budget).
+    Returns a tuple ``(section_text, fact_lines)`` where ``section_text`` is the
+    formatted ``"Facts:\\n..."`` section string (without any leading inter-section
+    separator — the caller owns that), and ``fact_lines`` are the individual lines
+    that make up the facts block.  Both elements are ``None`` if no facts survive.
+
+    Returning the lines separately lets the caller track them for the
+    structure-aware safety truncation so fallback facts enjoy the same
+    protected-suffix treatment as facts emitted by the primary path.
+
+    *valid_facts* is the already-filtered fact list built by the primary path so
+    the fallback does not redo validation work.  *preceding_section_cost* is the
+    tokens already consumed by user-context / history sections (used to derive
+    the remaining budget).
     """
-    valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
     ranked = sorted(valid_facts, key=lambda f: _coerce_confidence(f.get("confidence"), default=0.0), reverse=True)
 
-    has_preceding = preceding_section_cost > 0
     header = "Facts:\n"
-    sep = "\n\n" if has_preceding else ""
-    overhead = _count_tokens(sep + header, use_tiktoken=use_tiktoken)
+    overhead = _count_tokens(header, use_tiktoken=use_tiktoken)
     line_budget = max_tokens - preceding_section_cost - overhead
     if line_budget <= 0:
-        return None
+        return None, None
 
     lines, _ = _select_fact_lines(ranked, token_budget=line_budget, use_tiktoken=use_tiktoken)
     if not lines:
-        return None
-    return sep + header + "\n".join(lines)
+        return None, None
+    return header + "\n".join(lines), lines
 
 
 def format_memory_for_injection(
@@ -445,7 +452,13 @@ def format_memory_for_injection(
     if not memory_data:
         return ""
 
-    # Normalise guaranteed_categories so callers can pass None/[] safely.
+    # Reject a bare string explicitly: iterating a ``str`` yields single
+    # characters, which would silently produce a meaningless frozenset of
+    # letters and turn the guarantee off without any warning.  Config-layer
+    # callers go through Pydantic (which enforces ``list[str]``), so this
+    # only guards the public helper surface.
+    if isinstance(guaranteed_categories, str):
+        raise TypeError("guaranteed_categories must be an iterable of strings, not a bare str")
     effective_guaranteed: frozenset[str] = frozenset(c.strip() for c in guaranteed_categories if isinstance(c, str) and c.strip()) if guaranteed_categories else frozenset()
 
     sections: list[str] = []
@@ -514,21 +527,44 @@ def format_memory_for_injection(
         base_text = "\n\n".join(sections)
         base_tokens = _count_tokens(base_text, use_tiktoken=use_tiktoken) if base_text else 0
 
-        try:
-            # Collect valid facts and partition into guaranteed vs regular.
-            valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
+        # Pre-filter valid facts *before* entering the try so the except
+        # path can pass the same list straight into the fallback without
+        # redoing validation work on the hot prompt-injection path.
+        valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
 
+        # Initialise the facts-block markers *before* the try so the
+        # structure-aware truncation at the bottom of the function can
+        # reason about them regardless of whether the primary path or
+        # the except/fallback path produced the final Facts section.
+        facts_header = "Facts:\n"
+        all_fact_lines: list[str] = []
+
+        try:
+            # Partition valid facts into guaranteed vs regular groups.
+            # Use the *raw* category field (no ``or "context"`` default) so
+            # a category-less legacy fact is never silently promoted into
+            # a guaranteed pool whose operator configured
+            # ``guaranteed_categories=["context"]``.  Missing-category facts
+            # always fall through to the regular path.
             def _confidence_key(fact: dict[str, Any]) -> float:
                 return _coerce_confidence(fact.get("confidence"), default=0.0)
 
             if effective_guaranteed:
+
+                def _category_match(fact: dict[str, Any]) -> bool:
+                    raw = fact.get("category")
+                    if not isinstance(raw, str):
+                        return False
+                    cat = raw.strip()
+                    return bool(cat) and cat in effective_guaranteed
+
                 guaranteed = sorted(
-                    [f for f in valid_facts if (str(f.get("category", "")).strip() or "context") in effective_guaranteed],
+                    [f for f in valid_facts if _category_match(f)],
                     key=_confidence_key,
                     reverse=True,
                 )
                 regular = sorted(
-                    [f for f in valid_facts if (str(f.get("category", "")).strip() or "context") not in effective_guaranteed],
+                    [f for f in valid_facts if not _category_match(f)],
                     key=_confidence_key,
                     reverse=True,
                 )
@@ -537,10 +573,7 @@ def format_memory_for_injection(
                 regular = sorted(valid_facts, key=_confidence_key, reverse=True)
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
-            has_preceding = bool(sections)
-            facts_header = "Facts:\n"
-            sep = "\n\n" if has_preceding else ""
-            header_cost = _count_tokens(sep + facts_header, use_tiktoken=use_tiktoken)
+            header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)
 
             guaranteed_lines: list[str] = []
             if guaranteed:
@@ -570,49 +603,81 @@ def format_memory_for_injection(
                     )
 
             # ── Emit a single "Facts:" section ───────────────────────────
+            # Leading inter-section separator is NOT embedded here; the
+            # final ``"\n\n".join(sections)`` is the single source of truth
+            # for section-to-section spacing, preventing the prior
+            # double-``\n\n`` bug.
             all_fact_lines = guaranteed_lines + regular_lines
             if all_fact_lines:
-                section_text = sep + facts_header + "\n".join(all_fact_lines)
+                section_text = facts_header + "\n".join(all_fact_lines)
                 sections.append(section_text)
 
         except Exception:
             # ── Fallback: confidence-only ranking, single budget ─────────
             # Any unexpected error in the partition / guaranteed path must
             # not prevent memory injection entirely.  Fall back to the
-            # original single-pass confidence ranking.
+            # original single-pass confidence ranking.  Re-use the
+            # pre-filtered ``valid_facts`` so we don't redo validation work
+            # on the hot fallback path.
             logger.warning(
                 "Memory injection: guaranteed-category path failed, falling back to confidence-only ranking",
                 exc_info=True,
             )
-            fallback = _fallback_format_facts(
-                facts_data,
+            fallback, fallback_lines = _fallback_format_facts(
+                valid_facts,
                 preceding_section_cost=base_tokens,
                 max_tokens=max_tokens,
                 use_tiktoken=use_tiktoken,
             )
             if fallback:
                 sections.append(fallback)
+                # Surface the fallback's lines to ``all_fact_lines`` so the
+                # structure-aware truncation below treats fallback facts as a
+                # protected suffix too.  Without this, a large user-context
+                # prefix could silently clip fallback facts via the original
+                # prefix-cut.
+                all_fact_lines = fallback_lines
 
     if not sections:
         return ""
 
     result = "\n\n".join(sections)
 
-    # The effective ceiling accounts for the additional headroom granted to
-    # guaranteed-category facts.  Without this adjustment the safety truncation
-    # below could silently discard the very facts the guaranteed path worked to
-    # preserve.
-    effective_limit = max_tokens + guaranteed_line_tokens
-
-    # Use accurate token counting with tiktoken (or the char-based estimate
-    # when use_tiktoken is False).
     token_count = _count_tokens(result, use_tiktoken=use_tiktoken)
+    effective_limit = max_tokens + guaranteed_line_tokens
     if token_count > effective_limit:
-        # Truncate to fit within token limit
-        # Estimate characters to remove based on token ratio
-        char_per_token = len(result) / token_count
-        target_chars = int(effective_limit * char_per_token * 0.95)  # 95% to leave margin
-        result = result[:target_chars] + "\n..."
+        # Structure-aware truncation: the ``Facts:\n...`` block is treated as
+        # a *protected suffix* so guaranteed-category facts — the very facts
+        # this PR exists to preserve — can never be silently discarded by a
+        # prefix-cut on overflow.  Only the preceding (user-context / history)
+        # sections are eligible for truncation; if they alone exceed the
+        # budget available after reserving the Facts block, they are clipped
+        # from the tail.  When *guaranteed_line_tokens* is zero (no
+        # guaranteed categories configured or no facts survived), the
+        # equation collapses to the original prefix-truncation against
+        # ``max_tokens``, so backward compatibility is preserved.
+        facts_block = (facts_header + "\n".join(all_fact_lines)) if all_fact_lines else ""
+        facts_block_tokens = _count_tokens(facts_block, use_tiktoken=use_tiktoken)
+        separator_tokens = _count_tokens("\n\n", use_tiktoken=use_tiktoken)
+        budget_for_non_facts = max(
+            0,
+            effective_limit - facts_block_tokens - (separator_tokens if facts_block else 0),
+        )
+
+        # Build the preceding (non-facts) portion from *sections* excluding
+        # the trailing Facts block.
+        preceding_sections = sections[:-1] if all_fact_lines else sections
+        preceding = "\n\n".join(preceding_sections)
+
+        if preceding:
+            preceding_tokens = _count_tokens(preceding, use_tiktoken=use_tiktoken)
+            if preceding_tokens > budget_for_non_facts:
+                char_per_token = len(preceding) / max(preceding_tokens, 1)
+                target_chars = int(budget_for_non_facts * char_per_token * 0.95)
+                preceding = preceding[:target_chars].rstrip() + "\n..."
+            result = (preceding + "\n\n" + facts_block) if facts_block else preceding
+        else:
+            result = facts_block
 
     return result
 
