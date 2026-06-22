@@ -1,0 +1,32 @@
+---
+title: 简介
+description: DeerFlow 是一个运行时 Harness，用于构建支持技能、记忆、工具和沙箱执行的长时序 Agent 系统。
+---
+a
+import { Cards } from "nextra/components";
+
+# 简介
+
+欢迎来到 DeerFlow！
+
+DeerFlow 是一个用于构建和运行 Agent 系统的框架。与将 AI Agent 视为简单的文本生成器或硬编码的工作流图不同，DeerFlow 提供了一个强大的 **运行时 Harness**，打包了 Agent 执行有意义的长时序工作所需的核心组件。
+
+## 什么是 DeerFlow？
+
+DeerFlow 弥补了原生 LLM 与生产级 Agent 工作流之间的差距。它专注于完成复杂任务所需的关键能力：
+
+- **长时序规划**：在多个推理周期和工具调用中保持 Agent 处于正轨并连贯。
+- **通过子 Agent 进行任务拆解**：将复杂工作拆分为并行的、隔离的子任务，避免使主 Agent 的上下文窗口过载。
+- **沙箱化执行**：为 Agent 提供安全、隔离的文件系统环境，使其能够写入文件、运行测试并执行代码。
+- **模块化技能与工具**：动态加载能力，在保持 Agent 核心通用的同时适应特定工作负载（例如深度研究或数据分析）。
+- **持久化记忆与上下文工程**：管理 Agent 在不同轮次和会话之间记住、总结或遗忘的内容。
+
+## 章节内容
+
+在深入具体实现之前，建议阅读以下内容以建立正确的思维模型：
+
+<Cards num={3}>
+  <Cards.Card title="为什么选择 DeerFlow" href="/docs/introduction/why-deerflow" />
+  <Cards.Card title="核心概念" href="/docs/introduction/core-concepts" />
+  <Cards.Card title="Harness 与应用" href="/docs/introduction/harness-vs-app" />
+</Cards>
