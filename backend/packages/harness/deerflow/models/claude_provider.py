@@ -26,7 +26,7 @@ from typing import Any
 
 import anthropic
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,39 @@ THINKING_BUDGET_RATIO = 0.8
 # Override with ANTHROPIC_BILLING_HEADER env var if the hardcoded version drifts.
 _DEFAULT_BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.85.351; cc_entrypoint=cli; cch=6c6d5;"
 OAUTH_BILLING_HEADER = os.environ.get("ANTHROPIC_BILLING_HEADER", _DEFAULT_BILLING_HEADER)
+
+
+def _coalesce_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Merge non-leading system messages into one leading SystemMessage.
+
+    Anthropic accepts system content only as a single leading block. Several
+    DeerFlow middleware paths (skill activation, summarization message removal,
+    midnight date reminders) can leave a SystemMessage stranded mid-conversation,
+    which makes langchain_anthropic raise "Received multiple non-consecutive
+    system messages." Returns the input unchanged when the system messages
+    already form a front-anchored block (the common case), so normal requests
+    stay byte-for-byte identical.
+    """
+    system_idxs = [i for i, m in enumerate(messages) if isinstance(m, SystemMessage)]
+    if system_idxs == list(range(len(system_idxs))):
+        return messages
+
+    blocks: list[Any] = []
+    others: list[BaseMessage] = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            content = message.content
+            if isinstance(content, str):
+                if content:
+                    blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                blocks.extend(b if isinstance(b, dict) else {"type": "text", "text": str(b)} for b in content)
+        else:
+            others.append(message)
+
+    if not blocks:
+        return others
+    return [SystemMessage(content=blocks), *others]
 
 
 class ClaudeChatModel(ChatAnthropic):
@@ -139,7 +172,12 @@ class ClaudeChatModel(ChatAnthropic):
         **kwargs: Any,
     ) -> dict:
         """Override to inject prompt caching, thinking budget, and OAuth billing."""
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # Anthropic requires all system content as one leading block; coalesce
+        # defensively so stray mid-conversation SystemMessages don't blow up
+        # _format_messages with "multiple non-consecutive system messages".
+        messages = self._convert_input(input_).to_messages()
+        coalesced = _coalesce_system_messages(messages)
+        payload = super()._get_request_payload(input_ if coalesced is messages else coalesced, stop=stop, **kwargs)
 
         if self._is_oauth:
             self._apply_oauth_billing(payload)
