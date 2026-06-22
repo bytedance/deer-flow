@@ -101,7 +101,7 @@ LLM-powered persistent context retention across conversations:
 |----------|-------|
 | **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
 | **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
-| **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), DuckDuckGo (image search) |
+| **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), fastCRW (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
@@ -113,6 +113,7 @@ FastAPI application providing REST endpoints for frontend integration:
 |-------|---------|
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
+| `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET/PUT /api/skills` | List and manage skills |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |

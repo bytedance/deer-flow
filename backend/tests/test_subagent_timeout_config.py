@@ -97,7 +97,7 @@ class TestSubagentOverrideConfig:
 class TestSubagentsAppConfigDefaults:
     def test_default_timeout(self):
         config = SubagentsAppConfig()
-        assert config.timeout_seconds == 900
+        assert config.timeout_seconds == 1800
 
     def test_default_max_turns_override_is_none(self):
         config = SubagentsAppConfig()
@@ -281,7 +281,7 @@ class TestLoadSubagentsConfig:
     def test_load_empty_dict_uses_defaults(self):
         load_subagents_config_from_dict({})
         cfg = get_subagents_app_config()
-        assert cfg.timeout_seconds == 900
+        assert cfg.timeout_seconds == 1800
         assert cfg.max_turns is None
         assert cfg.agents == {}
 
@@ -319,13 +319,30 @@ class TestRegistryGetSubagentConfig:
         assert get_subagent_config("general-purpose") is not None
         assert get_subagent_config("bash") is not None
 
-    def test_default_timeout_preserved_when_no_config(self):
+    def test_explicit_global_timeout_propagates_to_general_purpose(self):
+        """An explicit global timeout (here the non-default 900) propagates to a
+        built-in agent, while max_turns still comes from the builtin def (150).
+        """
         from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
-        assert config.max_turns == 100
+        assert config.max_turns == 150
+
+    def test_builtin_defaults_have_research_headroom(self):
+        """Out-of-box defaults (no config.yaml subagents section) must give
+        general-purpose enough turns/time for deep research, which previously
+        failed with GraphRecursionError at the old max_turns=100 limit.
+        """
+        from deerflow.subagents.registry import get_subagent_config
+
+        load_subagents_config_from_dict({})  # no subagents config -> model defaults
+        config = get_subagent_config("general-purpose")
+        assert config.max_turns == 150
+        assert config.timeout_seconds == 1800
+        # Pin bash too so the config.example.yaml "bash=60" doc cannot drift.
+        assert get_subagent_config("bash").max_turns == 60
 
     def test_global_timeout_override_applied(self):
         from deerflow.subagents.registry import get_subagent_config

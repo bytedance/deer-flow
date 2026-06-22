@@ -1,5 +1,5 @@
+import { describe, expect, test } from "@rstest/core";
 import { QueryClient, type InfiniteData } from "@tanstack/react-query";
-import { describe, expect, test } from "vitest";
 
 import {
   filterInfiniteThreadsCache,

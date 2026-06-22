@@ -1,6 +1,6 @@
 ---
 name: deerflow-maintainer-orchestrator
-description: "Use when a DeerFlow maintainer needs comment-only GitHub issue or PR handling: resolve issue/PR scopes with gh, analyze issues, post or draft issue comments, perform PR review comments, give fix strategy, risk classification, and validation guidance. Intended for maintainers and trusted local agents, not general contributors."
+description: "Use when a DeerFlow maintainer needs comment-only GitHub issue or PR handling: resolve issue/PR scopes with gh, analyze issues, post or draft issue comments, perform PR review comments, review PR or issue batches, compare competing PRs that target the same issue, give fix strategy, risk classification, and validation guidance. Intended for maintainers and trusted local agents, not general contributors."
 ---
 
 # DeerFlow Maintainer Orchestrator
@@ -33,21 +33,35 @@ Use GitHub tooling to resolve artifact type and scope. Do not ask the maintainer
 8. For "recent/latest" wording without a count, use a small default recent slice. For "recent hours" wording without a number, use six hours. Do not ask.
 9. Use `gh api` when `gh issue/pr view/list` lacks required fields such as timeline events, review threads, or precise search filters.
 10. Use GitHub search only as a fallback for natural-language filters that cannot be represented by view/list/API calls. Do not use web search for artifact routing unless GitHub tooling is unavailable.
-11. If no artifact type, number, URL, count, time window, or searchable GitHub scope can be resolved, stop with a compact "scope unresolved" report. Do not ask a follow-up question.
+11. When an issue has more than one candidate resolving PR, gather them all before reviewing: the issue's linked/Development PRs, closing keywords (`Closes/Fixes #<issue>`) found via `gh api` timeline cross-reference events, and PRs that mention the issue. Route them into Competing PR Comparison.
+12. If no artifact type, number, URL, count, time window, or searchable GitHub scope can be resolved, stop with a compact "scope unresolved" report. Do not ask a follow-up question.
 
 Use concise repo-local references such as `#123` and `PR #123` in maintainer reports and comments. Include full GitHub URLs only for posted comment/review links returned by GitHub or when the maintainer supplied an explicit URL.
+
+## Existing Coverage and Re-Runs
+
+Existing comments suppress duplicate **posting**, not **analysis**. Always analyze the artifact in full, then post only the net-new delta over what is already covered.
+
+1. Read existing maintainer/trusted-agent comments and reviews as prior coverage.
+2. Analyze the artifact fully regardless of what already exists. A prior comment may be partial — catching A while missing B.
+3. Keep only net-new, high-confidence items not already materially covered.
+4. Non-empty delta: post one comment that explicitly builds on the prior coverage (for example `Adding to @reviewer's review:`) and states only the new items. Do not restate covered points.
+5. Empty delta: post nothing public; report `Already covered` to the maintainer with the existing comment/review URL.
+6. Idempotency: treat your own earlier skill-authored comments as already-covered. On a re-run, never stack a second comment that repeats an earlier one — post only genuinely new delta, or nothing.
+
+RFC issues are the one hard skip: no analysis and no post unless the maintainer overrides.
 
 ## Issue Flow
 
 Use Issue Flow for GitHub issues, bug reports, feature requests, support questions, and issue batches.
 
-Start every issue with a cheap duplicate-opinion precheck:
+Start every issue with a cheap precheck:
 
 1. Fetch issue metadata, labels, author, body, and existing comments.
 2. If labels, title, or body mark the issue as RFC (`rfc`, `[RFC]`, `RFC:`, or `Request for Comments`), classify it as `rfc-no-comment`, skip deep analysis, and do not post anything public unless the maintainer explicitly overrides the RFC skip for that item.
-3. If an existing maintainer or trusted-agent issue comment already gives a materially equivalent diagnosis, modification suggestion, information request, or blocking decision, skip deep analysis and do not post anything public for that issue.
+3. Existing maintainer or trusted-agent comments are prior coverage, not an automatic skip. Analyze fully and post only the net-new delta (see Existing Coverage and Re-Runs).
 4. Treat ordinary reporter replies, thanks, unrelated discussion, or incomplete guesses as non-blocking.
-5. Report skipped issues to the maintainer only as compact identifiers plus the skipped reason or existing comment URL when available.
+5. Report already-covered or skipped issues to the maintainer only as compact identifiers plus the reason or existing comment URL when available.
 
 For non-skipped issues:
 
@@ -87,7 +101,7 @@ Validation:
    - Add `Missing info:` only when the issue cannot be diagnosed without more evidence; ask for the smallest useful data.
    - Put relevant files/components inside `Evidence:` or `Recommended solution:` bullets instead of separate metadata fields.
    - Every posted issue comment should contain concrete modification guidance and validation guidance unless the only useful response is `Missing info:`.
-5. Immediately before posting, refresh comments and skip if an equivalent maintainer or trusted-agent comment appeared during analysis.
+5. Immediately before posting, refresh comments; fold any equivalent comment that appeared during analysis into prior coverage and post only the remaining delta.
 6. Post one issue comment when posting is authorized; otherwise return the same text as `Reply draft`.
 
 Do not expose private reasoning, credentials, internal-only context, or unsupported promises. Do not say a fix was made unless a separate coding workflow actually changed code.
@@ -96,12 +110,13 @@ Do not expose private reasoning, credentials, internal-only context, or unsuppor
 
 Use PR Review Flow for GitHub pull requests and PR batches.
 
-Start every PR with a cheap duplicate-review precheck:
+Start every PR with a cheap precheck:
 
 1. Fetch PR metadata, changed file list, checks summary, existing PR reviews, existing PR comments, and review threads when available.
-2. If an existing maintainer or trusted-agent review already gives materially equivalent findings or a blocking decision, skip deep review and do not post anything public for that PR.
-3. Treat author replies, thanks, unrelated discussion, or incomplete guesses as non-blocking.
-4. Report skipped PRs to the maintainer only as compact identifiers plus the existing review/comment URL when available.
+2. Existing maintainer or trusted-agent reviews are prior coverage, not an automatic skip. Review fully and post only the net-new delta (see Existing Coverage and Re-Runs).
+3. Read `statusCheckRollup` as signal, not verdict. Failing required checks are themselves a reportable finding (build failure = P0; failing tests or lint = P1/P2 by impact). Green checks lower risk but never excuse reading the actual changed code path — confirm suspect logic by reading the source, not by trusting green CI. Tests passing does not prove the changed branch is exercised.
+4. Treat author replies, thanks, unrelated discussion, or incomplete guesses as non-blocking.
+5. Report already-covered or clean PRs to the maintainer only, with the existing review/comment URL when available.
 
 ### Diff Base Rule
 
@@ -112,6 +127,8 @@ Before reviewing a local PR branch or local diff, fetch the base repository's ta
 - Prefer GitHub PR base metadata for the target branch. For non-PR local diffs, use the base repository default branch. If metadata is unavailable, default to `main` only after fetching the base remote.
 - Refresh the comparison ref explicitly, for example `git fetch <base-remote> +refs/heads/<base-branch>:refs/remotes/<base-remote>/<base-branch>`, then inspect `BASE=$(git merge-base HEAD <base-remote>/<base-branch>)` and `git diff "$BASE"...HEAD`.
 - If using `FETCH_HEAD` from a single-branch fetch instead, diff against that verified `FETCH_HEAD` immediately and do not later substitute a possibly stale remote-tracking ref.
+- Resolve the PR head explicitly. For fork PRs whose head branch is not on the base repo, fetch the PR ref: `git fetch <base-remote> pull/<n>/head:pr-<n>`. The fork's own branch ref and `gh api .../contents?ref=<fork-branch>` will 404 against the base repo. Record the head SHA you reviewed.
+- Re-check the head SHA immediately before posting. If the PR head moved during analysis, re-review the new diff or abort — never post a review against a diff the PR no longer has.
 - For uncommitted local changes, review committed branch changes against the fresh base first, then include working-tree changes separately.
 - If the base remote or base branch cannot be established, use the GitHub PR files/diff as the source of truth. If neither local nor GitHub diff can be read, return a compact failure report and do not post a review.
 
@@ -122,8 +139,8 @@ Before posting a PR review comment:
 3. Prioritize correctness, safety, maintainability, production risk, compatibility, and missing critical tests over style.
 4. Report concrete architecture, security, public API, default-behavior, and compatibility problems as findings when the diff causes or exposes them.
 5. Check changed behavior, edge cases, error paths, state mutation, transactions, locks, cache invalidation, cleanup, security boundaries, missing tests, performance/reliability, and API compatibility.
-6. Immediately before posting, refresh reviews/comments and skip if an equivalent maintainer or trusted-agent review appeared during analysis.
-7. If there are high-confidence findings, post a PR review comment using the PR language. If there are no high-confidence findings, do not post a public PR review/comment; report `No high-confidence review findings.` to the maintainer in the run result.
+6. Immediately before posting, refresh reviews/comments and fold any equivalent review that appeared during analysis into prior coverage; post only the remaining delta.
+7. Apply the Posting Gate. If the gate yields public findings, post one PR review comment in the PR language. Otherwise post nothing public and report the result (`No high-confidence review findings.` or `Already covered`) plus any sub-threshold items as `Maintainer notes`.
 
 For public PR reviews with findings, start with one short opener that fits the review context and matches the finding count. Use singular wording only for exactly one finding, for example `Thanks @author. I found one issue that should be addressed before this is ready.` Use plural wording for multiple findings, for example `Thanks @author. I found a few issues that should be addressed before this is ready.` Omit the mention for bots or when it adds noise.
 
@@ -145,7 +162,40 @@ Severity guide:
 - `P1`: likely production bug, serious regression, broken compatibility, or high-risk security/architecture issue.
 - `P2`: correctness, maintainability, or test concern with lower risk.
 
+### Posting Gate
+
+Posting depends on BOTH confidence (is the problem real?) and severity (how bad if real). They are independent axes — "no high-confidence findings" means none across P0/P1/P2, not merely "no P0".
+
+- Post publicly only items that are high-confidence AND at least P2.
+- For a public P2, additionally require that the diff itself introduces or worsens the issue. Do not raise a public P2 for pre-existing behavior the diff only touches, or for a change that is a net improvement over the prior state.
+- A high-confidence P0/P1 is always worth posting. A low-confidence P1 is not — omit it, or route it to `Maintainer notes` framed as a hypothesis to verify.
+- Sub-threshold but real observations (net-improvement nits, bounded or low-risk concerns, pre-existing issues, low-confidence hypotheses) go to the `Maintainer notes` channel in the run result, never to a public comment.
+
 Do not produce compliments, summaries, or general advice. For sensitive security issues, describe impact and remediation without exploit instructions.
+
+## Batch Handling
+
+When the scope has multiple artifacts, cluster before reviewing and synthesize after.
+
+Cluster by relatedness, not by type. Group artifacts that share files, interfaces, or the same issue/feature into one cluster; same-type artifacts that touch disjoint files are independent.
+
+- Related cluster: review in ONE shared context so cross-artifact reasoning is possible — parallel agents cannot see each other's findings. If it cannot fit one context, fan out per sub-group and reconcile in the synthesis pass; never split it blind, without that re-aggregation.
+- Independent clusters: may run in parallel. Offloading a large or independent batch to one subagent per cluster keeps the main context clean — consider it for big batches, prefer offering it to the maintainer over silently spawning, and do not spawn for two or three related items or when the cold-start cost is not earned.
+
+After per-artifact review, run one synthesis pass over the whole batch and report it to the maintainer (decision-support, not a public comment):
+
+- Overlapping files and merge-order/conflict surface — which PRs touch the same files and will conflict pairwise.
+- Duplicate or competing solutions to the same problem.
+- Composition risk — changes each safe alone but interacting (for example, two PRs editing the same module or table).
+
+## Competing PR Comparison
+
+When several PRs target the same issue, compare them instead of reviewing each in isolation.
+
+1. Pull the issue's acceptance criteria (reported problem and expected behavior); that is the rubric anchor.
+2. Score each PR on: does it actually resolve the issue's ask; correctness and edge/error-path coverage; test quality; blast radius and compatibility; maintainability. Use the same DeerFlow Review Heuristics and Posting Gate as a single review.
+3. Report a maintainer-facing comparison — strongest PR and why, what each is missing — in the run result.
+4. Keep the public surface constructive and per-PR: post each PR's own gate-passing findings normally. Do not publicly rank PRs against each other or tell an author their PR is worse than a competitor's; winner selection stays in the maintainer report.
 
 ## No-Question Policy
 
@@ -195,7 +245,9 @@ For Issue Flow:
 Run result:
 Posted:
 Skipped:
+Already covered:
 Failed:
+Maintainer notes:
 Per issue:
   Issue:
   Surface:
@@ -213,7 +265,9 @@ Run result:
 Reviewed:
 Skipped:
 Clean:
+Already covered:
 Failed:
+Maintainer notes:
 Per PR:
   PR:
   Public review:
@@ -231,7 +285,9 @@ For batches, prefer a compact maintainer-facing table after the headline counts:
 | #123 | posted | comment URL | short reason |
 | PR #456 | reviewed | review URL | P1: finding title |
 | PR #789 | clean | none | No high-confidence review findings. |
-| #321 | skipped | none | existing maintainer comment |
+| #321 | already covered | none | existing maintainer comment |
 ```
+
+For multi-artifact batches, follow the table with a `Batch synthesis` block (overlapping files, merge-order/conflict surface, duplicate or competing solutions, composition risk) and, when issues had competing PRs, a `Competing PR comparison` block. Both are maintainer-only.
 
 Omit empty categories, no-op fields, routine command output, and raw logs. Report meaningful changes, evidence, and options.

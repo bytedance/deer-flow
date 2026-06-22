@@ -1,5 +1,5 @@
+import { expect, test } from "@rstest/core";
 import rehypeRaw from "rehype-raw";
-import { expect, test } from "vitest";
 
 import { reasoningPlugins, streamdownPlugins } from "@/core/streamdown/plugins";
 

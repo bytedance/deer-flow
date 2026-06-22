@@ -3,7 +3,7 @@ title: 工具
 description: Lead Agent 是一个工具调用 Agent。工具是它与世界交互的方式：搜索网络、读写文件、运行命令、委派任务以及向用户呈现输出。
 ---
 
-import { Callout, Cards, Tabs } from "nextra/components";
+import { Callout, Tabs } from "nextra/components";
 
 # 工具
 
@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -167,11 +167,24 @@ tools:
 ```
 Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) API Key。
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_search_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper、Brave、Exa、Tavily、Firecrawl、Perplexity）。为每个查询路由到满足质量门槛的最低成本引擎，并在引擎故障时自动切换。定价采用收益分成模式，您可保留约一半的缓存节省。
+
+需要 [GroundRoute](https://groundroute.ai) API Key。同时支持 `web_fetch`。
+
+安装：`cd backend && uv add 'deerflow-harness[groundroute]'`
+
+  </Tabs.Tab>
 </Tabs>
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Exa"]}>
+<Tabs items={["Jina AI（默认）", "Exa", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -187,14 +200,42 @@ tools:
     api_key: $EXA_API_KEY
 ```
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_fetch_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+  </Tabs.Tab>
 </Tabs>
 
 ### 图像搜索
 
+<Tabs items={["DuckDuckGo（默认）", "InfoQuest", "Serper"]}>
+  <Tabs.Tab>
 ```yaml
 tools:
   - use: deerflow.community.image_search.tools:image_search_tool
 ```
+无需 API Key。默认配置，适合开发和通用用途。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:image_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+需要 InfoQuest API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serper.tools:image_search_tool
+    api_key: $SERPER_API_KEY
+```
+通过 Serper 获取 Google 图片结果。需要 [Serper](https://serper.dev) API Key，与 Serper `web_search` 工具复用同一个 `SERPER_API_KEY`。
+  </Tabs.Tab>
+</Tabs>
 
 ## 工具组
 

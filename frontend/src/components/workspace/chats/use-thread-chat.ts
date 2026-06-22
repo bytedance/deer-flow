@@ -27,6 +27,9 @@ export function resetThreadChatAfterDelete(detail: ThreadChatResetDetail) {
 export function useThreadChat() {
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
   const pathname = usePathname();
+  // Render-time values use the committed browser URL. The sync effect below
+  // intentionally watches the reactive pathname so client navigation still
+  // schedules a reset when window.location is stale during render.
   const actualPathname =
     typeof window === "undefined" ? pathname : window.location.pathname;
   const isNewPath = actualPathname.endsWith("/new");
@@ -57,7 +60,7 @@ export function useThreadChat() {
   }, []);
 
   useEffect(() => {
-    if (isNewPath) {
+    if (pathname.endsWith("/new")) {
       const nextThreadId = newThreadIdRef.current ?? uuid();
       newThreadIdRef.current = nextThreadId;
       setIsNewThreadState(true);
@@ -65,17 +68,15 @@ export function useThreadChat() {
       return;
     }
     newThreadIdRef.current = null;
-    // Guard: after history.replaceState updates the URL from /chats/new to
-    // /chats/{UUID}, Next.js useParams may still return the stale "new" value
-    // because replaceState does not trigger router updates.  Avoid propagating
-    // this invalid thread ID to downstream hooks (e.g. useStream), which would
-    // cause a 422 from LangGraph Server.
+    // Native history updates the canonical pathname but preserves the route
+    // tree, so useParams may still return the stale "new" value. Avoid passing
+    // it to downstream hooks (e.g. useStream), which would cause a 422.
     if (threadIdFromPath === "new") {
       return;
     }
     setIsNewThreadState(false);
     setThreadIdState(threadIdFromPath);
-  }, [isNewPath, threadIdFromPath]);
+  }, [pathname, threadIdFromPath]);
 
   useEffect(() => {
     const handleReset = (event: Event) => {

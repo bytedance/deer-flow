@@ -25,8 +25,10 @@ def _make_app(event_store=None, run_manager=None):
 
     if event_store is not None:
         app.state.run_event_store = event_store
-    if run_manager is not None:
-        app.state.run_manager = run_manager
+    if run_manager is None:
+        run_manager = AsyncMock()
+        run_manager.get.return_value = None
+    app.state.run_manager = run_manager
 
     return app
 
@@ -231,3 +233,85 @@ def test_stream_store_only_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_list_run_messages_injects_turn_duration():
+    """Verify that list_run_messages injects turn_duration into ALL AI messages for the run."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    # Mock a run record that took exactly 5 seconds
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Thinking..."}},
+        {"seq": 3, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+    ]
+
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = mock_run
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    assert "turn_duration" not in data[0]["content"].get("additional_kwargs", {})
+
+    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_thread_messages_injects_turn_duration():
+    """Verify that list_thread_messages injects turn_duration into the inner content."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[mock_run])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
+    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5

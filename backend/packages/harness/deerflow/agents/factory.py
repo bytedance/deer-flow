@@ -282,7 +282,17 @@ def _assemble_from_features(
 
             chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
-    # --- [13] Clarification (always last among built-ins) ---
+    # --- [13] TokenBudget ---
+    if feat.token_budget is not False:
+        if isinstance(feat.token_budget, AgentMiddleware):
+            chain.append(feat.token_budget)
+        else:
+            from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+            from deerflow.config.token_budget_config import TokenBudgetConfig
+
+            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
+
+    # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 

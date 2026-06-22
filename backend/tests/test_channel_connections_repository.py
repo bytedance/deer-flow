@@ -89,6 +89,119 @@ class TestChannelConnectionRepository:
         assert len(await repo.list_connections("alice")) == 1
 
     @pytest.mark.anyio
+    async def test_upsert_connection_transfers_external_identity_between_owners(self, repo):
+        await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        bob = await repo.upsert_connection(
+            owner_user_id="bob",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        alice_rows = await repo.list_connections("alice")
+        resolved = await repo.find_connection_by_external_identity(
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+        )
+
+        assert alice_rows[0]["status"] == "revoked"
+        assert bob["status"] == "connected"
+        assert resolved is not None
+        assert resolved["owner_user_id"] == "bob"
+        assert resolved["id"] == bob["id"]
+
+    @pytest.mark.anyio
+    async def test_active_identity_unique_index_rejects_second_connected_owner(self, repo):
+        # The single-active-owner invariant must be enforced by the database, not
+        # only by the app-level revoke step (which can race under READ COMMITTED).
+        from sqlalchemy.exc import IntegrityError
+
+        await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+
+        with pytest.raises(IntegrityError):
+            async with repo.session_factory() as session:
+                session.add(
+                    ChannelConnectionRow(
+                        id="manual-duplicate-active",
+                        owner_user_id="bob",
+                        provider="slack",
+                        external_account_id="U-shared",
+                        workspace_id="T1",
+                        status="connected",
+                    )
+                )
+                await session.commit()
+
+    @pytest.mark.anyio
+    async def test_active_identity_unique_index_allows_revoked_rows(self, repo):
+        # A revoked row must not occupy the active-identity slot, so a fresh
+        # connected bind for the same identity is allowed afterwards.
+        first = await repo.upsert_connection(
+            owner_user_id="alice",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+        await repo.disconnect_connection(connection_id=first["id"], owner_user_id="alice")
+
+        second = await repo.upsert_connection(
+            owner_user_id="bob",
+            provider="slack",
+            external_account_id="U-shared",
+            workspace_id="T1",
+            status="connected",
+        )
+        assert second["status"] == "connected"
+
+    @pytest.mark.anyio
+    async def test_concurrent_upserts_keep_single_active_owner(self, repo):
+        import asyncio
+
+        async def connect(owner: str):
+            return await repo.upsert_connection(
+                owner_user_id=owner,
+                provider="slack",
+                external_account_id="U-shared",
+                workspace_id="T1",
+                status="connected",
+            )
+
+        await asyncio.gather(connect("alice"), connect("bob"))
+
+        async with repo.session_factory() as session:
+            connected = (
+                (
+                    await session.execute(
+                        select(ChannelConnectionRow).where(
+                            ChannelConnectionRow.provider == "slack",
+                            ChannelConnectionRow.external_account_id == "U-shared",
+                            ChannelConnectionRow.workspace_id == "T1",
+                            ChannelConnectionRow.status == "connected",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(connected) == 1
+
+    @pytest.mark.anyio
     async def test_credentials_are_encrypted_at_rest_and_decrypted_by_repository(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
@@ -245,6 +358,77 @@ class TestChannelConnectionRepository:
         async with repo.session_factory() as session:
             states = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
         assert [state.state_hash for state in states] == [repo.hash_state("active-state")]
+
+    @pytest.mark.anyio
+    async def test_count_oauth_states_active_only_and_delete_expired(self, repo):
+        now = datetime.now(UTC)
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="expired-state",
+            expires_at=now - timedelta(minutes=1),
+        )
+        await repo.create_oauth_state(
+            owner_user_id="alice",
+            provider="slack",
+            state="active-state",
+            expires_at=now + timedelta(minutes=5),
+        )
+
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+        assert await repo.delete_expired_oauth_states(now=now) == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack") == 1
+        # Pin that the surviving row is the active one (an inverted expiry
+        # predicate would delete the active row, still return 1, and pass above).
+        async with repo.session_factory() as session:
+            survivors = (await session.execute(select(ChannelOAuthStateRow))).scalars().all()
+        assert [row.state_hash for row in survivors] == [repo.hash_state("active-state")]
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_enforces_pending_cap(self, repo):
+        now = datetime.now(UTC)
+        expires = now + timedelta(minutes=5)
+
+        for i in range(3):
+            inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=f"code-{i}", expires_at=expires, max_pending=3, now=now)
+            assert inserted is True
+
+        # Cap reached: the next issuance is rejected and nothing is inserted.
+        assert await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="code-over", expires_at=expires, max_pending=3, now=now) is False
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
+
+        # Expired rows are pruned and free up capacity; a different owner is unaffected.
+        assert await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="slack", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_ignores_expired_rows(self, repo):
+        now = datetime.now(UTC)
+        # Three already-expired rows must not count against the cap.
+        for i in range(3):
+            await repo.create_oauth_state(owner_user_id="alice", provider="slack", state=f"old-{i}", expires_at=now - timedelta(minutes=1))
+
+        inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now)
+        assert inserted is True
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+
+    @pytest.mark.anyio
+    async def test_create_oauth_state_within_cap_does_not_leak_under_concurrency(self, repo):
+        """Concurrent issuance for one owner cannot push past the cap (willem #1)."""
+        import anyio
+
+        now = datetime.now(UTC)
+        expires = now + timedelta(minutes=5)
+        results: list[bool] = []
+
+        async def issue(state: str) -> None:
+            results.append(await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=state, expires_at=expires, max_pending=3, now=now))
+
+        async with anyio.create_task_group() as tg:
+            for i in range(8):
+                tg.start_soon(issue, f"code-{i}")
+
+        assert sum(1 for ok in results if ok) == 3
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
 
     @pytest.mark.anyio
     async def test_consume_oauth_state_is_one_time_even_under_concurrent_consumers(self, repo):
