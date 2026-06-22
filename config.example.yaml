@@ -457,6 +457,46 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: Atlas Cloud (OpenAI-compatible)
+  # Atlas Cloud exposes a single OpenAI-compatible endpoint in front of many open
+  # models (DeepSeek, Qwen, Kimi, GLM, MiniMax, Llama, ...), so it uses the same
+  # ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
+  # Browse model ids at https://api.atlascloud.ai/v1/models — see https://atlascloud.ai
+  # - name: atlascloud-deepseek-v3.2
+  #   display_name: DeepSeek V3.2 (Atlas Cloud)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek-ai/DeepSeek-V3.2-Exp
+  #   api_key: $ATLASCLOUD_API_KEY
+  #   base_url: https://api.atlascloud.ai/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: false
+  #
+  # For reasoning models on Atlas Cloud (e.g. a Qwen3 *-thinking id), use the
+  # patched OpenAI-compatible adapter so reasoning_content is replayed across
+  # multi-turn tool-call conversations:
+  # - name: atlascloud-qwen3-thinking
+  #   display_name: Qwen3 235B Thinking (Atlas Cloud)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: qwen/qwen3-235b-a22b-thinking-2507
+  #   api_key: $ATLASCLOUD_API_KEY
+  #   base_url: https://api.atlascloud.ai/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
   # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
   # toggles Qwen-style reasoning by writing
