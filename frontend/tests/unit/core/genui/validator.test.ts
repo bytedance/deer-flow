@@ -197,3 +197,19 @@ describe("validateProps direction normalization", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("validateProps defect workflow todo list", () => {
+  it("accepts deep-link target props", () => {
+    const result = validateProps("defect-workflow-todo-list", {
+      title: "缺陷待办",
+      page_size: 20,
+      selected_task_id: null,
+      target_task_id: "90457",
+      target_defect_id: 1782112299446001,
+      target_defect_no: "QX20260622-A2A4AA30",
+      auto_open_detail: true,
+    });
+
+    expect(result.success).toBe(true);
+  });
+});

@@ -397,8 +397,10 @@ GET /login
 ### 6. 缺陷闭环
 
 ```
-GET /workspace/agents/defect-closure/chats/new
+GET /workspace/agents/defect-workflow-closure/chats/new
 ```
+
+该入口接入的是 EHM 闭环平台的 **缺陷流程待办**，不是旧版 DeerFlow 内部 Closure Ticket。旧入口 `/workspace/agents/defect-closure/chats/new` 已从左侧导航隐藏，不建议外部系统继续集成。
 
 **参数**
 
@@ -406,33 +408,46 @@ GET /workspace/agents/defect-closure/chats/new
 
 | 参数 | 类型 | 必填 | 校验规则 | 说明 |
 |------|------|------|----------|------|
-| `ticket_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 闭环单 ID |
-| `action` | string | 否 | `view` / `update` | `view` 仅查看详情；`update` 引导更新 |
+| `task_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 当前流程任务 ID。用于优先匹配并自动打开当前用户待办中的目标行 |
+| `defect_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 闭环平台缺陷业务 ID。`task_id` 未命中时作为第二优先级匹配条件 |
+| `defect_no` | string | 否 | ≤ 100 字符 | 缺陷编号，如 `QX20260621-C158E400`。作为第三优先级匹配条件和页面提示文案 |
+| `auto_open` | string | 否 | 仅 `"1"` | 是否在待办列表加载后自动选中匹配行并打开详情 |
+| `mode` | string | 否 | `todo` / `view` / `assist` | `todo` 表示查看待办列表；`view` 表示引导查看某条缺陷；`assist` 表示围绕当前缺陷辅助查询设备/测点/报警等信息 |
+
+> **当前行为说明**：打开该入口后，页面会立即展示当前登录用户的“缺陷待办”列表。若 URL 携带 `auto_open=1` 和目标参数，AI 工作台会在当前用户已加载的待办列表中按 `task_id` → `defect_id` → `defect_no` 的优先级匹配，命中后自动选中该行并打开详情。当前选中缺陷会进入后续对话上下文。
+>
+> **直达选中限制**：自动打开只针对当前登录用户待办列表中已经加载出来的行。未命中时不会仅凭 URL 中的 `defect_id` 直接调用详情接口，而是保留待办列表并提示目标缺陷未在当前用户待办中找到。系统不会自动提交、认领、驳回或通过任务；办理动作必须由用户在页面按钮上明确触发。
 
 **请求示例**
 
 ```
-# 查看工单
-GET /workspace/agents/defect-closure/chats/new
-  ?ticket_id=TCKT-0042
-  &action=view
-  &auto_send=1
-  &source=jira
+# 打开我的缺陷待办列表
+GET /workspace/agents/defect-workflow-closure/chats/new
+  ?auto_send=1
+  &source=ehm-defect-management
 
-# 更新工单
-GET /workspace/agents/defect-closure/chats/new
-  ?ticket_id=TCKT-0042
-  &action=update
-  &prompt=%E6%9B%B4%E6%96%B0%E8%AF%A5%E5%B7%A5%E5%8D%95%E5%A4%84%E7%BD%AE%E8%BF%9B%E5%BA%A6
+# EHM 缺陷管理页“AI分析”推荐跳转：自动定位并打开详情
+GET /workspace/agents/defect-workflow-closure/chats/new
+  ?task_id=90296
+  &defect_id=1781744317660112
+  &defect_no=QX20260621-C158E400
+  &mode=view
+  &auto_open=1
+  &source=ehm-defect-management
+
+# 进入缺陷闭环并请求辅助查询当前缺陷绑定设备的监测信息
+GET /workspace/agents/defect-workflow-closure/chats/new
+  ?mode=assist
+  &prompt=%E5%9C%A8%E6%88%91%E9%80%89%E4%B8%AD%E7%BC%BA%E9%99%B7%E5%90%8E%EF%BC%8C%E8%AF%B7%E5%9F%BA%E4%BA%8E%E7%BB%91%E5%AE%9A%E8%AE%BE%E5%A4%87%E5%B8%AE%E6%88%91%E6%9F%A5%E8%AF%A2%E6%B5%8B%E7%82%B9%E5%92%8C%E6%8A%A5%E8%AD%A6%E4%BF%A1%E6%81%AF
   &auto_send=1
-  &source=jira
+  &source=ehm-defect-management
 ```
 
 **EHM 免登示例**
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/defect-closure/chats/new?ticket_id=TCKT-0042&action=view&auto_send=1&source=jira)>
+  ?next=<encodeURIComponent(/workspace/agents/defect-workflow-closure/chats/new?task_id=90296&defect_id=1781744317660112&defect_no=QX20260621-C158E400&mode=view&auto_open=1&source=ehm-defect-management)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -440,10 +455,15 @@ GET /login
 **调用方验证方式**
 
 ```
-1. 在已登录浏览器中打开带 ticket_id 的 URL
-2. Agent 应首先列出该工单的详细信息
-3. 若 action=view，只展示不操作
-4. 若 ticket_id 不存在，Agent 应提示工单未找到
+1. 在已登录浏览器中打开 /workspace/agents/defect-workflow-closure/chats/new
+2. 页面左侧 Agent 徽章应显示“缺陷闭环”
+3. 页面应自动展示当前登录用户的缺陷待办列表
+4. 若 URL 携带 task_id / defect_id / defect_no / auto_open=1 且目标行在当前待办列表中，页面应自动选中该行并打开详情
+5. 详情区域应展示缺陷详情、历史处理记录和当前节点区域
+6. 若当前节点为“待认领”，当前节点表单不应展示，只展示认领入口；认领后再展示表单
+7. 若当前节点已认领，页面应展示当前节点表单和平台返回的可操作按钮
+8. 选中详情后发送“当前缺陷绑定的设备 ID 是什么”，Agent 应基于当前选中缺陷上下文回答
+9. 若目标行不在当前用户已加载待办列表中，页面应保留待办列表并提示未找到目标缺陷，不应直接打开详情
 ```
 
 ---

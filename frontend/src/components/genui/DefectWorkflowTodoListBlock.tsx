@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,8 +11,12 @@ import {
   RefreshCwIcon,
 } from "@/components/ui/icons";
 import {
+  defectWorkflowDeepLinkTargetKey,
+  findDefectWorkflowTargetRow,
+  hasDefectWorkflowDeepLinkTarget,
   listDefectWorkflowTodos,
   normalizeDefectWorkflowHistory,
+  type DefectWorkflowDeepLinkTarget,
   type DefectSummary,
   type DefectWorkflowDetail,
   type DefectWorkflowFormField,
@@ -32,6 +36,10 @@ interface DefectWorkflowTodoListBlockProps {
       title?: string;
       page_size?: number;
       selected_task_id?: string | number | null;
+      target_task_id?: string | number | null;
+      target_defect_id?: string | number | null;
+      target_defect_no?: string | number | null;
+      auto_open_detail?: boolean | string | number | null;
     };
   };
 }
@@ -179,22 +187,57 @@ function claimStatusClass(row: DefectWorkflowTodoRow): string {
   return "border-border bg-muted text-muted-foreground";
 }
 
+function isAutoOpenEnabled(value: boolean | string | number | null | undefined): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function targetDisplayName(target: DefectWorkflowDeepLinkTarget): string {
+  return String(target.defectNo ?? target.defectId ?? target.taskId ?? "目标缺陷");
+}
+
 export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTodoListBlockProps) {
-  const { title = "缺陷待办", page_size = 20, selected_task_id } = block.props;
+  const {
+    title = "缺陷待办",
+    page_size = 20,
+    selected_task_id,
+    target_task_id,
+    target_defect_id,
+    target_defect_no,
+    auto_open_detail,
+  } = block.props;
   const updateBlockProps = useBlockStore((state) => state.updateBlockProps);
+  const attemptedTargetKeyRef = useRef<string | null>(null);
   const [rows, setRows] = useState<DefectWorkflowTodoRow[]>([]);
   const [total, setTotal] = useState<number | undefined>();
   const [selectedTaskId, setSelectedTaskId] = useState<string | number | null>(
     selected_task_id ?? readStoredSelectedTaskId(block.thread_id),
   );
   const [loading, setLoading] = useState(false);
+  const [hasLoadedTodos, setHasLoadedTodos] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [targetNotice, setTargetNotice] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+
+  const deepLinkTarget = useMemo<DefectWorkflowDeepLinkTarget>(
+    () => ({
+      taskId: target_task_id,
+      defectId: target_defect_id,
+      defectNo: target_defect_no,
+      autoOpen: isAutoOpenEnabled(auto_open_detail),
+    }),
+    [target_task_id, target_defect_id, target_defect_no, auto_open_detail],
+  );
 
   const selectedRow = useMemo(
     () => rows.find((row) => String(row.taskId) === String(selectedTaskId)) ?? null,
     [rows, selectedTaskId],
   );
+
+  const selectTask = useCallback((taskId: string | number) => {
+    setSelectedTaskId(taskId);
+    updateBlockProps(block.block_id, { selected_task_id: taskId });
+    writeStoredSelectedTaskId(block.thread_id, taskId);
+  }, [block.block_id, block.thread_id, updateBlockProps]);
 
   useEffect(() => {
     if (selected_task_id == null) return;
@@ -210,14 +253,39 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
   }, [block.thread_id, selectedRow]);
 
   useEffect(() => {
+    const targetKey = defectWorkflowDeepLinkTargetKey(deepLinkTarget);
+    if (!targetKey || !deepLinkTarget.autoOpen || loading || !hasLoadedTodos) return;
+    if (attemptedTargetKeyRef.current === targetKey) return;
+
+    const match = findDefectWorkflowTargetRow(rows, deepLinkTarget);
+    attemptedTargetKeyRef.current = targetKey;
+
+    if (match) {
+      setTargetNotice(null);
+      selectTask(match.row.taskId);
+      return;
+    }
+
+    if (hasDefectWorkflowDeepLinkTarget(deepLinkTarget)) {
+      setTargetNotice(
+        `未在当前待办列表中找到从 EHM 跳转过来的缺陷 ${targetDisplayName(deepLinkTarget)}，请确认该缺陷是否仍属于当前用户待办。`,
+      );
+    }
+  }, [deepLinkTarget, hasLoadedTodos, loading, rows, selectTask]);
+
+  useEffect(() => {
     const controller = new AbortController();
+    attemptedTargetKeyRef.current = null;
     setLoading(true);
+    setHasLoadedTodos(false);
     setError(null);
+    setTargetNotice(null);
     listDefectWorkflowTodos({ pageNo: 1, pageSize: page_size })
       .then((page) => {
         if (controller.signal.aborted) return;
         setRows(page.rows ?? []);
         setTotal(page.total);
+        setHasLoadedTodos(true);
         if (selectedTaskId && !(page.rows ?? []).some((row) => String(row.taskId) === String(selectedTaskId))) {
           setSelectedTaskId(null);
           updateBlockProps(block.block_id, { selected_task_id: null });
@@ -227,6 +295,7 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
       .catch((err) => {
         if (controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : "加载缺陷待办失败");
+        setHasLoadedTodos(true);
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -235,11 +304,6 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
   }, [page_size, reloadKey, selectedTaskId]);
 
   const refresh = () => setReloadKey((key) => key + 1);
-  const selectTask = (taskId: string | number) => {
-    setSelectedTaskId(taskId);
-    updateBlockProps(block.block_id, { selected_task_id: taskId });
-    writeStoredSelectedTaskId(block.thread_id, taskId);
-  };
 
   return (
     <div className="rounded-lg border bg-card" role="region" aria-label={title}>
@@ -263,6 +327,12 @@ export default function DefectWorkflowTodoListBlock({ block }: DefectWorkflowTod
         <div className="flex items-center gap-2 border-b px-4 py-3 text-sm text-destructive">
           <AlertCircleIcon />
           {error}
+        </div>
+      )}
+      {targetNotice && !error && (
+        <div className="flex items-center gap-2 border-b px-4 py-3 text-sm text-amber-700">
+          <AlertCircleIcon />
+          {targetNotice}
         </div>
       )}
 

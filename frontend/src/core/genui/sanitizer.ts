@@ -79,7 +79,8 @@ const ALLOWED_PROPS_BY_COMPONENT: Record<string, Set<string>> = {
     "target_agent", "target_display_name", "target_icon", "message", "handoff_data",
   ]),
   "defect-workflow-todo-list": new Set([
-    "title", "page_size",
+    "title", "page_size", "selected_task_id", "target_task_id",
+    "target_defect_id", "target_defect_no", "auto_open_detail",
   ]),
   "defect-workflow-task-detail": new Set([
     "title", "defect_id", "task_id",

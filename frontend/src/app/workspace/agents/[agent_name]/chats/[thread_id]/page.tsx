@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "@/components/ui/icons";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { usePromptInputController } from "@/components/ai-elements/prompt-input";
@@ -34,6 +34,7 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
+import type { DefectWorkflowDeepLinkTarget } from "@/core/defect-workflow";
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
@@ -60,6 +61,7 @@ function storeDefectWorkflowSelectedTask(threadId: string, selectedTaskId: unkno
 function createDefectWorkflowTodoListBlock(
   threadId: string,
   selectedTaskId?: unknown,
+  target?: DefectWorkflowDeepLinkTarget | null,
 ): UIBlock {
   return {
     schema_version: "1.0",
@@ -71,6 +73,10 @@ function createDefectWorkflowTodoListBlock(
       title: "缺陷待办",
       page_size: 20,
       ...(selectedTaskId != null ? { selected_task_id: selectedTaskId } : {}),
+      ...(target?.taskId ? { target_task_id: target.taskId } : {}),
+      ...(target?.defectId ? { target_defect_id: target.defectId } : {}),
+      ...(target?.defectNo ? { target_defect_no: target.defectNo } : {}),
+      ...(target?.autoOpen ? { auto_open_detail: true } : {}),
     },
     interactive: false,
     thread_id: threadId,
@@ -78,6 +84,22 @@ function createDefectWorkflowTodoListBlock(
       source: "agent-home",
       agent_name: DEFECT_WORKFLOW_CLOSURE_AGENT,
     },
+  };
+}
+
+function createDefectWorkflowDeepLinkTarget(
+  params: Record<string, string>,
+): DefectWorkflowDeepLinkTarget | null {
+  const taskId = params["task_id"];
+  const defectId = params["defect_id"];
+  const defectNo = params["defect_no"];
+  const autoOpen = params["auto_open"] === "1";
+  if (!taskId && !defectId && !defectNo && !autoOpen) return null;
+  return {
+    taskId,
+    defectId,
+    defectNo,
+    autoOpen,
   };
 }
 
@@ -112,6 +134,10 @@ export default function AgentChatPage() {
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
   const deepLink = useDeepLinkChat(isNewThread);
+  const defectWorkflowDeepLinkTarget = useMemo(
+    () => createDefectWorkflowDeepLinkTarget(deepLink.passthroughParams),
+    [deepLink.passthroughParams],
+  );
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const isDefectWorkflowClosureAgent = agent_name === DEFECT_WORKFLOW_CLOSURE_AGENT;
@@ -135,7 +161,7 @@ export default function AgentChatPage() {
         store.setActiveThread(createdThreadId);
         store.upsertBlock(
           createdThreadId,
-          createDefectWorkflowTodoListBlock(createdThreadId, selectedTaskId),
+          createDefectWorkflowTodoListBlock(createdThreadId, selectedTaskId, defectWorkflowDeepLinkTarget),
         );
       }
       setThreadId(createdThreadId);
@@ -199,8 +225,11 @@ export default function AgentChatPage() {
       storeDefectWorkflowSelectedTask(threadId, selectedTaskId);
     }
     store.setActiveThread(threadId);
-    store.upsertBlock(threadId, createDefectWorkflowTodoListBlock(threadId, selectedTaskId));
-  }, [isNewThread, isDefectWorkflowClosureAgent, deepLink.autoSend, threadId]);
+    store.upsertBlock(
+      threadId,
+      createDefectWorkflowTodoListBlock(threadId, selectedTaskId, defectWorkflowDeepLinkTarget),
+    );
+  }, [isNewThread, isDefectWorkflowClosureAgent, deepLink.autoSend, threadId, defectWorkflowDeepLinkTarget]);
 
   useEffect(() => {
     if (!isDefectWorkflowClosureAgent) return;

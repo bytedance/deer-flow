@@ -174,6 +174,90 @@ describe("DefectWorkflowTodoListBlock", () => {
     expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("原方案");
   });
 
+  it("auto-opens the target detail from deep-link task props", async () => {
+    const { default: DefectWorkflowTodoListBlock } = await import("@/components/genui/DefectWorkflowTodoListBlock");
+    mocks.listDefectWorkflowTodos.mockResolvedValue({
+      rows: [
+        {
+          taskId: "90054",
+          nodeName: "班长确认",
+          claimedByCurrentUser: true,
+          defect: {
+            defectId: "1781744317660001",
+            defectCode: "QX-OTHER",
+            title: "其他缺陷",
+            equipment: { deviceName: "P-100" },
+          },
+        },
+        {
+          taskId: "90055",
+          nodeName: "维修处理",
+          allowedActions: ["SUBMIT", "REJECT"],
+          claimedByCurrentUser: true,
+          defect: {
+            defectId: "1781744317660016",
+            defectCode: "QX20260618-678EC4CF",
+            title: "泵密封泄漏",
+            equipment: { deviceName: "P-101" },
+          },
+        },
+      ],
+      total: 2,
+    });
+
+    React.act(() => {
+      root.render(
+        React.createElement(DefectWorkflowTodoListBlock, {
+          block: {
+            block_id: "defect-workflow-closure:todo-list:test-thread",
+            props: {
+              title: "缺陷待办",
+              page_size: 5,
+              target_task_id: "90055",
+              target_defect_id: "1781744317660016",
+              target_defect_no: "QX20260618-678EC4CF",
+              auto_open_detail: true,
+            },
+          },
+        }),
+      );
+    });
+    await flushEffects();
+    await flushEffects();
+
+    expect(mocks.getDefectWorkflowDetail).toHaveBeenCalledWith("1781744317660016");
+    expect(mocks.getDefectWorkflowFormContext).toHaveBeenCalledWith("90055");
+    expect(container.textContent).toContain("维修方案");
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("原方案");
+  });
+
+  it("shows a not-found notice without opening detail when target is not in loaded todos", async () => {
+    const { default: DefectWorkflowTodoListBlock } = await import("@/components/genui/DefectWorkflowTodoListBlock");
+
+    React.act(() => {
+      root.render(
+        React.createElement(DefectWorkflowTodoListBlock, {
+          block: {
+            block_id: "defect-workflow-closure:todo-list:test-thread",
+            props: {
+              title: "缺陷待办",
+              page_size: 5,
+              target_task_id: "missing-task",
+              target_defect_id: "missing-defect",
+              target_defect_no: "QX-MISSING",
+              auto_open_detail: true,
+            },
+          },
+        }),
+      );
+    });
+    await flushEffects();
+
+    expect(container.textContent).toContain("未在当前待办列表中找到从 EHM 跳转过来的缺陷 QX-MISSING");
+    expect(mocks.getDefectWorkflowDetail).not.toHaveBeenCalled();
+    expect(mocks.getDefectWorkflowFormContext).not.toHaveBeenCalled();
+  });
+
   it("hides current task form until a pending-claim task is claimed", async () => {
     const { default: DefectWorkflowTodoListBlock } = await import("@/components/genui/DefectWorkflowTodoListBlock");
     mocks.listDefectWorkflowTodos.mockResolvedValue({

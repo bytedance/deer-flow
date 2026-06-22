@@ -349,10 +349,16 @@ const agentHandoffPropsSchema = z.object({
 });
 
 const stringOrNumberSchema = z.union([z.string().max(200), z.number()]);
+const booleanStringOrNumberSchema = z.union([z.boolean(), z.string().max(20), z.number()]);
 
 const defectWorkflowTodoListPropsSchema = z.object({
   title: z.string().max(200).optional(),
   page_size: z.number().min(1).max(100).optional(),
+  selected_task_id: stringOrNumberSchema.nullable().optional(),
+  target_task_id: stringOrNumberSchema.nullable().optional(),
+  target_defect_id: stringOrNumberSchema.nullable().optional(),
+  target_defect_no: stringOrNumberSchema.nullable().optional(),
+  auto_open_detail: booleanStringOrNumberSchema.nullable().optional(),
 });
 
 const defectWorkflowTaskDetailPropsSchema = z.object({
