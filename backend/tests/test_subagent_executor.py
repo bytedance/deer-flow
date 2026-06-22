@@ -759,6 +759,53 @@ class TestAsyncExecutionPath:
         assert len(result.ai_messages) == 1
 
     @pytest.mark.anyio
+    async def test_aexecute_dedup_scales_over_repeated_chunks(self, classes, base_config, mock_agent, msg):
+        """``stream_mode="values"`` re-yields the same trailing message across many
+        snapshots before the next one appears. Dedup must collapse the repeats and
+        still capture each distinct message exactly once, in arrival order."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        m1 = msg.ai("first", "msg-1")
+        m2 = msg.ai("second", "msg-2")
+        m3 = msg.ai("third", "msg-3")
+        # m1 is re-yielded as the trailing message several times before m2/m3 arrive.
+        chunks = [
+            {"messages": [msg.human("Task"), m1]},
+            {"messages": [msg.human("Task"), m1]},
+            {"messages": [msg.human("Task"), m1]},
+            {"messages": [msg.human("Task"), m1, m2]},
+            {"messages": [msg.human("Task"), m1, m2]},
+            {"messages": [msg.human("Task"), m1, m2, m3]},
+        ]
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert [m["id"] for m in result.ai_messages] == ["msg-1", "msg-2", "msg-3"]
+
+    @pytest.mark.anyio
+    async def test_aexecute_dedup_idless_messages_fall_back_to_content(self, classes, base_config, mock_agent, msg):
+        """Messages without an id can't be keyed by the seen-id set, so dedup must
+        fall back to a full content compare: identical content collapses, distinct
+        content is kept."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        chunks = [
+            {"messages": [msg.human("Task"), msg.ai("same")]},  # id-less
+            {"messages": [msg.human("Task"), msg.ai("same")]},  # id-less, identical content -> dropped
+            {"messages": [msg.human("Task"), msg.ai("different")]},  # id-less, distinct -> kept
+        ]
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert [m["content"] for m in result.ai_messages] == ["same", "different"]
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
         """Test handling of list-type content in AIMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
