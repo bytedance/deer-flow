@@ -105,18 +105,22 @@ type MathDelimiter = {
   replacement: "$" | "$$";
 };
 
+type DelimiterState = {
+  openBlock: MathDelimiter | null;
+  inInlineCode: boolean;
+};
+
 function convertLatexDelimitersInLine(
   line: string,
-  openBlock: MathDelimiter | null,
-): { line: string; openBlock: MathDelimiter | null } {
+  state: DelimiterState,
+): { line: string; state: DelimiterState } {
   let result = "";
   let i = 0;
-  let inInlineCode = false;
-  let currentBlock = openBlock;
+  let inInlineCode = state.inInlineCode;
+  let currentBlock = state.openBlock;
 
   while (i < line.length) {
-    const two = line.slice(i, i + 2);
-
+    // Handle backtick for inline code tracking
     if (line[i] === "`") {
       result += line[i];
       if (!currentBlock) {
@@ -126,6 +130,18 @@ function convertLatexDelimitersInLine(
       continue;
     }
 
+    const two = line.slice(i, i + 2);
+
+    // Consume escaped backslash as a unit — `\\` is never part of a math
+    // delimiter, so skip past both characters to avoid the second `\` being
+    // mis-paired with a following `(` or `[`.
+    if (two === "\\\\" && !inInlineCode) {
+      result += two;
+      i += 2;
+      continue;
+    }
+
+    // Close an open math block
     if (!inInlineCode && currentBlock?.close === two) {
       result += currentBlock.replacement;
       currentBlock = null;
@@ -133,6 +149,7 @@ function convertLatexDelimitersInLine(
       continue;
     }
 
+    // Open a new math block
     if (!inInlineCode && !currentBlock && (two === "\\(" || two === "\\[")) {
       const isDisplay = two === "\\[";
       currentBlock = {
@@ -148,7 +165,7 @@ function convertLatexDelimitersInLine(
     i += 1;
   }
 
-  return { line: result, openBlock: currentBlock };
+  return { line: result, state: { openBlock: currentBlock, inInlineCode } };
 }
 
 /**
@@ -170,20 +187,20 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
   }
 
   let insideFence = false;
-  let openMath: MathDelimiter | null = null;
+  let mathState: DelimiterState = { openBlock: null, inInlineCode: false };
 
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line) && !openMath) {
+      if (CODE_FENCE_RE.test(line) && !mathState.openBlock) {
         insideFence = !insideFence;
         return line;
       }
-      if (insideFence || (INDENTED_CODE_RE.test(line) && !openMath)) {
+      if (insideFence || (INDENTED_CODE_RE.test(line) && !mathState.openBlock)) {
         return line;
       }
-      const converted = convertLatexDelimitersInLine(line, openMath);
-      openMath = converted.openBlock;
+      const converted = convertLatexDelimitersInLine(line, mathState);
+      mathState = converted.state;
       return converted.line;
     })
     .join("\n");
@@ -255,14 +272,12 @@ export function normalizeStreamdownMathMarkdown(markdown: string): string {
 }
 
 export function preprocessStreamdownMarkdown(markdown: string): string {
-  const mathNormalized = normalizeStreamdownMathMarkdown(markdown);
-
   if (
-    !MERMAID_BLOCK_HINT_RE.test(mathNormalized) ||
-    !mathNormalized.includes("-.->")
+    !MERMAID_BLOCK_HINT_RE.test(markdown) ||
+    !markdown.includes("-.->")
   ) {
-    return mathNormalized;
+    return markdown;
   }
 
-  return normalizeMermaidMarkdown(mathNormalized);
+  return normalizeMermaidMarkdown(markdown);
 }

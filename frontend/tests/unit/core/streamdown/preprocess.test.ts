@@ -183,7 +183,7 @@ test("compactDisplayMathBlocks leaves fenced code content untouched", () => {
   expect(compactDisplayMathBlocks(input)).toBe(expected);
 });
 
-test("preprocessStreamdownMarkdown normalizes math before Mermaid fixes", () => {
+test("preprocessStreamdownMarkdown applies only Mermaid fixes (not math)", () => {
   const input = [
     "Before \\(x\\)",
     "```mermaid",
@@ -192,11 +192,32 @@ test("preprocessStreamdownMarkdown normalizes math before Mermaid fixes", () => 
     "```",
   ].join("\n");
   const expected = [
-    "Before $x$",
+    "Before \\(x\\)",
     "```mermaid",
     "graph TD",
     "  A -.-> B",
     "```",
   ].join("\n");
   expect(preprocessStreamdownMarkdown(input)).toBe(expected);
+});
+
+test("normalizeStreamdownMathMarkdown preserves escaped backslash before parens", () => {
+  // When the backslash itself is escaped (\\), the following ( is not a math open
+  const input = "Use \\\\( to start inline math.";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(
+    "Use \\\\( to start inline math.",
+  );
+});
+
+test("normalizeStreamdownMathMarkdown preserves escaped backslash before brackets", () => {
+  const input = "Escape: \\\\[ is not math.";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(
+    "Escape: \\\\[ is not math.",
+  );
+});
+
+test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-line code spans", () => {
+  // A backtick code span opened on line 1 should protect line 2 content
+  const input = ["`code span", "with \\(x\\) inside`"].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
 });

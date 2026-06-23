@@ -31,6 +31,7 @@ export type MarkdownContentProps = {
 /** Renders markdown content. */
 export function MarkdownContent({
   content,
+  isLoading,
   rehypePlugins,
   className,
   remarkPlugins = streamdownPluginsWithoutRawHtml.remarkPlugins,
@@ -81,6 +82,7 @@ export function MarkdownContent({
       remarkPlugins={remarkPlugins}
       rehypePlugins={effectiveRehypePlugins}
       components={components}
+      parseIncompleteMarkdown={isLoading}
     >
       {normalizedContent}
     </MessageResponse>
