@@ -134,6 +134,99 @@ function sanitizeFormFields(fields: unknown): unknown {
     });
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function timelineTitleFromEvent(event: Record<string, unknown>, index: number): string {
+  const existingTitle = nonEmptyString(event.title);
+  if (existingTitle) return existingTitle;
+
+  const node =
+    nonEmptyString(event.nodeName) ??
+    nonEmptyString(event.node_name) ??
+    nonEmptyString(event.node) ??
+    nonEmptyString(event.taskName) ??
+    nonEmptyString(event.task_name) ??
+    nonEmptyString(event.activityName) ??
+    nonEmptyString(event.label) ??
+    nonEmptyString(event.name);
+  const action =
+    nonEmptyString(event.action) ??
+    nonEmptyString(event.operation) ??
+    nonEmptyString(event.actionName) ??
+    nonEmptyString(event.action_name);
+
+  if (node && action) return `${node} - ${action}`;
+  if (node) return node;
+  if (action) return action;
+  return `事件 ${index + 1}`;
+}
+
+function normalizeTimelineStatus(value: unknown): "completed" | "active" | "pending" | undefined {
+  const text = nonEmptyString(value);
+  if (!text) return undefined;
+  const normalized = text.toLowerCase();
+  if (
+    ["completed", "complete", "done", "success", "submit", "submitted", "pass", "passed"].includes(normalized) ||
+    ["完成", "已完成", "通过", "提交"].includes(text)
+  ) {
+    return "completed";
+  }
+  if (
+    ["active", "current", "processing", "running", "in_progress"].includes(normalized) ||
+    ["当前", "处理中", "进行中"].includes(text)
+  ) {
+    return "active";
+  }
+  if (
+    ["pending", "todo", "waiting", "wait"].includes(normalized) ||
+    ["待处理", "待办", "等待"].includes(text)
+  ) {
+    return "pending";
+  }
+  return undefined;
+}
+
+function normalizeTimelineEvents(events: unknown): unknown {
+  if (!Array.isArray(events)) return events;
+  return events.map((item, index) => {
+    const event: Record<string, unknown> = typeof item === "object" && item !== null
+      ? { ...(item as Record<string, unknown>) }
+      : { description: String(item) };
+    const {
+      title: _title,
+      description: _description,
+      timestamp: _timestamp,
+      status: _status,
+      icon: _icon,
+      ...rest
+    } = event;
+
+    const timestamp =
+      nonEmptyString(event.timestamp) ??
+      nonEmptyString(event.time) ??
+      nonEmptyString(event.createdAt) ??
+      nonEmptyString(event.created_at) ??
+      nonEmptyString(event.operateTime) ??
+      nonEmptyString(event.operate_time);
+    const status = normalizeTimelineStatus(event.status);
+    const description = nonEmptyString(event.description);
+    const icon = nonEmptyString(event.icon);
+
+    return {
+      ...rest,
+      title: timelineTitleFromEvent(event, index),
+      ...(timestamp ? { timestamp } : {}),
+      ...(status ? { status } : {}),
+      ...(description ? { description } : {}),
+      ...(icon ? { icon } : {}),
+    };
+  });
+}
+
 const DIRECTION_SYNONYMS: Record<string, "up" | "down" | "flat"> = {
   neutral: "flat",
   stable: "flat",
@@ -170,6 +263,10 @@ export function sanitizeProps(
 
   if (component === "form" && Array.isArray(sanitized.fields)) {
     sanitized.fields = sanitizeFormFields(sanitized.fields);
+  }
+
+  if (component === "timeline" && Array.isArray(sanitized.events)) {
+    sanitized.events = normalizeTimelineEvents(sanitized.events);
   }
 
   if (component === "card" && typeof sanitized.trend === "object" && sanitized.trend !== null) {
