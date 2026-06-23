@@ -85,7 +85,19 @@ def _last_injected_date(messages: list) -> str | None:
 
 def _is_user_injection_target(message: object) -> bool:
     """Return whether *message* can receive a dynamic-context reminder."""
-    return isinstance(message, HumanMessage) and not is_dynamic_context_reminder(message) and message.name != _SUMMARY_MESSAGE_NAME
+    if not isinstance(message, HumanMessage):
+        return False
+    if is_dynamic_context_reminder(message):
+        return False
+    if message.name == _SUMMARY_MESSAGE_NAME:
+        return False
+    # Prevent recursive ID-swap: a message whose ID already contains the
+    # ``__user`` suffix was produced by a prior _make_reminder_and_user_messages
+    # call and must not be processed again — doing so causes unbounded suffix
+    # growth (id__user__user__user...) and ghost-message re-execution (#3725).
+    if message.id and "__user" in str(message.id):
+        return False
+    return True
 
 
 class DynamicContextMiddleware(AgentMiddleware):

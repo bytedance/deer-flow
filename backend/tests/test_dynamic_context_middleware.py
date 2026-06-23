@@ -386,3 +386,89 @@ def test_no_second_midnight_injection_once_date_updated():
         result = mw.before_agent(state, _fake_runtime())
 
     assert result is None  # same day as last injected date → no update
+
+
+# ---------------------------------------------------------------------------
+# Regression: recursive ID-swap prevention (#3725)
+# ---------------------------------------------------------------------------
+
+
+def test_message_with_user_suffix_id_is_not_injection_target():
+    """A HumanMessage produced by a prior ID-swap (id contains '__user') must not
+    be re-processed — otherwise the suffix grows unboundedly (#3725)."""
+    mw = _make_middleware()
+    reminder_content = "<system-reminder>\n<current_date>2026-06-23, Monday</current_date>\n</system-reminder>"
+    state = {
+        "messages": [
+            # Existing reminder from first turn
+            SystemMessage(
+                content=reminder_content,
+                id="msg-1",
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            ),
+            # This is the ID-swapped user message from a prior turn
+            HumanMessage(content="检查生产运行状态", id="msg-1__user"),
+            AIMessage(content="巡检完成"),
+            # Current turn: new user question
+            HumanMessage(content="查看其他服务日志", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-06-23, Monday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    # Same date, reminder already exists → no injection
+    assert result is None
+
+
+def test_recursive_id_swap_blocked_after_summarization():
+    """Simulates the ghost-message scenario from #3725: after summarization removes
+    the AI response, a prior __user-suffixed HumanMessage becomes the last message.
+    The middleware must NOT re-process it, preventing id__user__user growth."""
+    mw = _make_middleware()
+    reminder_content = "<system-reminder>\n<current_date>2026-06-22, Sunday</current_date>\n</system-reminder>"
+    state = {
+        "messages": [
+            # Summary replaces early conversation
+            HumanMessage(
+                content="Here is a summary of the conversation to date:\n\n...",
+                id="summary-1",
+                name="summary",
+            ),
+            # Preserved dynamic-context reminder from first turn
+            SystemMessage(
+                content=reminder_content,
+                id="original-uuid",
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            ),
+            # Ghost message: this survived summarization because it was in preserved area
+            HumanMessage(content="检查今天生产运行状态", id="original-uuid__user"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        # Simulate midnight crossing — this would normally trigger date-update injection
+        mock_dt.now.return_value.strftime.return_value = "2026-06-23, Monday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    # The only valid injection target should be ignored because its ID contains __user.
+    # The middleware should return None (no valid target to inject into).
+    assert result is None
+
+
+def test_deeply_nested_user_suffix_blocked():
+    """Even with multiple levels of __user nesting, injection must be blocked."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _is_user_injection_target
+
+    msg_level1 = HumanMessage(content="test", id="abc__user")
+    msg_level2 = HumanMessage(content="test", id="abc__user__user")
+    msg_level4 = HumanMessage(content="test", id="abc__user__user__user__user")
+
+    assert _is_user_injection_target(msg_level1) is False
+    assert _is_user_injection_target(msg_level2) is False
+    assert _is_user_injection_target(msg_level4) is False
+
+    # Normal message should still be valid
+    msg_normal = HumanMessage(content="test", id="abc-def-123")
+    assert _is_user_injection_target(msg_normal) is True
