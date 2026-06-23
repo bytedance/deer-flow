@@ -79,9 +79,6 @@ def _enabled_connections_config() -> ChannelConnectionsConfig:
     return ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
-            "slack": {"enabled": True},
-            "discord": {"enabled": True},
             "feishu": {"enabled": True},
             "dingtalk": {"enabled": True},
             "wechat": {"enabled": True},
@@ -92,9 +89,6 @@ def _enabled_connections_config() -> ChannelConnectionsConfig:
 
 def _channels_config() -> dict:
     return {
-        "telegram": {"enabled": True, "bot_token": "telegram-token"},
-        "slack": {"enabled": True, "bot_token": "xoxb-operator", "app_token": "xapp-operator"},
-        "discord": {"enabled": True, "bot_token": "discord-bot"},
         "feishu": {"enabled": True, "app_id": "feishu-app", "app_secret": "feishu-secret"},
         "dingtalk": {"enabled": True, "client_id": "dingtalk-client", "client_secret": "dingtalk-secret"},
         "wechat": {"enabled": True, "bot_token": "wechat-token"},
@@ -109,8 +103,8 @@ def test_get_providers_only_returns_enabled_channels_and_setup_fields(tmp_path):
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
-            "discord": {"enabled": False},
+            "feishu": {"enabled": True},
+            "dingtalk": {"enabled": False},
         }
     )
     app = _make_app(config, repo, {})
@@ -121,23 +115,9 @@ def test_get_providers_only_returns_enabled_channels_and_setup_fields(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["enabled"] is True
-    assert [provider["provider"] for provider in body["providers"]] == ["slack"]
+    assert [provider["provider"] for provider in body["providers"]] == ["feishu"]
     assert body["providers"][0]["configured"] is False
     assert body["providers"][0]["connectable"] is False
-    assert body["providers"][0]["credential_fields"] == [
-        {
-            "name": "bot_token",
-            "label": "Bot token",
-            "type": "password",
-            "required": True,
-        },
-        {
-            "name": "app_token",
-            "label": "App token",
-            "type": "password",
-            "required": True,
-        },
-    ]
 
     anyio.run(repo.close)
 
@@ -155,23 +135,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     body = response.json()
     assert body["enabled"] is True
     by_provider = {item["provider"]: item for item in body["providers"]}
-    assert set(by_provider) == {"telegram", "slack", "discord", "feishu", "dingtalk", "wechat", "wecom"}
-    assert by_provider["telegram"]["configured"] is True
-    assert by_provider["telegram"]["auth_mode"] == "deep_link"
-    assert by_provider["telegram"]["credential_values"] == {
-        "bot_token": "********",
-        "bot_username": "deerflow_bot",
-    }
-    assert by_provider["slack"]["configured"] is True
-    assert by_provider["slack"]["auth_mode"] == "binding_code"
-    assert by_provider["slack"]["connection_status"] == "not_connected"
-    assert by_provider["slack"]["credential_values"] == {
-        "bot_token": "********",
-        "app_token": "********",
-    }
-    assert by_provider["discord"]["configured"] is True
-    assert by_provider["discord"]["auth_mode"] == "binding_code"
-    assert by_provider["discord"]["credential_values"] == {"bot_token": "********"}
+    assert set(by_provider) == {"feishu", "dingtalk", "wechat", "wecom"}
     assert by_provider["feishu"]["configured"] is True
     assert by_provider["feishu"]["auth_mode"] == "binding_code"
     assert by_provider["feishu"]["connection_status"] == "not_connected"
@@ -207,9 +171,9 @@ def test_get_providers_degrades_when_persistence_is_unavailable(monkeypatch):
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["configured"] is True
-    assert by_provider["slack"]["connectable"] is True
-    assert by_provider["slack"]["connection_status"] == "not_connected"
+    assert by_provider["feishu"]["configured"] is True
+    assert by_provider["feishu"]["connectable"] is True
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
 
 
 def test_get_providers_reports_connected_without_binding_in_auth_disabled_mode(tmp_path, monkeypatch):
@@ -228,8 +192,8 @@ def test_get_providers_reports_connected_without_binding_in_auth_disabled_mode(t
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
     # Auth-disabled local mode routes channel messages to the default user, so
     # a configured running channel is effectively connected without a binding.
-    assert by_provider["slack"]["connection_status"] == "connected"
     assert by_provider["feishu"]["connection_status"] == "connected"
+    assert by_provider["dingtalk"]["connection_status"] == "connected"
 
     anyio.run(repo.close)
 
@@ -238,21 +202,14 @@ def test_get_providers_reports_unconfigured_when_runtime_channel_is_missing(tmp_
     import anyio
 
     repo = anyio.run(_make_repo, tmp_path)
-    app = _make_app(_enabled_connections_config(), repo, {"telegram": {"enabled": True, "bot_token": "telegram-token"}})
+    app = _make_app(_enabled_connections_config(), repo, {"feishu": {"enabled": True, "app_id": "feishu-app", "app_secret": "feishu-secret"}})
 
     with TestClient(app) as client:
         response = client.get("/api/channels/providers")
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["telegram"]["configured"] is True
-    assert by_provider["slack"]["configured"] is False
-    assert by_provider["slack"]["connectable"] is False
-    assert "Slack credentials" in by_provider["slack"]["unavailable_reason"]
-    assert by_provider["discord"]["configured"] is False
-    assert "Discord credentials" in by_provider["discord"]["unavailable_reason"]
-    assert by_provider["feishu"]["configured"] is False
-    assert "Feishu credentials" in by_provider["feishu"]["unavailable_reason"]
+    assert by_provider["feishu"]["configured"] is True
     assert by_provider["dingtalk"]["configured"] is False
     assert "DingTalk credentials" in by_provider["dingtalk"]["unavailable_reason"]
     assert by_provider["wechat"]["configured"] is False
@@ -302,8 +259,8 @@ def test_get_providers_provider_unavailable_overrides_stale_connected_row(tmp_pa
     async def seed_connection():
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="slack",
-            external_account_id="U123",
+            provider="feishu",
+            external_account_id="ou-123",
             status="connected",
         )
 
@@ -311,7 +268,7 @@ def test_get_providers_provider_unavailable_overrides_stale_connected_row(tmp_pa
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     app = _make_app(config, repo, {})
@@ -321,10 +278,10 @@ def test_get_providers_provider_unavailable_overrides_stale_connected_row(tmp_pa
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["configured"] is False
-    assert by_provider["slack"]["connectable"] is False
-    assert by_provider["slack"]["connection_status"] == "not_connected"
-    assert "Slack credentials" in by_provider["slack"]["unavailable_reason"]
+    assert by_provider["feishu"]["configured"] is False
+    assert by_provider["feishu"]["connectable"] is False
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
+    assert "Feishu credentials" in by_provider["feishu"]["unavailable_reason"]
 
     anyio.run(repo.close)
 
@@ -391,17 +348,17 @@ def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
     async def seed_connections():
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="slack",
-            external_account_id="U-old",
-            workspace_id="T-old",
+            provider="feishu",
+            external_account_id="ou-old",
+            workspace_id="oc-old",
             status="revoked",
         )
         await anyio.sleep(0.01)
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="slack",
-            external_account_id="U-new",
-            workspace_id="T-new",
+            provider="feishu",
+            external_account_id="ou-new",
+            workspace_id="oc-new",
             status="connected",
         )
 
@@ -413,7 +370,7 @@ def test_get_providers_uses_newest_connection_status_per_provider(tmp_path):
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["connection_status"] == "connected"
+    assert by_provider["feishu"]["connection_status"] == "connected"
 
     anyio.run(repo.close)
 
@@ -426,15 +383,15 @@ def test_get_connections_returns_current_user_connections_only(tmp_path):
     async def seed_connections():
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="telegram",
-            external_account_id="42",
+            provider="feishu",
+            external_account_id="ou-42",
             external_account_name="Alice",
             status="connected",
         )
         await repo.upsert_connection(
             owner_user_id="other-user",
-            provider="telegram",
-            external_account_id="99",
+            provider="feishu",
+            external_account_id="ou-99",
             external_account_name="Bob",
             status="connected",
         )
@@ -448,56 +405,31 @@ def test_get_connections_returns_current_user_connections_only(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert len(body["connections"]) == 1
-    assert body["connections"][0]["provider"] == "telegram"
-    assert body["connections"][0]["external_account_id"] == "42"
+    assert body["connections"][0]["provider"] == "feishu"
+    assert body["connections"][0]["external_account_id"] == "ou-42"
 
     anyio.run(repo.close)
 
 
-def test_connect_telegram_returns_deep_link_and_persists_state(tmp_path):
+def test_connect_feishu_returns_binding_command_and_persists_state(tmp_path):
     import anyio
 
     repo = anyio.run(_make_repo, tmp_path)
     app = _make_app(_enabled_connections_config(), repo, _channels_config())
 
     with TestClient(app) as client:
-        response = client.post("/api/channels/telegram/connect")
+        response = client.post("/api/channels/feishu/connect")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["provider"] == "telegram"
-    assert body["mode"] == "deep_link"
-    assert body["url"].startswith("https://t.me/deerflow_bot?start=")
-    assert body["code"]
-    assert "/start" in body["instruction"]
-
-    async def count_states():
-        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="telegram")
-
-    assert anyio.run(count_states) == 1
-
-    anyio.run(repo.close)
-
-
-def test_connect_slack_returns_binding_command_and_persists_state(tmp_path):
-    import anyio
-
-    repo = anyio.run(_make_repo, tmp_path)
-    app = _make_app(_enabled_connections_config(), repo, _channels_config())
-
-    with TestClient(app) as client:
-        response = client.post("/api/channels/slack/connect")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["provider"] == "slack"
+    assert body["provider"] == "feishu"
     assert body["mode"] == "binding_code"
     assert body["url"] is None
     assert len(body["code"]) >= 22
-    assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow Slack bot."
+    assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow Feishu bot."
 
     async def count_states():
-        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="slack")
+        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="feishu")
 
     assert anyio.run(count_states) == 1
 
@@ -511,41 +443,16 @@ def test_connect_binding_code_caps_pending_states_per_provider(tmp_path):
     app = _make_app(_enabled_connections_config(), repo, _channels_config())
 
     with TestClient(app) as client:
-        responses = [client.post("/api/channels/slack/connect") for _ in range(6)]
+        responses = [client.post("/api/channels/feishu/connect") for _ in range(6)]
 
     assert [response.status_code for response in responses[:5]] == [200, 200, 200, 200, 200]
     assert responses[5].status_code == 429
     assert "Too many pending channel connection codes" in responses[5].json()["detail"]
 
     async def count_states():
-        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="slack")
+        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="feishu")
 
     assert anyio.run(count_states) == 5
-
-    anyio.run(repo.close)
-
-
-def test_connect_discord_returns_binding_command_and_persists_state(tmp_path):
-    import anyio
-
-    repo = anyio.run(_make_repo, tmp_path)
-    app = _make_app(_enabled_connections_config(), repo, _channels_config())
-
-    with TestClient(app) as client:
-        response = client.post("/api/channels/discord/connect")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["provider"] == "discord"
-    assert body["mode"] == "binding_code"
-    assert body["url"] is None
-    assert body["code"]
-    assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow Discord bot."
-
-    async def count_states():
-        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="discord")
-
-    assert anyio.run(count_states) == 1
 
     anyio.run(repo.close)
 
@@ -590,10 +497,10 @@ def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
     app = _make_app(_enabled_connections_config(), repo, {})
 
     with TestClient(app) as client:
-        response = client.post("/api/channels/slack/connect")
+        response = client.post("/api/channels/feishu/connect")
 
     assert response.status_code == 400
-    assert "Slack credentials" in response.json()["detail"]
+    assert "Feishu credentials" in response.json()["detail"]
 
     anyio.run(repo.close)
 
@@ -605,31 +512,31 @@ def test_configure_provider_runtime_credentials_enables_connect_without_file_edi
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     app = _make_app(config, repo, {})
 
     with TestClient(app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
-        connect_response = client.post("/api/channels/slack/connect")
+        connect_response = client.post("/api/channels/feishu/connect")
 
     assert configure_response.status_code == 200
     configured = configure_response.json()
-    assert configured["provider"] == "slack"
+    assert configured["provider"] == "feishu"
     assert configured["configured"] is True
     assert configured["connectable"] is True
     assert configured["connection_status"] == "not_connected"
-    assert app.state.channels_config["slack"] == {
+    assert app.state.channels_config["feishu"] == {
         "enabled": True,
-        "bot_token": "xoxb-ui",
-        "app_token": "xapp-ui",
+        "app_id": "feishu-ui",
+        "app_secret": "secret-ui",
     }
     assert connect_response.status_code == 200
-    assert connect_response.json()["provider"] == "slack"
+    assert connect_response.json()["provider"] == "feishu"
 
     anyio.run(repo.close)
 
@@ -641,7 +548,7 @@ def test_runtime_config_endpoints_require_admin(tmp_path):
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     app = make_authed_test_app(user_factory=_non_admin_user)
@@ -655,10 +562,10 @@ def test_runtime_config_endpoints_require_admin(tmp_path):
 
     with TestClient(app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
-        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        disconnect_response = client.delete("/api/channels/feishu/runtime-config")
         providers_response = client.get("/api/channels/providers")
 
     assert configure_response.status_code == 403
@@ -677,72 +584,43 @@ def test_configure_provider_runtime_rolls_back_visible_state_when_start_fails(tm
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     existing_runtime_config = {
         "enabled": True,
-        "bot_token": "xoxb-old",
-        "app_token": "xapp-old",
+        "app_id": "feishu-old",
+        "app_secret": "secret-old",
     }
     runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
-    runtime_config_store.set_provider_config("slack", existing_runtime_config)
+    runtime_config_store.set_provider_config("feishu", existing_runtime_config)
     service = SimpleNamespace(configure_channel=AsyncMock(return_value=False))
     monkeypatch.setattr("app.channels.service.get_channel_service", lambda: service)
     app = _make_app(
         config,
         repo,
-        {"slack": dict(existing_runtime_config)},
+        {"feishu": dict(existing_runtime_config)},
         runtime_config_store=runtime_config_store,
     )
 
     with TestClient(app) as client:
         response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-new", "app_token": "xapp-new"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-new", "app_secret": "secret-new"}},
         )
 
     assert response.status_code == 400
-    assert "Failed to start Slack channel" in response.json()["detail"]
+    assert "Failed to start Feishu channel" in response.json()["detail"]
     service.configure_channel.assert_awaited_once_with(
-        "slack",
+        "feishu",
         {
             "enabled": True,
-            "bot_token": "xoxb-new",
-            "app_token": "xapp-new",
+            "app_id": "feishu-new",
+            "app_secret": "secret-new",
         },
     )
-    assert app.state.channels_config["slack"] == existing_runtime_config
-    assert runtime_config_store.get_provider_config("slack") == existing_runtime_config
-
-    anyio.run(repo.close)
-
-
-def test_configure_telegram_runtime_uses_new_bot_username_for_deep_link_without_mutating_config(tmp_path):
-    import anyio
-
-    repo = anyio.run(_make_repo, tmp_path)
-    config = ChannelConnectionsConfig.model_validate(
-        {
-            "enabled": True,
-            "telegram": {"enabled": True, "bot_username": "old_bot"},
-        }
-    )
-    app = _make_app(config, repo, {})
-
-    with TestClient(app) as client:
-        configure_response = client.post(
-            "/api/channels/telegram/runtime-config",
-            json={"values": {"bot_token": "tg-token", "bot_username": "new_bot"}},
-        )
-        connect_response = client.post("/api/channels/telegram/connect")
-
-    assert configure_response.status_code == 200
-    assert configure_response.json()["credential_values"]["bot_username"] == "new_bot"
-    assert connect_response.status_code == 200
-    assert connect_response.json()["url"].startswith("https://t.me/new_bot?start=")
-    # The original config object cached by get_app_config() must stay untouched.
-    assert config.telegram.bot_username == "old_bot"
+    assert app.state.channels_config["feishu"] == existing_runtime_config
+    assert runtime_config_store.get_provider_config("feishu") == existing_runtime_config
 
     anyio.run(repo.close)
 
@@ -754,7 +632,7 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     runtime_config_path = tmp_path / "channels" / "runtime-config.json"
@@ -767,8 +645,8 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
 
     with TestClient(first_app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
 
     assert configure_response.status_code == 200
@@ -785,13 +663,13 @@ def test_configure_provider_runtime_credentials_survive_local_restart(tmp_path):
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["configured"] is True
-    assert by_provider["slack"]["connectable"] is True
-    assert by_provider["slack"]["connection_status"] == "not_connected"
-    assert restarted_app.state.channels_config["slack"] == {
+    assert by_provider["feishu"]["configured"] is True
+    assert by_provider["feishu"]["connectable"] is True
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
+    assert restarted_app.state.channels_config["feishu"] == {
         "enabled": True,
-        "bot_token": "xoxb-ui",
-        "app_token": "xapp-ui",
+        "app_id": "feishu-ui",
+        "app_secret": "secret-ui",
     }
 
     anyio.run(repo.close)
@@ -860,7 +738,7 @@ def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
@@ -868,27 +746,27 @@ def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
 
     with TestClient(app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
-        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        disconnect_response = client.delete("/api/channels/feishu/runtime-config")
         providers_response = client.get("/api/channels/providers")
 
     assert configure_response.status_code == 200
     assert disconnect_response.status_code == 200
     disconnected = disconnect_response.json()
-    assert disconnected["provider"] == "slack"
+    assert disconnected["provider"] == "feishu"
     assert disconnected["configured"] is False
     assert disconnected["connectable"] is False
     assert disconnected["connection_status"] == "not_connected"
-    assert runtime_config_store.get_provider_config("slack") == {
+    assert runtime_config_store.get_provider_config("feishu") == {
         "enabled": False,
         "_runtime_disabled": True,
     }
 
     assert providers_response.status_code == 200
     by_provider = {item["provider"]: item for item in providers_response.json()["providers"]}
-    assert by_provider["slack"]["connection_status"] == "not_connected"
+    assert by_provider["feishu"]["connection_status"] == "not_connected"
 
     anyio.run(repo.close)
 
@@ -974,20 +852,20 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
     async def seed_connection():
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="slack",
-            external_account_id="U123",
+            provider="feishu",
+            external_account_id="ou-123",
             status="connected",
         )
         await repo.upsert_connection(
             owner_user_id="other-user",
-            provider="slack",
-            external_account_id="U456",
+            provider="feishu",
+            external_account_id="ou-456",
             status="connected",
         )
         await repo.upsert_connection(
             owner_user_id="other-user",
-            provider="telegram",
-            external_account_id="42",
+            provider="dingtalk",
+            external_account_id="staff-42",
             status="connected",
         )
 
@@ -995,7 +873,7 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
@@ -1003,24 +881,24 @@ def test_disconnect_provider_runtime_config_revokes_all_provider_connections(tmp
 
     with TestClient(app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
-        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        disconnect_response = client.delete("/api/channels/feishu/runtime-config")
 
     assert configure_response.status_code == 200
     assert disconnect_response.status_code == 200
 
     async def get_connection_statuses():
         return {
-            "admin_slack": (await repo.list_connections(str(_user().id)))[0]["status"],
+            "admin_feishu": (await repo.list_connections(str(_user().id)))[0]["status"],
             "other": {item["provider"]: item["status"] for item in await repo.list_connections("other-user")},
         }
 
     statuses = anyio.run(get_connection_statuses)
-    assert statuses["admin_slack"] == "revoked"
-    assert statuses["other"]["slack"] == "revoked"
-    assert statuses["other"]["telegram"] == "connected"
+    assert statuses["admin_feishu"] == "revoked"
+    assert statuses["other"]["feishu"] == "revoked"
+    assert statuses["other"]["dingtalk"] == "connected"
 
     anyio.run(repo.close)
 
@@ -1033,8 +911,8 @@ def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_pa
     async def seed_connection():
         await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="slack",
-            external_account_id="U123",
+            provider="feishu",
+            external_account_id="ou-123",
             status="revoked",
         )
 
@@ -1042,10 +920,10 @@ def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_pa
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
-    # No runtime channels_config -> the slack provider is unavailable.
+    # No runtime channels_config -> the feishu provider is unavailable.
     app = _make_app(config, repo, {})
 
     with TestClient(app) as client:
@@ -1053,11 +931,11 @@ def test_get_providers_preserves_revoked_status_when_provider_unavailable(tmp_pa
 
     assert response.status_code == 200
     by_provider = {item["provider"]: item for item in response.json()["providers"]}
-    assert by_provider["slack"]["connectable"] is False
-    assert by_provider["slack"]["unavailable_reason"] is not None
+    assert by_provider["feishu"]["connectable"] is False
+    assert by_provider["feishu"]["unavailable_reason"] is not None
     # A revoked binding must stay distinguishable from a never-connected one,
     # even when the runtime provider is currently unavailable.
-    assert by_provider["slack"]["connection_status"] == "revoked"
+    assert by_provider["feishu"]["connection_status"] == "revoked"
 
     anyio.run(repo.close)
 
@@ -1069,8 +947,8 @@ def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tm
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
-            "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+            "feishu": {"enabled": True},
+            "dingtalk": {"enabled": True},
         }
     )
     runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
@@ -1081,7 +959,7 @@ def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tm
         # write to app.state lands while this request awaits the worker restart.
         app.state.channels_config = {
             **app.state.channels_config,
-            "telegram": {"enabled": True, "bot_token": "tg-token"},
+            "dingtalk": {"enabled": True, "client_id": "dt-id"},
         }
         return True
 
@@ -1090,14 +968,14 @@ def test_configure_provider_runtime_does_not_clobber_concurrent_config_update(tm
 
     with TestClient(app) as client:
         response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
 
     assert response.status_code == 200
-    # The concurrent telegram write must survive alongside the slack write.
-    assert app.state.channels_config["slack"]["bot_token"] == "xoxb-ui"
-    assert app.state.channels_config["telegram"]["bot_token"] == "tg-token"
+    # The concurrent dingtalk write must survive alongside the feishu write.
+    assert app.state.channels_config["feishu"]["app_id"] == "feishu-ui"
+    assert app.state.channels_config["dingtalk"]["client_id"] == "dt-id"
 
     anyio.run(repo.close)
 
@@ -1109,7 +987,7 @@ def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tm
     config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     runtime_config_store = ChannelRuntimeConfigStore(tmp_path / "channels" / "runtime-config.json")
@@ -1117,25 +995,25 @@ def test_disconnect_provider_runtime_keeps_state_consistent_when_revoke_fails(tm
 
     with TestClient(app) as client:
         configure_response = client.post(
-            "/api/channels/slack/runtime-config",
-            json={"values": {"bot_token": "xoxb-ui", "app_token": "xapp-ui"}},
+            "/api/channels/feishu/runtime-config",
+            json={"values": {"app_id": "feishu-ui", "app_secret": "secret-ui"}},
         )
     assert configure_response.status_code == 200
 
     repo.disconnect_provider_connections = AsyncMock(side_effect=RuntimeError("db down"))
 
     with TestClient(app, raise_server_exceptions=False) as client:
-        disconnect_response = client.delete("/api/channels/slack/runtime-config")
+        disconnect_response = client.delete("/api/channels/feishu/runtime-config")
 
     assert disconnect_response.status_code == 500
     # When the DB revoke fails, the store/cache must not be left diverged from
     # the DB: the provider stays configured so a later re-configure cannot
     # silently reactivate un-revoked connection rows.
-    assert app.state.channels_config["slack"]["bot_token"] == "xoxb-ui"
-    assert runtime_config_store.get_provider_config("slack") == {
+    assert app.state.channels_config["feishu"]["app_id"] == "feishu-ui"
+    assert runtime_config_store.get_provider_config("feishu") == {
         "enabled": True,
-        "bot_token": "xoxb-ui",
-        "app_token": "xapp-ui",
+        "app_id": "feishu-ui",
+        "app_secret": "secret-ui",
     }
 
     anyio.run(repo.close)
@@ -1149,8 +1027,8 @@ def test_disconnect_connection_revokes_current_user_connection(tmp_path):
     async def seed_connection():
         connection = await repo.upsert_connection(
             owner_user_id=str(_user().id),
-            provider="telegram",
-            external_account_id="42",
+            provider="feishu",
+            external_account_id="ou-42",
             status="connected",
         )
         return connection["id"]
@@ -1179,8 +1057,8 @@ def test_disconnect_connection_is_current_user_scoped(tmp_path):
     async def seed_connection():
         connection = await repo.upsert_connection(
             owner_user_id="other-user",
-            provider="telegram",
-            external_account_id="42",
+            provider="feishu",
+            external_account_id="ou-42",
             status="connected",
         )
         return connection["id"]

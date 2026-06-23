@@ -204,7 +204,14 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
         captured["user_id"] = user_id
         return {"facts": []}
 
-    def fake_format_memory_for_injection(memory_data, *, max_tokens, use_tiktoken=True):
+    def fake_format_memory_for_injection(
+        memory_data,
+        *,
+        max_tokens,
+        use_tiktoken=True,
+        guaranteed_categories=None,
+        guaranteed_token_budget=500,
+    ):
         captured["memory_data"] = memory_data
         captured["max_tokens"] = max_tokens
         captured["use_tiktoken"] = use_tiktoken

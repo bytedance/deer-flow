@@ -44,6 +44,44 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("uses arrow keys to navigate skill suggestions before prompt history", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/");
+
+    const dataAnalysis = page.getByRole("option", {
+      name: /data-analysis/i,
+    });
+    const frontendDesign = page.getByRole("option", {
+      name: /frontend-design/i,
+    });
+    await expect(dataAnalysis).toBeVisible();
+    await expect(frontendDesign).toBeVisible();
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowDown");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "false");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowUp");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "false");
+
+    await textarea.press("ArrowDown");
+    await textarea.press("Enter");
+
+    await expect(textarea).toHaveValue("/frontend-design ");
+  });
+
   test("keeps Shift+Enter as newline while skill suggestions are visible", async ({
     page,
   }) => {

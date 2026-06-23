@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
   clearReconnectRun,
@@ -9,18 +9,18 @@ import {
 function makeSessionStorage() {
   const values = new Map<string, string>();
   return {
-    getItem: vi.fn((key: string) => values.get(key) ?? null),
-    removeItem: vi.fn((key: string) => {
+    getItem: rs.fn((key: string) => values.get(key) ?? null),
+    removeItem: rs.fn((key: string) => {
       values.delete(key);
     }),
-    setItem: vi.fn((key: string, value: string) => {
+    setItem: rs.fn((key: string, value: string) => {
       values.set(key, value);
     }),
   };
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  rs.unstubAllGlobals();
 });
 
 test("identifies inactive run stream errors", () => {
@@ -45,7 +45,7 @@ test("does not classify unrelated conflict errors as inactive streams", () => {
 test("clears matching reconnect metadata", () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
-  vi.stubGlobal("window", { sessionStorage });
+  rs.stubGlobal("window", { sessionStorage });
 
   clearReconnectRun("thread-1", "run-1");
 
@@ -55,7 +55,7 @@ test("clears matching reconnect metadata", () => {
 test("keeps newer reconnect metadata", () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "newer-run");
-  vi.stubGlobal("window", { sessionStorage });
+  rs.stubGlobal("window", { sessionStorage });
 
   clearReconnectRun("thread-1", "stale-run");
 
@@ -63,7 +63,7 @@ test("keeps newer reconnect metadata", () => {
 });
 
 test("ignores reconnect metadata storage access failures", () => {
-  vi.stubGlobal("window", {
+  rs.stubGlobal("window", {
     get sessionStorage() {
       throw new DOMException("Blocked", "SecurityError");
     },
@@ -79,9 +79,9 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
     location: { origin: "http://localhost:3000" },
     sessionStorage,
   });
-  vi.stubGlobal(
+  rs.stubGlobal(
     "fetch",
-    vi.fn(async () => {
+    rs.fn(async () => {
       return new Response(
         JSON.stringify({
           detail:
@@ -106,9 +106,9 @@ test("rethrows unrelated streaming errors", async () => {
     location: { origin: "http://localhost:3000" },
     sessionStorage,
   });
-  vi.stubGlobal(
+  rs.stubGlobal(
     "fetch",
-    vi.fn(async () => {
+    rs.fn(async () => {
       return new Response(JSON.stringify({ detail: "run is still active" }), {
         status: 409,
       });

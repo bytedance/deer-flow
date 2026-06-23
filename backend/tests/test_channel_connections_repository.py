@@ -37,7 +37,7 @@ class TestChannelConnectionRepository:
     async def test_connections_are_listed_per_owner(self, repo):
         alice = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-alice",
             external_account_name="Alice",
             workspace_id="T1",
@@ -46,7 +46,7 @@ class TestChannelConnectionRepository:
         )
         await repo.upsert_connection(
             owner_user_id="bob",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-bob",
             external_account_name="Bob",
             workspace_id="T1",
@@ -58,7 +58,7 @@ class TestChannelConnectionRepository:
 
         assert [item["id"] for item in results] == [alice["id"]]
         assert results[0]["owner_user_id"] == "alice"
-        assert results[0]["provider"] == "slack"
+        assert results[0]["provider"] == "feishu"
         assert results[0]["scopes"] == ["chat:write"]
         assert "encrypted_access_token" not in results[0]
 
@@ -66,7 +66,7 @@ class TestChannelConnectionRepository:
     async def test_upsert_connection_updates_existing_provider_identity(self, repo):
         first = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="telegram",
+            provider="dingtalk",
             external_account_id="42",
             external_account_name="Alice",
             workspace_id=None,
@@ -75,9 +75,9 @@ class TestChannelConnectionRepository:
         )
         second = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="telegram",
+            provider="dingtalk",
             external_account_id="42",
-            external_account_name="Alice Telegram",
+            external_account_name="Alice DingTalk",
             workspace_id=None,
             workspace_name=None,
             status="connected",
@@ -85,14 +85,14 @@ class TestChannelConnectionRepository:
 
         assert second["id"] == first["id"]
         assert second["status"] == "connected"
-        assert second["external_account_name"] == "Alice Telegram"
+        assert second["external_account_name"] == "Alice DingTalk"
         assert len(await repo.list_connections("alice")) == 1
 
     @pytest.mark.anyio
     async def test_upsert_connection_transfers_external_identity_between_owners(self, repo):
         await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
             status="connected",
@@ -100,7 +100,7 @@ class TestChannelConnectionRepository:
 
         bob = await repo.upsert_connection(
             owner_user_id="bob",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
             status="connected",
@@ -108,7 +108,7 @@ class TestChannelConnectionRepository:
 
         alice_rows = await repo.list_connections("alice")
         resolved = await repo.find_connection_by_external_identity(
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
         )
@@ -127,7 +127,7 @@ class TestChannelConnectionRepository:
 
         await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
             status="connected",
@@ -139,7 +139,7 @@ class TestChannelConnectionRepository:
                     ChannelConnectionRow(
                         id="manual-duplicate-active",
                         owner_user_id="bob",
-                        provider="slack",
+                        provider="feishu",
                         external_account_id="U-shared",
                         workspace_id="T1",
                         status="connected",
@@ -153,7 +153,7 @@ class TestChannelConnectionRepository:
         # connected bind for the same identity is allowed afterwards.
         first = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
             status="connected",
@@ -162,7 +162,7 @@ class TestChannelConnectionRepository:
 
         second = await repo.upsert_connection(
             owner_user_id="bob",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-shared",
             workspace_id="T1",
             status="connected",
@@ -176,7 +176,7 @@ class TestChannelConnectionRepository:
         async def connect(owner: str):
             return await repo.upsert_connection(
                 owner_user_id=owner,
-                provider="slack",
+                provider="feishu",
                 external_account_id="U-shared",
                 workspace_id="T1",
                 status="connected",
@@ -189,7 +189,7 @@ class TestChannelConnectionRepository:
                 (
                     await session.execute(
                         select(ChannelConnectionRow).where(
-                            ChannelConnectionRow.provider == "slack",
+                            ChannelConnectionRow.provider == "feishu",
                             ChannelConnectionRow.external_account_id == "U-shared",
                             ChannelConnectionRow.workspace_id == "T1",
                             ChannelConnectionRow.status == "connected",
@@ -205,7 +205,7 @@ class TestChannelConnectionRepository:
     async def test_credentials_are_encrypted_at_rest_and_decrypted_by_repository(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-alice",
             workspace_id="T1",
         )
@@ -240,7 +240,7 @@ class TestChannelConnectionRepository:
     async def test_get_credentials_returns_none_when_decryption_fails(self, repo, caplog):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-alice",
             workspace_id="T1",
         )
@@ -260,13 +260,13 @@ class TestChannelConnectionRepository:
     async def test_conversations_are_scoped_by_connection(self, repo):
         alice = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-alice",
             workspace_id="T1",
         )
         bob = await repo.upsert_connection(
             owner_user_id="bob",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-bob",
             workspace_id="T1",
         )
@@ -274,7 +274,7 @@ class TestChannelConnectionRepository:
         await repo.set_thread_id(
             connection_id=alice["id"],
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_conversation_id="C-shared",
             external_topic_id="1710000000.000100",
             thread_id="thread-alice",
@@ -282,7 +282,7 @@ class TestChannelConnectionRepository:
         await repo.set_thread_id(
             connection_id=bob["id"],
             owner_user_id="bob",
-            provider="slack",
+            provider="feishu",
             external_conversation_id="C-shared",
             external_topic_id="1710000000.000100",
             thread_id="thread-bob",
@@ -295,7 +295,7 @@ class TestChannelConnectionRepository:
     async def test_disconnect_connection_revokes_owner_connection_and_removes_credentials(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="telegram",
+            provider="dingtalk",
             external_account_id="42",
         )
         await repo.store_credentials(connection["id"], access_token="secret-token")
@@ -314,7 +314,7 @@ class TestChannelConnectionRepository:
         assert credential_row is None
         assert (
             await repo.find_connection_by_external_identity(
-                provider="telegram",
+                provider="dingtalk",
                 external_account_id="42",
             )
             is None
@@ -324,7 +324,7 @@ class TestChannelConnectionRepository:
     async def test_disconnect_connection_is_owner_scoped(self, repo):
         connection = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="telegram",
+            provider="dingtalk",
             external_account_id="42",
         )
 
@@ -341,18 +341,18 @@ class TestChannelConnectionRepository:
         now = datetime.now(UTC)
         await repo.create_oauth_state(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             state="expired-state",
             expires_at=now - timedelta(minutes=1),
         )
         await repo.create_oauth_state(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             state="active-state",
             expires_at=now + timedelta(minutes=5),
         )
 
-        consumed = await repo.consume_oauth_state(provider="slack", state="expired-state", now=now)
+        consumed = await repo.consume_oauth_state(provider="feishu", state="expired-state", now=now)
 
         assert consumed is None
         async with repo.session_factory() as session:
@@ -364,20 +364,20 @@ class TestChannelConnectionRepository:
         now = datetime.now(UTC)
         await repo.create_oauth_state(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             state="expired-state",
             expires_at=now - timedelta(minutes=1),
         )
         await repo.create_oauth_state(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             state="active-state",
             expires_at=now + timedelta(minutes=5),
         )
 
-        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="feishu", active_only=True, now=now) == 1
         assert await repo.delete_expired_oauth_states(now=now) == 1
-        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack") == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="feishu") == 1
         # Pin that the surviving row is the active one (an inverted expiry
         # predicate would delete the active row, still return 1, and pass above).
         async with repo.session_factory() as session:
@@ -390,26 +390,26 @@ class TestChannelConnectionRepository:
         expires = now + timedelta(minutes=5)
 
         for i in range(3):
-            inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=f"code-{i}", expires_at=expires, max_pending=3, now=now)
+            inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="feishu", state=f"code-{i}", expires_at=expires, max_pending=3, now=now)
             assert inserted is True
 
         # Cap reached: the next issuance is rejected and nothing is inserted.
-        assert await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="code-over", expires_at=expires, max_pending=3, now=now) is False
-        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
+        assert await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="feishu", state="code-over", expires_at=expires, max_pending=3, now=now) is False
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="feishu", active_only=True, now=now) == 3
 
         # Expired rows are pruned and free up capacity; a different owner is unaffected.
-        assert await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="slack", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
+        assert await repo.create_oauth_state_within_cap(owner_user_id="bob", provider="feishu", state="bob-1", expires_at=expires, max_pending=3, now=now) is True
 
     @pytest.mark.anyio
     async def test_create_oauth_state_within_cap_ignores_expired_rows(self, repo):
         now = datetime.now(UTC)
         # Three already-expired rows must not count against the cap.
         for i in range(3):
-            await repo.create_oauth_state(owner_user_id="alice", provider="slack", state=f"old-{i}", expires_at=now - timedelta(minutes=1))
+            await repo.create_oauth_state(owner_user_id="alice", provider="feishu", state=f"old-{i}", expires_at=now - timedelta(minutes=1))
 
-        inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now)
+        inserted = await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="feishu", state="fresh", expires_at=now + timedelta(minutes=5), max_pending=3, now=now)
         assert inserted is True
-        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 1
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="feishu", active_only=True, now=now) == 1
 
     @pytest.mark.anyio
     async def test_create_oauth_state_within_cap_does_not_leak_under_concurrency(self, repo):
@@ -421,14 +421,14 @@ class TestChannelConnectionRepository:
         results: list[bool] = []
 
         async def issue(state: str) -> None:
-            results.append(await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="slack", state=state, expires_at=expires, max_pending=3, now=now))
+            results.append(await repo.create_oauth_state_within_cap(owner_user_id="alice", provider="feishu", state=state, expires_at=expires, max_pending=3, now=now))
 
         async with anyio.create_task_group() as tg:
             for i in range(8):
                 tg.start_soon(issue, f"code-{i}")
 
         assert sum(1 for ok in results if ok) == 3
-        assert await repo.count_oauth_states(owner_user_id="alice", provider="slack", active_only=True, now=now) == 3
+        assert await repo.count_oauth_states(owner_user_id="alice", provider="feishu", active_only=True, now=now) == 3
 
     @pytest.mark.anyio
     async def test_consume_oauth_state_is_one_time_even_under_concurrent_consumers(self, repo):
@@ -437,7 +437,7 @@ class TestChannelConnectionRepository:
         now = datetime.now(UTC)
         await repo.create_oauth_state(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             state="bind-once",
             expires_at=now + timedelta(minutes=5),
         )
@@ -445,7 +445,7 @@ class TestChannelConnectionRepository:
         results: list = []
 
         async def consume():
-            results.append(await repo.consume_oauth_state(provider="slack", state="bind-once", now=now))
+            results.append(await repo.consume_oauth_state(provider="feishu", state="bind-once", now=now))
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(consume)
@@ -460,7 +460,7 @@ class TestChannelConnectionRepository:
         """A losing concurrent INSERT retries as an UPDATE instead of raising IntegrityError."""
         first = await repo.upsert_connection(
             owner_user_id="alice",
-            provider="slack",
+            provider="feishu",
             external_account_id="U-race",
             workspace_id="T-race",
             status="pending",
@@ -501,7 +501,7 @@ class TestChannelConnectionRepository:
         try:
             second = await repo.upsert_connection(
                 owner_user_id="alice",
-                provider="slack",
+                provider="feishu",
                 external_account_id="U-race",
                 workspace_id="T-race",
                 status="connected",

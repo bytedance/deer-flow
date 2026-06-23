@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
-vi.mock("@/core/config", () => ({
+rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "/backend",
 }));
 
@@ -18,7 +18,7 @@ import {
   listChannelProviders,
 } from "@/core/channels/api";
 
-const mockedFetch = vi.mocked(fetcher);
+const mockedFetch = rs.mocked(fetcher);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -39,15 +39,15 @@ describe("channels api", () => {
         enabled: true,
         providers: [
           {
-            provider: "telegram",
-            display_name: "Telegram",
+            provider: "feishu",
+            display_name: "Feishu",
             enabled: true,
             configured: true,
-            auth_mode: "deep_link",
+            auth_mode: "binding_code",
             connection_status: "not_connected",
             credential_values: {
-              bot_token: "********",
-              bot_username: "deerflow_bot",
+              app_id: "feishu-app",
+              app_secret: "********",
             },
           },
         ],
@@ -58,11 +58,11 @@ describe("channels api", () => {
       enabled: true,
       providers: [
         {
-          provider: "telegram",
-          display_name: "Telegram",
+          provider: "feishu",
+          display_name: "Feishu",
           credential_values: {
-            bot_token: "********",
-            bot_username: "deerflow_bot",
+            app_id: "feishu-app",
+            app_secret: "********",
           },
         },
       ],
@@ -76,7 +76,7 @@ describe("channels api", () => {
         connections: [
           {
             id: "connection-1",
-            provider: "telegram",
+            provider: "feishu",
             status: "connected",
             external_account_name: "Alice",
             scopes: [],
@@ -87,7 +87,7 @@ describe("channels api", () => {
     );
 
     await expect(listChannelConnections()).resolves.toMatchObject([
-      { id: "connection-1", provider: "telegram", status: "connected" },
+      { id: "connection-1", provider: "feishu", status: "connected" },
     ]);
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/channels/connections",
@@ -97,22 +97,22 @@ describe("channels api", () => {
   test("starts a provider connection flow", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
-        provider: "telegram",
-        mode: "deep_link",
-        url: "https://t.me/deerflow_bot?start=state",
+        provider: "feishu",
+        mode: "binding_code",
+        url: null,
         code: "state",
-        instruction: "Send /start state to the DeerFlow Telegram bot.",
+        instruction: "Send /connect state to the DeerFlow Feishu bot.",
         expires_in: 600,
       }),
     );
 
-    await expect(connectChannelProvider("telegram")).resolves.toMatchObject({
-      provider: "telegram",
-      url: "https://t.me/deerflow_bot?start=state",
-      instruction: "Send /start state to the DeerFlow Telegram bot.",
+    await expect(connectChannelProvider("feishu")).resolves.toMatchObject({
+      provider: "feishu",
+      url: null,
+      instruction: "Send /connect state to the DeerFlow Feishu bot.",
     });
     expect(mockedFetch).toHaveBeenCalledWith(
-      "/backend/api/channels/telegram/connect",
+      "/backend/api/channels/feishu/connect",
       { method: "POST" },
     );
   });
@@ -120,28 +120,28 @@ describe("channels api", () => {
   test("starts a binding-code connection flow", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
-        provider: "slack",
+        provider: "dingtalk",
         mode: "binding_code",
         url: null,
         code: "abc123",
-        instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+        instruction: "Send /connect abc123 to the DeerFlow DingTalk bot.",
         expires_in: 600,
       }),
     );
 
-    await expect(connectChannelProvider("slack")).resolves.toMatchObject({
-      provider: "slack",
+    await expect(connectChannelProvider("dingtalk")).resolves.toMatchObject({
+      provider: "dingtalk",
       url: null,
       code: "abc123",
-      instruction: "Send /connect abc123 to the DeerFlow Slack bot.",
+      instruction: "Send /connect abc123 to the DeerFlow DingTalk bot.",
     });
   });
 
   test("submits runtime provider configuration", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
-        provider: "slack",
-        display_name: "Slack",
+        provider: "feishu",
+        display_name: "Feishu",
         enabled: true,
         configured: true,
         connectable: true,
@@ -151,22 +151,22 @@ describe("channels api", () => {
     );
 
     await expect(
-      configureChannelProvider("slack", {
-        bot_token: "xoxb-ui",
-        app_token: "xapp-ui",
+      configureChannelProvider("feishu", {
+        app_id: "feishu-ui",
+        app_secret: "secret-ui",
       }),
     ).resolves.toMatchObject({
-      provider: "slack",
+      provider: "feishu",
       configured: true,
       connectable: true,
     });
     expect(mockedFetch).toHaveBeenCalledWith(
-      "/backend/api/channels/slack/runtime-config",
+      "/backend/api/channels/feishu/runtime-config",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          values: { bot_token: "xoxb-ui", app_token: "xapp-ui" },
+          values: { app_id: "feishu-ui", app_secret: "secret-ui" },
         }),
       },
     );
@@ -187,8 +187,8 @@ describe("channels api", () => {
   test("disconnects provider runtime configuration", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
-        provider: "slack",
-        display_name: "Slack",
+        provider: "feishu",
+        display_name: "Feishu",
         enabled: true,
         configured: false,
         connectable: false,
@@ -197,13 +197,13 @@ describe("channels api", () => {
       }),
     );
 
-    await expect(disconnectChannelProvider("slack")).resolves.toMatchObject({
-      provider: "slack",
+    await expect(disconnectChannelProvider("feishu")).resolves.toMatchObject({
+      provider: "feishu",
       configured: false,
       connection_status: "not_connected",
     });
     expect(mockedFetch).toHaveBeenCalledWith(
-      "/backend/api/channels/slack/runtime-config",
+      "/backend/api/channels/feishu/runtime-config",
       { method: "DELETE" },
     );
   });
@@ -213,7 +213,7 @@ describe("channels api", () => {
       jsonResponse(400, { detail: "Channel provider is not configured" }),
     );
 
-    await expect(connectChannelProvider("slack")).rejects.toThrow(
+    await expect(connectChannelProvider("feishu")).rejects.toThrow(
       "Channel provider is not configured",
     );
   });

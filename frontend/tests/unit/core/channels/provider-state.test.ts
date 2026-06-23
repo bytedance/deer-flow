@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 
 import {
   providerCanConnect,
@@ -9,8 +9,8 @@ import type { ChannelProvider } from "@/core/channels/types";
 
 function makeProvider(overrides: Partial<ChannelProvider>): ChannelProvider {
   return {
-    provider: "slack",
-    display_name: "Slack",
+    provider: "feishu",
+    display_name: "Feishu",
     enabled: true,
     configured: true,
     connectable: true,
@@ -18,8 +18,8 @@ function makeProvider(overrides: Partial<ChannelProvider>): ChannelProvider {
     connection_status: "not_connected",
     credential_fields: [
       {
-        name: "bot_token",
-        label: "Bot token",
+        name: "app_id",
+        label: "App ID",
         type: "password",
         required: true,
       },

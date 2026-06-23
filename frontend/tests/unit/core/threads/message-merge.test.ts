@@ -1,5 +1,5 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import {
   buildRunMessagesUrl,

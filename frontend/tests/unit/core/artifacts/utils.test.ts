@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 const ENV_KEYS = [
   "NEXT_PUBLIC_BACKEND_BASE_URL",
@@ -33,7 +40,7 @@ function restoreEnv(snapshot: EnvSnapshot) {
 }
 
 async function loadFreshArtifactUtils() {
-  vi.resetModules();
+  rs.resetModules();
   return await import("@/core/artifacts/utils");
 }
 

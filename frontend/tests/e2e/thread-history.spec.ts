@@ -65,6 +65,70 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("input box recalls previous prompts with arrow keys", async ({
+    page,
+  }) => {
+    const firstPrompt = "Summarize the latest quarterly report";
+    const secondPrompt = "Turn the summary into an action plan";
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Prompt history conversation",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-prompt-history-1",
+              content: [{ type: "text", text: firstPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-1",
+              content: "First answer",
+            },
+            {
+              type: "human",
+              id: "msg-human-prompt-history-2",
+              content: [{ type: "text", text: secondPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-2",
+              content: "Second answer",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Second answer")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const textarea = page.locator("textarea[name='message']");
+    await expect(textarea).toBeVisible();
+
+    await textarea.focus();
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(firstPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue("");
+
+    await textarea.fill("draft should not be overwritten");
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue("draft should not be overwritten");
+  });
+
   test("deleting an inactive chat keeps the current chat open", async ({
     page,
   }) => {
