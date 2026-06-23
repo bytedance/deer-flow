@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wizard.providers import LLM_PROVIDERS, LLMProvider
+from wizard.providers import (
+    LLM_PROVIDERS,
+    LLMProvider,
+    OPENAI_COMPAT_THINKING_CONFIG,
+)
 from wizard.ui import (
     ask_choice,
     ask_secret,
     ask_text,
+    ask_yes_no,
     print_header,
     print_info,
     print_success,
@@ -51,6 +56,12 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         base_url = ask_text(provider.base_url_prompt, default=base_url or "", required=True)
         if provider.model_prompt:
             model_name = ask_text(provider.model_prompt, default=model_name)
+
+        # Ask custom OpenAI-compatible users if their model supports thinking
+        print_info("Does your model support thinking/reasoning output?")
+        supports_thinking = ask_yes_no("Enable thinking support?", default=True)
+        if supports_thinking:
+            provider.extra_config.update(OPENAI_COMPAT_THINKING_CONFIG)
 
     if provider.auth_hint:
         print_header(f"{step_label} · Authentication")
