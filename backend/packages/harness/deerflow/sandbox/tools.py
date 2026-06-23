@@ -855,12 +855,6 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
-def _looks_like_unsafe_cwd_target(target: str | None) -> bool:
-    if target is None:
-        return False
-    return target == "-" or target.startswith(("$", "`", "~", "/", "..")) or _has_dotdot_path_segment(target)
-
-
 def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
     if command_name not in _LOCAL_BASH_ROOT_PATH_COMMANDS:
         return
