@@ -1486,7 +1486,7 @@ done
 #### TC-DOCKER-04: IM 渠道使用内部认证
 
 ```bash
-# IM 渠道（Feishu/Slack/Telegram）在 gateway 容器内部通过 LangGraph SDK 调 Gateway
+# IM 渠道（Feishu/DingTalk）在 gateway 容器内部通过 LangGraph SDK 调 Gateway
 # 请求携带 process-local internal auth header，并带匹配的 CSRF cookie/header
 
 # 验证方式：检查 gateway 日志中 channel manager 的请求不包含 auth 错误

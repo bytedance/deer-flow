@@ -1296,8 +1296,7 @@ run_events:
 # - 不需要公网 IP、OAuth 回调 URL 或 provider webhook。
 # - Provider 的 bot/app 凭证仍保留在 `channels.*` 中。
 # - `channel_connections` 保存每个用户的绑定关系和一次性连接码。
-# - 当配置了 `bot_username` 时，Telegram 使用 deep link。
-# - Slack、Discord、Feishu、DingTalk、WeChat 和 WeCom 通过已运行的
+# - Feishu、DingTalk、WeChat 和 WeCom 通过已运行的
 #   bot/app 使用 `/connect <code>`。
 #
 # channel_connections:
@@ -1305,16 +1304,6 @@ run_events:
 #   # 安全性：除非你有意启用旧的 open-bot 行为，否则请保持启用。
 #   # 禁用此项会允许未绑定的外部 IM 用户创建 DeerFlow 的 threads/runs。
 #   require_bound_identity: true
-#
-#   telegram:
-#     enabled: false
-#     bot_username: $TELEGRAM_BOT_USERNAME
-#
-#   slack:
-#     enabled: false
-#
-#   discord:
-#     enabled: false
 #
 #   feishu:
 #     enabled: false
@@ -1365,17 +1354,6 @@ run_events:
 #     app_secret: $FEISHU_APP_SECRET
 #     # domain: https://open.feishu.cn       # 中国（默认）
 #     # domain: https://open.larksuite.com   # 国际
-#
-#   slack:
-#     enabled: false
-#     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
-#     app_token: $SLACK_APP_TOKEN     # xapp-...（Socket Mode）
-#     allowed_users: []               # 为空 = 允许所有；也可填单个 Slack 用户 ID 字符串，例如 U123456，但推荐列表形式
-#
-#   telegram:
-#     enabled: false
-#     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # 为空 = 允许所有
 #
 #   wechat:
 #     enabled: false
@@ -1433,14 +1411,6 @@ run_events:
 #     client_secret: $DINGTALK_CLIENT_SECRET
 #     allowed_users: []               # 为空 = 允许所有
 #     card_template_id: ""            # 可选：用于流式更新的 AI Card 模板 ID
-#
-#   discord:
-#     enabled: false
-#     bot_token: $DISCORD_BOT_TOKEN
-#     allowed_guilds: []              # 为空 = 允许所有 guild；也可填单个 guild ID
-#     mention_only: false             # 为 true 时，仅当 bot 被 @ 时才响应
-#     allowed_channels: []              # 可选：免除 mention_only 限制的频道 ID（无需 @ 也会响应）
-#     thread_mode: false               # 为 true 时，将某频道的对话归入一个 thread
 
 # ============================================================================
 # Guardrails 配置

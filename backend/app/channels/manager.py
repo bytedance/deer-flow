@@ -997,9 +997,9 @@ class ChannelManager:
         if message_id is None:
             return None
 
-        # Fail closed: without a workspace/team/guild identifier we cannot tell two
-        # workspaces apart (e.g. Slack channel ids are not globally unique), so
-        # skip dedupe rather than risk collapsing distinct workspaces' messages.
+        # Fail closed: without a workspace/team identifier we cannot tell two
+        # workspaces apart, so skip dedupe rather than risk collapsing distinct
+        # workspaces' messages.
         workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
         if not workspace_id:
             return None
@@ -1246,7 +1246,7 @@ class ChannelManager:
         storage_user_id = _channel_storage_user_id(msg)
 
         # Look up existing DeerFlow thread.
-        # topic_id may be None (e.g. Telegram private chats) — the store
+        # topic_id may be None (e.g. P2P chats without a topic) — the store
         # handles this by using the "channel:chat_id" key without a topic suffix.
         thread_id = await self._lookup_thread_id(msg)
         if thread_id:

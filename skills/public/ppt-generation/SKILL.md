@@ -359,7 +359,7 @@ python /mnt/skills/public/ppt-generation/scripts/generate.py \
     "imagery": "Clean isometric 3D illustrations, consistent 30° isometric angle, soft clay-render aesthetic, floating platforms and devices, cute simplified objects",
     "layout": "Central isometric scene as hero, text balanced around 3D elements, clear visual hierarchy, comfortable margins (64px+)",
     "effects": "Soft drop shadows (20px blur, 30% opacity), ambient occlusion on 3D objects, subtle gradients on surfaces, consistent light source (top-left)",
-    "visual_language": "Friendly tech illustration (Slack, Notion, Asana style), approachable complexity, clarity through simplification"
+    "visual_language": "Friendly tech illustration (Notion, Asana style), approachable complexity, clarity through simplification"
   }
 }
 ```

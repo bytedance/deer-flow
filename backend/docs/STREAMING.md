@@ -23,7 +23,7 @@
 | 执行模型 | `async def` + `agent.astream()` | sync generator + `agent.stream()` |
 | 事件传输 | `StreamBridge`（asyncio Queue）+ `sse_consumer` | 直接 `yield` |
 | 序列化 | `serialize(chunk)` → 纯 JSON dict，匹配 LangGraph Platform wire 格式 | `StreamEvent.data`，携带原生 LangChain 对象 |
-| 消费者 | 前端 `useStream` React hook、飞书/Slack/Telegram channel、LangGraph SDK 客户端 | Jupyter notebook、集成测试、内部 Python 脚本 |
+| 消费者 | 前端 `useStream` React hook、飞书/DingTalk channel、LangGraph SDK 客户端 | Jupyter notebook、集成测试、内部 Python 脚本 |
 | 生命周期管理 | `RunManager`：run_id 跟踪、disconnect 语义、multitask 策略、heartbeat | 无；函数返回即结束 |
 | 断连恢复 | `Last-Event-ID` SSE 重连 | 无需要 |
 

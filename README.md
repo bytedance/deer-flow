@@ -224,8 +224,6 @@ DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应�
 
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
-| Telegram | Bot API（long-polling） | 简单 |
-| Slack | Socket Mode | 中等 |
 | Feishu / Lark | WebSocket | 中等 |
 | 企业微信智能机器人 | WebSocket | 中等 |
 | 钉钉 | Stream Push（WebSocket） | 中等 |
@@ -261,31 +259,6 @@ channels:
     bot_id: $WECOM_BOT_ID
     bot_secret: $WECOM_BOT_SECRET
 
-  slack:
-    enabled: true
-    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
-    app_token: $SLACK_APP_TOKEN     # xapp-...（Socket Mode）
-    allowed_users: []               # 留空表示允许所有人
-
-  telegram:
-    enabled: true
-    bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 留空表示允许所有人
-
-    # 可选：按渠道 / 按用户单独覆盖 session 配置
-    session:
-      assistant_id: mobile-agent  # 这里同样支持自定义 agent 名
-      context:
-        thinking_enabled: false
-      users:
-        "123456789":
-          assistant_id: vip-agent
-          config:
-            recursion_limit: 150
-          context:
-            thinking_enabled: true
-            subagent_enabled: true
-
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # 钉钉开放平台 ClientId
@@ -301,13 +274,6 @@ channels:
 在 `.env` 里设置对应的 API key：
 
 ```bash
-# Telegram
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
-
-# Slack
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
@@ -320,19 +286,6 @@ WECOM_BOT_SECRET=your_bot_secret
 DINGTALK_CLIENT_ID=your_client_id
 DINGTALK_CLIENT_SECRET=your_client_secret
 ```
-
-**Telegram 配置**
-
-1. 打开 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，复制生成的 HTTP API token。
-2. 在 `.env` 中设置 `TELEGRAM_BOT_TOKEN`，并在 `config.yaml` 里启用该渠道。
-
-**Slack 配置**
-
-1. 前往 [api.slack.com/apps](https://api.slack.com/apps) 创建 Slack App：Create New App → From scratch。
-2. 在 **OAuth & Permissions** 中添加 Bot Token Scopes：`app_mentions:read`、`chat:write`、`im:history`、`im:read`、`im:write`、`files:write`。
-3. 启用 **Socket Mode**，生成带 `connections:write` 权限的 App-Level Token（`xapp-...`）。
-4. 在 **Event Subscriptions** 中订阅 bot events：`app_mention`、`message.im`。
-5. 在 `.env` 中设置 `SLACK_BOT_TOKEN` 和 `SLACK_APP_TOKEN`，并在 `config.yaml` 中启用该渠道。
 
 **Feishu / Lark 配置**
 

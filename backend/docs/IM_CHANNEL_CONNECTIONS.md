@@ -1,6 +1,6 @@
 # IM Channel Connections
 
-DeerFlow supports user-owned IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
+DeerFlow supports user-owned IM channel bindings for Feishu/Lark, DingTalk, WeChat, and WeCom. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
 
 No public IP, OAuth callback URL, or provider webhook is required in this implementation.
 
@@ -10,19 +10,6 @@ Configure the actual IM bots under the existing `channels` block:
 
 ```yaml
 channels:
-  telegram:
-    enabled: true
-    bot_token: $TELEGRAM_BOT_TOKEN
-
-  slack:
-    enabled: true
-    bot_token: $SLACK_BOT_TOKEN
-    app_token: $SLACK_APP_TOKEN
-
-  discord:
-    enabled: true
-    bot_token: $DISCORD_BOT_TOKEN
-
   feishu:
     enabled: true
     app_id: $FEISHU_APP_ID
@@ -54,16 +41,6 @@ channel_connections:
   # platform users to platform-ID user buckets.
   require_bound_identity: true
 
-  telegram:
-    enabled: true
-    bot_username: $TELEGRAM_BOT_USERNAME
-
-  slack:
-    enabled: true
-
-  discord:
-    enabled: true
-
   feishu:
     enabled: true
 
@@ -77,31 +54,13 @@ channel_connections:
     enabled: true
 ```
 
-`channel_connections` does not duplicate provider secrets. It only controls the browser-facing connect UI and stores per-user binding records. Telegram needs `bot_username` only so the frontend can open a deep link.
+`channel_connections` does not duplicate provider secrets. It only controls the browser-facing connect UI and stores per-user binding records.
 
 When `channel_connections.enabled` and `require_bound_identity` are true, auth-enabled deployments reject ordinary unbound IM messages before creating a DeerFlow thread or run. Users must connect the channel from DeerFlow Settings first. Auth-disabled local mode still routes channel messages to the auth-disabled default user, and legacy open-bot behavior can be restored explicitly with `require_bound_identity: false`.
 
 Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
 
 ## Connect Flow
-
-Telegram:
-
-- The frontend creates a short one-time code.
-- The Connect button opens `https://t.me/<bot_username>?start=<code>`.
-- The existing Telegram long-polling worker receives `/start <code>` and binds that Telegram chat/user to the current DeerFlow user.
-
-Slack:
-
-- The frontend creates a short one-time code.
-- The UI shows `Send /connect <code> to the DeerFlow Slack bot.`
-- The existing Slack Socket Mode worker receives the message and binds the Slack user/team to the current DeerFlow user.
-
-Discord:
-
-- The frontend creates a short one-time code.
-- The UI shows `Send /connect <code> to the DeerFlow Discord bot.`
-- The existing Discord Gateway worker receives the message and binds the Discord user/guild to the current DeerFlow user.
 
 Feishu/Lark, DingTalk, WeChat, and WeCom:
 
@@ -111,14 +70,14 @@ Feishu/Lark, DingTalk, WeChat, and WeCom:
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 
-For providers with an `allowed_users` allowlist (Telegram, Slack, DingTalk, WeChat, …), a valid `/connect <code>` (or Telegram `/start <code>`) is consumed **before** the allowlist is checked. This is intentional: a user who is not yet on the allowlist — and whose platform identity the bot has therefore never seen — can still complete their first browser-initiated bind. After binding, `allowed_users` continues to gate ordinary (non-bind) messages as before.
+For providers with an `allowed_users` allowlist (DingTalk, WeChat, …), a valid `/connect <code>` is consumed **before** the allowlist is checked. This is intentional: a user who is not yet on the allowlist — and whose platform identity the bot has therefore never seen — can still complete their first browser-initiated bind. After binding, `allowed_users` continues to gate ordinary (non-bind) messages as before.
 
 ## Runtime Model
 
 Connection records live in SQL tables under `deerflow.persistence.channel_connections`:
 
 - `channel_connections`: owner user, provider identity, workspace/guild/team, status, metadata.
-- `channel_oauth_states`: one-time connect codes and Telegram deep-link state.
+- `channel_oauth_states`: one-time connect codes.
 - `channel_conversations`: connection-scoped IM conversation to DeerFlow thread mapping.
 - `channel_credentials`: reserved for future provider-token flows, not used by the local/private binding flow.
 
