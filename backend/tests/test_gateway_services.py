@@ -705,8 +705,24 @@ def test_build_run_config_with_context():
     )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_context_injects_thread_id():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "T-deadbeef-42",
+        {"context": {"user_id": "u-1", "thinking_enabled": True}},
+        None,
+    )
+
+    assert config["context"]["user_id"] == "u-1"
+    assert config["context"]["thinking_enabled"] is True
+    assert config["context"]["thread_id"] == "T-deadbeef-42"
+    assert "configurable" not in config
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -715,7 +731,7 @@ def test_build_run_config_null_context_becomes_empty_context():
 
     config = build_run_config("thread-1", {"context": None}, None)
 
-    assert config["context"] == {}
+    assert config["context"] == {"thread_id": "thread-1"}
     assert "configurable" not in config
 
 

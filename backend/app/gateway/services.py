@@ -252,6 +252,7 @@ def build_run_config(
                 context = dict(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
+            context["thread_id"] = thread_id
             config["context"] = context
         else:
             configurable = {"thread_id": thread_id}
