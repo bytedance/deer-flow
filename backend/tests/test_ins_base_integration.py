@@ -44,21 +44,26 @@ def _setup_config():
     set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET))
 
 
+def _setup_config_with_public_key(public_key: str):
+    """Set up auth config with an ins-base RSA public key."""
+    set_auth_config(AuthConfig(jwt_secret=_TEST_SECRET, rsa_public_key=public_key))
+
+
 def _get_set_cookie_headers(resp) -> list[str]:
     return [value for key, value in resp.headers.multi_items() if key.lower() == "set-cookie"]
 
 
 @pytest.mark.asyncio
 async def test_ins_base_login_endpoint(rsa_key_pair):
-    """POST /api/v1/auth/ins-base/login calls ins-base-rpc and returns token."""
+    """POST /api/v1/auth/ins-base/login forwards encrypted credentials."""
     _, pub_pem = rsa_key_pair
 
-    _setup_config()
+    _setup_config_with_public_key(pub_pem)
     client = _make_client()
 
     # Mock the provider functions
     mock_provider = MagicMock()
-    mock_provider.authenticate = AsyncMock(return_value=type("obj", (), {
+    mock_provider.authenticate_encrypted = AsyncMock(return_value=type("obj", (), {
         "ins_base_token": "ins-base-jwt-token",
         "ins_base_refresh": "ins-base-refresh-token",
         "tenant_id": "default",
@@ -74,14 +79,53 @@ async def test_ins_base_login_endpoint(rsa_key_pair):
     with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
         response = client.post(
             "/api/v1/auth/ins-base/login",
-            json={"username": "testuser", "password": "testpass"},
+            json={
+                "encrypted_username": "encrypted-user",
+                "encrypted_password": "encrypted-pass",
+            },
         )
 
     assert response.status_code == 200
+    mock_provider.authenticate_encrypted.assert_awaited_once_with("encrypted-user", "encrypted-pass")
     data = response.json()
     assert data["token"] == "ins-base-jwt-token"
     assert data["refresh"] == "ins-base-refresh-token"
     assert data["tenant_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_ins_base_public_key_endpoint(rsa_key_pair):
+    """GET /api/v1/auth/ins-base/public-key returns the configured login key."""
+    _, pub_pem = rsa_key_pair
+
+    _setup_config_with_public_key(pub_pem)
+    client = _make_client()
+
+    response = client.get("/api/v1/auth/ins-base/public-key")
+
+    assert response.status_code == 200
+    assert response.json()["public_key"] == pub_pem
+
+
+@pytest.mark.asyncio
+async def test_ins_base_login_rejects_plaintext_payload(rsa_key_pair):
+    """The login endpoint no longer accepts plaintext username/password."""
+    _, pub_pem = rsa_key_pair
+
+    _setup_config_with_public_key(pub_pem)
+    client = _make_client()
+
+    mock_provider = MagicMock()
+    mock_provider.authenticate_encrypted = AsyncMock()
+
+    with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
+        response = client.post(
+            "/api/v1/auth/ins-base/login",
+            json={"username": "testuser", "password": "testpass"},
+        )
+
+    assert response.status_code == 422
+    mock_provider.authenticate_encrypted.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -259,7 +303,7 @@ async def test_ins_base_login_no_provider():
     with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=None):
         response = client.post(
             "/api/v1/auth/ins-base/login",
-            json={"username": "test", "password": "test"},
+            json={"encrypted_username": "test", "encrypted_password": "test"},
         )
 
     assert response.status_code == 503
@@ -272,12 +316,13 @@ async def test_ins_base_login_auth_failure():
     client = _make_client()
 
     mock_provider = MagicMock()
+    mock_provider.authenticate_encrypted = AsyncMock(side_effect=RuntimeError("Login failed"))
     mock_provider.authenticate = AsyncMock(side_effect=RuntimeError("登录失败"))
 
     with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
         response = client.post(
             "/api/v1/auth/ins-base/login",
-            json={"username": "test", "password": "wrong"},
+            json={"encrypted_username": "test", "encrypted_password": "wrong"},
         )
 
     assert response.status_code == 401
