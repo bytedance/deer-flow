@@ -1,9 +1,28 @@
 # SQLBot 报表生成（data-agent）设计
 
-日期：2026-06-22
+日期：2026-06-22（v3 修订 2026-06-23）
 分支：`feat/sqlbot-report-data-agent`
-状态：v2 重写（v1 砍掉 subagent，改 Lead Agent + SKILL.md）
+状态：v3 增量（v2 之上加单位声明 + 计算列代码生成）
 关联：`SQLBOT_SPEC_PENDING`（真实 SQLBot API 规格待用户提供，先用 mock）
+
+## v3 改动摘要（相对 v2）
+
+v3 仅在 v2 之上**做加法**，不改 v2 已有决策。
+
+| 新能力 | 触发 | 输出 |
+|--------|------|------|
+| 单位声明（元/万元/亿元/%/百分点/个/次）| `<th data-unit="万元">{{X}}</th>` | DOCX 表头副标 + `display_unit` + `scale_factor`（Decimal）|
+| 自动单位转换 | SQLBot raw_unit ≠ data-unit | render 时按 Decimal 域换算，避 float 精度漂移 |
+| 计算列声明（同比/环比/毛利率等）| MD 描述块下 `> 计算:` 自然语言 | 虚拟指标 `{{}}` + `is_computed: true` |
+| LLM 生成 pandas 代码 | lead agent step 7 | `report.computed.py`（Phase 1 不跑真数据，只 sandbox 烟雾验证）|
+| AST 白名单 + 签名检查 + 烟雾 + 可选示例 | step 7 验证子步骤 | 全部决策写入 `report.match.log` |
+
+**v3 设计原则**：
+1. 单位与计算都是**报表设计人员声明**的，不由 SQLBot 推断。设计师对自己的报表口径负责。
+2. 计算列**纯自然语言**写公式（不引入半结构化语法 DSL）。LLM 一次性把公式 + 基础指标 + 时期 tags 一起提取，由 lead agent 再调 LLM 生成 pandas 代码。
+3. Phase 1 只**生成 + 验证**计算代码（语法、签名、烟雾、可选示例），**不跑真数据**。真正用 base_indicators 拉数 + 跑代码留给 Phase 2。
+4. 单位换算用 `decimal.Decimal`，不用 float。展示精度由 `display_format` 控制，不由 scale_factor 决定。
+5. `current` / `yoy_same` / `prev_period` / `ytd` 是**计算层的 period tag**，不是新 SQLBot code。Phase 2 查数据时由 SQLBot 客户端转成 SQL 参数；如某指标不支持某 period，留给 Phase 2 报错（v3 不强制 SQLBot 预声明 `supports_periods`）。
 
 ## v2 改动摘要（相对 v1）
 
@@ -58,6 +77,21 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 - 方案 D（否决）：MCP server
   - 否决理由：DOCX 渲染是重活不适合 MCP 工具语义；端到端工作流不是 MCP 适合的场景
 
+### v3 计算列实现的子选型（仅 v3 阶段决策）
+
+- **采纳**：MD `> 计算:` 自然语言块 + lead agent 调 LLM 生成 pandas 代码 + AST 白名单 + sandbox 烟雾验证
+  - 设计师学习成本最低；DeerFlow 已有 sandbox 与 Python 能力完美契合
+  - 安全性由 AST 白名单兜底；逻辑正确性由设计师可选示例 + LLM few-shot 提示词把控
+- 否决：内置函数白名单（yoy/mom/share/cagr/ytd/ratio）
+  - 表达力受限；遇到自定义比率（如行业特定的 EVA / WACC 衍生）就要加新函数
+  - 后续若发现 LLM 生成稳定性差，可作为 fallback；当前不引入
+- 否决：半结构化 DSL（`yoy_same(X)` 函数语法）
+  - 报表专家 review 指出"设计师不会主动写半结构化，永远只粘自然语言"
+  - 双模式增加 parser / lint / 测试矩阵复杂度
+- 否决：SQLBot 预声明 `supports_periods`（计算时校验某指标是否支持 yoy_same）
+  - v3 不强制；推迟到 Phase 2 真实查数据时由 SQLBot 客户端返错处理
+  - 避免给当前 v3 上线增加 SQLBot 端的 schema 改动依赖
+
 ## 架构
 
 ```
@@ -67,14 +101,21 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 │ ├── SKILL.md            ← SkillActivationMiddleware 加载 │
 │ ├── README.md           ← 配置说明                        │
 │ ├── .env.example        ← SQLBOT_BASE_URL/SQLBOT_API_KEY │
+│ ├── codegen_prompts/         ← v3：计算列代码生成提示词模板  │
+│ │   ├── system.md                                          │
+│ │   └── examples.md                                        │
 │ └── scripts/                                                │
 │     ├── sqlbot_client.py        ← SQLBot REST 客户端 (mock)│
-│     ├── md_lint.py              ← 输入校验                   │
-│     ├── parse_md.py             ← MD → ReportDoc AST        │
+│     ├── md_lint.py              ← 输入校验（v3 扩 lint 规则）│
+│     ├── parse_md.py             ← MD → ReportDoc AST（v3 识别 data-unit/计算块）│
 │     ├── match_indicators.py     ← L1/L2/L3 匹配流水线       │
+│     ├── compute_ir.py           ← v3：> 计算: 块 LLM IR 提取  │
+│     ├── compute_codegen.py      ← v3：pandas 代码生成        │
+│     ├── compute_validator.py    ← v3：AST 白名单 + 烟雾验证   │
+│     ├── unit_converter.py       ← v3：Decimal 域换算         │
 │     ├── generate_descriptions.py ← 描述生成                  │
-│     ├── render_markdown.py      ← 回填映射                  │
-│     ├── render_docx.py          ← python-docx 渲染           │
+│     ├── render_markdown.py      ← 回填映射（v3 加单位副标 / computed 标记）│
+│     ├── render_docx.py          ← python-docx 渲染（v3 表头副标）│
 │     ├── retry.py                ← 通用重试装饰器             │
 │     ├── indicator_cache.py      ← 内存+持久化匹配缓存        │
 │     └── report_style.json       ← DOCX 样式定义             │
@@ -96,6 +137,7 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 │ ├── report.md                                                │
 │ ├── report.docx                                              │
 │ ├── report.json                                              │
+│ ├── report.computed.py    (v3，仅当有计算列时)                │
 │ ├── report.match.log                                        │
 │ └── report.status.json                                      │
 └──────────────────────────────────────────────────────────┘
@@ -110,13 +152,20 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 | JSON 输出 | ✅ | ✅ |
 | Markdown 输出（回填映射） | ✅ | ✅ |
 | DOCX 输出（python-docx） | ✅ | ✅ |
+| **v3** 单位声明（data-unit）| ✅ | ✅ |
+| **v3** 单位写入 JSON / DOCX 表头副标 | ✅ | ✅ |
+| **v3** 计算列声明 + LLM IR 提取 | ✅ | ✅ |
+| **v3** LLM 生成 pandas 计算代码 + AST/签名/烟雾/示例验证 | ✅ | ✅ |
+| **v3** 用真实数据跑 `report.computed.py` 得出计算列数值 | ❌ | ✅ |
+| **v3** 单位换算（Decimal 域）填进 DOCX cell | ❌ | ✅ |
 | **PDF 输出（reportlab）** | ❌ | ✅ |
 | **数据查询（SQLBot 数据 API）** | ❌ | ✅ |
 | 匹配结果持久化缓存（跨会话） | ⚠️ 内存级 | ✅ 文件级 |
 | 报表模板系统 | ❌ | ✅ |
 | Embedding 语义匹配（替代置信度猜值）| ❌ | ✅ |
+| **v3** 滚动 N 月 / 移动平均 / 跨表关联计算 | ❌ | ✅ |
 
-## Lead Agent 10 步流水线
+## Lead Agent 12 步流水线（v3 新增 step 6/7/10）
 
 ```
 [1] 读取 MD 文件
@@ -124,35 +173,64 @@ DeerFlow 当前没有「报表生成」能力。报表设计人员目前只能�
 [2] 调用 md_lint.py 校验格式
        - 检查 {{}} 标记是否成对
        - 检查 HTML table 是否闭合
+       - v3：检查 data-unit 枚举、计算块格式、计算列指引完整性
        - 报错则中断并列出错误
 [3] 解析 MD → in-memory AST
        ReportDoc {
          title, sections[], all_indicators: set
          Section { title, reports[] }
          Report {
-           title, description, indicators, header_html, data_rows
+           title, description, indicators, header_html, data_rows,
+           computed_specs: ComputedSpec[],   # v3
+         }
+         Th {
+           text, is_indicator, chinese,
+           data_unit?: str,                  # v3
+           is_computed: bool                 # v3
          }
        }
-[4] 批量查 SQLBot 候选
+[4] 批量查 SQLBot 候选（仅非计算列指标）
        python sqlbot_client.py search --keywords "营业收入,营业成本,..."
        输出: { "营业收入": [Indicator, ...], ... }
-[5] L1 精确匹配（中文名完全相等）
-       matched["营业收入"] = Indicator(code="revenue", ...)
-       同时查 indicator_cache（命中跳过 LLM）
-[6] L2 模糊匹配（LLM 选 top-1）
-       对每个未匹配指标，**单次 LLM 调用输出 JSON 数组**（批处理）
-       含幻觉校验：返回 code 必须严格在候选列表里
-       若 confidence < 0.6 → 进入 L3 候选池
-[7] L3 歧义中断（如有）
-       lead agent 原生 ask_clarification(...)（ClarificationMiddleware 拦截）
-       用户回答后 lead agent 自动恢复，继续 step 8
+[5] L1/L2/L3 匹配（仅非计算列）
+       L1 精确匹配（中文名完全相等） + 查缓存
+       L2 模糊匹配（LLM 选 top-1）+ 幻觉校验
+       L3 lead agent 原生 ask_clarification（如有歧义）
+[6] ★ v3：计算列 IR 提取与 base_indicators 绑定
+       a) lead agent 一次性把所有 ComputedSpec.prompt 拼成一个 batched LLM 调用，
+          每条返回 {formula_repr, base_indicators_zh, periods}
+       b) base_indicators_zh 必须能在 step 5 已匹配的 indicator_mappings 里找到，
+          否则该计算列标 F12 失败（其他列继续）
+       c) 把已匹配指标的 code 填入 base_indicators[].code
+       d) 推断 base_indicators[].periods（current/yoy_same/prev_period/ytd）
+[7] ★ v3：计算列代码生成 + 验证
+       对每个 ComputedSpec：
+         a) lead agent 调 LLM 生成 compute_<hash8>(df: pd.DataFrame) -> pd.Series
+            （同一次 prompt 让 LLM 一并返回 3 行烟雾数据）
+         b) AST 白名单：仅允许 BinOp / UnaryOp / Subscript / Call(限定到 df.* / pd.* / np.*)
+            / Name / Constant / IfExp。禁 Import / ImportFrom / Attribute(os/sys/subprocess/socket/__builtins__) / Global
+         c) 签名检查：函数名匹配 compute_<hash8>，参数 (df: pd.DataFrame)，返回 pd.Series
+         d) 烟雾跑：sandbox 内组装 DataFrame，跑函数，assert isinstance(out, pd.Series)
+         e) 若设计师写了 .示例: 组装对应 DataFrame，跑函数，math.isclose(out, expected, rel_tol=1e-6)
+         f) 任意一步失败 → 重试 1 次（附错误信息给 LLM）→ 仍失败 → 跳过该列，标
+            compute_validation_failed / compute_smoke_failed，其他列继续
+         g) 全部 compute 函数追加到 report.computed.py
+       Phase 1 不跑真数据，验证后即结束本步
 [8] LLM 生成结构化描述
        description_zh = 原中文（保留）
        description_en = LLM 翻译（仅用于 JSON 字段，DOCX 默认不用）
 [9] 组装 JSON 输出
-[10] 渲染 DOCX（用 description_zh）+ 回填 MD
+       含 indicator_mappings（含 is_computed、display_unit、scale_factor、compute_spec）
+       含 computed_code 顶层字段（仅当有计算列时）
+[10] ★ v3：单位换算（仅 render 阶段）
+       Phase 1：raw 数据为示例值/无真实数据。把 display_unit、scale_factor 写入 JSON，
+       DOCX 渲染时在表头追加副标。
+       Phase 2：拉真实数据 → 按 Decimal 域换算 → 写入 DOCX cell。
+[11] 渲染 DOCX（含 v3 表头副标 + scale 后的数值）
        python render_docx.py --json report.json --style report_style.json
+[12] 回填 MD
        python render_markdown.py --json report.json --original {user_md}
+       计算列在回填 MD 中显示 `{{营收同比}} (computed)` 而非 (`code`)
 ```
 
 ### 续跑语义
@@ -161,15 +239,16 @@ Phase 1 不需要手写 checkpoint——LangGraph checkpointer 自动持久化 l
 
 `SummarizationMiddleware` 在 token 累积到阈值时自动总结老消息，确保长流程不爆上下文。
 
-### SKILL.md 关键内容（草稿）
+### SKILL.md 关键内容（草稿，v3 更新到 12 步）
 
 ```markdown
 ---
 name: sqlbot-report
-version: 1.0.0-20260622
+version: 1.1.0-20260623
 description: |
   根据用户上传的带 {{中文指标}} 标记的 Markdown 报表样例，
   匹配 SQLBot 指标库的中文→英文代码，生成 JSON/Markdown/DOCX。
+  v1.1 新增：单位声明（元/万元/亿元）、计算列（同比/环比/毛利率等 LLM 生成 pandas 代码）。
 
   Triggers: "生成报表", "用 SQLBot 指标生成报告", "根据这个 MD 出报表",
   "根据 SQLBot 指标库生成 DOCX"
@@ -180,32 +259,40 @@ description: |
 你是 DeerFlow 的 SQLBot 报表生成助手。用户上传一份带 `{{指标}}` 标记的
 Markdown 报表样例，你要把它处理成结构化 JSON + DOCX。
 
-## 工作流（10 步，每次执行都按顺序）
+## 工作流（12 步，每次执行都按顺序）
 
 1. 读取 `/mnt/user-data/uploads/{user_md}`（用户上传路径）
 2. 跑 `python /mnt/skills/public/sqlbot-report/scripts/md_lint.py <md>`
 3. 跑 `python /mnt/skills/public/sqlbot-report/scripts/parse_md.py <md>`
-   → 得到 ReportDoc AST（JSON）
-4. 收集所有 `{{指标}}` 去重，跑：
+   → 得到 ReportDoc AST（JSON），含 data_unit、computed_specs、is_computed
+4. 收集所有非计算列 `{{指标}}` 去重，跑：
    `python /mnt/skills/public/sqlbot-report/scripts/sqlbot_client.py search --keywords "k1,k2,..."`
-5. L1 精确匹配（中文名 == SQLBot.name_cn）
-6. L2 模糊匹配：调 LLM，对未匹配指标**批量**输出 JSON 数组
-   - 每个候选含 chinese, code, confidence
-   - 强校验：返回的 code 必须**在候选列表里**
-   - confidence < 0.6 且 top1-top2 < 0.1 → 加入 L3 池
-7. L3 歧义：调 ask_clarification 工具（lead agent 原生）
-   - options 列出候选的中文名 + code + 简短描述
-   - 用户回答后**自动恢复**
+5. L1 + L2 + L3 匹配（仅非计算列）；同 v1 流程
+6. **v3** 计算列 IR 提取（batched LLM）：
+   - 输入：所有 ComputedSpec.prompt（自然语言公式）+ 表头 `{{}}` 指标的中英映射
+   - 输出：每条 {formula_repr, base_indicators_zh, periods}
+   - 校验 base_indicators_zh 必须在已匹配指标里；否则该列标 F12
+7. **v3** 计算列代码生成 + 验证（按列循环）：
+   - 调 LLM 生成 `compute_<hash8>(df: pd.DataFrame) -> pd.Series` 并要求同时返回 3 行烟雾数据
+   - AST 白名单校验
+   - 签名校验
+   - sandbox 烟雾跑：assert isinstance(out, pd.Series)
+   - 若有 .示例：再跑示例 assert
+   - 失败重试 1 次后仍失败 → 跳过该列，标 compute_*_failed，其他列继续
+   - 成功 → 追加到 `/mnt/user-data/outputs/{thread_id}/report.computed.py`
 8. 描述生成：保留中文原描述，`description_en` 由 LLM 生成（仅用于 JSON 字段）
-9. 组装 JSON：跑 `python scripts/match_indicators.py --assemble --in <parsed> --out <matched> --out <final>`
-10. 渲染：并行跑 `render_docx.py` + `render_markdown.py`
+9. 组装 JSON：跑 `python scripts/match_indicators.py --assemble`，含 v3 字段
+10. **v3** 单位换算：Phase 1 仅写入 display_unit + scale_factor，不换算数据
+11. 渲染 DOCX：表头加单位副标，数值按 data_type + scale_factor 格式化
+12. 回填 MD：`{{营业收入}}` → `营业收入 (\`revenue\`) (万元)`；`{{营收同比}}` → `营收同比 (computed)`
 
 ## 产出文件（写到 /mnt/user-data/outputs/{thread_id}/）
 
-- `report.json` — 结构化 JSON
+- `report.json` — 结构化 JSON（含 v3 单位 + 计算列字段）
 - `report.md` — 回填映射的 Markdown
-- `report.docx` — DOCX 文档
-- `report.match.log` — 决策日志
+- `report.docx` — DOCX 文档（含 v3 表头单位副标）
+- **v3** `report.computed.py` — LLM 生成的 pandas 计算函数（仅当有计算列）
+- `report.match.log` — 决策日志（含 v3 代码生成与验证全文）
 - `report.status.json` — 最终 status
 
 ## 关键约束
@@ -215,7 +302,11 @@ Markdown 报表样例，你要把它处理成结构化 JSON + DOCX。
 - LLM 返回的 code 必须强校验，不在候选列表的视作幻觉
 - 同一 thread 内匹配的指标自动进入内存缓存，避免重复 LLM
 - DOCX 表格多级表头用 python-docx cell.merge() 合并
-- 描述、匹配、渲染的每步决定都写到 `report.match.log`
+- 描述、匹配、渲染、**v3 代码生成与验证**的每步决定都写到 `report.match.log`
+- **v3** 计算列代码生成 + 烟雾跑必须**在 sandbox 内**，禁直接在 lead agent 进程 exec()
+- **v3** 计算列 AST 白名单遇到 Import/Attribute(os/sys/subprocess) 一律拒绝
+- **v3** 单位换算用 `decimal.Decimal`，禁 float
+- **v3** Phase 1 不查真实数据；计算列代码生成的输出仅是"能跑+签名对+示例对"的占位证据
 ```
 
 ## 输入契约：Markdown 报表样例
@@ -232,6 +323,7 @@ section:
 report:
   header: "### 报表: <中文标题>"
   description_block: "> 描述: <中文提示词，多行>"
+  compute_block?: "> 计算: <计算列定义，多行>"   # v3 新增，可选
   table: <HTML table>
 
 table:
@@ -239,14 +331,93 @@ table:
   tbody: rows+
   row: th+ | td+
 
+th:
+  attrs: { data-unit?: "<元|万元|亿元|%|百分点|个|次|自定义>" }   # v3 新增
+  content: text | "{{<中文指标名>}}"
+
 indicator_marker: "{{<中文指标名>}}"
   # 严格规则：
   # - 在 <th> 内：表头是"需映射"的指标
   # - 在 <td> 内：数据值，无需映射
   # - 在 {{}} 外：标题/描述/分类，无需映射
+  # - 计算列也用 {{}}，但中文名同时出现在 compute_block 左侧，parser 标 is_computed=true
 ```
 
-### Lint 规则（md_lint.py 强制）
+### v3 新增：列级单位声明 `data-unit`
+
+设计师在 `<th>` 上加 `data-unit` 属性，声明该列**显示单位**：
+
+```html
+<thead>
+  <tr>
+    <th>季度</th>
+    <th data-unit="万元">{{营业收入}}</th>
+    <th data-unit="万元">{{营业成本}}</th>
+    <th data-unit="%">{{毛利率}}</th>
+  </tr>
+</thead>
+```
+
+合法值（lint WARN 之外的视为自定义字符串，照原样写入 JSON）：
+
+| data-unit | scale_factor (Decimal) | 含义 |
+|-----------|------------------------|------|
+| `元` | `Decimal("1")` | SQLBot 原始即此单位 |
+| `万元` | `Decimal("10000")` | 显示时除以 1e4 |
+| `亿元` | `Decimal("100000000")` | 显示时除以 1e8 |
+| `%` | `Decimal("0.01")` | 0.366 显示为 36.60% |
+| `百分点` | `Decimal("1")` | 已经是百分点单位（如同比增加 3 个百分点）|
+| `个` / `次` | `Decimal("1")` | 计数单位 |
+
+**转换语义**（render 阶段，Phase 2 用数据回填时启用）：
+
+```
+display_value = Decimal(raw_value) * Decimal(raw_unit_scale) / Decimal(display_unit_scale)
+# raw_unit_scale 来自 SQLBot Indicator.unit
+# display_unit_scale 来自 MD 的 data-unit
+```
+
+Phase 1 无真实数据查询，仅把 `display_unit` + `scale_factor` 写入 JSON `indicator_mappings`，并在 DOCX 表头副标显示 `中文名 (单位)`。
+
+**精度策略**：换算和展示一律在 `decimal.Decimal` 域进行。DOCX 输出由 `display_format`（默认按 `data_type` 推导，如 `#,##0.00` / `0.0%`）控制小数位数；scale_factor 只负责量纲，不负责精度。
+
+### v3 新增：计算块 `> 计算:` 与虚拟指标
+
+设计师在每个 `> 描述:` 块下方可选添加 `> 计算:` 块，用**自然语言**写公式：
+
+```markdown
+### 报表: 季度财务概览
+
+> 描述: 2024 年各季度营收成本对比，重点关注同比环比变化。
+> 计算:
+>   营收同比 = 本期营业收入减去年同期再除同期
+>   成本同比 = 本期营业成本减去年同期再除同期
+>   毛利率 = (营业收入 - 营业成本) / 营业收入
+>   营收同比.示例: 营业收入[current=200, yoy_same=100] -> 1.0
+```
+
+**核心约定**：
+- `> 计算:` 块每一行：`<虚拟指标名> = <自然语言公式>`
+- 计算列的表头**也用 `{{}}`**，但同名出现在 `> 计算:` 左侧 → parser 标 `is_computed: true`，不发到 SQLBot
+- 公式右侧是**自由文本**，由 lead agent 调 LLM 提取出结构化中间表示（IR）：base_indicators + period tags + formula_repr
+- 公式右侧引用的中文指标必须能在表头 `{{}}` 中找到（同名匹配），否则 lint ERROR
+- 时期 tag 由 LLM 推断："本期/当期"→`current`，"去年同期/同期"→`yoy_same`，"上期/上月/上季度/上年"→`prev_period`，"年初至今/累计"→`ytd`
+- v3 不引入 DSL/算子白名单/半结构化语法，公式形式由设计师写得舒服为准
+
+**示例值（可选，不阻塞）**：
+- 格式：`<虚拟指标名>.示例: <SQLBot指标名>[period1=val, period2=val, ...] -> <期望值>`
+- 同一虚拟指标可写多行示例
+- Phase 1 验证时若有示例，sandbox 跑生成的 pandas 函数并 `assert math.isclose(out, expected, rel_tol=1e-6)`
+- 没写示例的列只跑类型/形状烟雾测试，不 assert 数值
+
+### 多表头里计算列重名（v3 决策：WARN 不 ERROR）
+
+如同名计算列出现在不同表头分支（如外层"同比"下面同时有"营业收入"和"营业成本"两个子列），建议起**唯一中文名**（"营收同比"/"成本同比"）。
+
+- lint WARN：同名虚拟指标出现 > 1 次 → 提示设计师起更精确的名字
+- parser 兜底：以 "表头路径前缀 + 列名" 生成内部 ID（仅用于 JSON `code` 字段去重，不暴露给设计师）
+
+### Lint 规则（md_lint.py 强制 — v3 扩展）
 
 | 规则 | 等级 |
 |------|------|
@@ -257,6 +428,13 @@ indicator_marker: "{{<中文指标名>}}"
 | 多级表头用 `<th rowspan/colspan>`，不用 markdown 表格 | WARN |
 | 指标名应**简洁**（≤8 个汉字） | WARN |
 | 同一中文指标在多张表出现时建议全名一致 | WARN |
+| **v3** `data-unit` 在枚举值（`元`/`万元`/`亿元`/`%`/`百分点`/`个`/`次`）内 | WARN |
+| **v3** `> 计算:` 块每行格式 `<name> = <expr>`，长度 1-200 字 | ERROR |
+| **v3** 表头计算列名必须出现在 `> 计算:` 左侧 | ERROR |
+| **v3** `> 计算:` 左侧名必须出现在表头 `{{}}` | WARN（未用公式）|
+| **v3** `> 计算:` 公式右侧引用的中文指标名必须在表头 `{{}}` 中存在 | ERROR（由 IR 提取后校验） |
+| **v3** 多表头里同名虚拟指标多次出现 | WARN |
+| **v3** `<名>.示例:` 格式 `<指标>[k=v,...] -> 数值` | WARN（解析失败的示例丢弃，不阻塞）|
 
 ## 输出契约 1：JSON Schema（v2，扩字段）
 
@@ -328,13 +506,13 @@ indicator_marker: "{{<中文指标名>}}"
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["chinese", "code", "confidence"],
+                    "required": ["chinese", "code", "confidence", "is_computed"],
                     "properties": {
                       "chinese": {"type": "string"},
                       "code": {"type": "string"},
                       "name_en": {"type": "string"},
                       "category": {"type": "string"},
-                      "unit": {"type": "string"},
+                      "unit": {"type": "string", "description": "SQLBot 返回的原始单位（raw_unit）"},
                       "data_type": {
                         "enum": ["number", "currency", "percentage", "ratio", "text", "date"],
                         "description": "决定 DOCX 数字格式"
@@ -351,7 +529,70 @@ indicator_marker: "{{<中文指标名>}}"
                       "last_updated": {"type": "string", "format": "date-time"},
                       "version": {"type": "string"},
                       "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                      "match_method": {"enum": ["exact", "fuzzy", "user_clarification", "cache_hit"]}
+                      "match_method": {"enum": ["exact", "fuzzy", "user_clarification", "cache_hit", "computed"]},
+                      "is_computed": {"type": "boolean", "description": "v3：true 表示虚拟指标，由 compute_spec 定义"},
+                      "display_unit": {
+                        "type": "string",
+                        "description": "v3：MD `data-unit` 声明的显示单位"
+                      },
+                      "scale_factor": {
+                        "type": "string",
+                        "description": "v3：Decimal 字符串表示。display_value = raw_value * raw_unit_scale / display_unit_scale"
+                      },
+                      "compute_spec": {
+                        "type": "object",
+                        "description": "v3：仅 is_computed=true 时存在",
+                        "required": ["prompt", "base_indicators", "code_file", "function", "validation"],
+                        "properties": {
+                          "prompt": {"type": "string", "description": "设计师写的自然语言公式原文"},
+                          "formula_repr": {
+                            "type": "string",
+                            "description": "LLM 提取的结构化中间表示，形如 (current(revenue) - yoy_same(revenue)) / yoy_same(revenue)"
+                          },
+                          "parser_mode": {
+                            "enum": ["natural_language"],
+                            "description": "v3 仅支持自然语言模式（半结构化已砍）"
+                          },
+                          "base_indicators": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "required": ["chinese", "code", "periods"],
+                              "properties": {
+                                "chinese": {"type": "string"},
+                                "code": {"type": "string"},
+                                "periods": {
+                                  "type": "array",
+                                  "items": {"enum": ["current", "yoy_same", "prev_period", "ytd"]}
+                                }
+                              }
+                            }
+                          },
+                          "code_file": {"type": "string", "const": "report.computed.py"},
+                          "function": {"type": "string", "description": "如 compute_<hash8>"},
+                          "examples": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "inputs": {"type": "object", "additionalProperties": {"type": "string"}},
+                                "expected": {"type": "string", "description": "Decimal 字符串"}
+                              }
+                            }
+                          },
+                          "validation": {
+                            "type": "object",
+                            "required": ["ast_check", "signature_check", "smoke_run"],
+                            "properties": {
+                              "ast_check": {"enum": ["passed", "failed", "skipped"]},
+                              "signature_check": {"enum": ["passed", "failed"]},
+                              "smoke_run": {"enum": ["passed", "failed", "skipped"]},
+                              "example_check": {"enum": ["passed", "failed", "skipped", "not_provided"]},
+                              "failure_reason": {"type": "string"}
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -373,7 +614,23 @@ indicator_marker: "{{<中文指标名>}}"
         "unmatched": {"type": "array", "items": {"type": "string"}},
         "cache_hits": {"type": "integer", "description": "缓存命中次数"},
         "llm_calls": {"type": "integer", "description": "LLM 调用次数（含 batch）"},
-        "duration_seconds": {"type": "number"}
+        "duration_seconds": {"type": "number"},
+        "computed_columns_count": {"type": "integer", "description": "v3：虚拟指标数"},
+        "computed_validation_failures": {"type": "integer", "description": "v3：AST/签名/烟雾/示例失败数"},
+        "code_generation_llm_calls": {"type": "integer", "description": "v3：用于代码生成的 LLM 调用数"}
+      }
+    },
+    "computed_code": {
+      "type": "object",
+      "description": "v3：lead agent 生成的 pandas 计算代码描述。仅当存在计算列时出现。",
+      "properties": {
+        "file": {"type": "string", "const": "report.computed.py"},
+        "size_bytes": {"type": "integer"},
+        "functions": {"type": "array", "items": {"type": "string"}},
+        "imports_allowed": {"type": "array", "items": {"type": "string"}, "default": ["pandas", "numpy"]},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "generator_model": {"type": "string"},
+        "validation_log": {"type": "string", "const": "report.match.log"}
       }
     }
   }
@@ -394,6 +651,20 @@ indicator_marker: "{{<中文指标名>}}"
 | `metadata.cache_hits` / `llm_calls` | 性能监控 |
 | `time_range` (top-level) | 报表级时间范围 |
 
+### v3 schema 相比 v2 增字段
+
+| 新字段 | 业务价值 |
+|--------|---------|
+| `indicator_mappings[].is_computed` | 区分虚拟指标和 SQLBot 指标 |
+| `indicator_mappings[].display_unit` | 设计师声明的显示单位 |
+| `indicator_mappings[].scale_factor` | 与 `raw_unit` 协同的换算系数（Decimal 字符串）|
+| `indicator_mappings[].compute_spec` | 虚拟指标完整规格：自然语言提示词、LLM 提取的 IR、base_indicators、生成函数、示例、验证结果 |
+| `match_method: computed` | 标记计算列（match_rate 计算时分母含计算列）|
+| `metadata.computed_columns_count` | 计算列数量统计 |
+| `metadata.computed_validation_failures` | 失败的计算列数 |
+| `metadata.code_generation_llm_calls` | 代码生成 LLM 调用数（独立于匹配 LLM）|
+| `computed_code` (top-level) | 生成的 `report.computed.py` 文件元信息 |
+
 ## 输出契约 2：DOCX 结构
 
 ```
@@ -405,9 +676,23 @@ report.docx:
 │       ├── 数据表 (python-docx Table)
 │       │   ├── 表头：多级用 cell.merge() 合并
 │       │   ├── 表头单元格：粗体 + 底色 (#F0F0F0)
-│       │   └── 数据单元格：根据 data_type 应用格式（千分位/百分比/货币）
-│       └── 备注 (Indicator 未映射时显示 ⚠️UNMAPPED)
+│       │   ├── 表头副标 (v3)：中文名下方一行小字显示 "(单位)"，如 "(万元)" / "(%)"
+│       │   └── 数据单元格：根据 data_type + scale_factor 应用格式（千分位/百分比/货币）
+│       └── 备注 (Indicator 未映射时显示 ⚠️UNMAPPED；计算列验证失败显示 ⚠️COMPUTE_FAILED)
 ```
+
+### v3 表头副标渲染规则
+
+```
+┌────────────────┐
+│  营业收入       │  ← Heading 文本（粗体）
+│  (万元)         │  ← 单位副标（同 cell，小一号字 + 灰色 #666666）
+└────────────────┘
+```
+
+- 仅当 `display_unit` 不为空时渲染副标
+- 副标与主标在同一 cell，用换行符 + run-level 字号控制（不另起 cell）
+- 副标字号：主标 × 0.8；颜色 #666666
 
 ### 样式配置 `report_style.json`
 
@@ -440,19 +725,19 @@ report.docx:
 
 ## 输出契约 3：回填 MD
 
-把 `{{营业收入}}` 替换成 `营业收入 (\`revenue\`)`：
+把 `{{营业收入}}` 替换成 `营业收入 (\`revenue\`) (万元)`（v3 加单位副标）：
 
 ```markdown
 | 季度 | 财务指标 || 增长率 ||
-|      | 营业收入 (`revenue`) | 营业成本 (`operating_cost`) | 环比 (`qoq_growth`) | 同比 (`yoy_growth`) |
+|      | 营业收入 (`revenue`) (万元) | 营业成本 (`operating_cost`) (万元) | 营收同比 (computed) (%) | 成本同比 (computed) (%) |
 |------|---------|---------|------|------|
-| 2024 Q1 | 1450 | 920 | 20.8% | 12.5% |
+| 2024 Q1 | 14500 | 9200 | 12.5% | 10.2% |
 ```
 
-未匹配项标 `⚠️UNMAPPED`：
+未匹配项标 `⚠️UNMAPPED`，计算列代码生成失败标 `⚠️COMPUTE_FAILED`：
 
 ```markdown
-| {{营业收入}} (revenue) | {{新增指标}} ⚠️UNMAPPED |
+| {{营业收入}} (revenue) (万元) | {{新增指标}} ⚠️UNMAPPED | {{自定义比率}} (computed) ⚠️COMPUTE_FAILED |
 ```
 
 ## 决策日志 `report.match.log`
@@ -466,6 +751,19 @@ report.docx:
 [2026-06-22 10:23:46] L2 hallucination_check: rejected code="unknown_growth" (not in candidates)
 [2026-06-22 10:23:50] L3 澄清: {{增长率}} 用户选择 "yoy_growth" (3 选项中)
 [2026-06-22 10:23:51] unmatched: {{行业平均}} (SQLBot 中无候选)
+[2026-06-22 10:23:52] v3 unit: {{营业收入}} display_unit=万元 scale_factor=10000 raw_unit=元
+[2026-06-22 10:23:52] v3 unit: {{毛利率}} display_unit=% scale_factor=0.01 (data_type=percentage)
+[2026-06-22 10:23:53] v3 compute IR (batched LLM): 3 columns extracted
+[2026-06-22 10:23:53] v3 compute IR: 营收同比 → formula=(current(revenue) - yoy_same(revenue)) / yoy_same(revenue) periods=[current, yoy_same]
+[2026-06-22 10:23:53] v3 compute IR: 成本同比 → formula=(current(operating_cost) - yoy_same(operating_cost)) / yoy_same(operating_cost)
+[2026-06-22 10:23:53] v3 compute IR: 毛利率 → formula=(current(revenue) - current(operating_cost)) / current(revenue)
+[2026-06-22 10:23:54] v3 codegen LLM (营收同比): generated 6 lines + 3 smoke rows
+[2026-06-22 10:23:54] v3 ast_check (营收同比): passed (only BinOp/Subscript/Call(df.xs))
+[2026-06-22 10:23:54] v3 signature_check (营收同比): passed (def compute_a1b2c3d4(df: pd.DataFrame) -> pd.Series)
+[2026-06-22 10:23:55] v3 smoke_run (营收同比): passed (isinstance(out, pd.Series), len=3)
+[2026-06-22 10:23:55] v3 example_check (营收同比): passed (out[0]=1.0 ≈ expected 1.0)
+[2026-06-22 10:23:56] v3 codegen LLM (毛利率): generated, all checks passed
+[2026-06-22 10:23:57] v3 report.computed.py written: 3 functions, 1247 bytes
 ```
 
 ## 错误处理 & 失败模式
@@ -483,6 +781,11 @@ report.docx:
 | F9 | DOCX 渲染失败 | python-docx 异常 | 返回 JSON + log，flag `render_error`，用户可手动重跑 `render_docx.py` |
 | F10 | LLM 幻觉 | LLM 返回 code 不在候选列表 | 拒绝该结果，回退 L1 重试；仍失败 → 进 L3 |
 | F11 | 上下文爆 | token 累积超阈值 | SummarizationMiddleware 自动总结老消息 |
+| **F12** | v3：计算列 base 未匹配 | `> 计算:` 公式引用的中文指标不在表头 `{{}}` 已匹配集合中 | 该计算列标 `compute_base_missing`，写 log，继续其他列；status=partial |
+| **F13** | v3：LLM 代码生成失败 | LLM API 失败 / 返回非 Python 文本 | 重试 1 次（附最后错误信息）；仍失败 → 该列标 `compute_codegen_failed`，继续其他列；status=partial |
+| **F14** | v3：AST 校验失败 | 含 Import / Attribute 黑名单 / 非白名单算子 | 重试 1 次（提示模型只用白名单）；仍失败 → 该列标 `compute_validation_failed`，继续 |
+| **F15** | v3：烟雾跑或示例 assert 失败 | sandbox 跑出来类型不对 / 数值与示例不匹配 | 重试 1 次（附差异信息）；仍失败 → 该列标 `compute_smoke_failed`，继续 |
+| **F16** | v3：单位声明与 SQLBot raw_unit 不一致 | display_unit 与 raw_unit 单位族不同（如 `元` ↔ `%`）| WARN 不阻断，按 display_unit 写入，log 提示；Phase 2 拉数据时若 raw_unit 数值无法换算到 display_unit（如 元↔个）→ 升级为 F9 渲染错误 |
 
 ### 重试装饰器
 
@@ -585,6 +888,7 @@ class IndicatorCache:
 ├── report.md
 ├── report.docx
 ├── report.json
+├── report.computed.py    # v3：LLM 生成的 pandas 计算函数（仅当有计算列时）
 ├── report.match.log
 └── report.status.json
 ```
@@ -605,15 +909,19 @@ class IndicatorCache:
 
 | 文件 | 覆盖 |
 |------|------|
-| `test_md_lint.py` | 合法 + 各种 lint 错误 |
-| `test_parse_md.py` | 单/多章节、多级表头、特殊字符、空报表 |
+| `test_md_lint.py` | 合法 + 各种 lint 错误 + **v3** data-unit / 计算块 / 示例语法 |
+| `test_parse_md.py` | 单/多章节、多级表头、特殊字符、空报表 + **v3** data-unit / computed_specs / 虚拟指标识别 |
 | `test_sqlbot_client.py` | 用 `pytest-httpx` mock HTTP（5xx/4xx/timeout）|
-| `test_match_indicators.py` | L1/L2 + 幻觉校验 + 批调用 + L3 |
+| `test_match_indicators.py` | L1/L2 + 幻觉校验 + 批调用 + L3 + **v3** 跳过 is_computed |
 | `test_indicator_cache.py` | 缓存命中、缓存写入、并发安全 |
-| `test_render_docx.py` | 读回 docx 验证 cell 合并、字体、底色、data_type 格式 |
-| `test_render_markdown.py` | `{{}}` 替换、unmapped 标记 |
+| `test_render_docx.py` | 读回 docx 验证 cell 合并、字体、底色、data_type 格式 + **v3** 表头单位副标 |
+| `test_render_markdown.py` | `{{}}` 替换、unmapped 标记 + **v3** computed 标记 + 单位副标 |
 | `test_retry.py` | 成功路径、失败重试、最终失败 |
 | `test_status.py` | 各失败场景下 status.json 字段 |
+| **`test_compute_ir.py`** | v3：LLM batched IR 提取；公式右侧引用校验；periods 推断 |
+| **`test_compute_codegen.py`** | v3：LLM mock 返回；代码生成；重试逻辑 F13 |
+| **`test_compute_validator.py`** | v3：AST 白名单（含 Import/Attribute 黑名单）；签名检查；烟雾数据 sandbox；示例 assert |
+| **`test_unit_conversion.py`** | v3：scale_factor (Decimal) 换算；DOCX 表头副标；data_type=percentage 联动 |
 
 ### 集成测试 `backend/tests/integration/sqlbot_report/`
 
@@ -626,6 +934,13 @@ class IndicatorCache:
 | `test_partial_unmapped.py` | 部分无候选 → F4 → status=partial |
 | `test_hallucination_rejection.py` | LLM 输出 code 不在候选 → 校验拒绝 + fallback |
 | `test_cache_effectiveness.py` | 同 thread 多次匹配，cache_hits > 0 |
+| **`test_computed_columns_happy.py`** | v3：全 L1 + 全计算列代码生成成功 → DOCX 含表头副标 |
+| **`test_computed_base_missing.py`** | v3：计算列引用未匹配指标 → F12 → status=partial |
+| **`test_computed_codegen_retry.py`** | v3：LLM 第一次输出非法 → 重试成功 |
+| **`test_computed_ast_rejected.py`** | v3：LLM 输出含 import os → AST 拒绝 → F14 |
+| **`test_computed_smoke_failed.py`** | v3：示例 assert 失败 → F15 |
+| **`test_unit_conversion_e2e.py`** | v3：mock SQLBot raw_unit=元 + MD data-unit=万元 → 校验 JSON/DOCX 字段 |
+| **`test_designer_examples.py`** | v3：MD 带示例 → 触发 example_check |
 
 集成测试用 mock SQLBot server（`pytest-httpx` + fixture 返回假数据）。
 
@@ -638,13 +953,20 @@ backend/tests/fixtures/sqlbot_report/
 │   ├── lint_error.md
 │   ├── multi_chapter.md
 │   ├── partial_unmapped.md
-│   └── l3_ambiguous.md
+│   ├── l3_ambiguous.md
+│   ├── computed_columns.md         # v3：含 > 计算: 块
+│   ├── computed_with_examples.md   # v3：含示例值
+│   ├── multi_header_computed.md    # v3：多级表头 + 计算列重名
+│   └── unit_conversion.md          # v3：含 data-unit 各种单位
 ├── mock_sqlbot/
 │   ├── indicators.json       # 模拟指标库（100+ 条，覆盖 5+ 业务域）
 │   └── search_responses.json # 含易混名（"营收" / "营业收入" / "营业总收入"）
 └── expected_outputs/
     ├── happy.json
-    └── partial_unmapped.json
+    ├── partial_unmapped.json
+    ├── computed_columns.json       # v3：含 compute_spec
+    ├── computed_columns.computed.py.regex # v3：用正则验证生成代码结构
+    └── unit_conversion.json        # v3：含 display_unit + scale_factor
 ```
 
 ### 覆盖率目标
@@ -666,10 +988,11 @@ backend/tests/fixtures/sqlbot_report/
 | E5 | 长流程（20 报表）→ 看 SummarizationMiddleware 是否触发 |
 | E6 | 中途退出 thread → 重进 → 看 LangGraph checkpointer 续跑 |
 
-## 改动清单（v2 实施时）
+## 改动清单（v2 + v3 增量）
 
 ### 新增文件
 
+**v2 已规划**：
 - `skills/public/sqlbot-report/SKILL.md`
 - `skills/public/sqlbot-report/README.md`
 - `skills/public/sqlbot-report/.env.example`
@@ -687,9 +1010,42 @@ backend/tests/fixtures/sqlbot_report/
 - `backend/tests/integration/sqlbot_report/` (7 个 test_*.py)
 - `backend/tests/fixtures/sqlbot_report/` (sample_md / mock_sqlbot / expected_outputs)
 
+**v3 新增**：
+- `skills/public/sqlbot-report/scripts/compute_ir.py` — `> 计算:` 块 LLM IR 提取
+- `skills/public/sqlbot-report/scripts/compute_codegen.py` — LLM 调用 + pandas 代码生成
+- `skills/public/sqlbot-report/scripts/compute_validator.py` — AST 白名单 + 签名检查 + sandbox 烟雾 + 示例 assert
+- `skills/public/sqlbot-report/scripts/unit_converter.py` — Decimal 域单位换算
+- `skills/public/sqlbot-report/codegen_prompts/system.md` — 代码生成系统提示词模板
+- `skills/public/sqlbot-report/codegen_prompts/examples.md` — 常见公式（同比/环比/毛利率/占比）few-shot 示例
+- `backend/tests/sqlbot_report/test_compute_ir.py`
+- `backend/tests/sqlbot_report/test_compute_codegen.py`
+- `backend/tests/sqlbot_report/test_compute_validator.py`
+- `backend/tests/sqlbot_report/test_unit_conversion.py`
+- `backend/tests/integration/sqlbot_report/test_computed_columns_happy.py`
+- `backend/tests/integration/sqlbot_report/test_computed_base_missing.py`
+- `backend/tests/integration/sqlbot_report/test_computed_codegen_retry.py`
+- `backend/tests/integration/sqlbot_report/test_computed_ast_rejected.py`
+- `backend/tests/integration/sqlbot_report/test_computed_smoke_failed.py`
+- `backend/tests/integration/sqlbot_report/test_unit_conversion_e2e.py`
+- `backend/tests/integration/sqlbot_report/test_designer_examples.py`
+- `backend/tests/fixtures/sqlbot_report/sample_md/computed_columns.md`
+- `backend/tests/fixtures/sqlbot_report/sample_md/computed_with_examples.md`
+- `backend/tests/fixtures/sqlbot_report/sample_md/multi_header_computed.md`
+- `backend/tests/fixtures/sqlbot_report/sample_md/unit_conversion.md`
+- `backend/tests/fixtures/sqlbot_report/expected_outputs/computed_columns.json`
+- `backend/tests/fixtures/sqlbot_report/expected_outputs/computed_columns.computed.py.regex`
+- `backend/tests/fixtures/sqlbot_report/expected_outputs/unit_conversion.json`
+
 ### 改动文件
 
 - `config.example.yaml` → `summarization` 节点确保开启（已存在，确认启用）
+- **v3** `skills/public/sqlbot-report/scripts/md_lint.py` — 新增 6 条 lint 规则
+- **v3** `skills/public/sqlbot-report/scripts/parse_md.py` — 识别 data-unit / 计算块 / 虚拟指标
+- **v3** `skills/public/sqlbot-report/scripts/match_indicators.py` — 跳过 is_computed=true 的指标
+- **v3** `skills/public/sqlbot-report/scripts/render_docx.py` — 表头副标 + Decimal 域 scale_factor 渲染
+- **v3** `skills/public/sqlbot-report/scripts/render_markdown.py` — 计算列 (computed) 标记 + 单位副标
+- **v3** `skills/public/sqlbot-report/scripts/report_style.json` — 表头副标字号/颜色配置
+- **v3** `skills/public/sqlbot-report/SKILL.md` — 10 步 → 12 步
 
 ### 不改动
 
@@ -702,6 +1058,18 @@ backend/tests/fixtures/sqlbot_report/
 
 ## SQLBot API 占位契约（待用户提供真实规格）
 
+**已确认**（用户口述，2026-06-23）：
+- SQLBot 对外是 **HTTP REST API**
+- 请求体为 **JSON 格式**，返回也为 JSON
+
+**待确认（PENDING）**：
+- 接口端点（`/search`, `/query`, `/indicator/<code>` ...）
+- 请求/响应 JSON 字段名
+- 鉴权方式（API key / Bearer / OAuth）
+- 是否支持「指标按时期参数返多期数据」（影响 Phase 2 同比/环比的查询设计；v3 在 `current/yoy_same/prev_period/ytd` tag 阶段不强依赖 SQLBot 预声明，把校验推迟到 Phase 2 实际拉数时）
+
+### Phase 1 mock 客户端结构（占位）
+
 ```python
 # SQLBOT_SPEC_PENDING — 真实 schema 待用户提供
 
@@ -711,7 +1079,7 @@ class Indicator:
     name_cn: str
     name_en: str
     category: str
-    unit: str
+    unit: str               # SQLBot 返回的原始单位（v3 称为 raw_unit）
     description: str
     # Phase 2 字段（当前 mock 返回 None）：
     # data_type: str | None
@@ -722,12 +1090,34 @@ class Indicator:
     # version: str | None
 
 class SQLBotClient:
-    def __init__(self, base_url: str, api_key: str): ...
-    def search_indicators(self, keyword: str, limit: int = 20) -> list[Indicator]: ...
-    def get_indicator(self, code: str) -> Indicator: ...
+    """
+    占位客户端：v3 Phase 1 仅暴露语义层（search / get_indicator）。
+    真实 HTTP REST 调用细节在拿到 SQLBot OpenAPI/接口文档后填充。
+    """
+    def __init__(self, base_url: str, api_key: str):
+        self._base_url = base_url
+        self._api_key = api_key
+
+    def search_indicators(self, keyword: str, limit: int = 20) -> list[Indicator]:
+        """Phase 1: 内置 fixture 命中。Phase 2: HTTP POST {base_url}/search {keyword}"""
+        ...
+
+    def get_indicator(self, code: str) -> Indicator:
+        """Phase 1: 内置 fixture 命中。Phase 2: HTTP GET {base_url}/indicator/{code}"""
+        ...
+
+    # Phase 2 才接入的真实数据查询接口（v3 暂留接口签名占位）
+    def query_data(
+        self,
+        code: str,
+        period: Literal["current", "yoy_same", "prev_period", "ytd"],
+        time_range: dict,   # 如 {"start": "2024-01-01", "end": "2024-03-31"}
+    ) -> list[dict]:
+        """v3 计算列：base_indicators × periods 的笛卡尔积都走这个查询"""
+        raise NotImplementedError("Phase 2")
 ```
 
-mock 实现（`sqlbot_client.py` 内的 `MockSQLBotClient`）返回固定 fixtures 数据，**仅用于开发和测试**。生产前必须替换为真实实现。
+mock 实现（`sqlbot_client.py` 内的 `MockSQLBotClient`）返回固定 fixtures 数据，**仅用于开发和测试**。生产前必须按真实 HTTP REST 规格替换。
 
 ## 风险与缓解
 
@@ -741,6 +1131,13 @@ mock 实现（`sqlbot_client.py` 内的 `MockSQLBotClient`）返回固定 fixtur
 | 中文表格单元格内换行 | DOCX 显示错乱 | parser 把 `\n` 转为段落而非单 cell 多行 |
 | LLM 幻觉编造 code | JSON 含不存在的 code | 强校验（不在候选列表直接拒绝 + log）|
 | 跨 thread 不缓存 | 同名指标重复 LLM | Phase 1 内存缓存（thread 内）；Phase 2 文件级缓存 |
+| **v3** LLM 生成 pandas 代码逻辑错（分子分母搞反）| 报表算错 | 鼓励设计师写示例值；烟雾跑 + 示例 assert；codegen_prompts/examples.md 提供 few-shot |
+| **v3** 设计师写自然语言公式歧义大 | LLM IR 提取错 | F12 失败标列，其他列继续；log 保留 LLM 输入输出供审计；后续可改 LLM model |
+| **v3** sandbox 没有 pandas | 验证步骤跑不起来 | `.env.example` 提示；启动时检查 sandbox image；缺包 → status=error reason=SANDBOX_MISSING_PANDAS |
+| **v3** 同名虚拟指标跨报表冲突 | 复用代码歧义 | code 用 `compute_<hash8>`（hash(报表名+中文名+formula)），自然避冲突 |
+| **v3** 单位换算精度（亿元 × 浮点）| DOCX 显示 0.150000000002 | scale_factor 用 Decimal；展示精度由 display_format 控制，与 scale_factor 解耦 |
+| **v3** 设计师 data-unit 与业务实际数据单位差 N 倍 | 报表数错 | DOCX 表头副标让设计师肉眼可见单位；F16 WARN；Phase 2 拉数后校验 raw_unit 兼容性 |
+| **v3** 计算列 `current/yoy_same/...` 在某些 SQLBot 指标上不支持 | Phase 2 拉数报错 | Phase 1 不阻断；Phase 2 拉数时若 SQLBot 不支持该 period → F12 升级，重新走澄清 |
 
 ## 不在 Phase 1 范围
 
@@ -751,13 +1148,22 @@ mock 实现（`sqlbot_client.py` 内的 `MockSQLBotClient`）返回固定 fixtur
 - 设计 GUI
 - 真实 SQLBot API 集成（用 mock 占位）
 - Embedding 语义匹配
+- **v3** 用真实数据跑生成的计算代码
+- **v3** 单位换算在数据维度落地（display_unit 仅写 JSON，不影响数值）
+- **v3** 滚动窗口（rolling_N_month）/ 移动平均 / 跨表关联（不同 SQLBot code 的复合）
 
 ## 后续 Phase 计划
 
-- **Phase 2**：PDF 渲染（reportlab）+ 数据查询 + 文件级匹配缓存 + Embedding 语义匹配
-- **Phase 3**：报表模板系统（部门级样式库）
-- **Phase 4**：设计 GUI（让设计师不写 HTML）
-- **Phase 5**：跨企业复用 / 多租户指标隔离
+- **Phase 2**：
+  - PDF 渲染（reportlab）
+  - 真实 SQLBot HTTP REST API 接入（按用户后续提供的规格替换 `MockSQLBotClient.search_indicators` / `get_indicator` / `query_data`）
+  - 文件级匹配缓存
+  - Embedding 语义匹配
+  - **v3 计算列拉数 + 跑代码**：`query_data(code, period, time_range)` 按 base_indicators × periods 笛卡尔积拉数，组装 DataFrame，sandbox 跑 `compute_<hash8>(df)`，结果写入 DOCX cell
+  - **v3 Decimal 单位换算**真正生效在数值维度
+- **Phase 3**：滚动窗口 / 移动平均 / 跨表关联（计算 IR 支持 `rolling(X, 12m)` / `join(A.code, B.code)`）+ 报表模板系统
+- **Phase 4**：设计 GUI（让设计师不写 HTML，可视化拖拽生成 MD 样例）
+- **Phase 5**：跨企业复用 / 多租户指标隔离 / 计算代码缓存（同提示词复用）
 
 ## v2 相对 v1 的具体修改清单
 
@@ -775,3 +1181,21 @@ mock 实现（`sqlbot_client.py` 内的 `MockSQLBotClient`）返回固定 fixtur
 | 10 | 测试 fixture | 30+ 指标 | 100+ 指标，含易混名 |
 | 11 | 失败模式 | F1-F11 | F1-F11 + F10 幻觉 + F11 上下文 |
 | 12 | 改动文件 | 含 subagent 配置 | 仅 skill + scripts + 启用 summarization config |
+
+## v3 相对 v2 的具体修改清单
+
+| # | 维度 | v2 | v3 |
+|---|------|----|----|
+| 1 | 单位声明 | 仅 SQLBot 自带 unit | 列级 `data-unit` 设计师声明 + scale_factor (Decimal) |
+| 2 | DOCX 单位 | 无副标 | 表头中文名下方副标显示单位 |
+| 3 | 单位换算精度 | float（隐式）| Decimal 域换算，display_format 控制展示精度 |
+| 4 | 计算列声明 | 视为 SQLBot 指标 (`qoq_growth` / `yoy_growth`) | MD `> 计算:` 自然语言块 + 虚拟 `{{}}` 指标 |
+| 5 | 计算实现 | SQLBot 端 | DeerFlow lead agent 调 LLM 生成 pandas + sandbox 验证 |
+| 6 | 计算时期表达 | SQLBot code 维度 | `current/yoy_same/prev_period/ytd` period tag（计算层）|
+| 7 | 计算安全 | n/a | AST 白名单（禁 import/os/sys/subprocess）+ 签名检查 |
+| 8 | 计算质量 | n/a | sandbox 烟雾跑 + 设计师可选示例 assert |
+| 9 | 流水线步数 | 10 | 12（加 step 6 IR 提取、step 7 codegen + 验证、step 10 单位换算）|
+| 10 | JSON schema | 缺 is_computed / display_unit / compute_spec | 已加 |
+| 11 | 失败模式 | F1-F11 | F1-F11 + F12-F16（计算与单位相关）|
+| 12 | 改动文件 | 仅 skill + scripts | +4 个新脚本（compute_ir / compute_codegen / compute_validator / unit_converter）+ 2 个 prompt 模板 |
+| 13 | 输出文件 | json/md/docx/log/status | + `report.computed.py`（仅当有计算列时）|
