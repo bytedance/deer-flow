@@ -43,11 +43,14 @@ export function textOfMessage(message: Message) {
   if (typeof message.content === "string") {
     return message.content;
   } else if (Array.isArray(message.content)) {
-    for (const part of message.content) {
-      if (part.type === "text") {
-        return part.text;
-      }
-    }
+    // Flat join ("") for single-line consumers (input box, titles); the rendered
+    // body uses extractContentFromMessage, which joins multi-part content with "\n".
+    const text = message.content
+      .map((part) =>
+        typeof part === "string" ? part : part.type === "text" ? part.text : "",
+      )
+      .join("");
+    return text.length > 0 ? text : null;
   }
   return null;
 }

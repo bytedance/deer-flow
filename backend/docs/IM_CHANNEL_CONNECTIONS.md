@@ -111,6 +111,8 @@ Feishu/Lark, DingTalk, WeChat, and WeCom:
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 
+For providers with an `allowed_users` allowlist (Telegram, Slack, DingTalk, WeChat, …), a valid `/connect <code>` (or Telegram `/start <code>`) is consumed **before** the allowlist is checked. This is intentional: a user who is not yet on the allowlist — and whose platform identity the bot has therefore never seen — can still complete their first browser-initiated bind. After binding, `allowed_users` continues to gate ordinary (non-bind) messages as before.
+
 ## Runtime Model
 
 Connection records live in SQL tables under `deerflow.persistence.channel_connections`:
@@ -122,10 +124,31 @@ Connection records live in SQL tables under `deerflow.persistence.channel_connec
 
 Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
 
+Runtime provider credentials are deployment-level bot secrets, not user-owned
+connection credentials. They can come from `channels.*` in `config.yaml` or
+from the browser runtime setup flow, which persists them through
+`ChannelRuntimeConfigStore` so local/private deployments can configure bots
+without editing YAML. The runtime store is a local plaintext JSON fallback with
+owner-only file permissions (`0600`); use it only where the DeerFlow data
+directory is already trusted as secret storage. WeChat QR login auth state
+follows the same local-runtime model and may persist a QR-derived bot token in
+the channel state directory.
+
 ## Security Notes
 
 - Browser APIs remain authenticated and CSRF-protected.
 - Connect codes are 128-bit random, short-lived, and single-use.
+- Runtime provider bot tokens are shared deployment secrets. Runtime setup
+  responses mask password fields, and mutating runtime/channel-worker APIs
+  require an admin user.
+- Stored per-connection credentials use the `channel_credentials` encryption
+  path. If stored credential material cannot be decrypted, DeerFlow treats it
+  as unavailable instead of using corrupt secrets.
+- The local plaintext runtime credential fallback is documented above; prefer
+  deployment-managed environment/config secrets for non-local deployments until
+  a dedicated secret backend is configured.
+- `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
+- An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another DeerFlow user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Provider bot tokens remain in `channels.*` and are never returned to the browser.
 - Stored per-connection credentials are encrypted. If stored credential material cannot be decrypted, DeerFlow treats it as unavailable instead of using corrupt secrets.
 - This implementation does not add public provider callback or webhook routes.

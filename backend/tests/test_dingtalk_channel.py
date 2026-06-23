@@ -435,6 +435,49 @@ class TestAllowedUsersFiltering:
 
         _run(go())
 
+    def test_non_allowed_user_message_content_not_logged(self, caplog):
+        import logging
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={"allowed_users": ["user_001"]})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(sender_staff_id="user_blocked", text="secret blocked content")
+            with caplog.at_level(logging.INFO, logger="app.channels.dingtalk"):
+                channel._on_chatbot_message(msg)
+                await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_not_awaited()
+            # The parsed-message INFO log (with message content) must not fire for
+            # a blocked sender — allowed_users still acts as a privacy/noise filter.
+            assert "parsed message" not in caplog.text
+            assert "secret blocked content" not in caplog.text
+
+        _run(go())
+
+    def test_connect_code_bypasses_allowed_users_filter(self):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={"allowed_users": ["user_001"], "connection_repo": object()})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+            channel._bind_connection_from_connect_code = AsyncMock(return_value=True)
+
+            msg = _make_chatbot_message(sender_staff_id="user_blocked", text="/connect dingtalk-bind-code")
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+            channel._bind_connection_from_connect_code.assert_awaited_once()
+            bus.publish_inbound.assert_not_awaited()
+
+        _run(go())
+
     def test_empty_allowed_users_allows_all(self):
         async def go():
             bus = MessageBus()

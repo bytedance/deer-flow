@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import type { ThreadTokenUsageResponse } from "@/core/threads/types";

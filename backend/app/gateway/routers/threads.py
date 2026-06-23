@@ -640,7 +640,47 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             if is_latest_checkpoint:
                 messages = channel_values.get("messages")
                 if messages:
-                    values["messages"] = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
+                    serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
+                    try:
+                        from app.gateway.deps import get_run_event_store, get_run_manager
+                        from app.gateway.routers.thread_runs import compute_run_durations
+
+                        run_mgr = get_run_manager(request)
+                        event_store = get_run_event_store(request)
+
+                        runs = await run_mgr.list_by_thread(thread_id)
+
+                        # FIXME: Fetching limit=1000 silently drops durations for messages older than the cap on long threads.
+                        # We do this full fetch because raw LangGraph messages lack a native run_id link.
+
+                        events = await event_store.list_messages(thread_id, limit=1000)
+
+                        if runs and serialized_msgs:
+                            # 1. Map each run_id to its actual duration
+                            run_durations = compute_run_durations(runs)
+
+                            # 2. Map every message id directly to its parent run_id
+                            msg_to_run = {}
+                            for e in events:
+                                content = e.get("content", {})
+                                if isinstance(content, dict) and content.get("type") == "ai" and "id" in content:
+                                    msg_to_run[content["id"]] = e["run_id"]
+
+                            # 3. Inject the exact correct duration into each AI message
+                            for msg in serialized_msgs:
+                                if msg.get("type") == "ai":
+                                    msg_id = msg.get("id")
+                                    run_id = msg_to_run.get(msg_id)
+                                    if run_id and run_id in run_durations:
+                                        if "additional_kwargs" not in msg:
+                                            msg["additional_kwargs"] = {}
+                                        msg["additional_kwargs"]["turn_duration"] = run_durations[run_id]
+
+                    except Exception:
+                        logger.warning("Failed to inject turn_duration for thread %s", thread_id, exc_info=True)
+
+                    values["messages"] = serialized_msgs
+
             is_latest_checkpoint = False
 
             # Derive next tasks

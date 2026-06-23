@@ -65,6 +65,70 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("input box recalls previous prompts with arrow keys", async ({
+    page,
+  }) => {
+    const firstPrompt = "Summarize the latest quarterly report";
+    const secondPrompt = "Turn the summary into an action plan";
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Prompt history conversation",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-prompt-history-1",
+              content: [{ type: "text", text: firstPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-1",
+              content: "First answer",
+            },
+            {
+              type: "human",
+              id: "msg-human-prompt-history-2",
+              content: [{ type: "text", text: secondPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-2",
+              content: "Second answer",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Second answer")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const textarea = page.locator("textarea[name='message']");
+    await expect(textarea).toBeVisible();
+
+    await textarea.focus();
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(firstPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue("");
+
+    await textarea.fill("draft should not be overwritten");
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue("draft should not be overwritten");
+  });
+
   test("deleting an inactive chat keeps the current chat open", async ({
     page,
   }) => {
@@ -200,6 +264,43 @@ test.describe("Thread history", () => {
 
     await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  });
+
+  test("new chat resets immediately after a history-only thread URL update", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Message that must disappear in the next new chat");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // A newly created chat changes the URL with history.replaceState so the
+    // active stream is not remounted. Reproduce that history-only transition:
+    // the canonical pathname becomes the UUID while useParams can stay "new".
+    await page.evaluate((threadId) => {
+      history.replaceState(null, "", `/workspace/chats/${threadId}`);
+    }, MOCK_THREAD_ID);
+
+    const newChatLink = page.locator(
+      "[data-sidebar='sidebar'] a[href='/workspace/chats/new']",
+    );
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+    );
+    await expect(newChatLink).toHaveAttribute("data-active", "false");
+
+    // One click must reset the chat without a second click or unrelated UI
+    // interaction forcing another render.
+    await newChatLink.click();
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+    await expect(textarea).toBeVisible();
   });
 
   test("deleting the active newly created chat returns to the new chat screen", async ({

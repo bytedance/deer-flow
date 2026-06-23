@@ -1142,6 +1142,8 @@ class DeerFlowClient:
             "injection_enabled": config.injection_enabled,
             "max_injection_tokens": config.max_injection_tokens,
             "token_counting": config.token_counting,
+            "guaranteed_categories": config.guaranteed_categories,
+            "guaranteed_token_budget": config.guaranteed_token_budget,
         }
 
     def get_memory_status(self) -> dict:

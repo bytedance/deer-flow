@@ -32,11 +32,23 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         self.passport = passport
 
     def _build_request(self, request: ToolCallRequest) -> GuardrailRequest:
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None) if runtime is not None else None
+        context = context if isinstance(context, dict) else {}
+
         return GuardrailRequest(
             tool_name=str(request.tool_call.get("name", "")),
             tool_input=request.tool_call.get("args", {}),
             agent_id=self.passport,
+            thread_id=context.get("thread_id"),
+            is_subagent=bool(context.get("is_subagent")),
             timestamp=datetime.now(UTC).isoformat(),
+            user_id=context.get("user_id"),
+            user_role=context.get("user_role"),
+            oauth_provider=context.get("oauth_provider"),
+            oauth_id=context.get("oauth_id"),
+            run_id=context.get("run_id"),
+            tool_call_id=request.tool_call.get("id"),
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:

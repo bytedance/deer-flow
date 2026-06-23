@@ -373,6 +373,70 @@ def test_run_create_request_context_defaults_to_none():
     assert body.context is None
 
 
+def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    checkpointer = FakeCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    body = SimpleNamespace(
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        },
+        checkpoint_id=None,
+    )
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert checkpointer.seen_config == {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        }
+    }
+    assert config["configurable"]["checkpoint_id"] == "ckpt-1"
+    assert config["configurable"]["checkpoint_ns"] == ""
+    assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
+
+
+def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        async def aget_tuple(self, config):
+            return None
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=FakeCheckpointer())))
+    body = SimpleNamespace(checkpoint=None, checkpoint_id="missing")
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert exc.value.status_code == 404
+    assert "missing" in exc.value.detail
+
+
 def test_context_merges_into_configurable():
     """Context values must be merged into config['configurable'] by start_run.
 
@@ -641,8 +705,24 @@ def test_build_run_config_with_context():
     )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_context_injects_thread_id():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "T-deadbeef-42",
+        {"context": {"user_id": "u-1", "thinking_enabled": True}},
+        None,
+    )
+
+    assert config["context"]["user_id"] == "u-1"
+    assert config["context"]["thinking_enabled"] is True
+    assert config["context"]["thread_id"] == "T-deadbeef-42"
+    assert "configurable" not in config
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -651,7 +731,7 @@ def test_build_run_config_null_context_becomes_empty_context():
 
     config = build_run_config("thread-1", {"context": None}, None)
 
-    assert config["context"] == {}
+    assert config["context"] == {"thread_id": "thread-1"}
     assert "configurable" not in config
 
 

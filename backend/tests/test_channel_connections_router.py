@@ -504,6 +504,27 @@ def test_connect_slack_returns_binding_command_and_persists_state(tmp_path):
     anyio.run(repo.close)
 
 
+def test_connect_binding_code_caps_pending_states_per_provider(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(_enabled_connections_config(), repo, _channels_config())
+
+    with TestClient(app) as client:
+        responses = [client.post("/api/channels/slack/connect") for _ in range(6)]
+
+    assert [response.status_code for response in responses[:5]] == [200, 200, 200, 200, 200]
+    assert responses[5].status_code == 429
+    assert "Too many pending channel connection codes" in responses[5].json()["detail"]
+
+    async def count_states():
+        return await repo.count_oauth_states(owner_user_id=str(_user().id), provider="slack")
+
+    assert anyio.run(count_states) == 5
+
+    anyio.run(repo.close)
+
+
 def test_connect_discord_returns_binding_command_and_persists_state(tmp_path):
     import anyio
 

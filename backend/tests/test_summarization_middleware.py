@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 
@@ -43,11 +43,13 @@ class _StaticChatModel(BaseChatModel):
         return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
-def _dynamic_context_reminder(msg_id: str = "reminder-1") -> HumanMessage:
-    return HumanMessage(
+def _dynamic_context_reminder(msg_id: str = "reminder-1") -> SystemMessage:
+    # Current production shape: a date SystemMessage carrying the authoritative
+    # date in additional_kwargs (see DynamicContextMiddleware).
+    return SystemMessage(
         content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
         id=msg_id,
-        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True, "reminder_date": "2026-05-08, Friday"},
     )
 
 

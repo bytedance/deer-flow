@@ -377,6 +377,28 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
+    reaches a router. Falling back to the strict dependency keeps the route safe
+    in tests or alternative ASGI compositions that mount a router without the
+    global middleware. ``detail`` is the route-specific 403 message.
+
+    Centralising this here means a future change to the admin definition (e.g.
+    allowing an internal system role, adding audit logging, or switching to a
+    permission-based check) lands in one place instead of drifting across the
+    per-router copies that previously existed in ``mcp``, ``channel_connections``
+    and ``channels``.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        user = await get_current_user_from_request(request)
+
+    if getattr(user, "system_role", None) != "admin":
+        raise HTTPException(status_code=403, detail=detail)
+
+
 async def get_optional_user_from_request(request: Request):
     """Get optional authenticated user from request.
 

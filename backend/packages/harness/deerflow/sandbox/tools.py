@@ -4,6 +4,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
@@ -24,6 +25,11 @@ from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_
 from deerflow.tools.types import Runtime
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
+# in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
+# ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
+_IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
@@ -549,76 +555,74 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
+@lru_cache(maxsize=512)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile the host→virtual masking patterns once per source set.
+
+    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
+    (skills, then ACP workspace, then per-thread user-data mappings sorted by
+    host-path length, longest first). The patterns derive only from
+    config-stable + per-thread inputs, so they're cached and reused instead of
+    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
+    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
+    glob/grep match, so without this the same patterns are recompiled per
+    match.
+    """
+    compiled: list[tuple[re.Pattern[str], str, str]] = []
+    for host_base, virtual_base in sources:
+        seen: set[str] = set()
+        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
+        # ordered deterministically so the cached tuple is stable (variants of
+        # one host map to the same virtual and don't overlap after substitution,
+        # so order within a source is irrelevant to the result).
+        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+            for variant in sorted(_path_variants(root)):
+                if variant in seen:
+                    continue
+                seen.add(variant)
+                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
+                compiled.append((re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?"), variant, virtual_base))
+    return tuple(compiled)
+
+
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths, and ACP workspace paths (global).
     """
-    result = output
+    # Build the ordered (host_base, virtual_base) source list. Order is
+    # preserved from the original implementation: skills, then ACP workspace,
+    # then user-data mappings (longest host path first). Custom mount host
+    # paths are masked by LocalSandbox._reverse_resolve_paths_in_output().
+    sources: list[tuple[str, str]] = []
 
-    # Mask skills host paths
     skills_host = _get_skills_host_path()
-    skills_container = _get_skills_container_path()
     if skills_host:
-        raw_base = str(Path(skills_host))
-        resolved_base = str(Path(skills_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((skills_host, _get_skills_container_path()))
 
-            def replace_skills(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return skills_container
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{skills_container}/{relative}" if relative else skills_container
-
-            result = pattern.sub(replace_skills, result)
-
-    # Mask ACP workspace host paths
-    _thread_id = _extract_thread_id_from_thread_data(thread_data)
-    acp_host = _get_acp_workspace_host_path(_thread_id)
+    acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        raw_base = str(Path(acp_host))
-        resolved_base = str(Path(acp_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
-            def replace_acp(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _ACP_WORKSPACE_VIRTUAL_PATH
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_ACP_WORKSPACE_VIRTUAL_PATH}/{relative}" if relative else _ACP_WORKSPACE_VIRTUAL_PATH
+    if thread_data is not None:
+        mappings = _thread_actual_to_virtual_mappings(thread_data)
+        for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+            sources.append((actual_base, virtual_base))
 
-            result = pattern.sub(replace_acp, result)
+    if not sources:
+        return output
 
-    # Custom mount host paths are masked by LocalSandbox._reverse_resolve_paths_in_output()
+    result = output
+    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
 
-    # Mask user-data host paths
-    if thread_data is None:
-        return result
+        def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
+            matched_path = match.group(0)
+            if matched_path == _base:
+                return _virtual
+            relative = matched_path[len(_base) :].lstrip("/\\")
+            return f"{_virtual}/{relative}" if relative else _virtual
 
-    mappings = _thread_actual_to_virtual_mappings(thread_data)
-    if not mappings:
-        return result
-
-    for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-        raw_base = str(Path(actual_base))
-        resolved_base = str(Path(actual_base).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped_actual = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped_actual + r"(?:[/\\][^\s\"';&|<>()]*)?")
-
-            def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual_base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _virtual
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_virtual}/{relative}" if relative else _virtual
-
-            result = pattern.sub(replace_match, result)
+        result = pattern.sub(replace_match, result)
 
     return result
 
@@ -938,6 +942,54 @@ def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState)
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
+def _braces_are_identifier_placeholders_only(fragment: str) -> bool:
+    """Return True only if every ``{...}`` block is a single identifier placeholder.
+
+    Identifier-only blocks (``{id}``, ``{port}``) come from REST templates and
+    f-strings and are text. Bash brace expansion (``{passwd,shadow}``, ``{,.bak}``,
+    ``{etc,var}``) reconstitutes real host paths at runtime, so it must NOT be
+    exempted. Stray, empty, or nested braces are rejected too (each ``{``/``}``
+    must belong to one balanced single-placeholder block).
+
+    ``${VAR}`` shell variable expansion (e.g. ``/home/${USER}/.ssh/id_rsa``) also
+    expands to a real host path at runtime, so a ``${`` anywhere disqualifies the
+    fragment even though the inner name is identifier-shaped.
+    """
+    if "${" in fragment:
+        return False
+    blocks = _IDENTIFIER_BRACE_BLOCK_PATTERN.findall(fragment)
+    # Every brace must be part of a balanced ``{...}`` block (no stray/nested braces).
+    if fragment.count("{") != len(blocks) or fragment.count("}") != len(blocks):
+        return False
+    return all(_IDENTIFIER_PATTERN.fullmatch(inner) for inner in blocks)
+
+
+def _is_non_path_literal_fragment(fragment: str) -> bool:
+    """Return True if a ``/segment`` match is almost certainly text, not a path.
+
+    The absolute-path scan runs over the raw command string, so it also matches
+    ``/segment`` sequences sitting inside string literals, f-strings, and
+    templates (e.g. ``python -c "print(f'/端口{port}')"`` or a REST template
+    like ``/devices/{id}/port``). Non-ASCII characters and single identifier-like
+    ``{placeholder}`` braces do not appear in real host filesystem paths a command
+    would open, so treating such fragments as text removes those false positives.
+
+    Bash brace expansion (``cat /etc/{passwd,shadow}``) is deliberately NOT
+    exempted: it expands to plain host paths at runtime, so only braces that are
+    single identifier placeholders are treated as text (see
+    :func:`_braces_are_identifier_placeholders_only`).
+
+    This guard is best-effort, not a security boundary (see
+    :func:`validate_local_bash_command_paths`): plain ASCII host paths such as
+    ``/etc/passwd`` contain none of these markers and are still rejected.
+    """
+    if any(ord(ch) > 127 for ch in fragment):
+        return True
+    if "{" in fragment or "}" in fragment:
+        return _braces_are_identifier_placeholders_only(fragment)
+    return False
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -970,6 +1022,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         absolute_path = match.group()
+        if _is_non_path_literal_fragment(absolute_path):
+            continue
         if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
@@ -1665,6 +1719,12 @@ def read_file_tool(
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
+    except UnicodeDecodeError:
+        return (
+            f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
+            "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
+            "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
+        )
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
