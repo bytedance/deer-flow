@@ -496,6 +496,150 @@ models:
   #     extra_body:
   #       thinking:
   #         type: disabled
+  #
+  # Full Atlas Cloud chat model id list (grouped by provider):
+  # Anthropic:
+  #   - anthropic/claude-haiku-4.5-20251001
+  #   - anthropic/claude-haiku-4.5-20251001-coding
+  #   - anthropic/claude-opus-4-20250514
+  #   - anthropic/claude-opus-4-20250514-coding
+  #   - anthropic/claude-opus-4.1-20250805
+  #   - anthropic/claude-opus-4.1-20250805-coding
+  #   - anthropic/claude-opus-4.5-20251101
+  #   - anthropic/claude-opus-4.5-20251101-coding
+  #   - anthropic/claude-opus-4.6
+  #   - anthropic/claude-opus-4.6-coding
+  #   - anthropic/claude-opus-4.7
+  #   - anthropic/claude-opus-4.7-coding
+  #   - anthropic/claude-opus-4.8
+  #   - anthropic/claude-opus-4.8-coding
+  #   - anthropic/claude-sonnet-4-20250514
+  #   - anthropic/claude-sonnet-4-20250514-coding
+  #   - anthropic/claude-sonnet-4.5-20250929
+  #   - anthropic/claude-sonnet-4.5-20250929-coding
+  #   - anthropic/claude-sonnet-4.6
+  #   - anthropic/claude-sonnet-4.6-coding
+  # OpenAI:
+  #   - openai/gpt-4.1
+  #   - openai/gpt-4.1-mini
+  #   - openai/gpt-4.1-nano
+  #   - openai/gpt-4o
+  #   - openai/gpt-4o-mini
+  #   - openai/gpt-5
+  #   - openai/gpt-5-chat
+  #   - openai/gpt-5-codex
+  #   - openai/gpt-5-mini
+  #   - openai/gpt-5-nano
+  #   - openai/gpt-5-pro
+  #   - openai/gpt-5.1
+  #   - openai/gpt-5.1-chat
+  #   - openai/gpt-5.1-codex
+  #   - openai/gpt-5.1-codex-max
+  #   - openai/gpt-5.1-codex-mini
+  #   - openai/gpt-5.2
+  #   - openai/gpt-5.2-chat
+  #   - openai/gpt-5.2-codex
+  #   - openai/gpt-5.3-codex
+  #   - openai/gpt-5.4
+  #   - openai/gpt-5.4-mini
+  #   - openai/gpt-5.4-nano
+  #   - openai/gpt-5.5
+  #   - openai/gpt-image-2
+  #   - openai/o1
+  #   - openai/o3
+  #   - openai/o3-mini
+  #   - openai/o3-pro
+  #   - openai/o4-mini
+  # Google:
+  #   - google/gemini-2.0-flash
+  #   - google/gemini-2.0-flash-lite
+  #   - google/gemini-2.5-flash
+  #   - google/gemini-2.5-flash-image
+  #   - google/gemini-2.5-flash-lite
+  #   - google/gemini-2.5-flash-lite-preview-202509
+  #   - google/gemini-2.5-flash-preview-202509
+  #   - google/gemini-2.5-pro
+  #   - google/gemini-3-flash-preview
+  #   - google/gemini-3-pro-image-preview
+  #   - google/gemini-3.1-flash-image
+  #   - google/gemini-3.1-flash-image-preview
+  #   - google/gemini-3.1-flash-lite
+  #   - google/gemini-3.1-pro-preview
+  #   - google/gemini-3.5-flash
+  # DeepSeek:
+  #   - deepseek-ai/DeepSeek-V3-0324
+  #   - deepseek-ai/DeepSeek-V3.1
+  #   - deepseek-ai/DeepSeek-V3.1-Terminus
+  #   - deepseek-ai/DeepSeek-V3.2-Exp
+  #   - deepseek-ai/deepseek-ocr
+  #   - deepseek-ai/deepseek-r1-0528
+  #   - deepseek-ai/deepseek-v3.2
+  #   - deepseek-ai/deepseek-v4-flash
+  #   - deepseek-ai/deepseek-v4-pro
+  # Qwen:
+  #   - qwen/qwen3-235b-a22b-thinking-2507
+  #   - qwen/qwen3-30b-a3b
+  #   - qwen/qwen3-30b-a3b-thinking-2507
+  #   - qwen/qwen3-32b
+  #   - qwen/qwen3-8b
+  #   - qwen/qwen3-coder-next
+  #   - qwen/qwen3-max-2026-01-23
+  #   - qwen/qwen3-vl-235b-a22b-thinking
+  #   - qwen/qwen3-vl-30b-a3b-instruct
+  #   - qwen/qwen3-vl-30b-a3b-thinking
+  #   - qwen/qwen3-vl-8b-instruct
+  #   - qwen/qwen3.5-122b-a10b
+  #   - qwen/qwen3.5-27b
+  #   - qwen/qwen3.5-35b-a3b
+  #   - qwen/qwen3.5-397b-a17b
+  #   - qwen/qwen3.5-flash
+  #   - qwen/qwen3.5-plus
+  #   - qwen/qwen3.6-35b-a3b
+  #   - qwen/qwen3.6-plus
+  #   - qwen/qwen3.7-max
+  #   - qwen/qwen3.7-plus
+  #   - Qwen/Qwen3-235B-A22B-Instruct-2507
+  #   - Qwen/Qwen3-30B-A3B-Instruct-2507
+  #   - Qwen/Qwen3-Coder
+  #   - Qwen/Qwen3-Next-80B-A3B-Instruct
+  #   - Qwen/Qwen3-Next-80B-A3B-Thinking
+  #   - Qwen/Qwen3-VL-235B-A22B-Instruct
+  # Kimi (Moonshot):
+  #   - moonshotai/Kimi-K2-Instruct
+  #   - moonshotai/Kimi-K2-Instruct-0905
+  #   - moonshotai/Kimi-K2-Thinking
+  #   - moonshotai/kimi-k2.5
+  #   - moonshotai/kimi-k2.6
+  #   - moonshotai/kimi-k2.7-code
+  # GLM (Zhipu):
+  #   - zai-org/GLM-4.6
+  #   - zai-org/glm-4.7
+  #   - zai-org/glm-5
+  #   - zai-org/glm-5-turbo
+  #   - zai-org/glm-5.1
+  #   - zai-org/glm-5.2
+  #   - zai-org/glm-5v-turbo
+  # MiniMax:
+  #   - MiniMaxAI/MiniMax-M2
+  #   - minimaxai/minimax-m2.1
+  #   - minimaxai/minimax-m2.5
+  #   - minimaxai/minimax-m2.7
+  #   - minimaxai/minimax-m3
+  # xAI:
+  #   - xai/grok-4.3
+  #   - xai/grok-build-0.1
+  # ByteDance:
+  #   - bytedance/doubao-seed-1.6-251015
+  #   - bytedance/doubao-seed-1.6-flash-250828
+  #   - bytedance/doubao-seed-1.8-251228
+  #   - bytedance/doubao-seed-2.0-code-preview-260215
+  #   - bytedance/doubao-seed-2.0-lite-260428
+  #   - bytedance/doubao-seed-2.0-mini-260428
+  #   - bytedance/doubao-seed-2.0-pro-260215
+  # KAT:
+  #   - kwaipilot/kat-coder-pro-v2
+  # Other:
+  #   - owl
 
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
   # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
