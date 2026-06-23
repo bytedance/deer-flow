@@ -32,7 +32,8 @@ REPLAY_MODEL_BLOCK = """\
   - name: scenario-model
     display_name: Scenario Model
     use: replay_provider:ReplayChatModel
-    model: replay"""
+    model: replay
+    supports_thinking: true"""
 
 
 def real_model_block(model: str) -> str:

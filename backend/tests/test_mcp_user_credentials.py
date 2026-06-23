@@ -127,8 +127,12 @@ async def test_stdio_session_pool_scopes_by_user_and_uses_user_env():
             await wrapped.coroutine(runtime=_runtime("user-b"), query="repos for user b")
 
         assert create_session.call_count == 2
-        assert create_session.call_args_list[0].args[0]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "token-a"}
-        assert create_session.call_args_list[1].args[0]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "token-b"}
+        first_env = create_session.call_args_list[0].args[0]["env"]
+        second_env = create_session.call_args_list[1].args[0]["env"]
+        assert first_env["GITHUB_PERSONAL_ACCESS_TOKEN"] == "token-a"
+        assert second_env["GITHUB_PERSONAL_ACCESS_TOKEN"] == "token-b"
+        assert {"TMPDIR", "TMP", "TEMP"}.issubset(first_env)
+        assert {"TMPDIR", "TMP", "TEMP"}.issubset(second_env)
         pool_keys = set(get_session_pool()._entries)
         assert ("github", "user-a:shared-thread:v1") in pool_keys
         assert ("github", "user-b:shared-thread:v1") in pool_keys

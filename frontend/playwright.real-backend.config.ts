@@ -7,8 +7,9 @@ import { defineConfig, devices } from "@playwright/test";
  * so the mock-based suite is untouched.
  *
  * Two webServers are started: the replay gateway (:8011) and the frontend
- * (:3000, pointed at the gateway). Auth uses a throwaway test account the spec
- * registers at runtime — no secrets.
+ * (:3000, pointed at the gateway). Auth-disabled mode is enabled on both
+ * servers so the no-cookie e2e contract is covered; specs that need session
+ * cookies still register a throwaway test account at runtime.
  */
 export default defineConfig({
   testDir: "./tests/e2e-real-backend",
@@ -38,7 +39,10 @@ export default defineConfig({
       // Mount the test-only run/message seeder used by multi-run-order.spec.ts
       // (#3352). The endpoint exists only on this replay gateway, never in the
       // production app.
-      env: { DEERFLOW_ENABLE_TEST_SEED: "1" },
+      env: {
+        DEERFLOW_ENABLE_TEST_SEED: "1",
+        DEER_FLOW_AUTH_DISABLED: "1",
+      },
     },
     {
       command: "pnpm build && pnpm start",

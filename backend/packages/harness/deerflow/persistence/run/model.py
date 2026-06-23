@@ -39,6 +39,8 @@ class RunRow(Base):
     lead_agent_tokens: Mapped[int] = mapped_column(default=0)
     subagent_tokens: Mapped[int] = mapped_column(default=0)
     middleware_tokens: Mapped[int] = mapped_column(default=0)
+    # Per-model token breakdown
+    token_usage_by_model: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))

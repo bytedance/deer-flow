@@ -1,8 +1,8 @@
-import { beforeEach, expect, test, vi } from "vitest";
+import { beforeEach, expect, test, rs } from "@rstest/core";
 
-const fetchWithAuth = vi.fn();
+const fetchWithAuth = rs.fn();
 
-vi.mock("@/core/api/fetcher", () => ({
+rs.mock("@/core/api/fetcher", () => ({
   fetch: fetchWithAuth,
 }));
 

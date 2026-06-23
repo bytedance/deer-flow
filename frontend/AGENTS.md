@@ -38,7 +38,7 @@ DeerFlow is built on a sophisticated agent-based architecture using the [LangGra
 ```
 tests/
 ├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
-└── unit/                   # Unit tests (mirrors src/ layout, powered by Vitest)
+└── unit/                   # Unit tests (mirrors src/ layout, powered by Rstest)
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
@@ -52,6 +52,7 @@ src/
 ├── core/                   # Core business logic
 │   ├── api/                # API client & data fetching
 │   ├── artifacts/          # Artifact management
+│   ├── channels/           # IM channel connections (providers, connect flow)
 │   ├── config/              # App configuration
 │   ├── i18n/               # Internationalization
 │   ├── mcp/                # MCP integration

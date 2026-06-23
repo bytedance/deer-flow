@@ -50,6 +50,7 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    regenerate: "Regenerate",
   },
 
   // Home
@@ -170,6 +171,7 @@ export const enUS: Translations = {
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
+    channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
@@ -241,6 +243,8 @@ export const enUS: Translations = {
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",
+    gatewayUnavailable: "Gateway is temporarily unavailable.",
+    gatewayUnavailableRetrying: "Retrying in the background…",
   },
 
   // Conversation
@@ -252,6 +256,42 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    loadMoreToSearch: "Load more to search older conversations",
+    loadingMore: "Loading more...",
+    loadOlderChats: "Load older chats",
+  },
+
+  // Channels
+  channels: {
+    title: "Channels",
+    connect: "Connect",
+    modify: "Modify",
+    reconnect: "Reconnect",
+    disconnect: "Disconnect",
+    connected: "Connected",
+    notConnected: "Not connected",
+    pending: "Pending",
+    revoked: "Disconnected",
+    disabled: "Disabled",
+    unconfigured: "Not configured",
+    unavailable: "Channel connections are unavailable right now.",
+    unavailableShort: "Unavailable",
+    setupTitle: (name: string) => `Connect ${name}`,
+    setupEditTitle: (name: string) => `Modify ${name}`,
+    setupDescription:
+      "Enter the values needed by this server process. They are not written to config.yaml.",
+    saveAndConnect: "Save and connect",
+    saveChanges: "Save changes",
+    descriptions: {
+      telegram: "Telegram direct messages through your DeerFlow bot.",
+      slack: "Slack workspace messages and mentions.",
+      discord: "Discord server messages through your DeerFlow bot.",
+      feishu: "Feishu and Lark messages through your DeerFlow app.",
+      dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
+      wechat: "WeChat iLink messages through your DeerFlow bot.",
+      wecom: "WeCom messages through your DeerFlow AI bot.",
+    },
+    connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
@@ -354,6 +394,7 @@ export const enUS: Translations = {
     sections: {
       account: "Account",
       appearance: "Appearance",
+      channels: "Channels",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -455,6 +496,15 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      adminRequired: "Admin privileges are required to manage MCP tools.",
+      empty: "No MCP tools configured.",
+    },
+    channels: {
+      title: "Channels",
+      description:
+        "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
+      disabled:
+        "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
     skills: {
       title: "Agent Skills",
@@ -483,8 +533,12 @@ export const enUS: Translations = {
       profileTitle: "Profile",
       email: "Email",
       role: "Role",
+      ssoProvider: "SSO",
       changePasswordTitle: "Change Password",
       changePasswordDescription: "Update your account password.",
+      ssoPasswordDescription: "Password is managed by your SSO provider.",
+      ssoPasswordMessage:
+        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -499,6 +553,34 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+  login: {
+    signInTitle: "Sign in to your account",
+    createAccountTitle: "Create a new account",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "Please wait...",
+    signIn: "Sign In",
+    createAccount: "Create Account",
+    orContinueWith: "Or continue with",
+    ssoHint:
+      "If your account uses single sign-on, sign in with the option below instead.",
+    continueWith: (provider: string) => `Continue with ${provider}`,
+    noAccountSignUp: "Don't have an account? Sign up",
+    haveAccountSignIn: "Already have an account? Sign in",
+    backToHome: "← Back to home",
+    networkError: "Network error. Please try again.",
+    authFailed: "Authentication failed.",
+    errors: {
+      sso_failed: "SSO login failed. Please try again or use email login.",
+      sso_cancelled: "SSO login was cancelled.",
+      sso_account_exists:
+        "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_not_allowed:
+        "SSO login is not allowed for your account. Contact your administrator.",
     },
   },
 };

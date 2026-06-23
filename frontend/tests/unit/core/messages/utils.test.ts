@@ -1,8 +1,9 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "@rstest/core";
 
 import {
   extractContentFromMessage,
+  extractTextFromMessage,
   extractReasoningContentFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
@@ -11,6 +12,7 @@ import {
   hasContent,
   hasReasoning,
   isAssistantMessageGroupStreaming,
+  stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
 function aiMessage(content: string): Message {
@@ -170,6 +172,38 @@ describe("inline <think> tag splitting", () => {
     const message = aiMessage("Documentation: `<think>");
     expect(extractContentFromMessage(message)).toBe("Documentation: `<think>");
     expect(extractReasoningContentFromMessage(message)).toBeNull();
+  });
+});
+
+describe("human message internal context stripping", () => {
+  test("strips slash skill activation context from display content", () => {
+    const content =
+      "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";
+
+    expect(stripUploadedFilesTag(content)).toBe("real user task");
+  });
+
+  test("hides leaked slash skill activation messages with no user text", () => {
+    const messages = [
+      {
+        id: "slash-activation",
+        type: "human",
+        content:
+          "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Public answer",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual(["assistant"]);
+    expect(
+      groups.flatMap((group) => group.messages).map((message) => message.id),
+    ).toEqual(["ai-1"]);
   });
 });
 
@@ -474,4 +508,36 @@ test("keeps streaming assistant hidden when a hidden control message follows it"
       ),
     ),
   ).toBe(true);
+});
+
+describe("multi-part content with bare-string continuations", () => {
+  // Gemini streams the first content block as a {type:"text"} object carrying
+  // the thinking signature, then emits continuation deltas as plain strings.
+  // LangChain's Python merge_content preserves these as bare-string elements,
+  // so the finalized message content is [{type:"text", ...}, "...rest..."].
+  const geminiMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: [
+      {
+        type: "text",
+        text: "First block carrying the signature.",
+        extras: { signature: "abc123" },
+        index: 0,
+      },
+      "Continuation streamed as a bare string.",
+    ],
+  } as unknown as Message;
+
+  test("extractContentFromMessage includes the bare-string parts", () => {
+    expect(extractContentFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
+
+  test("extractTextFromMessage includes the bare-string parts", () => {
+    expect(extractTextFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
 });

@@ -134,12 +134,17 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
+    from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
+    # InputSanitizationMiddleware is first so it becomes the outermost
+    # wrap_model_call wrapper — sanitised messages are what every inner
+    # middleware (including LLMErrorHandlingMiddleware retries) sees.
     middlewares: list[AgentMiddleware] = [
+        InputSanitizationMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ThreadDataMiddleware(lazy_init=lazy_init),
         SandboxMiddleware(lazy_init=lazy_init),

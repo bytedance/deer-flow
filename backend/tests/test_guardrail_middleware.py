@@ -300,6 +300,145 @@ class TestGuardrailMiddleware:
             asyncio.run(run())
 
 
+class TestGuardrailRequestAttribution:
+    """Tests for GuardrailRequest runtime attribution fields."""
+
+    def _make_runtime_mock(self, context: dict | None = None):
+        runtime = MagicMock()
+        runtime.context = context
+        return runtime
+
+    def _make_request(self, runtime=None, tool_call: dict | None = None):
+        req = MagicMock()
+        req.runtime = runtime
+        req.tool_call = tool_call or {"name": "bash", "args": {}}
+        req.tool = None
+        req.state = {}
+        return req
+
+    def _capture_guardrail_request(self, req):
+        captured = {}
+
+        class CaptureProvider:
+            name = "capture"
+
+            def evaluate(self, request):
+                captured["request"] = request
+                return GuardrailDecision(allow=True)
+
+            async def aevaluate(self, request):
+                return self.evaluate(request)
+
+        mw = GuardrailMiddleware(CaptureProvider())
+        mw.wrap_tool_call(req, MagicMock())
+        return captured["request"]
+
+    def test_no_attribution_fields_are_none(self):
+        req = self._make_request(runtime=None, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.user_role is None
+        assert guardrail_request.oauth_provider is None
+        assert guardrail_request.oauth_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id is None
+
+    def test_only_user_id_present(self):
+        runtime = self._make_runtime_mock(context={"user_id": "user_abc"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role is None
+        assert guardrail_request.oauth_provider is None
+        assert guardrail_request.oauth_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id is None
+
+    def test_authenticated_user_context_present(self):
+        runtime = self._make_runtime_mock(
+            context={
+                "user_id": "user_abc",
+                "user_role": "admin",
+                "oauth_provider": "github",
+                "oauth_id": "gh_123",
+            }
+        )
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role == "admin"
+        assert guardrail_request.oauth_provider == "github"
+        assert guardrail_request.oauth_id == "gh_123"
+
+    def test_only_run_id_present(self):
+        runtime = self._make_runtime_mock(context={"run_id": "run_xyz"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id == "run_xyz"
+        assert guardrail_request.tool_call_id is None
+
+    def test_only_tool_call_id_present(self):
+        req = self._make_request(runtime=None, tool_call={"name": "web_search", "args": {"query": "test"}, "id": "call_42"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_42"
+
+    def test_all_attribution_fields_present(self):
+        runtime = self._make_runtime_mock(
+            context={
+                "user_id": "user_abc",
+                "user_role": "user",
+                "oauth_provider": "google",
+                "oauth_id": "google_123",
+                "run_id": "run_xyz",
+                "is_subagent": True,
+            }
+        )
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_all"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role == "user"
+        assert guardrail_request.oauth_provider == "google"
+        assert guardrail_request.oauth_id == "google_123"
+        assert guardrail_request.run_id == "run_xyz"
+        assert guardrail_request.tool_call_id == "call_all"
+        assert guardrail_request.is_subagent is True
+
+    def test_partial_attribution_fields_present(self):
+        runtime = self._make_runtime_mock(context={"user_id": "user_partial"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_partial"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_partial"
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_partial"
+
+    def test_empty_context_with_tool_call(self):
+        runtime = self._make_runtime_mock(context={})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_empty_context"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_empty_context"
+
+
 # --- Config tests ---
 
 

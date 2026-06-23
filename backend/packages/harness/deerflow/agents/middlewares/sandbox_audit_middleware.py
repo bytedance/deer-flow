@@ -201,7 +201,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     1. **Command classification**: regex + shlex analysis grades commands as
        high-risk (block), medium-risk (warn), or safe (pass).
     2. **Audit log**: every bash call is recorded as a structured JSON entry
-       via the standard logger (visible in langgraph.log).
+       via the standard logger (visible in gateway.log).
 
     High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked:
     the handler is not called and an error ``ToolMessage`` is returned so the
