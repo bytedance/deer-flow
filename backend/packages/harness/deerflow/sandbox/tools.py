@@ -12,6 +12,7 @@ from langchain.tools import tool
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -1110,9 +1111,9 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Accepts both the legacy generic id ``"local"`` (acquire with no thread
-    context) and the per-thread id format ``"local:{thread_id}"`` produced by
-    :meth:`LocalSandboxProvider.acquire` once a thread is known.
+    Accepts both the generic id ``"local"`` (acquire with no thread context)
+    and the per-thread id format ``"local:{user_id}:{thread_id}"`` produced
+    by :meth:`LocalSandboxProvider.acquire` once a thread is known.
     """
     if runtime is None:
         return False
@@ -1200,7 +1201,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id)
+    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1245,7 +1246,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id)
+    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
