@@ -64,6 +64,7 @@
 | [`05-scenarios-and-prompts.md`](05-scenarios-and-prompts.md) | `claude_code` 子代理在 4 种 mode 下的可用性、跟 general-purpose/bash 的分工、适用/不适用场景、提示词模板、lead agent 调度建议 | 写 lead agent 系统提示 / 写子代理 prompt 的人 |
 | [`claude-agent-sdk-smoke-test-summary.md`](claude-agent-sdk-smoke-test-summary.md) | SDK 烟雾测试运行记录（`cli_path` 验证 + 版本对比） | 关心"SDK 真的能跑吗"的人 |
 | [`claude-agent-sdk-smoke-test.py`](claude-agent-sdk-smoke-test.py) | 烟雾测试脚本 | 想自己跑一遍的人 |
+| [`06-acp-agents-config.md`](06-acp-agents-config.md) | `acp_agents` 段配置参考（claude_code / pi / codex 三个 agent 的字段说明 + vendored binary 路径 + `CLAUDE_CODE_EXECUTABLE` env 解释） | 配 `config.yaml` 时查字段含义的人 |
 
 ---
 
