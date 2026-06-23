@@ -249,6 +249,64 @@ class InsBaseAuthProvider(AuthProvider):
 
         return tenant_id
 
+    async def authenticate_encrypted(self, encrypted_username: str, encrypted_password: str):
+        """Authenticate by forwarding encrypted credentials to ins-base-rpc."""
+        if not encrypted_username or not encrypted_password:
+            return None
+
+        try:
+            response = await self._auth_service.login(encrypted_username, encrypted_password)
+        except RpcNotConfiguredError:
+            raise
+        except (RpcConnectionError, RpcTimeoutError) as e:
+            logger.exception("ins-base-rpc /auth/login transport failed")
+            raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
+        except Exception as e:
+            logger.exception("ins-base-rpc /auth/login call failed")
+            raise RuntimeError(f"Login service call failed: {e}") from e
+
+        code = response.get("code", 0)
+        if code != 200:
+            msg = response.get("msg", "Login failed")
+            raise RuntimeError(msg)
+
+        data = response.get("data") or {}
+        token = data.get("token") or response.get("token")
+        refresh_token = data.get("refresh") or response.get("refresh")
+
+        tenant_id = "default"
+        user_data = {}
+        if token:
+            try:
+                auth_response = await self._auth_service.authenticate(token)
+            except (RpcConnectionError, RpcTimeoutError) as e:
+                logger.exception("ins-base-rpc /auth/authentication transport failed during login")
+                raise AuthProviderUnavailableError("ins-base authentication service unavailable") from e
+            if auth_response.get("code") == 200:
+                user_data = auth_response.get("user") or auth_response.get("data", {}).get("user") or {}
+                org_id = self._extract_org_id(user_data)
+                tenant_id = await self._resolve_tenant_id(org_id)
+
+        username = str(user_data.get("userName") or user_data.get("username") or "ins-base-user")
+
+        user = type(
+            "InsBaseUser",
+            (),
+            {
+                "id": uuid4(),
+                "email": user_data.get("email") or f"{username}@ins-base",
+                "password_hash": None,
+                "system_role": _map_system_role(username),
+                "needs_setup": False,
+                "token_version": 0,
+                "tenant_id": tenant_id,
+                "ins_base_token": token or "",
+                "ins_base_refresh": refresh_token or "",
+                "ins_base_user_data": user_data,
+            },
+        )()
+        return user
+
     async def authenticate(self, credentials: dict):
         """Authenticate with RSA-encrypted username and password via ins-base-rpc.
 

@@ -72,6 +72,38 @@ class TestInsBaseAuthProvider:
         assert mock_rpc_client.call_raw.called
 
     @pytest.mark.asyncio
+    async def test_authenticate_encrypted_forwards_ciphertext(self, provider, mock_rpc_client):
+        """Encrypted login forwards ciphertext to ins-base without local re-encryption."""
+        mock_rpc_client.call_raw.side_effect = [
+            {
+                "code": 200,
+                "data": {
+                    "token": "mock-jwt-token",
+                    "refresh": "mock-refresh-token",
+                },
+            },
+            {
+                "code": 200,
+                "data": {
+                    "user": {
+                        "userId": 123,
+                        "userName": "admin",
+                        "email": "admin@example.com",
+                    },
+                    "permissions": [],
+                },
+            },
+        ]
+
+        result = await provider.authenticate_encrypted("cipher-user", "cipher-pass")
+
+        assert result is not None
+        assert result.system_role == "tenant_admin"
+        login_call = mock_rpc_client.call_raw.call_args_list[0]
+        assert login_call.args[3]["enCodeUser"] == "cipher-user"
+        assert login_call.args[3]["enCodePassword"] == "cipher-pass"
+
+    @pytest.mark.asyncio
     async def test_authenticate_success_admin_role(self, provider, mock_rpc_client):
         """Username 'superadmin' gets superadmin role."""
         mock_rpc_client.call_raw.return_value = {

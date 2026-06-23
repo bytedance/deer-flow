@@ -253,7 +253,16 @@ present_files(["/mnt/user-data/outputs/daily_report.md", "/mnt/user-data/outputs
 present_files(["/mnt/user-data/outputs/daily_report.md"])
 ```
 
-在渲染的 `markdown` 末尾追加下载链接，PDF 不可用时显示"PDF 不可用（weasyprint 未安装）"。
+在渲染的 `markdown` 末尾追加下载链接（其中 `{thread_id}` 替换为当前线程的实际 ID）：
+
+```text
+## 下载
+
+- [下载 Markdown](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.md)
+- [下载 PDF](/api/threads/{thread_id}/artifacts/mnt/user-data/outputs/daily_report.pdf)
+```
+
+PDF 不可用时把 PDF 链接换成 `- PDF 不可用（weasyprint 未安装）`。
 
 7. **绝对不要对 `daily_kpi.json` 或 `daily_data.json` 调用 `present_files`，这些是中间文件，不应暴露给用户。**
 

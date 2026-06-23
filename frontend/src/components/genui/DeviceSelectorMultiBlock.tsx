@@ -92,10 +92,37 @@ export default function DeviceSelectorMultiBlock({ block }: DeviceSelectorMultiB
     void fetchTree();
   }, [fetchTree]);
 
+  /**
+   * Look up the original (unfiltered) node from treeData by id.
+   *
+   * The OrgTreePanel search (`filterTree`) returns shallow-copied nodes whose
+   * `children` are already filtered to the search term. If we pass that
+   * filtered copy to `collectDevices`, any device child that doesn't match
+   * the search keyword is silently dropped — causing "no devices under this
+   * org node" even though devices exist in the real tree.
+   */
+  const findNodeById = useCallback(
+    (id: string): OrgTreeNode | null => {
+      const walk = (nodes: OrgTreeNode[]): OrgTreeNode | null => {
+        for (const n of nodes) {
+          if (n.id === id) return n;
+          if (n.children) {
+            const found = walk(n.children);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      return walk(treeData);
+    },
+    [treeData],
+  );
+
   const devices = useMemo(() => {
     if (!selectedOrgNode) return [];
-    return collectDevices(selectedOrgNode, filterDeviceType);
-  }, [selectedOrgNode, filterDeviceType]);
+    const originalNode = findNodeById(selectedOrgNode.id) ?? selectedOrgNode;
+    return collectDevices(originalNode, filterDeviceType);
+  }, [selectedOrgNode, filterDeviceType, findNodeById]);
 
   const selectedList = useMemo(() => Array.from(selectedDevices.values()), [selectedDevices]);
 

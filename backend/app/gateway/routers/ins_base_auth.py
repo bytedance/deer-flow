@@ -1,7 +1,7 @@
 """InsBase authentication endpoints.
 
-Provides login, token refresh, and authentication endpoints
-backed by the ins-base-rpc Java microservice.
+Provides login, token refresh, and authentication endpoints backed by the
+ins-base-rpc Java microservice.
 """
 
 import logging
@@ -20,13 +20,15 @@ router = APIRouter(prefix="/api/v1/auth/ins-base", tags=["auth-ins-base"])
 
 
 class InsBaseLoginRequest(BaseModel):
-    """Request model for ins-base login."""
-    username: str = Field(..., min_length=1, description="登陆用户名")
-    password: str = Field(..., min_length=1, description="登陆密码")
+    """Request model for ins-base encrypted login."""
+
+    encrypted_username: str = Field(..., min_length=1, description="RSA-encrypted login username")
+    encrypted_password: str = Field(..., min_length=1, description="RSA-encrypted login password")
 
 
 class InsBaseLoginResponse(BaseModel):
     """Response model for ins-base login."""
+
     token: str
     refresh: str
     tenant_id: str = "default"
@@ -34,13 +36,21 @@ class InsBaseLoginResponse(BaseModel):
 
 class InsBaseRefreshRequest(BaseModel):
     """Request model for ins-base token refresh."""
+
     refresh_token: str = Field(..., min_length=1, description="Refresh token")
 
 
 class InsBaseAuthResponse(BaseModel):
     """Response model for ins-base authentication."""
+
     authenticated: bool
     permissions: list = []
+
+
+class InsBasePublicKeyResponse(BaseModel):
+    """Response model for the ins-base login RSA public key."""
+
+    public_key: str
 
 
 def _set_session_cookie(response: Response, token_value: str, request: Request) -> None:
@@ -72,12 +82,24 @@ def _set_refresh_cookie(response: Response, refresh_value: str, request: Request
     )
 
 
+@router.get("/public-key", response_model=InsBasePublicKeyResponse)
+async def public_key():
+    """Return the RSA public key used by the browser for login encryption."""
+    config = get_auth_config()
+    if not config.rsa_public_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ins-base login RSA public key is not configured",
+        )
+    return InsBasePublicKeyResponse(public_key=config.rsa_public_key)
+
+
 @router.post("/login", response_model=InsBaseLoginResponse)
 async def login(request: Request, response: Response, body: InsBaseLoginRequest):
-    """Authenticate with ins-base-rpc using RSA-encrypted credentials.
+    """Authenticate with ins-base-rpc using browser-encrypted credentials.
 
-    The username and password are encrypted with the configured RSA public key
-    before being sent to the ins-base-rpc /auth/login endpoint.
+    Gateway does not receive plaintext credentials. The encrypted username and
+    password are forwarded directly to ins-base-rpc /auth/login.
     """
     provider = get_ins_base_provider()
     if provider is None:
@@ -87,10 +109,10 @@ async def login(request: Request, response: Response, body: InsBaseLoginRequest)
         )
 
     try:
-        user = await provider.authenticate({
-            "username": body.username,
-            "password": body.password,
-        })
+        user = await provider.authenticate_encrypted(
+            body.encrypted_username,
+            body.encrypted_password,
+        )
     except RpcNotConfiguredError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -99,6 +121,11 @@ async def login(request: Request, response: Response, body: InsBaseLoginRequest)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    except AuthProviderUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(e),
         )
     except RuntimeError as e:
@@ -110,10 +137,9 @@ async def login(request: Request, response: Response, body: InsBaseLoginRequest)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="登录失败：用户名或密码错误",
+            detail="Login failed: invalid username or password",
         )
 
-    # Set session cookie with the ins-base token
     _set_session_cookie(response, user.ins_base_token, request)
     _set_refresh_cookie(response, user.ins_base_refresh, request)
 
@@ -138,7 +164,7 @@ async def refresh(request: Request, response: Response, body: InsBaseRefreshRequ
     if new_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的 refresh token",
+            detail="Invalid refresh token",
         )
 
     _set_session_cookie(response, new_token, request)
@@ -162,7 +188,7 @@ async def authenticate(request: Request, response: Response):
     if not access_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少认证 token",
+            detail="Missing authentication token",
         )
 
     provider = get_ins_base_provider()
@@ -182,7 +208,7 @@ async def authenticate(request: Request, response: Response):
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效 token 或 token 已过期",
+            detail="Invalid or expired token",
         )
 
     _set_session_cookie(response, access_token, request)

@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { setCurrentTenantId } from "@/core/tenant/store";
 import { setEhmCookieAndRedirect, isEhmTokenValid } from "@/core/auth/ehm-auth";
+import { encryptInsBaseCredential } from "@/core/auth/rsa-login";
 
 /**
  * Validate next parameter
@@ -97,10 +98,33 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
+      const keyRes = await fetch("/api/v1/auth/ins-base/public-key", {
+        credentials: "include",
+      });
+      if (!keyRes.ok) {
+        setError("登录加密配置不可用，请联系管理员");
+        return;
+      }
+      const keyData = await keyRes.json();
+      const publicKey =
+        typeof keyData?.public_key === "string" ? keyData.public_key : "";
+      if (!publicKey) {
+        setError("登录加密配置不可用，请联系管理员");
+        return;
+      }
+
+      const [encryptedUsername, encryptedPassword] = await Promise.all([
+        encryptInsBaseCredential(username, publicKey),
+        encryptInsBaseCredential(password, publicKey),
+      ]);
+
       const res = await fetch("/api/v1/auth/ins-base/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          encrypted_username: encryptedUsername,
+          encrypted_password: encryptedPassword,
+        }),
         credentials: "include",
       });
 
