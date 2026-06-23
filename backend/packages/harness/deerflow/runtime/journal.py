@@ -29,6 +29,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from deerflow.utils.messages import message_to_text
+
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
 
@@ -104,33 +106,7 @@ class RunJournal(BaseCallbackHandler):
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, Mapping):
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-                    else:
-                        nested = block.get("content")
-                        if isinstance(nested, str):
-                            parts.append(nested)
-            return "".join(parts)
-        if isinstance(content, Mapping):
-            for key in ("text", "content"):
-                value = content.get(key)
-                if isinstance(value, str):
-                    return value
-
-        text = getattr(message, "text", None)
-        if isinstance(text, str):
-            return text
-        return ""
+        return message_to_text(message, text_attribute_fallback=True)
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
