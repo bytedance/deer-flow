@@ -53,6 +53,32 @@ test.describe("Thread history", () => {
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
   });
 
+  test("clicking blank space in a sidebar thread row navigates to it", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const firstThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({ hasText: "First conversation" })
+      .first();
+    await expect(firstThreadItem).toBeVisible({ timeout: 15_000 });
+
+    const box = await firstThreadItem.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) {
+      return;
+    }
+
+    await page.mouse.click(box.x + 4, box.y + box.height / 2);
+
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
+  });
+
   test("existing thread loads historical messages", async ({ page }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
