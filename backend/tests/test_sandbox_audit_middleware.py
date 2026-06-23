@@ -556,6 +556,35 @@ class TestHomeDirectorySpellingsStayAllowed:
         assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
 
 
+class TestHomeDirectoryReadsStillExecute:
+    """Allowed home spellings must still run the bash tool (#7029)."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "echo $HOME",
+            "ls $HOME",
+            "ls $HOME/Documents",
+            "cat $HOME/.bashrc",
+            "cat ${HOME}/.bashrc",
+            "rm -rf $HOMELESS",
+            "rm -rf $MY_HOME/",
+            "rm -rf ${HOME_CACHE}",
+        ],
+    )
+    def test_allowed_home_spellings_reach_the_handler(self, cmd):
+        request = _make_request(cmd)
+        handler = _make_handler()
+        with patch.object(self.mw, "_write_audit"):
+            result = self.mw.wrap_tool_call(request, handler)
+        assert handler.called, f"handler should be called for: {cmd!r}"
+        assert result == handler.return_value
+        assert result.status != "error"
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 
