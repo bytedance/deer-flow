@@ -1191,6 +1191,20 @@ memory:
   #   char - network-free CJK-aware character-based estimate; never touches
   #     tiktoken. Slightly less precise budgeting, zero network I/O.
   token_counting: tiktoken
+  # Guaranteed injection: fact categories that bypass the regular token budget
+  # and draw from a reserved allowance, so high-signal corrections (e.g.
+  # "don't use `pip`, use `uv`") survive even when the budget is tight.
+  #   guaranteed_categories - list of fact categories to guarantee. Pass [] to
+  #     disable; defaults to ["correction"].
+  #   guaranteed_token_budget - token ceiling for guaranteed facts. In the
+  #     common case the total injection stays within ``max_injection_tokens``
+  #     (guaranteed lines displace regular ones); the allowance becomes
+  #     additive only when guaranteed lines alone would overflow
+  #     ``max_injection_tokens``, in which case the safety-truncation ceiling
+  #     is raised accordingly.
+  guaranteed_categories:
+    - correction
+  guaranteed_token_budget: 500
 
 # ============================================================================
 # Custom Agent Management API

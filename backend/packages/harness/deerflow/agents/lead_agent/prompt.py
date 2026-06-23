@@ -610,6 +610,8 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             memory_data,
             max_tokens=config.max_injection_tokens,
             use_tiktoken=(config.token_counting == "tiktoken"),
+            guaranteed_categories=getattr(config, "guaranteed_categories", None),
+            guaranteed_token_budget=getattr(config, "guaranteed_token_budget", 500),
         )
 
         if not memory_content.strip():
