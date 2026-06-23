@@ -74,7 +74,7 @@ async function extractRsaPublicNumbers(publicKeyPem: string): Promise<{
 }> {
   const key = await crypto.subtle.importKey(
     "spki",
-    pemToDer(publicKeyPem),
+    pemToDer(publicKeyPem) as BufferSource,
     { name: "RSA-OAEP", hash: "SHA-256" },
     true,
     ["encrypt"],
