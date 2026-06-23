@@ -162,20 +162,20 @@ read_file(path="/mnt/user-data/uploads/document.md")
 
 ```bash
 # 1. 上传单个文件
-curl -X POST http://localhost:2026/api/threads/test-thread/uploads \
+curl -X POST http://localhost:8001/api/threads/test-thread/uploads \
   -F "files=@/path/to/document.pdf"
 
 # 2. 上传多个文件
-curl -X POST http://localhost:2026/api/threads/test-thread/uploads \
+curl -X POST http://localhost:8001/api/threads/test-thread/uploads \
   -F "files=@/path/to/document.pdf" \
   -F "files=@/path/to/presentation.pptx" \
   -F "files=@/path/to/spreadsheet.xlsx"
 
 # 3. 列出已上传文件
-curl http://localhost:2026/api/threads/test-thread/uploads/list
+curl http://localhost:8001/api/threads/test-thread/uploads/list
 
 # 4. 删除文件
-curl -X DELETE http://localhost:2026/api/threads/test-thread/uploads/document.pdf
+curl -X DELETE http://localhost:8001/api/threads/test-thread/uploads/document.pdf
 ```
 
 ### 使用 Python 测试
@@ -184,7 +184,7 @@ curl -X DELETE http://localhost:2026/api/threads/test-thread/uploads/document.pd
 import requests
 
 thread_id = "test-thread"
-base_url = "http://localhost:2026"
+base_url = "http://localhost:8001"
 
 # 上传文件
 files = [
@@ -224,7 +224,7 @@ backend/.deer-flow/threads/
 
 ## 限制
 
-- 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
+- 最大文件大小：100MB（FastAPI / uvicorn 默认接受；如需在反向代理前限流请在你的代理层配置）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
 - 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
@@ -240,10 +240,6 @@ backend/.deer-flow/threads/
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
    - 在每次 Agent 请求前注入文件列表
    - 自动生成格式化的文件列表消息
-
-3. **Nginx 配置** (`nginx.conf`)
-   - 路由上传请求到 Gateway API
-   - 配置大文件上传支持
 
 ### 依赖
 

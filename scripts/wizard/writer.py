@@ -13,9 +13,6 @@ from typing import Any
 import yaml
 
 CHANNEL_CONNECTION_PROVIDERS: tuple[str, ...] = (
-    "telegram",
-    "slack",
-    "discord",
     "feishu",
     "dingtalk",
     "wechat",

@@ -8,31 +8,29 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
 
 ```
                         ┌──────────────────────────────────────┐
-                        │          Nginx (Port 2026)           │
-                        │      Unified reverse proxy           │
-                        └───────┬──────────────────┬───────────┘
-                                │
-            /api/langgraph/*    │    /api/* (other)
-            rewritten to /api/* │
-                                ▼
-               ┌────────────────────────────────────────┐
-               │        Gateway API (8001)              │
-               │        FastAPI REST + agent runtime    │
-               │                                        │
-               │ Models, MCP, Skills, Memory, Uploads,  │
-               │ Artifacts, Threads, Runs, Streaming    │
-               │                                        │
-               │ ┌────────────────────────────────────┐ │
-               │ │ Lead Agent                         │ │
-               │ │ Middleware Chain, Tools, Subagents │ │
-               │ └────────────────────────────────────┘ │
-               └────────────────────────────────────────┘
+                        │       Browser (User Client)          │
+                        └────────┬──────────────────┬──────────┘
+                                 │ UI               │ API (CORS)
+                                 ▼                  ▼
+               ┌────────────────────────┐  ┌────────────────────────────────────────┐
+               │  Frontend (Port 3000)  │  │        Gateway API (8001)              │
+               │  Next.js + SSR         │  │        FastAPI REST + agent runtime    │
+               └────────────────────────┘  │                                        │
+                                           │ Models, MCP, Skills, Memory, Uploads,  │
+                                           │ Artifacts, Threads, Runs, Streaming    │
+                                           │                                        │
+                                           │ ┌────────────────────────────────────┐ │
+                                           │ │ Lead Agent                         │ │
+                                           │ │ Middleware Chain, Tools, Subagents │ │
+                                           │ └────────────────────────────────────┘ │
+                                           └────────────────────────────────────────┘
 ```
 
-**Request Routing** (via Nginx):
-- `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
-- `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
-- `/` (non-API) → Frontend - Next.js web interface
+**Request Routing**:
+- Browser → Frontend (`:3000`) for UI / SSR
+- Browser → Gateway (`:8001`) for all `/api/*` calls via CORS
+- `/api/langgraph/*` on Gateway → LangGraph-compatible runtime - agent interactions, threads, streaming
+- Other `/api/*` on Gateway → REST routers - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 
 ---
 
@@ -189,10 +187,10 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts Gateway + Frontend + Nginx
+make dev  # Starts Gateway + Frontend
 ```
 
-Access at: http://localhost:2026
+Access at: http://localhost:3000
 
 **Backend Only** (from backend directory):
 

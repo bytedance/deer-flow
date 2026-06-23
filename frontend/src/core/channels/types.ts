@@ -1,4 +1,4 @@
-export type ChannelProviderId = "telegram" | "slack" | "discord" | string;
+export type ChannelProviderId = string;
 
 export interface ChannelCredentialField {
   name: string;

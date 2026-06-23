@@ -142,7 +142,6 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
         Query forms:
           - "select:Read,Edit" -- fetch these exact tools by name
           - "notebook jupyter" -- keyword search, up to max_results best matches
-          - "+slack send" -- require "slack" in the name, rank by remaining terms
         """
         matched = catalog.search(query)[:MAX_RESULTS]
         if not matched:

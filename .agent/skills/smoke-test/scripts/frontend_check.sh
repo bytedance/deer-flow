@@ -6,7 +6,7 @@ echo "  Frontend Page Smoke Check"
 echo "=========================================="
 echo ""
 
-BASE_URL="${BASE_URL:-http://localhost:2026}"
+BASE_URL="${BASE_URL:-http://localhost:3000}"
 DOC_PATH="${DOC_PATH:-/en/docs}"
 
 # When the gateway has authentication enabled (DEER_FLOW_AUTH_DISABLED != 1),

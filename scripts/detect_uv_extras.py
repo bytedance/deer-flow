@@ -143,12 +143,9 @@ def section_value(lines: list[str], section: str, key: str) -> str | None:
 
 
 def nested_section_value(lines: list[str], section_path: str, key: str) -> str | None:
-    """Return the value of a nested YAML key like ``channels.discord.enabled``.
+    """Return the value of a nested YAML key like ``parent.child.key``.
 
-    Handles two levels of nesting:
-        channels:
-          discord:
-            enabled: true
+    Handles two levels of nesting.
     """
     parts = section_path.split(".")
     if len(parts) != 2:
@@ -231,8 +228,6 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("postgres")
     if (section_value(lines, "checkpointer", "type") or "").lower() == "postgres":
         extras.add("postgres")
-    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
-        extras.add("discord")
     return sorted(extras)
 
 

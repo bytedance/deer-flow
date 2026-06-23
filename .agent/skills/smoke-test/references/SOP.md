@@ -117,25 +117,13 @@ This document describes the detailed operating steps for each phase of the DeerF
 
 ---
 
-#### 2.2.4 Check nginx
-
-**Steps**:
-1. Run `nginx -v`
-
-**Success Criteria**: The command returns nginx version information.
-
-**Failure Handling**:
-- macOS: install with Homebrew using `brew install nginx`
-- Linux: install using the system package manager
-
----
 
 #### 2.2.5 Check Required Ports
 
 **Steps**:
 1. Run the following commands to check ports:
    ```bash
-   lsof -i :2026  # Main port
+   lsof -i :3000  # Main port
    lsof -i :3000  # Frontend
    lsof -i :8001  # Gateway
    ```
@@ -182,9 +170,9 @@ This document describes the detailed operating steps for each phase of the DeerF
 #### 2.3.4 Check Required Ports
 
 **Steps**:
-1. Run `lsof -i :2026` (macOS/Linux) or `netstat -ano | findstr :2026` (Windows)
+1. Run `lsof -i :3000` (macOS/Linux) or `netstat -ano | findstr :3000` (Windows)
 
-**Success Criteria**: Port 2026 is free, or it is occupied only by a DeerFlow-related process.
+**Success Criteria**: Port 3000 is free, or it is occupied only by a DeerFlow-related process.
 
 **Failure Handling**:
 - If the port is occupied by another process, ask the user to stop that process or change the configuration
@@ -226,7 +214,7 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Run `make check`
 
-**Description**: This command validates all required tools (Node.js 22+, pnpm, uv, nginx).
+**Description**: This command validates all required tools (Node.js 22+, pnpm, uv).
 
 ---
 
@@ -257,7 +245,7 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Run `make dev-daemon` (background mode)
 
-**Description**: This command starts all services (Gateway embedded runtime, Frontend, Nginx).
+**Description**: This command starts all services (Gateway embedded runtime, Frontend).
 
 **Notes**:
 - `make dev` runs in the foreground and stops with Ctrl+C
@@ -273,8 +261,7 @@ This document describes the detailed operating steps for each phase of the DeerF
 2. You can monitor startup progress by checking these log files:
    - `logs/gateway.log`
    - `logs/frontend.log`
-   - `logs/nginx.log`
-
+   - 
 ---
 
 ### 4.2 Docker Mode Deployment (If Docker Is Selected)
@@ -314,25 +301,24 @@ This document describes the detailed operating steps for each phase of the DeerF
 **Steps**:
 1. Run the following command to check processes:
    ```bash
-   ps aux | grep -E "(uvicorn|next|nginx)" | grep -v grep
+   ps aux | grep -E "(uvicorn|next)" | grep -v grep
    ```
 
 **Success Criteria**: Confirm that the following processes are running:
 - Gateway (`uvicorn app.gateway.app:app`)
 - Frontend (`next dev` or `next start`)
-- Nginx (`nginx`)
 
 ---
 
 #### 5.1.2 Check Frontend Service
 
 **Steps**:
-1. Use curl or a browser to visit `http://localhost:2026`
+1. Use curl or a browser to visit `http://localhost:3000`
 2. Verify that the page loads normally
 
 **Example curl command**:
 ```bash
-curl -I http://localhost:2026
+curl -I http://localhost:3000
 ```
 
 **Success Criteria**: Returns an HTTP 200 status code.
@@ -342,11 +328,11 @@ curl -I http://localhost:2026
 #### 5.1.3 Check API Gateway
 
 **Steps**:
-1. Visit `http://localhost:2026/health`
+1. Visit `http://localhost:3000/health`
 
 **Example curl command**:
 ```bash
-curl http://localhost:2026/health
+curl http://localhost:3000/health
 ```
 
 **Success Criteria**: Returns health status JSON.
@@ -356,7 +342,7 @@ curl http://localhost:2026/health
 #### 5.1.4 Check LangGraph-compatible API
 
 **Steps**:
-1. Visit `http://localhost:2026/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
+1. Visit `http://localhost:3000/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
 2. A `401` response is acceptable when authentication is enabled and no session cookie is provided.
 
 ---
@@ -384,7 +370,6 @@ curl http://localhost:2026/health
 **Steps**:
 1. Run `docker ps`
 2. Confirm that the following containers are running:
-   - `deer-flow-nginx`
    - `deer-flow-frontend`
    - `deer-flow-gateway`
 
@@ -393,12 +378,12 @@ curl http://localhost:2026/health
 #### 5.2.2 Check Frontend Service
 
 **Steps**:
-1. Use curl or a browser to visit `http://localhost:2026`
+1. Use curl or a browser to visit `http://localhost:3000`
 2. Verify that the page loads normally
 
 **Example curl command**:
 ```bash
-curl -I http://localhost:2026
+curl -I http://localhost:3000
 ```
 
 **Success Criteria**: Returns an HTTP 200 status code.
@@ -408,11 +393,11 @@ curl -I http://localhost:2026
 #### 5.2.3 Check API Gateway
 
 **Steps**:
-1. Visit `http://localhost:2026/health`
+1. Visit `http://localhost:3000/health`
 
 **Example curl command**:
 ```bash
-curl http://localhost:2026/health
+curl http://localhost:3000/health
 ```
 
 **Success Criteria**: Returns health status JSON.
@@ -422,7 +407,7 @@ curl http://localhost:2026/health
 #### 5.2.4 Check LangGraph-compatible API
 
 **Steps**:
-1. Visit `http://localhost:2026/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
+1. Visit `http://localhost:3000/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
 2. A `401` response is acceptable when authentication is enabled and no session cookie is provided.
 
 ---

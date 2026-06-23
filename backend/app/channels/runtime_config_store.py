@@ -134,25 +134,10 @@ def merge_runtime_channel_configs(
 def apply_runtime_connection_config(
     channel_connections_config: Any,
     *,
-    store: ChannelRuntimeConfigStore | None = None,
+    store: ChannelRuntimeConfigStore | None = None,  # noqa: ARG001  (kept for call-site compatibility)
 ) -> Any:
     """Apply persisted connection metadata that lives outside ``channels``.
 
-    Telegram uses a bot username for deep links; UI-entered values are stored
-    with the runtime channel config so local restarts keep the provider
-    configured.
+    Currently a no-op kept for backward compatibility with existing call sites.
     """
-    if channel_connections_config is None or not getattr(channel_connections_config, "enabled", False):
-        return channel_connections_config
-
-    runtime_store = store or ChannelRuntimeConfigStore()
-    telegram_runtime_config = runtime_store.get_provider_config("telegram")
-    bot_username = ""
-    if isinstance(telegram_runtime_config, dict):
-        bot_username = str(telegram_runtime_config.get("bot_username") or "").strip()
-    if not bot_username or not _provider_enabled(channel_connections_config, "telegram"):
-        return channel_connections_config
-
-    config = channel_connections_config.model_copy(deep=True)
-    config.telegram.bot_username = bot_username
-    return config
+    return channel_connections_config

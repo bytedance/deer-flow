@@ -82,9 +82,9 @@ pnpm start
 Key environment variables (see `.env.example` for full list):
 
 ```bash
-# Backend API URL (optional, uses local Next.js/nginx proxy by default)
+# Backend API URL (set by serve.sh / Docker compose; browser calls Gateway directly via CORS)
 NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
-# LangGraph-compatible API URL (optional, uses local Next.js/nginx proxy by default)
+# LangGraph-compatible API URL (set by serve.sh / Docker compose; browser calls Gateway directly via CORS)
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 
@@ -145,7 +145,7 @@ src/
 - Uses pnpm workspaces (see `packageManager` in package.json)
 - Turbopack enabled by default in development for faster builds
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
-- Backend API URLs are optional; nginx proxy is used by default in development
+- Backend API URLs are set by serve.sh / Docker compose; browser calls Gateway directly via CORS in development
 
 ## License
 

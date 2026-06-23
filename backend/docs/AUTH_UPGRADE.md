@@ -41,13 +41,13 @@ make dev
 
 ### 3. 创建 admin
 
-访问 `http://localhost:2026/setup`，填写邮箱和密码创建第一个 admin 账号。创建成功后会自动登录并进入 workspace。
+访问 `http://localhost:8001/setup`，填写邮箱和密码创建第一个 admin 账号。创建成功后会自动登录并进入 workspace。
 
 如果这是从无认证版本升级，创建 admin 后重启一次服务，让启动迁移把缺少 `user_id` 的历史 thread 归属到 admin。
 
 ### 4. 登录
 
-后续访问 `http://localhost:2026/login`，使用已创建的邮箱和密码登录。
+后续访问 `http://localhost:8001/login`，使用已创建的邮箱和密码登录。
 
 ### 5. 添加用户（可选）
 
@@ -87,7 +87,7 @@ python -m app.gateway.auth.reset_admin --email user@example.com
 
 ```bash
 rm -f backend/.deer-flow/data/deerflow.db
-# 重启服务后访问 http://localhost:2026/setup
+# 重启服务后访问 http://localhost:8001/setup
 ```
 
 ## 数据存储

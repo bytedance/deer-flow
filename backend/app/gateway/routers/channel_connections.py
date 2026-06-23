@@ -85,9 +85,6 @@ class ChannelRuntimeConfigRequest(BaseModel):
 
 
 _PROVIDER_META: dict[str, dict[str, str]] = {
-    "telegram": {"display_name": "Telegram", "auth_mode": "deep_link"},
-    "slack": {"display_name": "Slack", "auth_mode": "binding_code"},
-    "discord": {"display_name": "Discord", "auth_mode": "binding_code"},
     "feishu": {"display_name": "Feishu", "auth_mode": "binding_code"},
     "dingtalk": {"display_name": "DingTalk", "auth_mode": "binding_code"},
     "wechat": {"display_name": "WeChat", "auth_mode": "binding_code"},
@@ -95,15 +92,6 @@ _PROVIDER_META: dict[str, dict[str, str]] = {
 }
 
 _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
-    "telegram": (
-        {"name": "bot_token", "label": "Bot token", "type": "password"},
-        {"name": "bot_username", "label": "Bot username", "type": "text"},
-    ),
-    "slack": (
-        {"name": "bot_token", "label": "Bot token", "type": "password"},
-        {"name": "app_token", "label": "App token", "type": "password"},
-    ),
-    "discord": ({"name": "bot_token", "label": "Bot token", "type": "password"},),
     "feishu": (
         {"name": "app_id", "label": "App ID", "type": "text"},
         {"name": "app_secret", "label": "App secret", "type": "password"},
@@ -120,9 +108,6 @@ _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
 }
 
 _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "telegram": ("bot_token",),
-    "slack": ("bot_token", "app_token"),
-    "discord": ("bot_token",),
     "feishu": ("app_id", "app_secret"),
     "dingtalk": ("client_id", "client_secret"),
     "wechat": ("bot_token",),
@@ -338,8 +323,6 @@ async def _create_state(
 
 
 def _connect_instruction(provider: str, code: str) -> str:
-    if provider == "telegram":
-        return f"Send /start {code} to the DeerFlow Telegram bot."
     meta = _PROVIDER_META.get(provider)
     if meta is None:
         raise HTTPException(status_code=404, detail="Unknown channel provider")
@@ -347,9 +330,7 @@ def _connect_instruction(provider: str, code: str) -> str:
 
 
 def _connect_url(config: ChannelConnectionsConfig, provider: str, code: str) -> str | None:
-    if provider == "telegram":
-        provider_config = _provider_config(config, provider)
-        return f"https://t.me/{provider_config.bot_username}?start={code}"
+    del config, code
     if _PROVIDER_META.get(provider, {}).get("auth_mode") == "binding_code":
         return None
     raise HTTPException(status_code=404, detail="Unknown channel provider")
@@ -425,10 +406,6 @@ def _provider_response(
     else:
         connection_status = "not_connected"
     credential_values = _credential_values(provider, channels_config)
-    if provider == "telegram" and not credential_values.get("bot_username"):
-        bot_username = str(_provider_config(config, provider).bot_username or "").strip()
-        if bot_username:
-            credential_values["bot_username"] = bot_username
     return ChannelProviderResponse(
         provider=provider,
         display_name=meta["display_name"],
@@ -659,13 +636,6 @@ async def configure_channel_provider_runtime(
 
     for key in _RUNTIME_REQUIREMENTS[provider]:
         runtime_config[key] = values[key]
-
-    if provider == "telegram":
-        # The deep-link username is persisted with the runtime channel config
-        # (set_provider_config below) and applied to future requests via
-        # apply_runtime_connection_config; never mutate the config instance
-        # cached by get_app_config().
-        runtime_config["bot_username"] = values["bot_username"]
 
     candidate_channels_config = dict(channels_config)
     candidate_channels_config[provider] = runtime_config

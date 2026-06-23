@@ -61,7 +61,7 @@ export const enUS: Translations = {
 
   // Welcome
   welcome: {
-    greeting: "Hello, again!",
+    greeting: "What can Hound help you with?",
     description:
       "Welcome to 🦌 DeerFlow, an open source super agent. With built-in and custom skills, DeerFlow helps you search on the web, analyze data, and generate artifacts like slides, web pages and do almost anything.",
 
@@ -283,9 +283,6 @@ export const enUS: Translations = {
     saveAndConnect: "Save and connect",
     saveChanges: "Save changes",
     descriptions: {
-      telegram: "Telegram direct messages through your DeerFlow bot.",
-      slack: "Slack workspace messages and mentions.",
-      discord: "Discord server messages through your DeerFlow bot.",
       feishu: "Feishu and Lark messages through your DeerFlow app.",
       dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
       wechat: "WeChat iLink messages through your DeerFlow bot.",

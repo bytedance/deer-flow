@@ -18,14 +18,6 @@ export function GET() {
         enabled: true,
       },
       {
-        name: "github-deep-research",
-        description:
-          "Conduct multi-round deep research on any GitHub Repo. Use when users request comprehensive analysis, timeline reconstruction, competitive analysis, or in-depth investigation of GitHub. Produces structured markdown reports with executive summaries, chronological timelines, metrics analysis, and Mermaid diagrams. Triggers on Github repository URL or open source projects.",
-        license: null,
-        category: "public",
-        enabled: true,
-      },
-      {
         name: "image-generation",
         description:
           "Use this skill when the user requests to generate, create, imagine, or visualize images including characters, scenes, products, or any visual content. Supports structured prompts and reference images for guided generation.",
@@ -77,14 +69,6 @@ export function GET() {
         name: "video-generation",
         description:
           "Use this skill when the user requests to generate, create, or imagine videos. Supports structured prompts and reference image for guided generation.",
-        license: null,
-        category: "public",
-        enabled: true,
-      },
-      {
-        name: "web-design-guidelines",
-        description:
-          'Review UI code for Web Interface Guidelines compliance. Use when asked to "review my UI", "check accessibility", "audit design", "review UX", or "check my site against best practices".',
         license: null,
         category: "public",
         enabled: true,

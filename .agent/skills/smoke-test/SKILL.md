@@ -58,14 +58,13 @@ smoke-test/
 1. **Check Node.js version** - Requires 22+
 2. **Check pnpm** - Package manager
 3. **Check uv** - Python package manager
-4. **Check nginx** - Reverse proxy
-5. **Check required ports** - Confirm that ports 2026, 3000, and 8001 are not occupied
+5. **Check required ports** - Confirm that ports 3000 and 8001 are not occupied
 
 **Docker mode environment check** (if Docker is selected):
 1. **Check whether Docker is installed** - Run `docker --version`
 2. **Check Docker daemon status** - Run `docker info`
 3. **Check Docker Compose availability** - Run `docker compose version`
-4. **Check required ports** - Confirm that port 2026 is not occupied
+4. **Check required ports** - Confirm that port 3000 is not occupied
 
 ### Phase 3: Configuration Preparation
 
@@ -93,16 +92,16 @@ smoke-test/
 ### Phase 5: Service Health Check
 
 **Local mode health check**:
-1. **Check process status** - Confirm that Gateway, Frontend, and Nginx processes are all running
-2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
-3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
+1. **Check process status** - Confirm that Gateway and Frontend processes are all running
+2. **Check frontend service** - Visit `http://localhost:3000` and verify that the page loads
+3. **Check API Gateway** - Verify the `http://localhost:3000/health` endpoint
 4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
 5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. The script auto-detects whether authentication is enabled and, if so, registers / logs in a smoke-test user so the real pages are verified rather than the login redirect.
 
 **Docker mode health check** (when using Docker):
 1. **Check container status** - Run `docker ps` and confirm that all containers are running
-2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
-3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
+2. **Check frontend service** - Visit `http://localhost:3000` and verify that the page loads
+3. **Check API Gateway** - Verify the `http://localhost:3000/health` endpoint
 4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
 5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. The script auto-detects whether authentication is enabled and, if so, registers / logs in a smoke-test user so the real pages are verified rather than the login redirect.
 
@@ -150,7 +149,7 @@ Use the following tools during execution:
 
 Smoke test pass criteria (local mode):
 - [x] Latest code is pulled successfully
-- [x] Local environment check passes (Node.js 22+, pnpm, uv, nginx)
+- [x] Local environment check passes (Node.js 22+, pnpm, uv)
 - [x] Configuration files are set up correctly
 - [x] `make check` passes
 - [x] `make install` completes successfully

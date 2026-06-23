@@ -72,10 +72,7 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
-    "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
-    "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": True},
     "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }

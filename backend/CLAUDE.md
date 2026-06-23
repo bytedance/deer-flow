@@ -7,13 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
 
 **Architecture**:
-- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
-- **Frontend** (port 3000): Next.js web interface
-- **Nginx** (port 2026): Unified reverse proxy entry point
+- **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime, called directly from the browser via CORS
+- **Frontend** (port 3000): Next.js web interface and browser entry point
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Runtime**:
-- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
+- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). The runtime is exposed at `/api/langgraph/*` directly on the Gateway.
 
 **Project Structure**:
 ```
@@ -81,7 +80,7 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
+make dev        # Start all services (Gateway + Frontend), with config.yaml preflight
 make start      # Start production services locally
 make stop       # Stop all services
 ```
@@ -259,7 +258,7 @@ Configuration priority:
 
 FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
 
-CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned.
+CORS is disabled by default: the browser only talks to the Next.js frontend on `:3000`, and Next.js dev rewrites (see `frontend/next.config.js`) proxy `/api/*` to Gateway on `:8001` server-side so everything stays same-origin. Split-origin browser deployments (frontend and Gateway on different hosts/ports) can opt in by setting `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway's `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned.
 
 **Routers**:
 
@@ -285,7 +284,7 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 - `POST /wait` (both thread-scoped and `/api/runs/wait`) drains the stream bridge via `wait_for_run_completion()` instead of bare `await record.task`, so it honours the run's `on_disconnect` setting and cancels the background run on real client disconnect rather than returning a stale checkpoint (issue #3265).
 - Thread-scoped run creation accepts `checkpoint` / `checkpoint_id`; Gateway validates the checkpoint belongs to the request thread before writing `checkpoint_id` / `checkpoint_ns` into `config.configurable` for LangGraph branching.
 
-Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
+All `/api/*` paths are served by the Gateway directly. `/api/langgraph/*` reaches the LangGraph-compatible runtime; all other `/api/*` paths hit the REST routers.
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
@@ -586,7 +585,7 @@ From the **project root** directory:
 make dev
 ```
 
-This starts all services and makes the application available at `http://localhost:2026`.
+This starts all services and makes the application available at `http://localhost:3000`.
 
 **All startup modes:**
 
@@ -600,10 +599,11 @@ This starts all services and makes the application available at `http://localhos
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-**Nginx routing**:
-- `/api/langgraph/*` → Gateway embedded runtime (8001), rewritten to `/api/*`
-- `/api/*` (other) → Gateway API (8001)
-- `/` (non-API) → Frontend (3000)
+**Request routing**:
+- Browser → Frontend (`localhost:3000`)
+- Next.js dev rewrites server-proxy `/api/*` → Gateway (`localhost:8001`)
+  - `/api/langgraph/*` → Gateway embedded LangGraph-compatible runtime
+  - other `/api/*` → Gateway REST routers
 
 ### Running Backend Services Separately
 
@@ -614,16 +614,17 @@ From the **backend** directory:
 make gateway
 ```
 
-Direct access (without nginx):
-- Gateway: `http://localhost:8001`
+Direct access:
+- Frontend (browser entry): `http://localhost:3000`
+- Gateway (internal API): `http://localhost:8001`
 
 ### Frontend Configuration
 
 The frontend uses environment variables to connect to backend services:
-- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Defaults to `/api/langgraph` (through nginx)
-- `NEXT_PUBLIC_BACKEND_BASE_URL` - Defaults to empty string (through nginx)
+- `NEXT_PUBLIC_LANGGRAPH_BASE_URL` - Optional; defaults to `/api/langgraph` (Next.js proxies it server-side to Gateway)
+- `NEXT_PUBLIC_BACKEND_BASE_URL` - Optional; defaults to empty (Next.js proxies `/api/*` server-side to Gateway)
 
-When using `make dev` from root, the frontend automatically connects through nginx.
+When using `make dev` from root, the browser only talks to Next.js on `:3000`; Next.js dev rewrites in `next.config.js` forward `/api/*` to Gateway on `:8001` server-side, so the browser sees a single origin and no CORS is needed.
 
 ## Key Features
 

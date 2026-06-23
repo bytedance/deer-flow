@@ -7,22 +7,17 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                              Client (Browser)                             │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          Nginx (Port 2026)                               │
-│                    Unified Reverse Proxy Entry Point                      │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  /api/langgraph/*  →  Gateway LangGraph-compatible runtime (8001)  │  │
-│  │  /api/*            →  Gateway REST APIs (8001)                     │  │
-│  │  /*                →  Frontend (3000)                               │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          │                                               │
-          ▼                                               ▼
+└────────────────┬─────────────────────────────────────────┬───────────────┘
+                 │ UI / SSR                                │ API (CORS)
+                 ▼                                         ▼
+┌─────────────────────────────────┐ ┌──────────────────────────────────────┐
+│         Frontend (Port 3000)    │ │           Gateway API                 │
+│         Next.js App + SSR       │ │           (Port 8001)                 │
+│                                 │ │                                       │
+└─────────────────────────────────┘ │  /api/langgraph/* → LangGraph runtime │
+                                    │  /api/*            → REST routers     │
+          ┌───────────────────────┴─┴───────────────────────┐
+          ▼                                                 ▼
 ┌─────────────────────────────────────────────┐ ┌─────────────────────┐
 │              Gateway API                    │ │     Frontend        │
 │              (Port 8001)                    │ │    (Port 3000)      │
@@ -52,7 +47,7 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 
 ### Gateway Embedded Agent Runtime
 
-The agent runtime is embedded in the FastAPI Gateway and built on LangGraph for robust multi-agent workflow orchestration. Nginx rewrites `/api/langgraph/*` to Gateway's native `/api/*` routes, so the public API remains compatible with LangGraph SDK clients without running a separate LangGraph server.
+The agent runtime is embedded in the FastAPI Gateway and built on LangGraph for robust multi-agent workflow orchestration. The Gateway serves `/api/langgraph/*` directly, keeping the public API compatible with LangGraph SDK clients without running a separate LangGraph server.
 
 **Entry Point**: `packages/harness/deerflow/agents/lead_agent/agent.py:make_lead_agent`
 
@@ -349,12 +344,11 @@ SKILL.md Format:
 │                    User sends message to agent                           │
 └─────────────────────────────────────────────────────────────────────────┘
 
-1. Client → Nginx
+1. Client (browser) → Gateway API (8001)
    POST /api/langgraph/threads/{thread_id}/runs
    {"input": {"messages": [{"role": "user", "content": "Hello"}]}}
 
-2. Nginx → Gateway API (8001)
-   `/api/langgraph/*` is rewritten to Gateway's LangGraph-compatible `/api/*` routes
+2. Gateway routes `/api/langgraph/*` to its embedded LangGraph-compatible runtime
 
 3. Gateway embedded runtime
    a. Load/create thread state

@@ -33,7 +33,7 @@ def _check_csrf(request) -> None:
     """Enforce Double Submit Cookie CSRF check for state-changing requests.
 
     Mirrors Gateway's CSRFMiddleware logic so that LangGraph routes
-    proxied directly by nginx have the same CSRF protection.
+    exposed directly by the Gateway have the same CSRF protection.
     """
     method = getattr(request, "method", "") or ""
     if method.upper() not in _CSRF_METHODS:

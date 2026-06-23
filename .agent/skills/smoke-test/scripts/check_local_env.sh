@@ -46,17 +46,7 @@ else
 fi
 echo ""
 
-# Check nginx
-echo "4. Checking nginx..."
-if command -v nginx >/dev/null 2>&1; then
-    echo "✓ nginx is installed (version: $(nginx -v 2>&1))"
-else
-    echo "✗ nginx is not installed"
-    echo "  macOS: brew install nginx"
-    echo "  Linux: install it with the system package manager"
-    all_passed=false
-fi
-echo ""
+
 
 # Check ports
 echo "5. Checking ports..."
@@ -65,7 +55,7 @@ if ! command -v lsof >/dev/null 2>&1; then
     echo "  Install lsof and rerun this check"
     all_passed=false
 else
-    for port in 2026 3000 8001; do
+    for port in 3000 8001; do
         if lsof -i :$port >/dev/null 2>&1; then
             echo "⚠  Port $port is already in use:"
             lsof -i :$port | head -2

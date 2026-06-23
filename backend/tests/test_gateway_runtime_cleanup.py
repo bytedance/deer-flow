@@ -72,26 +72,16 @@ def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
     assert ".langgraph_api" not in makefile
 
 
-def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
-    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
-        content = _read(path)
-
-        assert "/api/langgraph-compat" not in content
-        assert "proxy_pass http://langgraph" not in content
-        assert "rewrite ^/api/langgraph/(.*) /api/$1 break;" in content
-        assert "proxy_pass http://gateway" in content or "proxy_pass http://$gateway_upstream" in content
+def test_nginx_artifacts_removed():
+    """After the CORS migration, the docker/nginx/ tree and any nginx config
+    must be gone from the repo."""
+    assert not (REPO_ROOT / "docker" / "nginx").exists()
 
 
-def test_nginx_defers_cors_to_gateway_allowlist():
-    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
-        content = _read(path)
-
-        assert "Access-Control-Allow-Origin" not in content
-        assert "Access-Control-Allow-Methods" not in content
-        assert "Access-Control-Allow-Headers" not in content
-        assert "Access-Control-Allow-Credentials" not in content
-        assert "proxy_hide_header 'Access-Control-Allow-" not in content
-        assert "if ($request_method = 'OPTIONS')" not in content
+def test_serve_sh_does_not_reference_nginx():
+    content = _read("scripts/serve.sh")
+    assert "nginx" not in content.lower()
+    assert "2026" not in content
 
 
 def test_gateway_cors_configuration_uses_gateway_allowlist():

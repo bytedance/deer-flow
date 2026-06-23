@@ -31,7 +31,7 @@ EXPOSE 3000
 # ── Builder: install + compile Next.js ───────────────────────────────────────
 FROM base AS builder
 RUN cd /app/frontend && pnpm install --frozen-lockfile
-# Skip env validation — runtime vars are injected by nginx/container
+# Skip env validation — runtime vars (NEXT_PUBLIC_*) are injected by the container at runtime
 RUN cd /app/frontend && SKIP_ENV_VALIDATION=1 pnpm build
 
 # ── Prod: minimal runtime with pre-built output ───────────────────────────────

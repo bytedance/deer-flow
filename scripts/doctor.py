@@ -192,18 +192,6 @@ def check_uv() -> CheckResult:
     return CheckResult("uv", "ok", version)
 
 
-def check_nginx() -> CheckResult:
-    if shutil.which("nginx"):
-        out = _run(["nginx", "-v"]) or ""
-        version = out.split("/", 1)[-1] if "/" in out else out
-        return CheckResult("nginx", "ok", version)
-    return CheckResult(
-        "nginx",
-        "fail",
-        fix=("macOS:   brew install nginx\nUbuntu:  sudo apt install nginx\nWindows: use WSL or Docker mode"),
-    )
-
-
 def check_config_exists(config_path: Path) -> CheckResult:
     if config_path.exists():
         return CheckResult("config.yaml found", "ok")
@@ -688,7 +676,6 @@ def main() -> int:
         check_node(),
         check_pnpm(),
         check_uv(),
-        check_nginx(),
     ]
     sections.append(("System Requirements", sys_checks))
 

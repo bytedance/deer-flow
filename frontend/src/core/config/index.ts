@@ -4,8 +4,8 @@ function getBaseOrigin() {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-  // Fallback for SSR
-  return "http://localhost:2026";
+  // Fallback for SSR — Next.js renders on the same host as the frontend.
+  return "http://localhost:3000";
 }
 
 export function getBackendBaseURL() {
@@ -19,10 +19,6 @@ export function getBackendBaseURL() {
 }
 
 export function getLangGraphBaseURL(isMock?: boolean) {
-  console.log(
-    "env.NEXT_PUBLIC_LANGGRAPH_BASE_URL",
-    env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
-  );
   if (env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
     return new URL(
       env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
@@ -34,11 +30,13 @@ export function getLangGraphBaseURL(isMock?: boolean) {
     }
     return "http://localhost:3000/mock/api";
   } else {
-    // LangGraph SDK requires a full URL, construct it from current origin
+    // Same-origin fallback: relies on Next.js dev rewrites in next.config.js
+    // (server-side proxy). Production deployments should set
+    // NEXT_PUBLIC_LANGGRAPH_BASE_URL for browser CORS access to Gateway.
     if (typeof window !== "undefined") {
       return `${window.location.origin}/api/langgraph`;
     }
     // Fallback for SSR
-    return "http://localhost:2026/api/langgraph";
+    return "http://localhost:3000/api/langgraph";
   }
 }

@@ -9,13 +9,13 @@ DeerFlow backend exposes two sets of APIs:
 1. **LangGraph-compatible API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
 2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
-All APIs are accessed through the Nginx reverse proxy at port 2026.
+All APIs are served directly by the Gateway at port 8001. The browser calls Gateway across origins via CORS (allowlist controlled by `GATEWAY_CORS_ORIGINS`).
 
 ## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
 
-The public LangGraph-compatible API follows LangGraph SDK conventions. In the unified nginx deployment, Gateway owns `/api/langgraph/*` and translates those paths to its native `/api/*` run, thread, and streaming routers.
+The public LangGraph-compatible API follows LangGraph SDK conventions. Gateway owns `/api/langgraph/*` and translates those paths to its native `/api/*` run, thread, and streaming routers.
 
 ### Threads
 
@@ -593,16 +593,8 @@ Note: MCP outbound connections can still use OAuth for configured HTTP/SSE MCP s
 
 ## Rate Limiting
 
-No rate limiting is implemented by default. For production deployments, configure rate limiting in Nginx:
-
-```nginx
-limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-
-location /api/ {
-    limit_req zone=api burst=20 nodelay;
-    proxy_pass http://backend;
-}
-```
+No rate limiting is implemented by default. For production deployments, configure rate limiting through your reverse proxy or
+by setting `GATEWAY_CORS_ORIGINS` to restrict origins and using `AUTH_TRUSTED_PROXIES` to validate client IPs.
 
 ---
 
@@ -624,7 +616,7 @@ Accept: text/event-stream
 ```python
 from langgraph_sdk import get_client
 
-client = get_client(url="http://localhost:2026/api/langgraph")
+client = get_client(url="http://localhost:8001/api/langgraph")
 
 # Create thread
 thread = await client.threads.create()
@@ -669,24 +661,24 @@ const reader = streamResponse.body?.getReader();
 
 ```bash
 # List models
-curl http://localhost:2026/api/models
+curl http://localhost:8001/api/models
 
 # Get MCP config
-curl http://localhost:2026/api/mcp/config
+curl http://localhost:8001/api/mcp/config
 
 # Upload file
-curl -X POST http://localhost:2026/api/threads/abc123/uploads \
+curl -X POST http://localhost:8001/api/threads/abc123/uploads \
   -F "files=@document.pdf"
 
 # Enable skill
-curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
+curl -X POST http://localhost:8001/api/skills/pdf-processing/enable
 
 # Create thread and run agent
-curl -X POST http://localhost:2026/api/langgraph/threads \
+curl -X POST http://localhost:8001/api/langgraph/threads \
   -H "Content-Type: application/json" \
   -d '{}'
 
-curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
+curl -X POST http://localhost:8001/api/langgraph/threads/abc123/runs \
   -H "Content-Type: application/json" \
   -d '{
     "input": {"messages": [{"role": "user", "content": "Hello"}]},

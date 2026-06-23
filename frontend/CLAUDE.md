@@ -85,15 +85,19 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ## Environment
 
-Backend API URLs are optional; an nginx proxy is used by default:
+Backend API URLs are optional; Next.js dev rewrites (see `next.config.js`) proxy
+`/api/*` server-side to the Gateway on `:8001`, so the browser only sees a single
+origin (`:3000`) and no CORS configuration is needed:
 
 ```
 NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
 NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
 
-Leave these unset for the standard `make dev` / Docker flow, where nginx serves
-the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*`
-routes.
+Leave these unset for the standard `make dev` / Docker flow, where Next.js
+rewrites all `/api/*` calls to Gateway internally.
+
+For split-origin deployments (frontend and Gateway on different hosts/ports),
+set these env vars and configure `GATEWAY_CORS_ORIGINS` on the backend.
 
 Requires Node.js 22+ and pnpm 10.26.2+.

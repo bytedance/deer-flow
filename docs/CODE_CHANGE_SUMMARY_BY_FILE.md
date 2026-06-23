@@ -16,7 +16,7 @@
 -| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for download with citation removal |
 +| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
 
- Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
+ All `/api/*` paths served directly by the Gateway (Next.js dev rewrites proxy /api/* from :3000 to :8001 for the browser).
 ```
 
 - **第 159 行**：表格中 Artifacts 描述由「download with citation removal」改为「file download」。
@@ -834,22 +834,6 @@ export function MarkdownContent({
 ---
 
 ## 五、技能与 Demo
-
-### 23. `skills/public/github-deep-research/SKILL.md`
-
-```diff
-@@ -147,5 +147,5 @@ Save report as: `research_{topic}_{YYYYMMDD}.md`
- 3. **Triangulate claims** - 2+ independent sources
- 4. **Note conflicting info** - Don't hide contradictions
- 5. **Distinguish fact vs opinion** - Label speculation clearly
--6. **Cite inline** - Reference sources near claims
-+6. **Reference sources** - Add source references near claims where applicable
- 7. **Update as you go** - Don't wait until end to synthesize
-```
-
-- 第 150 行：一条措辞修改。
-
----
 
 ### 24. `skills/public/market-analysis/SKILL.md`
 

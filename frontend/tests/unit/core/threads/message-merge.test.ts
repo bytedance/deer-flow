@@ -326,7 +326,7 @@ test("buildRunMessagesUrl omits before_seq when loading the latest page", () => 
   ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
 });
 
-test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
+test("buildRunMessagesUrl returns a relative URL when using the Next.js dev proxy", () => {
   expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
     "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
   );

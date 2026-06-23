@@ -34,7 +34,7 @@ class InboundMessage:
     """A message arriving from an IM channel toward the agent dispatcher.
 
     Attributes:
-        channel_name: Name of the source channel (e.g. "feishu", "slack").
+        channel_name: Name of the source channel (e.g. "feishu", "dingtalk").
         chat_id: Platform-specific chat/conversation identifier.
         user_id: Platform-specific user identifier.
         text: The message text.

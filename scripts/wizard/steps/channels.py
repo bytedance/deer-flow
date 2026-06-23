@@ -8,9 +8,6 @@ from wizard.ui import ask_multi_choice, print_header, print_info, print_success
 
 
 CHANNEL_CONNECTION_OPTIONS: tuple[tuple[str, str, str], ...] = (
-    ("telegram", "Telegram", "direct messages through your DeerFlow bot"),
-    ("slack", "Slack", "workspace messages and mentions"),
-    ("discord", "Discord", "server messages through your DeerFlow bot"),
     ("feishu", "Feishu / Lark", "messages through your DeerFlow app"),
     ("dingtalk", "DingTalk", "Stream Push messages through your DeerFlow bot"),
     ("wechat", "WeChat", "iLink messages through your DeerFlow bot"),

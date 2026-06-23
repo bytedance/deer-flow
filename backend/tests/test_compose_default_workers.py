@@ -3,8 +3,8 @@
 The Gateway holds run state (RunManager and the stream bridge) in process, so
 the default deployment must run a single Uvicorn worker. Running more than one
 worker without a shared cross-worker stream bridge breaks run cancellation, SSE
-reconnects, request de-duplication, and IM channels (nginx has no sticky
-sessions, so requests scatter across workers that each keep their own run
+reconnects, request de-duplication, and IM channels (no shared run state
+across workers means requests scatter across workers that each keep their own
 state). This test pins the safe default so it cannot silently regress to a
 multi-worker default, while still allowing operators to override it once a
 shared stream bridge exists.

@@ -126,7 +126,7 @@ class Channel(ABC):
         Adapters MUST consult this **before** applying their ``allowed_users`` /
         ``_check_user`` gate, so a browser-initiated bind can bootstrap an external
         identity that the platform bot has never seen and is therefore not yet
-        authorized. (Telegram uses its deep-link ``/start <token>`` flow instead.)
+        authorized.
         """
         if self._connection_repo is None:
             return None

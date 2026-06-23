@@ -279,7 +279,7 @@ API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execu
 
 ### Architecture
 
-LangGraph-compatible requests are routed through nginx to this gateway.
+LangGraph-compatible requests are served at /api/langgraph/* on this gateway.
 This gateway provides runtime endpoints for agent runs plus custom endpoints for models, MCP configuration, skills, and artifacts.
         """,
         version="0.1.0",
@@ -326,7 +326,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             },
             {
                 "name": "channels",
-                "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
+                "description": "Manage IM channel integrations (Feishu, DingTalk, WeChat, WeCom)",
             },
             {
                 "name": "assistants-compat",
@@ -349,9 +349,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 
-    # CORS: the unified nginx endpoint is same-origin by default. Split-origin
-    # browser clients must opt in with this explicit Gateway allowlist so CORS
-    # and CSRF origin checks share the same source of truth.
+    # CORS: the browser calls Gateway directly on a different origin from the
+    # Next.js frontend. The GATEWAY_CORS_ORIGINS env var (comma-separated exact
+    # origins) is the single source of truth shared by CORS and CSRF origin
+    # checks. It is set automatically by serve.sh and the Docker compose files.
     cors_origins = sorted(get_configured_cors_origins())
     if cors_origins:
         app.add_middleware(

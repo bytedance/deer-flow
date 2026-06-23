@@ -336,7 +336,7 @@ class TestBuildMinimalConfig:
             display_name="OpenAI",
             api_key_field="api_key",
             env_var="OPENAI_API_KEY",
-            channel_connection_providers=["feishu", "slack"],
+            channel_connection_providers=["feishu", "dingtalk"],
         )
 
         data = yaml.safe_load(content)
@@ -344,10 +344,7 @@ class TestBuildMinimalConfig:
 
         assert channel_connections["enabled"] is True
         assert channel_connections["feishu"]["enabled"] is True
-        assert channel_connections["slack"]["enabled"] is True
-        assert channel_connections["telegram"]["enabled"] is False
-        assert channel_connections["discord"]["enabled"] is False
-        assert channel_connections["dingtalk"]["enabled"] is False
+        assert channel_connections["dingtalk"]["enabled"] is True
         assert channel_connections["wechat"]["enabled"] is False
         assert channel_connections["wecom"]["enabled"] is False
 
@@ -429,11 +426,11 @@ class TestChannelsStep:
         monkeypatch.setattr(channels_step, "print_header", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(channels_step, "print_info", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(channels_step, "print_success", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(channels_step, "ask_multi_choice", lambda *_args, **_kwargs: [0, 3, 6])
+        monkeypatch.setattr(channels_step, "ask_multi_choice", lambda *_args, **_kwargs: [0, 3])
 
         result = channels_step.run_channels_step()
 
-        assert result.enabled_providers == ["telegram", "feishu", "wecom"]
+        assert result.enabled_providers == ["feishu", "wecom"]
 
     def test_empty_selection_disables_channel_connections(self, monkeypatch):
         monkeypatch.setattr(channels_step, "print_header", lambda *_args, **_kwargs: None)

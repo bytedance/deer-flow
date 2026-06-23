@@ -54,7 +54,7 @@ def _make_request(tmp_path) -> Request:
     app.state.channel_connections_config = ChannelConnectionsConfig.model_validate(
         {
             "enabled": True,
-            "slack": {"enabled": True},
+            "feishu": {"enabled": True},
         }
     )
     app.state.channels_config = {}
@@ -72,17 +72,17 @@ async def test_configure_runtime_channel_does_not_block_event_loop(tmp_path) -> 
     request = await asyncio.to_thread(_make_request, tmp_path)
 
     response = await configure_channel_provider_runtime(
-        "slack",
-        ChannelRuntimeConfigRequest(values={"bot_token": "xoxb-ui", "app_token": "xapp-ui"}),
+        "feishu",
+        ChannelRuntimeConfigRequest(values={"app_id": "feishu-ui", "app_secret": "secret-ui"}),
         request,
     )
 
-    assert response.provider == "slack"
+    assert response.provider == "feishu"
     store = request.app.state.channel_runtime_config_store
-    assert await asyncio.to_thread(store.get_provider_config, "slack") == {
+    assert await asyncio.to_thread(store.get_provider_config, "feishu") == {
         "enabled": True,
-        "bot_token": "xoxb-ui",
-        "app_token": "xapp-ui",
+        "app_id": "feishu-ui",
+        "app_secret": "secret-ui",
     }
 
 
@@ -91,17 +91,17 @@ async def test_disconnect_runtime_channel_does_not_block_event_loop(tmp_path) ->
     store = request.app.state.channel_runtime_config_store
     await asyncio.to_thread(
         store.set_provider_config,
-        "slack",
-        {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+        "feishu",
+        {"enabled": True, "app_id": "feishu-ui", "app_secret": "secret-ui"},
     )
     request.app.state.channels_config = {
-        "slack": {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+        "feishu": {"enabled": True, "app_id": "feishu-ui", "app_secret": "secret-ui"},
     }
 
-    response = await disconnect_channel_provider_runtime("slack", request)
+    response = await disconnect_channel_provider_runtime("feishu", request)
 
-    assert response.provider == "slack"
-    assert await asyncio.to_thread(store.get_provider_config, "slack") == {
+    assert response.provider == "feishu"
+    assert await asyncio.to_thread(store.get_provider_config, "feishu") == {
         "enabled": False,
         "_runtime_disabled": True,
     }
@@ -113,8 +113,8 @@ async def test_runtime_config_store_file_is_owner_only(tmp_path) -> None:
 
     await asyncio.to_thread(
         store.set_provider_config,
-        "slack",
-        {"enabled": True, "bot_token": "xoxb-ui", "app_token": "xapp-ui"},
+        "feishu",
+        {"enabled": True, "app_id": "feishu-ui", "app_secret": "secret-ui"},
     )
 
     mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
@@ -136,8 +136,8 @@ async def test_runtime_config_store_overwrites_loose_existing_file(tmp_path) -> 
     store = await asyncio.to_thread(ChannelRuntimeConfigStore, path)
     await asyncio.to_thread(
         store.set_provider_config,
-        "slack",
-        {"enabled": True, "bot_token": "xoxb-ui"},
+        "feishu",
+        {"enabled": True, "app_id": "feishu-ui"},
     )
 
     mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
@@ -165,11 +165,11 @@ async def test_runtime_config_store_chmod_failure_is_logged_not_fatal(tmp_path, 
 
     def _save_with_failing_temp_chmod() -> None:
         with caplog.at_level(logging.DEBUG, logger="app.channels.runtime_config_store"), mock.patch.object(Path, "chmod", chmod_spy):
-            store.set_provider_config("slack", {"enabled": True, "bot_token": "xoxb-ui"})
+            store.set_provider_config("feishu", {"enabled": True, "app_id": "feishu-ui"})
 
     await asyncio.to_thread(_save_with_failing_temp_chmod)
 
     assert any("Unable to chmod temporary channel runtime config store" in record.getMessage() for record in caplog.records)
     mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
     assert mode == 0o600
-    assert await asyncio.to_thread(store.get_provider_config, "slack") == {"enabled": True, "bot_token": "xoxb-ui"}
+    assert await asyncio.to_thread(store.get_provider_config, "feishu") == {"enabled": True, "app_id": "feishu-ui"}

@@ -38,7 +38,7 @@ def test_restart_channel_requires_admin(monkeypatch):
     app.include_router(channels.router)
 
     with TestClient(app) as client:
-        response = client.post("/api/channels/slack/restart")
+        response = client.post("/api/channels/feishu/restart")
 
     assert response.status_code == 403
     assert "Admin privileges" in response.json()["detail"]
@@ -52,14 +52,14 @@ def test_restart_channel_allows_admin(monkeypatch):
     app.include_router(channels.router)
 
     with TestClient(app) as client:
-        response = client.post("/api/channels/slack/restart")
+        response = client.post("/api/channels/feishu/restart")
 
     assert response.status_code == 200
     assert response.json() == {
         "success": True,
-        "message": "Channel slack restarted successfully",
+        "message": "Channel feishu restarted successfully",
     }
-    service.restart_channel.assert_awaited_once_with("slack")
+    service.restart_channel.assert_awaited_once_with("feishu")
 
 
 def test_get_channels_status_remains_read_only(monkeypatch):
@@ -67,7 +67,7 @@ def test_get_channels_status_remains_read_only(monkeypatch):
         get_status=lambda: {
             "service_running": True,
             "channels": {
-                "slack": {
+                "feishu": {
                     "enabled": True,
                     "running": True,
                 }
@@ -83,4 +83,4 @@ def test_get_channels_status_remains_read_only(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["service_running"] is True
-    assert response.json()["channels"]["slack"]["running"] is True
+    assert response.json()["channels"]["feishu"]["running"] is True

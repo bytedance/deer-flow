@@ -28,7 +28,7 @@ test("reuses the original File when a prompt attachment already has one", async 
     type: "file",
     filename: file.name,
     mediaType: file.type,
-    url: "blob:http://localhost:2026/stale-preview-url",
+    url: "blob:http://localhost:3000/stale-preview-url",
     file,
   });
 
@@ -88,7 +88,7 @@ test("returns null when the URL fallback fetch fails", async () => {
   const converted = await promptInputFilePartToFile({
     type: "file",
     filename: "note.txt",
-    url: "blob:http://localhost:2026/missing-preview-url",
+    url: "blob:http://localhost:3000/missing-preview-url",
   } as PromptInputFilePart);
 
   expect(converted).toBeNull();
@@ -112,7 +112,7 @@ test("returns null when the URL fallback fetch response is non-ok", async () => 
   const converted = await promptInputFilePartToFile({
     type: "file",
     filename: "note.txt",
-    url: "blob:http://localhost:2026/missing-preview-url",
+    url: "blob:http://localhost:3000/missing-preview-url",
   } as PromptInputFilePart);
 
   expect(converted).toBeNull();

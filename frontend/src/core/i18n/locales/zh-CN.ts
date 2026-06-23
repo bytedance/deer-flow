@@ -61,7 +61,7 @@ export const zhCN: Translations = {
 
   // Welcome
   welcome: {
-    greeting: "你好，欢迎回来！",
+    greeting: "Hound 可以帮你处理什么？",
     description:
       "欢迎使用 🦌 DeerFlow，一个完全开源的超级智能体。通过内置和自定义的 Skills，\nDeerFlow 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。",
 
@@ -85,7 +85,7 @@ export const zhCN: Translations = {
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
     mode: "模式",
-    flashMode: "闪速",
+    flashMode: "极速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
     reasoningMode: "思考",
     reasoningModeDescription: "思考后再行动，在时间与准确性之间取得平衡",
@@ -271,9 +271,6 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
-      telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
-      slack: "接收 Slack 工作区消息和提及。",
-      discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
       feishu: "通过 DeerFlow 应用接收飞书和 Lark 消息。",
       dingtalk: "通过 DeerFlow Bot 接收钉钉 Stream Push 消息。",
       wechat: "通过 DeerFlow Bot 接收微信 iLink 消息。",

@@ -2,9 +2,8 @@
 # Usage: make up
 #
 # Services:
-#   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
-#   - frontend:    Next.js production server
-#   - gateway:     FastAPI Gateway API + agent runtime
+#   - frontend:    Next.js production server (exposes :3000, browser entry point; also reverse-proxies /api/* to gateway)
+#   - gateway:     FastAPI Gateway API + agent runtime (internal-only on :8001)
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -21,27 +20,9 @@
 # LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
 # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
 #
-# Access: http://localhost:${PORT:-2026}
+# Access: http://localhost:${FRONTEND_PORT:-3000}  (browser; Next.js proxies /api/* to gateway internally)
 
 services:
-  # ── Reverse Proxy ──────────────────────────────────────────────────────────
-  nginx:
-    image: nginx:alpine
-    container_name: deer-flow-nginx
-    ports:
-      - "${PORT:-2026}:2026"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
-    depends_on:
-      - frontend
-      - gateway
-    networks:
-      - deer-flow
-    restart: unless-stopped
-
   # ── Frontend: Next.js Production ───────────────────────────────────────────
   frontend:
     build:
@@ -52,8 +33,13 @@ services:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: deer-flow-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      # SSR + Next.js rewrites talk to gateway over Docker internal network.
+      # Browser /api/* calls are proxied through this same Next.js process, so
+      # everything stays same-origin and no CORS configuration is required.
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
       - ../frontend/.env
@@ -74,10 +60,10 @@ services:
     container_name: deer-flow-gateway
     # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
     # singletons -- run state lives in this worker's memory. Default to a single
-    # worker: with >1 worker and no nginx sticky sessions, run cancel, SSE
-    # reconnect, request dedup, and per-worker IM channel services all break
-    # across workers until a shared (e.g. redis) stream bridge lands, which is
-    # not yet implemented. Override GATEWAY_WORKERS only once that is in place.
+    # worker: with >1 worker and no shared run state, run cancel, SSE reconnect,
+    # request dedup, and per-worker IM channel services all break across workers
+    # until a shared (e.g. redis) stream bridge lands, which is not yet
+    # implemented. Override GATEWAY_WORKERS only once that is in place.
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
@@ -105,14 +91,18 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+      # Auth/CSRF trusted origins — Next.js (port 3000) is the only browser
+      # entry point; it server-proxies /api/* to gateway, so requests reach
+      # Gateway with that same origin.
+      - DEER_FLOW_TRUSTED_ORIGINS=${DEER_FLOW_TRUSTED_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000},http://127.0.0.1:${FRONTEND_PORT:-3000}}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:

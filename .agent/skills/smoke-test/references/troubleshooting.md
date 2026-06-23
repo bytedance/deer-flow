@@ -109,49 +109,18 @@ command not found: uv
 
 ---
 
-### Issue: nginx Is Not Installed
-
-**Symptoms**:
-```
-command not found: nginx
-```
-
-**Solutions**:
-1. macOS (Homebrew):
-   ```bash
-   brew install nginx
-   ```
-
-2. Ubuntu/Debian:
-   ```bash
-   sudo apt update
-   sudo apt install nginx
-   ```
-
-3. CentOS/RHEL:
-   ```bash
-   sudo yum install nginx
-   ```
-
-4. Verify the installation:
-   ```bash
-   nginx -v
-   ```
-
----
-
 ### Issue: Port Is Already in Use
 
 **Symptoms**:
 ```
-Error: listen EADDRINUSE: address already in use :::2026
+Error: listen EADDRINUSE: address already in use :::3000
 ```
 
 **Solutions**:
 1. Find the process using the port:
    ```bash
-   lsof -i :2026  # macOS/Linux
-   netstat -ano | findstr :2026  # Windows
+   lsof -i :3000  # macOS/Linux
+   netstat -ano | findstr :3000  # Windows
    ```
 
 2. Stop that process:
@@ -245,81 +214,6 @@ Errors occur during `pnpm install`.
 ---
 
 ## Local Mode Service Startup Issues
-
-### Issue: Services Exit Immediately After Startup
-
-**Symptoms**:
-Processes exit quickly after running `make dev-daemon`.
-
-**Solutions**:
-1. Check log files:
-   ```bash
-   tail -f logs/gateway.log
-   tail -f logs/frontend.log
-   tail -f logs/nginx.log
-   ```
-
-2. Check whether config.yaml is configured correctly
-3. Check environment variables in the .env file
-4. Confirm that required ports are not occupied
-5. Stop all services and restart:
-   ```bash
-   make stop
-   make dev-daemon
-   ```
-
----
-
-### Issue: Nginx Fails to Start Because Temp Directories Do Not Exist
-
-**Symptoms**:
-```
-nginx: [emerg] mkdir() "/opt/homebrew/var/run/nginx/client_body_temp" failed (2: No such file or directory)
-```
-
-**Solutions**:
-Add local temp directory configuration to `docker/nginx/nginx.local.conf` so nginx uses the repository's temp directory.
-
-Add the following at the beginning of the `http` block:
-```nginx
-client_body_temp_path temp/client_body_temp;
-proxy_temp_path temp/proxy_temp;
-fastcgi_temp_path temp/fastcgi_temp;
-uwsgi_temp_path temp/uwsgi_temp;
-scgi_temp_path temp/scgi_temp;
-```
-
-Note: The `temp/` directory under the repository root is created automatically by `make dev` or `make dev-daemon`.
-
----
-
-### Issue: Nginx Fails to Start (General)
-
-**Symptoms**:
-The nginx process fails to start or reports an error.
-
-**Solutions**:
-1. Check the nginx configuration:
-   ```bash
-   nginx -t -c docker/nginx/nginx.local.conf -p .
-   ```
-
-2. Check nginx logs:
-   ```bash
-   tail -f logs/nginx.log
-   ```
-
-3. Ensure no other nginx process is running:
-   ```bash
-   ps aux | grep nginx
-   ```
-
-4. If needed, stop existing nginx processes:
-   ```bash
-   pkill -9 nginx
-   ```
-
----
 
 ### Issue: Frontend Compilation Fails
 
@@ -455,139 +349,3 @@ After services start, API requests fail with authentication errors.
 
 ## Service Health Check Issues
 
-### Issue: Frontend Page Is Not Accessible
-
-**Symptoms**:
-The browser shows a connection failure when visiting http://localhost:2026.
-
-**Solutions** (local mode):
-1. Confirm that the nginx process is running:
-   ```bash
-   ps aux | grep nginx
-   ```
-
-2. Check nginx logs:
-   ```bash
-   tail -f logs/nginx.log
-   ```
-
-3. Check firewall settings
-
-**Solutions** (Docker mode):
-1. Confirm that the nginx container is running:
-   ```bash
-   docker ps | grep nginx
-   ```
-
-2. Check nginx logs:
-   ```bash
-   cd docker && docker compose -p deer-flow-dev -f docker-compose-dev.yaml logs nginx
-   ```
-
-3. Check firewall settings
-
----
-
-### Issue: API Gateway Health Check Fails
-
-**Symptoms**:
-Accessing `/health` returns an error or times out.
-
-**Solutions** (local mode):
-1. Check gateway logs:
-   ```bash
-   tail -f logs/gateway.log
-   ```
-
-2. Confirm that config.yaml exists and has valid formatting
-3. Check whether Python dependencies are complete
-4. Confirm that the Gateway process is running normally.
-
-**Solutions** (Docker mode):
-1. Check gateway container logs:
-   ```bash
-   make docker-logs-gateway
-   ```
-
-2. Confirm that config.yaml is mounted correctly
-3. Check whether Python dependencies are complete
-4. Confirm that the Gateway process is running normally.
-
----
-
-## Common Diagnostic Commands
-
-### Local Mode Diagnostics
-
-#### View All Service Processes
-```bash
-ps aux | grep -E "(uvicorn|next|nginx)" | grep -v grep
-```
-
-#### View Service Logs
-```bash
-# View all logs
-tail -f logs/*.log
-
-# View specific service logs
-tail -f logs/gateway.log
-tail -f logs/frontend.log
-tail -f logs/nginx.log
-```
-
-#### Stop All Services
-```bash
-make stop
-```
-
-#### Fully Reset the Local Environment
-```bash
-make stop
-make clean
-make config
-make install
-make dev-daemon
-```
-
----
-
-### Docker Mode Diagnostics
-
-#### View All Container Status
-```bash
-docker ps -a
-```
-
-#### View Container Resource Usage
-```bash
-docker stats
-```
-
-#### Enter a Container for Debugging
-```bash
-docker exec -it deer-flow-gateway sh
-```
-
-#### Clean Up All DeerFlow-Related Containers and Images
-```bash
-make docker-stop
-cd docker && docker compose -p deer-flow-dev -f docker-compose-dev.yaml down -v
-```
-
-#### Fully Reset the Docker Environment
-```bash
-make docker-stop
-make clean
-make config
-make docker-init
-make docker-start
-```
-
----
-
-## Get More Help
-
-If the solutions above do not resolve the issue:
-1. Check the GitHub issues for the project: https://github.com/bytedance/deer-flow/issues
-2. Review the project documentation: README.md and the `backend/docs/` directory
-3. Open a new issue and include detailed error logs

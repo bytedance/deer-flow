@@ -213,7 +213,7 @@ def _get_client_ip(request: Request) -> str:
     - ``X-Real-IP`` is **only** honored if the TCP peer is in the
       ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
       CIDR or single IPs). When set, the gateway is assumed to be behind a
-      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
+      reverse proxy (Cloudflare, ALB, …) that overwrites
       ``X-Real-IP`` with the original client address.
     - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
       ignored — closing the bypass where any client could rotate the

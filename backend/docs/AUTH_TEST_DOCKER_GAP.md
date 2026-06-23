@@ -18,7 +18,7 @@ $ ssh sg_dev "which docker; docker --version"
 
 All other test plan sections were executed against either:
 - The local dev box (Mac, all services running locally), or
-- The deployed sg_dev instance (gateway + frontend + nginx via SSH tunnel)
+- The deployed sg_dev instance (gateway + frontend via SSH tunnel)
 
 ## Cases not executed
 
@@ -29,7 +29,7 @@ All other test plan sections were executed against either:
 | TC-DOCKER-03 | Per-worker rate limiter divergence | Confirms in-process `_login_attempts` dict doesn't share state across `gunicorn` workers (4 by default in the compose file); known limitation, documented | needs multi-worker container |
 | TC-DOCKER-04 | IM channels use internal Gateway auth | Verify Feishu/Slack/Telegram dispatchers attach the process-local internal auth header plus CSRF cookie/header when calling Gateway-compatible LangGraph APIs | needs `docker logs` |
 | TC-DOCKER-05 | Reset credentials surfacing | `reset_admin` writes a 0600 credential file in `DEER_FLOW_HOME` instead of logging plaintext. The file-based behavior is validated by non-Docker reset tests, so the only Docker-specific gap is verifying the volume mount carries the file out to the host | needs container + host volume |
-| TC-DOCKER-06 | Docker deploy uses Gateway embedded runtime | `./scripts/deploy.sh` produces a Gateway + frontend + nginx topology (no `langgraph` container); same auth flow as local `make dev` | needs `docker compose up` |
+| TC-DOCKER-06 | Docker deploy uses Gateway embedded runtime | `./scripts/deploy.sh` produces a Gateway + frontend topology (no separate `langgraph` container); same auth flow as local `make dev` | needs `docker compose up` |
 
 ## Coverage already provided by non-Docker tests
 

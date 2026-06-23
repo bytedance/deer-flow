@@ -258,7 +258,7 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
 
-services="frontend gateway nginx"
+services="frontend gateway"
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
@@ -307,8 +307,8 @@ echo "=========================================="
 echo "  DeerFlow is running!"
 echo "=========================================="
 echo ""
-echo "  🌐 Application: http://localhost:${PORT:-2026}"
-echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
+echo "  🌐 Application: http://localhost:${FRONTEND_PORT:-3000}"
+echo "  📡 API Gateway: http://localhost:${GATEWAY_PORT:-8001}/api/*"
 echo "  🤖 Runtime:     Gateway embedded"
 echo "  API:            /api/langgraph/* → Gateway"
 echo ""

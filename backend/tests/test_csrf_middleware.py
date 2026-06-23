@@ -116,9 +116,9 @@ def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     response = client.post(
         "/api/v1/auth/login/local",
         headers={
-            "Origin": "http://localhost:2026",
+            "Origin": "http://localhost:3000",
             "X-Forwarded-Proto": "http",
-            "X-Forwarded-Host": "localhost:2026",
+            "X-Forwarded-Host": "localhost:3000",
         },
     )
 
@@ -239,7 +239,7 @@ def test_channel_posts_require_double_submit_csrf():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
     response = client.post(
-        "/api/channels/slack/connect",
+        "/api/channels/feishu/connect",
         headers={"Origin": "https://deerflow.example"},
     )
 

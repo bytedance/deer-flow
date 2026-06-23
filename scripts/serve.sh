@@ -74,9 +74,9 @@ done
 # ── Stop helper ──────────────────────────────────────────────────────────────
 
 # Every deer-flow worktree (the main checkout + each linked worktree) hardcodes
-# the same dev ports (8001/3000/2026), so a service started from ANY of them
-# must be reclaimable from here — otherwise `make stop`/`make dev` in this
-# worktree can neither kill nor take over a port held by a sibling worktree.
+# the same dev ports (8001/3000), so a service started from ANY of them must be
+# reclaimable from here — otherwise `make stop`/`make dev` in this worktree can
+# neither kill nor take over a port held by a sibling worktree.
 # DEERFLOW_ROOTS is that set of roots; processes living outside all of them
 # (e.g. an unrelated project on port 3000) are still never touched.
 # Sorted most-specific-first (longest path first): a linked worktree lives
@@ -119,7 +119,7 @@ _is_deerflow_pid() {
 # (or starting, which stops first) isn't silently killing someone else's run.
 _report_reclaimed_ports() {
     local port pid files root owner
-    for port in 8001 3000 2026; do
+    for port in 8001 3000; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
             _is_deerflow_pid "$pid" || continue
             files=$(lsof -b -w -p "$pid" 2>/dev/null)
@@ -176,73 +176,21 @@ _kill_repo_port() {
 _is_port_listening() {
     local port=$1
 
-    if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
-            return 0
-        fi
-    fi
-
+    # Linux: ss is the fastest and most accurate.
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
     fi
 
-    if command -v netstat >/dev/null 2>&1; then
-        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
+    # macOS & Linux fallback: lsof correctly matches LISTEN state only.
+    if command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
         fi
     fi
 
     return 1
-}
-
-_is_repo_nginx_pid() {
-    local pid=$1
-    local command
-    local args
-
-    command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
-    case "$command" in
-        nginx|*/nginx) ;;
-        *) return 1 ;;
-    esac
-
-    args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
-    local root
-    while IFS= read -r root; do
-        [ -n "$root" ] || continue
-        case "$args" in
-            *"$root"/docker/nginx/nginx.local.conf*|*"$root"/*) return 0 ;;
-        esac
-    done <<< "$DEERFLOW_ROOTS"
-
-    _is_deerflow_pid "$pid"
-}
-
-_kill_repo_nginx() {
-    local pid
-    local pids=""
-
-    if [ -f "$REPO_ROOT/logs/nginx.pid" ]; then
-        read -r pid < "$REPO_ROOT/logs/nginx.pid" || true
-        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
-            pids="$pids $pid"
-        fi
-    fi
-
-    while IFS= read -r pid; do
-        if [ -n "$pid" ] && _is_repo_nginx_pid "$pid"; then
-            case " $pids " in
-                *" $pid "*) ;;
-                *) pids="$pids $pid" ;;
-            esac
-        fi
-    done < <(pgrep -f nginx 2>/dev/null || true)
-
-    if [ -n "$pids" ]; then
-        kill -9 $pids 2>/dev/null || true
-    fi
 }
 
 stop_all() {
@@ -252,16 +200,9 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
-    sleep 1
-    _kill_repo_nginx
-    # Force-kill any survivors still holding the service ports. 2026 is included
-    # so a lingering nginx (or any deer-flow process) that _kill_repo_nginx did
-    # not match by name still gets reclaimed — otherwise `make dev` fails its
-    # nginx port preflight.
+    # Force-kill any survivors still holding the service ports.
     _kill_repo_port 8001
     _kill_repo_port 3000
-    _kill_repo_port 2026
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -401,8 +342,7 @@ echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
 echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
-echo "    Frontend    → localhost:3000  (Next.js)"
-echo "    Nginx       → localhost:2026  (reverse proxy)"
+echo "    Frontend    → localhost:3000  (Next.js + browser entry point)"
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
@@ -453,7 +393,13 @@ run_service() {
 # ── Start services ───────────────────────────────────────────────────────────
 
 mkdir -p logs
-mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
+
+# Next.js's built-in dev proxy (configured in frontend/next.config.js) forwards
+# /api/* from :3000 to Gateway on :8001 server-side, so the browser only sees
+# a single origin. No CORS configuration is needed in the default local-dev
+# setup — leave NEXT_PUBLIC_BACKEND_BASE_URL / NEXT_PUBLIC_LANGGRAPH_BASE_URL
+# unset to keep that rewrite active.
+export DEER_FLOW_TRUSTED_ORIGINS="${DEER_FLOW_TRUSTED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
 
 # 1. Gateway API
 run_service "Gateway" \
@@ -465,11 +411,6 @@ run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 3. Nginx
-run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
-
 # ── Ready ────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -477,13 +418,14 @@ echo "=========================================="
 echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
-echo "  🌐 http://localhost:2026"
+echo "  🌐 http://localhost:3000"
 echo ""
-echo "  Routing: Frontend → Nginx → Gateway"
+echo "  Routing: Browser → Frontend (localhost:3000) → Gateway (localhost:8001)"
+echo "           Next.js dev rewrites proxy /api/* to Gateway server-side"
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
-echo "           /api/*              →  Gateway REST API (8001)"
+echo "           /api/*              →  Gateway REST API"
 echo ""
-echo "  📋 Logs: logs/{gateway,frontend,nginx}.log"
+echo "  📋 Logs: logs/{gateway,frontend}.log"
 echo ""
 
 if $DAEMON_MODE; then

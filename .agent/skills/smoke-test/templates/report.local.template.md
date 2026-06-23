@@ -47,7 +47,6 @@
 - [x] Node.js version - {{status_node_version}}
 - [x] pnpm - {{status_pnpm}}
 - [x] uv - {{status_uv}}
-- [x] nginx - {{status_nginx}}
 - [x] Port check - {{status_port_check}}
 
 **Phase Status**: {{stage2_status}}
@@ -127,7 +126,6 @@
 Node.js: {{node_version_output}}
 pnpm: {{pnpm_version_output}}
 uv: {{uv_version_output}}
-nginx: {{nginx_version_output}}
 ```
 
 ### Git Information
@@ -149,7 +147,6 @@ Commit Message: {{git_commit_message}}
 
 | Service | Status | Endpoint |
 |---------|--------|----------|
-| Nginx | {{nginx_status}} | {{nginx_endpoint}} |
 | Frontend | {{frontend_status}} | {{frontend_endpoint}} |
 | Gateway | {{gateway_status}} | {{gateway_endpoint}} |
 | Gateway LangGraph API | {{langgraph_status}} | {{langgraph_endpoint}} |
@@ -159,14 +156,14 @@ Commit Message: {{git_commit_message}}
 ## Recommendations and Next Steps
 
 ### If the Test Passes
-1. [ ] Visit http://localhost:2026 to start using DeerFlow
+1. [ ] Visit http://localhost:3000 to start using DeerFlow
 2. [ ] Configure your preferred model if it is not configured yet
 3. [ ] Explore available skills
 4. [ ] Refer to the documentation to learn more features
 
 ### If the Test Fails
 1. [ ] Review references/troubleshooting.md for common solutions
-2. [ ] Check local logs: `logs/{gateway,frontend,nginx}.log`
+2. [ ] Check local logs: `logs/{gateway,frontend}.log`
 3. [ ] Verify configuration file format and content
 4. [ ] If needed, fully reset the environment: `make stop && make clean && make install && make dev-daemon`
 

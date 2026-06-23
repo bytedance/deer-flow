@@ -1,4 +1,4 @@
-"""Connection binding tests for browser-connectable IM channels beyond Telegram/Slack/Discord."""
+"""Connection binding tests for browser-connectable IM channels."""
 
 from __future__ import annotations
 

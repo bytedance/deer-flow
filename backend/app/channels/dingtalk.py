@@ -409,7 +409,7 @@ class DingTalkChannel(Channel):
             else:
                 msg_type = InboundMessageType.CHAT
 
-            # P2P: topic_id=None (single thread per user, like Telegram private chat)
+            # P2P: topic_id=None (single thread per user)
             # Group: topic_id=msg_id (each new message starts a new topic, like Feishu)
             topic_id: str | None = msg_id if conversation_type == _CONVERSATION_TYPE_GROUP else None
 

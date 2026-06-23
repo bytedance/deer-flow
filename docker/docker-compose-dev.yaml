@@ -2,15 +2,14 @@
 # Usage: docker-compose -f docker-compose-dev.yaml up --build
 #
 # Services:
-#   - nginx: Reverse proxy (port 2026)
-#   - frontend: Frontend Next.js dev server (port 3000)
-#   - gateway: Backend Gateway API + agent runtime (port 8001)
+#   - frontend: Frontend Next.js dev server (port 3000, browser entry point; also reverse-proxies /api/* to gateway internally)
+#   - gateway: Backend Gateway API + agent runtime (internal-only on :8001)
 #   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
 #   - Kubernetes cluster + kubeconfig are only required when using provisioner mode.
 #
-# Access: http://localhost:2026
+# Access: http://localhost:3000  (browser; Next.js proxies /api/* to gateway internally)
 
 services:
   # ── Sandbox Provisioner ────────────────────────────────────────────────
@@ -59,30 +58,6 @@ services:
       retries: 6
       start_period: 15s
 
-  # ── Reverse Proxy ──────────────────────────────────────────────────────
-  # Routes API traffic to gateway and (optionally) provisioner.
-  nginx:
-    image: nginx:alpine
-    container_name: deer-flow-nginx
-    ports:
-      - "2026:2026"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
-        exec nginx -g 'daemon off;'
-    depends_on:
-      - frontend
-      - gateway
-    networks:
-      - deer-flow-dev
-    restart: unless-stopped
-
   # Frontend - Next.js Development Server
   frontend:
     build:
@@ -94,6 +69,8 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: deer-flow-frontend
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
     volumes:
       - ../frontend/src:/app/frontend/src
       - ../frontend/public:/app/frontend/public
@@ -106,6 +83,9 @@ services:
       - NODE_ENV=development
       - WATCHPACK_POLLING=true
       - CI=true
+      # SSR + Next.js rewrites talk to gateway over Docker internal network.
+      # Browser /api/* calls are proxied through this same Next.js process, so
+      # everything stays same-origin and no CORS configuration is required.
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
       - ../frontend/.env
@@ -164,13 +144,14 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
+      - DEER_FLOW_TRUSTED_ORIGINS=${DEER_FLOW_TRUSTED_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000},http://127.0.0.1:${FRONTEND_PORT:-3000}}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:

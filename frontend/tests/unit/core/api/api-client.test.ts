@@ -76,7 +76,7 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
   vi.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
+    location: { origin: "http://localhost:3000" },
     sessionStorage,
   });
   vi.stubGlobal(
@@ -103,7 +103,7 @@ test("rethrows unrelated streaming errors", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
   vi.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
+    location: { origin: "http://localhost:3000" },
     sessionStorage,
   });
   vi.stubGlobal(

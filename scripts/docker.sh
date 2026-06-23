@@ -191,9 +191,9 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="frontend gateway nginx"
+    services="frontend gateway"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway provisioner nginx"
+        services="frontend gateway provisioner"
     fi
 
     # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
@@ -269,8 +269,8 @@ start() {
     echo "  DeerFlow Docker is starting!"
     echo "=========================================="
     echo ""
-    echo "  🌐 Application: http://localhost:2026"
-    echo "  📡 API Gateway: http://localhost:2026/api/*"
+    echo "  🌐 Application: http://localhost:3000"
+    echo "  📡 API Gateway: http://localhost:8001/api/*"
     echo "  🤖 Runtime:     Gateway embedded"
     echo "  API:            /api/langgraph/* → Gateway"
     echo ""
@@ -292,10 +292,6 @@ logs() {
             service="gateway"
             echo -e "${BLUE}Viewing gateway logs...${NC}"
             ;;
-        --nginx)
-            service="nginx"
-            echo -e "${BLUE}Viewing nginx logs...${NC}"
-            ;;
         --provisioner)
             service="provisioner"
             echo -e "${BLUE}Viewing provisioner logs...${NC}"
@@ -305,7 +301,7 @@ logs() {
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--provisioner]"
             exit 1
             ;;
     esac
@@ -338,7 +334,7 @@ restart() {
     echo ""
     echo -e "${GREEN}✓ Docker services restarted${NC}"
     echo ""
-    echo "  🌐 Application: http://localhost:2026"
+    echo "  🌐 Application: http://localhost:3000"
     echo "  📋 View logs: make docker-logs"
     echo ""
 }
@@ -356,7 +352,6 @@ help() {
     echo "  logs [option] - View Docker development logs"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
-    echo "                  --nginx      View nginx logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"

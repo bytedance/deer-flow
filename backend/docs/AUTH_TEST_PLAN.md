@@ -4,7 +4,7 @@
 
 | 模式 | 启动命令 | Auth 层 | 端口 |
 |------|---------|---------|------|
-| 标准模式 | `make dev` | Gateway AuthMiddleware（全量） | 2026 (nginx) |
+| 标准模式 | `make dev` | Gateway AuthMiddleware（全量） | 3000 (前端) / 8001 (API) |
 | 直连 Gateway | `cd backend && make gateway` | Gateway AuthMiddleware | 8001 |
 | 直连 LangGraph 兼容性 | 手动运行 LangGraph 工具链时使用 | LangGraph auth | 2024 |
 
@@ -57,7 +57,7 @@ make dev
 
 ## 二、接口流程测试
 
-> 以下用 `BASE=http://localhost:2026` 为例。标准模式经 nginx 暴露此地址。
+> 以下用 `BASE=http://localhost:8001` 为例。浏览器通过 CORS 直连 Gateway。
 > 直连测试替换为对应端口。
 >
 > **CSRF token 提取**：多处用到从 cookie jar 提取 CSRF token，统一使用：
@@ -362,8 +362,7 @@ curl -s -X POST $BASE/api/threads \
 ### 3.3 Cookie 安全
 
 > HTTP 与 HTTPS 行为差异通过 `X-Forwarded-Proto: https` 模拟。
-> **注意：** 经 nginx 代理时，nginx 的 `proxy_set_header X-Forwarded-Proto $scheme` 会覆盖
-> 客户端发的值（`$scheme` = nginx 监听端口的 scheme），因此 HTTPS 模拟必须**直连 Gateway（端口 8001）**。
+> 浏览器直连 Gateway（端口 8001），客户端可设置 `X-Forwarded-Proto` 头部来模拟 HTTPS。
 > 每个 case 需在 **login** 和 **register** 两个端点各验证一次。
 
 #### TC-ATK-06: HTTP 模式 Cookie 属性
@@ -389,7 +388,7 @@ curl -s -D - -X POST $BASE/api/v1/auth/register \
 
 #### TC-ATK-07: HTTPS 模式 Cookie 属性
 
-> **必须直连 Gateway**（`GW=http://localhost:8001`），经 nginx 会被 `$scheme` 覆盖。
+> 浏览器直连 Gateway（`GW=http://localhost:8001`），通过 `X-Forwarded-Proto: https` 头模拟 HTTPS。
 
 ```bash
 GW=http://localhost:8001
@@ -416,7 +415,7 @@ curl -s -D - -X POST $GW/api/v1/auth/register \
 
 #### TC-ATK-07a: HTTP/HTTPS 差异对比
 
-> 直连 Gateway 执行，避免 nginx 覆盖 `X-Forwarded-Proto`。
+> 直连 Gateway 执行，客户端自行设置 `X-Forwarded-Proto` 头部。
 
 ```bash
 GW=http://localhost:8001
@@ -534,7 +533,7 @@ sqlite3 backend/.deer-flow/data/deerflow.db "SELECT email, password_hash FROM us
 
 #### TC-UI-01: 无 admin 时访问 workspace 跳转 setup
 
-1. 打开 `http://localhost:2026/workspace`
+1. 打开 `http://localhost:8001/workspace`
 2. **预期：** 自动跳转到 `/setup`
 
 #### TC-UI-02: Setup 页面创建 admin
@@ -647,16 +646,16 @@ git stash && git checkout main
 make dev
 
 # 2. 创建一些对话数据（无 auth，直接访问）
-curl -s -X POST http://localhost:2026/api/langgraph/threads \
+curl -s -X POST http://localhost:8001/api/langgraph/threads \
   -H "Content-Type: application/json" \
   -d '{"metadata":{"title":"old-thread-1"}}' | jq .thread_id
 
-curl -s -X POST http://localhost:2026/api/langgraph/threads \
+curl -s -X POST http://localhost:8001/api/langgraph/threads \
   -H "Content-Type: application/json" \
   -d '{"metadata":{"title":"old-thread-2"}}' | jq .thread_id
 
 # 3. 记录 thread 数量
-curl -s http://localhost:2026/api/langgraph/threads | jq length
+curl -s http://localhost:8001/api/langgraph/threads | jq length
 # 预期: 2+
 
 # 4. 停止服务
@@ -683,7 +682,7 @@ make dev
 
 ```bash
 # 创建第一个 admin
-curl -s -X POST http://localhost:2026/api/v1/auth/initialize \
+curl -s -X POST http://localhost:8001/api/v1/auth/initialize \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"AdminPass1!"}' \
   -c cookies.txt
@@ -692,13 +691,13 @@ curl -s -X POST http://localhost:2026/api/v1/auth/initialize \
 make stop && make dev
 
 # 登录 admin
-curl -s -X POST http://localhost:2026/api/v1/auth/login/local \
+curl -s -X POST http://localhost:8001/api/v1/auth/login/local \
   -d "username=admin@example.com&password=AdminPass1!" \
   -c cookies.txt
 
 # 查看 thread 列表
 CSRF=$(grep csrf_token cookies.txt | awk '{print $NF}')
-curl -s -X POST http://localhost:2026/api/threads/search \
+curl -s -X POST http://localhost:8001/api/threads/search \
   -b cookies.txt \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF" \
@@ -714,7 +713,7 @@ curl -s -X POST http://localhost:2026/api/threads/search \
 
 ```bash
 # 检查某个旧 thread 的内容
-curl -s http://localhost:2026/api/threads/<old-thread-id> \
+curl -s http://localhost:8001/api/threads/<old-thread-id> \
   -b cookies.txt | jq .metadata
 ```
 
@@ -726,13 +725,13 @@ curl -s http://localhost:2026/api/threads/<old-thread-id> \
 
 ```bash
 # 注册新用户
-curl -s -X POST http://localhost:2026/api/v1/auth/register \
+curl -s -X POST http://localhost:8001/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"newuser@example.com","password":"NewPass123!"}' \
   -c newuser.txt
 
 CSRF2=$(grep csrf_token newuser.txt | awk '{print $NF}')
-curl -s -X POST http://localhost:2026/api/threads/search \
+curl -s -X POST http://localhost:8001/api/threads/search \
   -b newuser.txt \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF2" \
@@ -792,7 +791,7 @@ grep -c "auth" config.yaml || echo "0"
 
 #### TC-UPG-10: 书签 URL
 
-1. 用升级前保存的 workspace URL（如 `localhost:2026/workspace/chats/xxx`）直接访问
+1. 用升级前保存的 workspace URL（如 `localhost:8001/workspace/chats/xxx`）直接访问
 2. **预期：** 跳转到 `/login`，登录后跳回原 URL（`?next=` 参数）
 
 ### 5.6 降级回滚
@@ -1231,7 +1230,7 @@ P2=$(awk -F': ' '/^password:/ {print $2}' /tmp/deerflow-reset-p2.txt)
 
 ## 七、模式差异测试
 
-> 以下用 `GW=http://localhost:8001` 表示直连 Gateway，`BASE=http://localhost:2026` 表示经 nginx。
+> 以下用 `BASE=http://localhost:8001` 表示 Gateway 地址。
 > 标准启动命令：`make dev`（或 `./scripts/serve.sh --dev`）。
 
 ### 7.1 标准启动模式
@@ -1319,10 +1318,10 @@ curl -s -w "%{http_code}" -o /dev/null -X POST $BASE/api/langgraph/threads \
 # 预期: 403（CSRF token missing）
 ```
 
-### 7.3 直连 Gateway（无 nginx）
+### 7.3 直连 Gateway
 
 > 启动命令：`cd backend && make gateway`（端口 8001）
-> 不经过 nginx，直接测试 Gateway 的 auth 层。
+> 直接测试 Gateway 的 auth 层。
 
 #### TC-GW-01: AuthMiddleware 保护所有非 public 路由
 
@@ -1386,7 +1385,7 @@ curl -s -w "%{http_code}" -o /dev/null -X POST $GW/api/memory/reload \
 ```bash
 GW=http://localhost:8001
 
-# 直连时 request.client.host 是真实 IP（无 nginx 代理），不读 X-Real-IP
+# 客户端直连 Gateway 时，request.client.host 取自连接的真实 IP
 for i in $(seq 1 6); do
   echo -n "attempt $i: "
   curl -s -w "%{http_code}\n" -o /dev/null -X POST $GW/api/v1/auth/login/local \
@@ -1427,7 +1426,7 @@ done
 
 # 等待启动完成
 sleep 15
-BASE=http://localhost:2026
+BASE=http://localhost:8001
 
 # 注册用户
 curl -s -X POST $BASE/api/v1/auth/register \
@@ -1615,7 +1614,7 @@ curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
   | grep "access_token=" | grep -oi "max-age=[0-9]*" || echo "NO max-age (HTTP session cookie)"
 
-# HTTPS：直连 Gateway 才能用 X-Forwarded-Proto 模拟 HTTPS；nginx 会覆盖该 header
+# HTTPS：客户端自行设置 X-Forwarded-Proto 头来模拟 HTTPS
 curl -s -D - -X POST $GW/api/v1/auth/login/local \
   -H "X-Forwarded-Proto: https" \
   -d "username=admin@example.com&password=正确密码" 2>/dev/null \
