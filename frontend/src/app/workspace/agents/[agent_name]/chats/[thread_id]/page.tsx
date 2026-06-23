@@ -83,6 +83,7 @@ function createDefectWorkflowTodoListBlock(
     metadata: {
       source: "agent-home",
       agent_name: DEFECT_WORKFLOW_CLOSURE_AGENT,
+      anchor: "thread-start",
     },
   };
 }
@@ -452,7 +453,11 @@ export default function AgentChatPage() {
           <main className="flex min-h-0 max-w-full grow flex-col">
             <div className="flex size-full justify-center">
               <MessageList
-                className={cn("size-full", !useNewThreadLayout && "pt-10")}
+                className={cn(
+                  "size-full",
+                  !useNewThreadLayout && "pt-10",
+                  showDefectWorkflowLocalHome && "justify-start",
+                )}
                 threadId={threadId}
                 thread={thread}
                 paddingBottom={messageListPaddingBottom}

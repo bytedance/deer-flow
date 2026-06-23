@@ -141,6 +141,10 @@ vi.mock("@/components/workspace/messages/skeleton", () => ({
   MessageListSkeleton: () => React.createElement("div", null, "skeleton"),
 }));
 
+vi.mock("@/components/workspace/messages/stream-tier-notice-banner", () => ({
+  StreamTierNoticeBanner: () => null,
+}));
+
 vi.mock("@/components/workspace/messages/subtask-card", () => ({
   SubtaskCard: () => null,
 }));
@@ -200,6 +204,7 @@ describe("MessageList standalone block placement", () => {
     });
     useBlockStore.getState().reset();
     useBlockStore.setState({
+      activeThreadId: "thread-1",
       blocks: new Map([["old-block", makeBlock("old-block")]]),
       interactions: new Map(),
     });
@@ -309,6 +314,84 @@ describe("MessageList standalone block placement", () => {
     expect(container.textContent?.indexOf("BLOCK:old-block")).toBeLessThan(
       container.textContent?.indexOf("HUMAN:human-2") ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("keeps defect workflow todo blocks at the start of the message stream", async () => {
+    useBlockStore.setState({
+      blocks: new Map([
+        [
+          "defect-workflow-closure:todo-list:thread-1",
+          makeBlock("defect-workflow-closure:todo-list:thread-1", {
+            component: "defect-workflow-todo-list",
+            metadata: {
+              source: "agent-home",
+              agent_name: "defect-workflow-closure",
+            },
+          }),
+        ],
+      ]),
+      interactions: new Map(),
+    });
+
+    const previousMessages = [
+      {
+        type: "human" as const,
+        id: "human-1",
+        content: [{ type: "text" as const, text: "上一轮问题" }],
+      },
+    ];
+
+    const nextTurnMessages = [
+      ...previousMessages,
+      {
+        type: "human" as const,
+        id: "human-2",
+        content: [{ type: "text" as const, text: "选择的缺陷设备ID是什么" }],
+      },
+      {
+        type: "ai" as const,
+        id: "ai-2",
+        content: [{ type: "text" as const, text: "设备ID是 2067..." }],
+      },
+    ];
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, previousMessages),
+        }),
+      );
+    });
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(true, previousMessages),
+        }),
+      );
+    });
+
+    await React.act(async () => {
+      root.render(
+        React.createElement(MessageList, {
+          threadId: "thread-1",
+          thread: makeThread(false, nextTurnMessages),
+        }),
+      );
+    });
+
+    const defectBlockIndex =
+      container.textContent?.indexOf("BLOCK:defect-workflow-closure:todo-list:thread-1") ?? -1;
+    const firstMessageIndex =
+      container.textContent?.indexOf("HUMAN:human-1") ?? Number.POSITIVE_INFINITY;
+    const nextTurnIndex =
+      container.textContent?.indexOf("HUMAN:human-2") ?? Number.POSITIVE_INFINITY;
+
+    expect(defectBlockIndex).toBeGreaterThanOrEqual(0);
+    expect(defectBlockIndex).toBeLessThan(firstMessageIndex);
+    expect(defectBlockIndex).toBeLessThan(nextTurnIndex);
   });
 
   it("keeps blocks near their first processing turn when they later become standalone", async () => {

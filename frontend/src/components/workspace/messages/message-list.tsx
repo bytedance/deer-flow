@@ -62,6 +62,10 @@ const EMPTY_INTERACTION_MAP = new Map<string, InteractionState>();
 
 const getMessageKey = getHistoryMessageKey;
 
+function isThreadStartStandaloneBlock(block: UIBlock | undefined): boolean {
+  return block?.metadata?.anchor === "thread-start" || block?.component === "defect-workflow-todo-list";
+}
+
 function getGroupRenderKey(
   group: ReturnType<typeof getMessageGroups>[number],
   index: number,
@@ -273,6 +277,18 @@ export function MessageList({
         (blockId) => !resolvedBlockHistory.duplicatedRawBlockIds.has(blockId),
       ),
     [blocks, resolvedBlockHistory.duplicatedRawBlockIds],
+  );
+  const threadStartStandaloneBlockIds = useMemo(
+    () => storeBlockIds.filter((blockId) => isThreadStartStandaloneBlock(blocks.get(blockId))),
+    [blocks, storeBlockIds],
+  );
+  const threadStartStandaloneBlockIdSet = useMemo(
+    () => new Set(threadStartStandaloneBlockIds),
+    [threadStartStandaloneBlockIds],
+  );
+  const nonThreadStartStoreBlockIds = useMemo(
+    () => storeBlockIds.filter((blockId) => !threadStartStandaloneBlockIdSet.has(blockId)),
+    [storeBlockIds, threadStartStandaloneBlockIdSet],
   );
   const preStreamMessageKeysRef = useRef<Set<string>>(new Set());
   const preStreamBlockIdsRef = useRef<Set<string>>(new Set());
@@ -553,20 +569,30 @@ export function MessageList({
 
   const { historicalBlockIds: historicalStandaloneBlockIds, tailBlockIds: unclaimedBlockIds } =
     useMemo(() => {
+      const nonThreadStartHistoricalMessageBlockIds = historicalMessageBlockIds.filter(
+        (blockId) => !threadStartStandaloneBlockIdSet.has(blockId),
+      );
+      const nonThreadStartLiveMessageBlockIds = liveMessageBlockIds.filter(
+        (blockId) => !threadStartStandaloneBlockIdSet.has(blockId),
+      );
+      const nonThreadStartPreStreamBlockIds = Array.from(preStreamBlockIdsRef.current).filter(
+        (blockId) => !threadStartStandaloneBlockIdSet.has(blockId),
+      );
       return partitionStandaloneBlockIds({
         claimedBlockIds,
-        storeBlockIds,
-        historicalMessageBlockIds,
-        liveMessageBlockIds,
-        preStreamBlockIds: Array.from(preStreamBlockIdsRef.current),
+        storeBlockIds: nonThreadStartStoreBlockIds,
+        historicalMessageBlockIds: nonThreadStartHistoricalMessageBlockIds,
+        liveMessageBlockIds: nonThreadStartLiveMessageBlockIds,
+        preStreamBlockIds: nonThreadStartPreStreamBlockIds,
         blocks,
         interactions,
       });
     }, [
       claimedBlockIds,
-      storeBlockIds,
+      nonThreadStartStoreBlockIds,
       historicalMessageBlockIds,
       liveMessageBlockIds,
+      threadStartStandaloneBlockIdSet,
       blocks,
       interactions,
     ]);
@@ -902,6 +928,14 @@ export function MessageList({
           hasMore={hasMoreHistory}
           loadMore={loadMoreHistory}
         />
+        {threadStartStandaloneBlockIds.length > 0 && (
+          <GenUIBlockList
+            threadId={threadId}
+            blockIds={threadStartStandaloneBlockIds}
+            disableExpiration={true}
+            onInteraction={handleInteraction}
+          />
+        )}
         {groupedHistoricalStandaloneBlocks.beforeMessageBlockIds.length > 0 && (
             <GenUIBlockList
               threadId={threadId}
