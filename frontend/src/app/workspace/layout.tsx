@@ -11,7 +11,17 @@ export const dynamic = "force-dynamic";
 
 export default async function WorkspaceLayout({
   children,
-}: Readonly<{ children: React.ReactNode }>) {
+  searchParams,
+}: Readonly<{
+  children: React.ReactNode;
+  searchParams: Promise<{ mock?: string }>;
+}>) {
+  // Allow unauthenticated access for public case study demos
+  const params = await searchParams;
+  if (params?.mock === "true") {
+    return <WorkspaceContent>{children}</WorkspaceContent>;
+  }
+
   const result = await getServerSideUser();
 
   switch (result.tag) {
