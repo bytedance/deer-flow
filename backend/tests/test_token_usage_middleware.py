@@ -296,6 +296,4 @@ class TestBuildTodoActions:
             {"content": "A", "status": "completed"},
         ]
         actions = _build_todo_actions(previous, next_todos)
-        assert any(
-            a.get("kind") == "todo_remove" and a.get("content") == "B" for a in actions
-        ), f"Expected todo_remove for B but got: {actions}"
+        assert any(a.get("kind") == "todo_remove" and a.get("content") == "B" for a in actions), f"Expected todo_remove for B but got: {actions}"
