@@ -4,6 +4,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
@@ -554,76 +555,74 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
+@lru_cache(maxsize=512)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile the host→virtual masking patterns once per source set.
+
+    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
+    (skills, then ACP workspace, then per-thread user-data mappings sorted by
+    host-path length, longest first). The patterns derive only from
+    config-stable + per-thread inputs, so they're cached and reused instead of
+    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
+    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
+    glob/grep match, so without this the same patterns are recompiled per
+    match.
+    """
+    compiled: list[tuple[re.Pattern[str], str, str]] = []
+    for host_base, virtual_base in sources:
+        seen: set[str] = set()
+        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
+        # ordered deterministically so the cached tuple is stable (variants of
+        # one host map to the same virtual and don't overlap after substitution,
+        # so order within a source is irrelevant to the result).
+        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+            for variant in sorted(_path_variants(root)):
+                if variant in seen:
+                    continue
+                seen.add(variant)
+                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
+                compiled.append((re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?"), variant, virtual_base))
+    return tuple(compiled)
+
+
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths, and ACP workspace paths (global).
     """
-    result = output
+    # Build the ordered (host_base, virtual_base) source list. Order is
+    # preserved from the original implementation: skills, then ACP workspace,
+    # then user-data mappings (longest host path first). Custom mount host
+    # paths are masked by LocalSandbox._reverse_resolve_paths_in_output().
+    sources: list[tuple[str, str]] = []
 
-    # Mask skills host paths
     skills_host = _get_skills_host_path()
-    skills_container = _get_skills_container_path()
     if skills_host:
-        raw_base = str(Path(skills_host))
-        resolved_base = str(Path(skills_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((skills_host, _get_skills_container_path()))
 
-            def replace_skills(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return skills_container
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{skills_container}/{relative}" if relative else skills_container
-
-            result = pattern.sub(replace_skills, result)
-
-    # Mask ACP workspace host paths
-    _thread_id = _extract_thread_id_from_thread_data(thread_data)
-    acp_host = _get_acp_workspace_host_path(_thread_id)
+    acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        raw_base = str(Path(acp_host))
-        resolved_base = str(Path(acp_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
-            def replace_acp(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _ACP_WORKSPACE_VIRTUAL_PATH
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_ACP_WORKSPACE_VIRTUAL_PATH}/{relative}" if relative else _ACP_WORKSPACE_VIRTUAL_PATH
+    if thread_data is not None:
+        mappings = _thread_actual_to_virtual_mappings(thread_data)
+        for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+            sources.append((actual_base, virtual_base))
 
-            result = pattern.sub(replace_acp, result)
+    if not sources:
+        return output
 
-    # Custom mount host paths are masked by LocalSandbox._reverse_resolve_paths_in_output()
+    result = output
+    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
 
-    # Mask user-data host paths
-    if thread_data is None:
-        return result
+        def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
+            matched_path = match.group(0)
+            if matched_path == _base:
+                return _virtual
+            relative = matched_path[len(_base) :].lstrip("/\\")
+            return f"{_virtual}/{relative}" if relative else _virtual
 
-    mappings = _thread_actual_to_virtual_mappings(thread_data)
-    if not mappings:
-        return result
-
-    for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-        raw_base = str(Path(actual_base))
-        resolved_base = str(Path(actual_base).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped_actual = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped_actual + r"(?:[/\\][^\s\"';&|<>()]*)?")
-
-            def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual_base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _virtual
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_virtual}/{relative}" if relative else _virtual
-
-            result = pattern.sub(replace_match, result)
+        result = pattern.sub(replace_match, result)
 
     return result
 
