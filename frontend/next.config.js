@@ -4,12 +4,6 @@
  */
 import "./src/env.js";
 
-function getInternalServiceURL(envKey, fallbackURL) {
-  const configured = process.env[envKey]?.trim();
-  return configured && configured.length > 0
-    ? configured.replace(/\/+$/, "")
-    : fallbackURL;
-}
 import nextra from "nextra";
 
 const withNextra = nextra({});
@@ -20,61 +14,26 @@ const config = {
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"
       : undefined,
+  // Next.js enables gzip compression in production by default, which buffers
+  // the entire response body before sending. That breaks SSE
+  // (text/event-stream) — every event arrives at the client in one batch at
+  // connection close. Disable it so the streaming route handler in
+  // src/app/api/[...path]/route.ts can flush Server-Sent Events as they
+  // arrive. Gateway-side responses are not large; if compression is needed
+  // for static assets, put a reverse proxy (nginx/caddy) in front.
+  compression: false,
   i18n: {
     locales: ["en", "zh"],
     defaultLocale: "en",
   },
   devIndicators: false,
+  // API requests are proxied by the streaming route handler in
+  // src/app/api/[...path]/route.ts. Next.js dev-server rewrites buffer the
+  // full response body, which breaks SSE (text/event-stream) — events arrive
+  // at the client in one batch instead of streaming. The route handler
+  // forwards ReadableStreams so Server-Sent Events stay real-time.
   async rewrites() {
-    const rewrites = [];
-    const gatewayURL = getInternalServiceURL(
-      "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
-      "http://127.0.0.1:8001",
-    );
-
-    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
-      rewrites.push({
-        source: "/api/langgraph",
-        destination: `${gatewayURL}/api`,
-      });
-      rewrites.push({
-        source: "/api/langgraph/:path*",
-        destination: `${gatewayURL}/api/:path*`,
-      });
-    }
-
-    if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
-      rewrites.push({
-        source: "/api/agents",
-        destination: `${gatewayURL}/api/agents`,
-      });
-      rewrites.push({
-        source: "/api/agents/:path*",
-        destination: `${gatewayURL}/api/agents/:path*`,
-      });
-      rewrites.push({
-        source: "/api/skills",
-        destination: `${gatewayURL}/api/skills`,
-      });
-      rewrites.push({
-        source: "/api/skills/:path*",
-        destination: `${gatewayURL}/api/skills/:path*`,
-      });
-
-      // Catch-all for remaining gateway API routes (models, threads, memory,
-      // mcp, artifacts, uploads, suggestions, runs, etc.) that don't have
-      // their own NEXT_PUBLIC_* env var toggle.
-      //
-      // NOTE: this must come AFTER the /api/langgraph rewrite above so that
-      // LangGraph-compatible routes keep their public prefix while Gateway
-      // receives its native /api/* paths.
-      rewrites.push({
-        source: "/api/:path*",
-        destination: `${gatewayURL}/api/:path*`,
-      });
-    }
-
-    return rewrites;
+    return [];
   },
 };
 

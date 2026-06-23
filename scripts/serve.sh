@@ -394,11 +394,12 @@ run_service() {
 
 mkdir -p logs
 
-# Next.js's built-in dev proxy (configured in frontend/next.config.js) forwards
-# /api/* from :3000 to Gateway on :8001 server-side, so the browser only sees
-# a single origin. No CORS configuration is needed in the default local-dev
-# setup — leave NEXT_PUBLIC_BACKEND_BASE_URL / NEXT_PUBLIC_LANGGRAPH_BASE_URL
-# unset to keep that rewrite active.
+# Next.js streaming route handler (src/app/api/[...path]/route.ts) proxies
+# /api/* from :3000 to Gateway on :8001 server-side as ReadableStreams, so the
+# browser only sees a single origin and SSE stays real-time (Next.js dev-server
+# rewrites buffered the full response and broke Server-Sent Events). No CORS
+# configuration is needed in the default local-dev setup — leave
+# NEXT_PUBLIC_BACKEND_BASE_URL / NEXT_PUBLIC_LANGGRAPH_BASE_URL unset.
 export DEER_FLOW_TRUSTED_ORIGINS="${DEER_FLOW_TRUSTED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
 
 # 1. Gateway API
