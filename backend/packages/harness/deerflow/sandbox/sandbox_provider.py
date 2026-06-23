@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from abc import ABC, abstractmethod
 
 from deerflow.config import get_app_config
@@ -55,6 +56,13 @@ class SandboxProvider(ABC):
 
 
 _default_sandbox_provider: SandboxProvider | None = None
+# Guards every access to `_default_sandbox_provider`. The singleton is reachable
+# from more than one OS thread (e.g. the main event loop and the Feishu channel
+# thread, which runs its own loop), so a bare check-then-create can double
+# initialize the provider, and an unsynchronized reset/shutdown racing an
+# in-flight create can tear it down or clear it mid-construction. Hold this lock
+# across the whole lifecycle (get / reset / shutdown / set) to keep it consistent.
+_provider_lock = threading.Lock()
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -68,9 +76,11 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     """
     global _default_sandbox_provider
     if _default_sandbox_provider is None:
-        config = get_app_config()
-        cls = resolve_class(config.sandbox.use, SandboxProvider)
-        _default_sandbox_provider = cls(**kwargs)
+        with _provider_lock:
+            if _default_sandbox_provider is None:
+                config = get_app_config()
+                cls = resolve_class(config.sandbox.use, SandboxProvider)
+                _default_sandbox_provider = cls(**kwargs)
     return _default_sandbox_provider
 
 
@@ -90,9 +100,10 @@ def reset_sandbox_provider() -> None:
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is not None:
-        _default_sandbox_provider.reset()
-        _default_sandbox_provider = None
+    with _provider_lock:
+        if _default_sandbox_provider is not None:
+            _default_sandbox_provider.reset()
+            _default_sandbox_provider = None
 
 
 def shutdown_sandbox_provider() -> None:
@@ -103,10 +114,11 @@ def shutdown_sandbox_provider() -> None:
     is shutting down or when you need to completely reset the sandbox system.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is not None:
-        if hasattr(_default_sandbox_provider, "shutdown"):
-            _default_sandbox_provider.shutdown()
-        _default_sandbox_provider = None
+    with _provider_lock:
+        if _default_sandbox_provider is not None:
+            if hasattr(_default_sandbox_provider, "shutdown"):
+                _default_sandbox_provider.shutdown()
+            _default_sandbox_provider = None
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:
@@ -118,4 +130,5 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
         provider: The SandboxProvider instance to use.
     """
     global _default_sandbox_provider
-    _default_sandbox_provider = provider
+    with _provider_lock:
+        _default_sandbox_provider = provider
