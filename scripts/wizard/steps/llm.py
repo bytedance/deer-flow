@@ -9,6 +9,7 @@ from wizard.ui import (
     ask_choice,
     ask_secret,
     ask_text,
+    ask_yes_no,
     print_header,
     print_info,
     print_success,
@@ -21,6 +22,7 @@ class LLMStepResult:
     model_name: str
     api_key: str | None
     base_url: str | None = None
+    supports_thinking: bool = False
 
 
 def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
@@ -52,6 +54,9 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         if provider.model_prompt:
             model_name = ask_text(provider.model_prompt, default=model_name)
 
+    # Ask about thinking support for custom OpenAI-compatible gateways
+    supports_thinking = _ask_thinking_support(provider)
+
     if provider.auth_hint:
         print_header(f"{step_label} · Authentication")
         print_info(provider.auth_hint)
@@ -61,6 +66,7 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
             model_name=model_name,
             api_key=api_key,
             base_url=base_url,
+            supports_thinking=supports_thinking,
         )
 
     print_header(f"{step_label} · Enter your API Key")
@@ -77,4 +83,21 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         model_name=model_name,
         api_key=api_key,
         base_url=base_url,
+        supports_thinking=supports_thinking,
     )
+
+
+def _ask_thinking_support(provider: LLMProvider) -> bool:
+    """Ask the user whether their OpenAI-compatible model supports thinking/reasoning.
+
+    Only prompted for custom gateway providers (those with base_url_prompt) where
+    the thinking capability is ambiguous.
+    """
+    if not provider.base_url_prompt:
+        return False
+    print_header("Thinking / Reasoning support")
+    print_info(
+        "Some OpenAI-compatible models (e.g. DeepSeek Reasoner, Claude Sonnet 4) "
+        "support thinking/reasoning output, which can improve complex reasoning tasks."
+    )
+    return ask_yes_no("Does this model support thinking/reasoning output?", default=False)

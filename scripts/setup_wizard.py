@@ -38,6 +38,7 @@ def main() -> int:
             yellow,
         )
         from wizard.writer import write_config_yaml, write_env_file
+        from wizard.providers import OPENAI_COMPAT_THINKING_CONFIG
 
         project_root = Path(__file__).resolve().parents[1]
         config_path = project_root / "config.yaml"
@@ -82,6 +83,9 @@ def main() -> int:
 
         print_header(f"Step {total_steps}/{total_steps} · Writing configuration")
 
+        extra_model_config = llm.provider.extra_config_for(llm.model_name) or {}
+        if llm.provider.base_url_prompt and llm.supports_thinking:
+            extra_model_config.update(OPENAI_COMPAT_THINKING_CONFIG)
         write_config_yaml(
             config_path,
             provider_use=llm.provider.use,
@@ -89,7 +93,7 @@ def main() -> int:
             display_name=f"{llm.provider.display_name} / {llm.model_name}",
             api_key_field=llm.provider.api_key_field,
             env_var=llm.provider.env_var,
-            extra_model_config=llm.provider.extra_config_for(llm.model_name) or None,
+            extra_model_config=extra_model_config or None,
             base_url=llm.base_url,
             search_use=search_provider.use if search_provider else None,
             search_tool_name=search_provider.tool_name if search_provider else "web_search",
