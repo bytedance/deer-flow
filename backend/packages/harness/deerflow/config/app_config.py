@@ -8,10 +8,11 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
+from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
@@ -32,6 +33,7 @@ from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
+from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -97,6 +99,7 @@ class AppConfig(BaseModel):
         ),
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
+    token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig, description="Token Budget tracking and limits configuration.")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
         description=format_field_description(
@@ -129,6 +132,7 @@ class AppConfig(BaseModel):
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
+    auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,
@@ -159,20 +163,38 @@ class AppConfig(BaseModel):
         ),
     )
 
-    @field_validator("models", "tools", "tool_groups", mode="before")
+    # Name -> config lookup tables, (re)built after validation by
+    # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
+    # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
+    # call. Private attrs are excluded from serialization.
+    _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
+    _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
+    _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="before")
     @classmethod
-    def _coerce_null_list_sections(cls, value: Any) -> Any:
-        """Treat a present-but-empty config section as an empty list.
+    def _drop_null_config_sections(cls, data: Any) -> Any:
+        """Treat a present-but-null config section as absent so its default applies.
 
         Commenting out every entry under a top-level YAML key — e.g. ``models:``
-        with only comments beneath it, exactly as shipped in
-        ``config.example.yaml`` — makes PyYAML parse the value as ``None``.
-        Without this, the documented ``cp config.example.yaml config.yaml``
-        first-run flow crashes with an opaque ``Input should be a valid list``
-        pydantic error. Coercing ``None`` to ``[]`` keeps that flow working and
-        matches the field's own ``default_factory=list``.
+        (a list) or ``memory:`` (an object), with only comments beneath it as
+        shipped throughout ``config.example.yaml`` — makes PyYAML parse the value
+        as ``None``. Without this, the documented ``cp config.example.yaml
+        config.yaml`` first-run flow crashes with an opaque ``Input should be a
+        valid list`` / ``valid dictionary`` pydantic error for that section.
+
+        Dropping the ``None`` lets each field fall back to its default: list
+        sections become ``[]`` via ``default_factory=list`` and object sections
+        get their default config. This generalizes the earlier list-only
+        handling to every section that defines a default. The ``database``
+        section is independent and still owned by ``_apply_database_defaults``
+        (in ``from_file``), which applies concrete defaults beyond null-coercion.
+        Required sections without a default (``sandbox``) intentionally still
+        error when null — there is nothing to fall back to.
         """
-        return [] if value is None else value
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -361,6 +383,31 @@ class AppConfig(BaseModel):
             return [cls.resolve_env_variables(item) for item in config]
         return config
 
+    @model_validator(mode="after")
+    def _build_name_indexes(self) -> "AppConfig":
+        """Build name -> config lookup tables for O(1) ``get_*_config``.
+
+        ``get_tool_config`` runs 2-3x per community-tool invocation (e.g.
+        web_search) and ``get_model_config`` several times per agent build, so
+        the previous O(n) ``next(...)`` scans sat on hot paths. Rebuilt here so a
+        config reload (which constructs a fresh ``AppConfig``) refreshes them.
+        ``setdefault`` keeps the first entry on duplicate names, preserving the
+        prior ``next(...)`` first-match semantics.
+        """
+        models_by_name: dict[str, ModelConfig] = {}
+        for model in self.models:
+            models_by_name.setdefault(model.name, model)
+        tools_by_name: dict[str, ToolConfig] = {}
+        for tool in self.tools:
+            tools_by_name.setdefault(tool.name, tool)
+        tool_groups_by_name: dict[str, ToolGroupConfig] = {}
+        for group in self.tool_groups:
+            tool_groups_by_name.setdefault(group.name, group)
+        self._models_by_name = models_by_name
+        self._tools_by_name = tools_by_name
+        self._tool_groups_by_name = tool_groups_by_name
+        return self
+
     def get_model_config(self, name: str) -> ModelConfig | None:
         """Get the model config by name.
 
@@ -370,7 +417,7 @@ class AppConfig(BaseModel):
         Returns:
             The model config if found, otherwise None.
         """
-        return next((model for model in self.models if model.name == name), None)
+        return self._models_by_name.get(name)
 
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
@@ -381,7 +428,7 @@ class AppConfig(BaseModel):
         Returns:
             The tool config if found, otherwise None.
         """
-        return next((tool for tool in self.tools if tool.name == name), None)
+        return self._tools_by_name.get(name)
 
     def get_tool_group_config(self, name: str) -> ToolGroupConfig | None:
         """Get the tool group config by name.
@@ -392,7 +439,7 @@ class AppConfig(BaseModel):
         Returns:
             The tool group config if found, otherwise None.
         """
-        return next((group for group in self.tool_groups if group.name == name), None)
+        return self._tool_groups_by_name.get(name)
 
 
 # Compatibility singleton layer for code paths that have not yet been

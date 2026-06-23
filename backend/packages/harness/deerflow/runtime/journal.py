@@ -225,7 +225,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary":
+                    if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(

@@ -10,6 +10,7 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
 /**
  * Validate next parameter
@@ -49,11 +50,28 @@ export default function LoginPage() {
   const searchParams = useSearchParams();
   const { isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
+  const { t } = useI18n();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLogin, setIsLogin] = useState(true);
-  const [error, setError] = useState("");
+  const [ssoProviders, setSsoProviders] = useState<
+    { id: string; display_name: string; type: string }[]
+  >([]);
+
+  // Extract error from query params (e.g., ?error=sso_failed)
+  const errorParam = searchParams.get("error");
+  const [error, setError] = useState(
+    errorParam
+      ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
+          t.login.authFailed)
+      : "",
+  );
+  // Soft hint shown after a failed login when SSO is configured: an SSO-only
+  // account has no local password, so the backend returns a generic
+  // "incorrect email or password" (deliberately, to avoid account enumeration).
+  // Nudge the user toward the SSO buttons without confirming the account exists.
+  const [showSsoHint, setShowSsoHint] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // Get next parameter for validated redirect
@@ -82,6 +100,22 @@ export default function LoginPage() {
         // Ignore errors; user stays on login page
       });
 
+    // Fetch SSO providers
+    void fetch("/api/v1/auth/providers")
+      .then((r) => r.json())
+      .then(
+        (data: {
+          providers: { id: string; display_name: string; type: string }[];
+        }) => {
+          if (!cancelled) {
+            setSsoProviders(data.providers ?? []);
+          }
+        },
+      )
+      .catch(() => {
+        // Ignore errors; no SSO providers shown
+      });
+
     return () => {
       cancelled = true;
     };
@@ -90,6 +124,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setShowSsoHint(false);
     setLoading(true);
 
     try {
@@ -115,13 +150,18 @@ export default function LoginPage() {
         const data = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
+        // On a failed login with SSO configured, surface a hint pointing at the
+        // SSO buttons — the "wrong password" may really mean "this is an SSO account".
+        if (isLogin && ssoProviders.length > 0) {
+          setShowSsoHint(true);
+        }
         return;
       }
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.login.networkError);
     } finally {
       setLoading(false);
     }
@@ -143,34 +183,34 @@ export default function LoginPage() {
         <div className="text-center">
           <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            {isLogin ? "Sign in to your account" : "Create a new account"}
+            {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
-              Email
+              {t.login.email}
             </label>
             <Input
               id="email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              placeholder={t.login.emailPlaceholder}
               required
             />
           </div>
           <div className="flex flex-col space-y-1">
             <label htmlFor="password" className="text-sm font-medium">
-              Password
+              {t.login.password}
             </label>
             <Input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="•••••••"
+              placeholder={t.login.passwordPlaceholder}
               required
               minLength={isLogin ? 6 : 8}
             />
@@ -180,12 +220,48 @@ export default function LoginPage() {
 
           <Button type="submit" className="w-full" disabled={loading}>
             {loading
-              ? "Please wait..."
+              ? t.login.pleaseWait
               : isLogin
-                ? "Sign In"
-                : "Create Account"}
+                ? t.login.signIn
+                : t.login.createAccount}
           </Button>
         </form>
+
+        {ssoProviders.length > 0 && (
+          <div className="space-y-2">
+            {isLogin && (
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-background text-muted-foreground px-2">
+                    {t.login.orContinueWith}
+                  </span>
+                </div>
+              </div>
+            )}
+            {showSsoHint && (
+              <p className="text-muted-foreground text-center text-sm">
+                {t.login.ssoHint}
+              </p>
+            )}
+            {ssoProviders.map((provider) => (
+              <Button
+                key={provider.id}
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={loading}
+                onClick={() => {
+                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
+                }}
+              >
+                {t.login.continueWith(provider.display_name)}
+              </Button>
+            ))}
+          </div>
+        )}
 
         <div className="text-center text-sm">
           <button
@@ -193,18 +269,17 @@ export default function LoginPage() {
             onClick={() => {
               setIsLogin(!isLogin);
               setError("");
+              setShowSsoHint(false);
             }}
             className="text-blue-500 hover:underline"
           >
-            {isLogin
-              ? "Don't have an account? Sign up"
-              : "Already have an account? Sign in"}
+            {isLogin ? t.login.noAccountSignUp : t.login.haveAccountSignIn}
           </button>
         </div>
 
         <div className="text-muted-foreground text-center text-xs">
           <Link href="/" className="hover:underline">
-            ← Back to home
+            {t.login.backToHome}
           </Link>
         </div>
       </div>

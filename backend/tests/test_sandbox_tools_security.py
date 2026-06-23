@@ -9,6 +9,7 @@ from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
+    _compiled_mask_patterns,
     _get_custom_mount_for_path,
     _get_custom_mounts,
     _is_acp_workspace_path,
@@ -112,6 +113,40 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
 
         assert "/home/user/deer-flow/skills" not in masked
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+
+
+def test_mask_local_paths_compiled_patterns_are_cached() -> None:
+    """The compiled patterns for a given source set are built once and reused
+    (mask runs once per glob/grep match, so this avoids per-match recompiles)."""
+    sources = (("/tmp/deer-flow/threads/t1/user-data/workspace", "/mnt/user-data/workspace"),)
+    first = _compiled_mask_patterns(sources)
+    second = _compiled_mask_patterns(sources)
+    assert first is second  # cache hit -> identical object, not rebuilt
+
+
+def test_mask_local_paths_stable_across_repeated_and_batched_calls() -> None:
+    """Masking is identical whether applied once or repeatedly (per-match path)."""
+    output = "a /tmp/deer-flow/threads/t1/user-data/workspace/x.txt and /tmp/deer-flow/threads/t1/user-data/outputs/y.log"
+    once = mask_local_paths_in_output(output, _THREAD_DATA)
+    twice = mask_local_paths_in_output(once, _THREAD_DATA)
+    assert "/tmp/deer-flow/threads/t1/user-data" not in once
+    assert "/mnt/user-data/workspace/x.txt" in once
+    assert "/mnt/user-data/outputs/y.log" in once
+    # Re-masking already-masked output leaves it unchanged (no host paths left).
+    assert twice == once
+    # Mapping outputs one-by-one matches masking each independently.
+    assert [mask_local_paths_in_output(o, _THREAD_DATA) for o in (output, output)] == [once, once]
+
+
+def test_mask_local_paths_no_thread_data_still_masks_skills() -> None:
+    """With thread_data=None, skills host paths are still masked (user-data skipped)."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output("Reading: /home/user/deer-flow/skills/a/b.md", None)
+        assert "/home/user/deer-flow/skills" not in masked
+        assert "/mnt/skills/a/b.md" in masked
 
 
 # ---------- _reject_path_traversal ----------

@@ -234,8 +234,8 @@ tools:
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl)
-- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
+- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper)
 - `ls` - List directory contents
 - `read_file` - Read file contents
@@ -416,6 +416,7 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path

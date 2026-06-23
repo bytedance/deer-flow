@@ -533,8 +533,12 @@ export const enUS: Translations = {
       profileTitle: "Profile",
       email: "Email",
       role: "Role",
+      ssoProvider: "SSO",
       changePasswordTitle: "Change Password",
       changePasswordDescription: "Update your account password.",
+      ssoPasswordDescription: "Password is managed by your SSO provider.",
+      ssoPasswordMessage:
+        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -549,6 +553,34 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+  login: {
+    signInTitle: "Sign in to your account",
+    createAccountTitle: "Create a new account",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "Please wait...",
+    signIn: "Sign In",
+    createAccount: "Create Account",
+    orContinueWith: "Or continue with",
+    ssoHint:
+      "If your account uses single sign-on, sign in with the option below instead.",
+    continueWith: (provider: string) => `Continue with ${provider}`,
+    noAccountSignUp: "Don't have an account? Sign up",
+    haveAccountSignIn: "Already have an account? Sign in",
+    backToHome: "← Back to home",
+    networkError: "Network error. Please try again.",
+    authFailed: "Authentication failed.",
+    errors: {
+      sso_failed: "SSO login failed. Please try again or use email login.",
+      sso_cancelled: "SSO login was cancelled.",
+      sso_account_exists:
+        "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_not_allowed:
+        "SSO login is not allowed for your account. Contact your administrator.",
     },
   },
 };

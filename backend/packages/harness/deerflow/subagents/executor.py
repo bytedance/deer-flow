@@ -289,6 +289,10 @@ class SubagentExecutor:
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
+        user_role: str | None = None,
+        oauth_provider: str | None = None,
+        oauth_id: str | None = None,
+        run_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -305,6 +309,12 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
                 When None, the tracing layer falls back to DEFAULT_USER_ID.
+            user_role: Authenticated user's role, propagated so GuardrailMiddleware
+                on the subagent can apply role-aware policy to delegated calls.
+            oauth_provider: External identity provider, when authenticated via SSO.
+            oauth_id: Subject id at the external identity provider.
+            run_id: Parent run id, so delegated guardrail decisions attribute to
+                the same run as the lead agent.
         """
         self.config = config
         self.app_config = app_config
@@ -322,6 +332,11 @@ class SubagentExecutor:
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
+        # Guardrail attribution propagated from the parent runtime context.
+        self.user_role = user_role
+        self.oauth_provider = oauth_provider
+        self.oauth_id = oauth_id
+        self.run_id = run_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -512,6 +527,12 @@ class SubagentExecutor:
         if ai_messages is None:
             ai_messages = []
             result.ai_messages = ai_messages
+        # O(1) duplicate detection for streamed AI messages. ``stream_mode="values"``
+        # re-yields the full state every super-step, so the same trailing message is
+        # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
+        # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
+        # over a run, which reaches max_turns=150 for deep-research subagents).
+        seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -564,6 +585,16 @@ class SubagentExecutor:
                 context["thread_id"] = self.thread_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            # Propagate guardrail attribution so delegated tool calls are
+            # evaluated with the parent run's identity (role-aware policy,
+            # audit). user_id reuses the resolved tracing id; on every
+            # authenticated/IM path this equals the parent context value.
+            context["user_id"] = self.user_id
+            context["user_role"] = self.user_role
+            context["oauth_provider"] = self.oauth_provider
+            context["oauth_id"] = self.oauth_id
+            context["run_id"] = self.run_id
+            context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -608,14 +639,16 @@ class SubagentExecutor:
                         # Only add if it's not already in the list (avoid duplicates)
                         # Check by comparing message IDs if available, otherwise compare full dict
                         message_id = message_dict.get("id")
-                        is_duplicate = False
                         if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in ai_messages)
+                            is_duplicate = message_id in seen_message_ids
                         else:
+                            # id-less messages can't be keyed; fall back to a full-dict compare
                             is_duplicate = message_dict in ai_messages
 
                         if not is_duplicate:
                             ai_messages.append(message_dict)
+                            if message_id:
+                                seen_message_ids.add(message_id)
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
