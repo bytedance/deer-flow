@@ -37,10 +37,18 @@ async def _seed(store):
     """Two runs interleaved within one thread; messages and traces mixed so
     each run's message seqs are non-contiguous (the bisect must handle gaps)."""
     plan = [
-        ("run-a", "message"), ("run-a", "trace"), ("run-b", "message"),
-        ("run-a", "message"), ("run-b", "trace"), ("run-b", "message"),
-        ("run-a", "trace"), ("run-a", "message"), ("run-b", "message"),
-        ("run-a", "message"), ("run-b", "message"), ("run-a", "message"),
+        ("run-a", "message"),
+        ("run-a", "trace"),
+        ("run-b", "message"),
+        ("run-a", "message"),
+        ("run-b", "trace"),
+        ("run-b", "message"),
+        ("run-a", "trace"),
+        ("run-a", "message"),
+        ("run-b", "message"),
+        ("run-a", "message"),
+        ("run-b", "message"),
+        ("run-a", "message"),
     ]
     records = []
     for i, (run_id, category) in enumerate(plan):
