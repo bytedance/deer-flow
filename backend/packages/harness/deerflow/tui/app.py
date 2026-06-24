@@ -151,7 +151,7 @@ class DeerFlowTUI(App):
         Binding("down", "nav_down", show=False, priority=True),
         Binding("up", "nav_up", show=False, priority=True),
         Binding("tab", "palette_complete", show=False, priority=True),
-        Binding("escape", "palette_close", show=False, priority=True),
+        Binding("escape", "escape", show=False, priority=True),
         Binding("enter", "palette_accept", show=False, priority=True),
     ]
 
@@ -237,15 +237,16 @@ class DeerFlowTUI(App):
     # ----- slash command palette ----------------------------------------- #
 
     def check_action(self, action: str, parameters):  # noqa: D401 - Textual hook
-        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "palette_close"}
+        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "escape"}
         if action in custom:
             # A modal overlay (e.g. the model/thread picker) is on top — never
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            # nav (history) and Tab are always consumed so Tab can't move focus
-            # off the composer; Enter/Esc fall through to the Input when idle.
-            if action in {"nav_up", "nav_down", "palette_complete"}:
+            # nav (history), Tab and Esc are always consumed (Tab can't move focus
+            # off the composer; Esc closes the palette or interrupts a run). Enter
+            # falls through to the Input when the palette is closed so it submits.
+            if action in {"nav_up", "nav_down", "palette_complete", "escape"}:
                 return True
             return True if self._palette_open else None
         return True
@@ -305,9 +306,6 @@ class DeerFlowTUI(App):
         if self._palette_items:
             self._palette_index = max(self._palette_index - 1, 0)
             self._render_palette()
-
-    def action_palette_close(self) -> None:
-        self._close_palette()
 
     def action_palette_complete(self) -> None:
         # When the palette is open, Tab completes the highlighted command.
@@ -540,13 +538,22 @@ class DeerFlowTUI(App):
 
     def action_interrupt(self) -> None:
         if self._streaming:
-            self._cancelled = True
-            self.workers.cancel_group(self, "agent")
-            self._streaming = False
-            self.state = reduce(self.state, RunEnded())
-            self._dispatch(SystemMessage("Interrupted.", tone="info"))
+            self._interrupt_run()
         else:
             self.exit()
+
+    def action_escape(self) -> None:
+        if self._palette_open:
+            self._close_palette()
+        elif self._streaming:
+            self._interrupt_run()
+
+    def _interrupt_run(self) -> None:
+        self._cancelled = True
+        self.workers.cancel_group(self, "agent")
+        self._streaming = False
+        self.state = reduce(self.state, RunEnded())
+        self._dispatch(SystemMessage("Interrupted.", tone="info"))
 
     def action_redraw(self) -> None:
         self.refresh(layout=True)

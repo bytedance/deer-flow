@@ -108,6 +108,19 @@ async def test_up_arrow_recalls_previous_input_from_history():
 
 
 @pytest.mark.asyncio
+async def test_escape_interrupts_an_active_run():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app._refresh_status()
+        await pilot.press("escape")
+        await pilot.pause()
+    assert app._streaming is False
+    assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+
+
+@pytest.mark.asyncio
 async def test_tab_keeps_focus_on_composer_when_palette_closed():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
