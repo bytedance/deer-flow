@@ -25,16 +25,12 @@ def render_transcript(state: ViewState) -> RenderableType:
     if not state.rows:
         return Text(_EMPTY_HINT, style=f"italic {THEME.dim}")
 
-    # The actively-streaming assistant row renders as plain text to avoid Markdown
-    # reflow jumpiness; every finalized assistant message renders as Markdown.
-    last_assistant = -1
-    for i, row in enumerate(state.rows):
-        if isinstance(row, AssistantRow):
-            last_assistant = i
-
+    # Only the message being generated right now renders as plain text (to avoid
+    # Markdown reflow jumpiness). Every other message — all history — renders as
+    # Markdown, so a follow-up turn never reverts prior answers to raw text.
     blocks: list[RenderableType] = []
-    for i, row in enumerate(state.rows):
-        streaming_now = state.streaming and i == last_assistant
+    for row in state.rows:
+        streaming_now = state.streaming and isinstance(row, AssistantRow) and row.id is not None and row.id == state.streaming_id
         blocks.append(render_row(row, as_markdown=not streaming_now))
         blocks.append(Text(""))  # one blank line between blocks for breathing room
     return Group(*blocks[:-1])

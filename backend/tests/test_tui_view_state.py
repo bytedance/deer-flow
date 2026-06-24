@@ -114,6 +114,23 @@ def test_assistant_delta_treats_cumulative_snapshot_as_replace():
     assert state.rows[0].text == "Hel lo world"
 
 
+def test_streaming_id_tracks_active_message_not_reemitted_history():
+    state = initial_state()
+    state = reduce(state, AssistantDelta(id="m1", text="answer one"))
+    state = reduce(state, RunEnded())
+    assert state.streaming_id is None
+
+    state = reduce(state, RunStarted())
+    assert state.streaming_id is None  # new turn: nothing actively streaming yet
+    state = reduce(state, AssistantDelta(id="m1", text="answer one"))  # re-emit (no-op)
+    assert state.streaming_id is None  # re-emit of history must not mark active
+    state = reduce(state, AssistantDelta(id="m2", text="new content"))  # real new content
+    assert state.streaming_id == "m2"
+
+    state = reduce(state, RunEnded())
+    assert state.streaming_id is None
+
+
 def test_assistant_resend_of_older_message_updates_in_place_not_duplicated():
     # On a thread with history, the client re-emits every prior message on each
     # new turn. A values snapshot can re-emit an OLDER message's full text AFTER

@@ -137,6 +137,9 @@ class ViewState:
     streaming: bool = False
     usage: dict | None = None
     title: str | None = None
+    # Id of the message currently being generated this turn. Only this row renders
+    # as plain text while streaming; everything else (history) stays Markdown.
+    streaming_id: str | None = None
 
 
 def initial_state(rows: tuple[Row, ...] = ()) -> ViewState:
@@ -159,10 +162,17 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return _append(state, UserRow(text=action.text))
 
     if isinstance(action, RunStarted):
-        return replace(state, streaming=True)
+        # New turn: no message is actively streaming yet (the client re-emits
+        # prior messages first; those must not be treated as the active one).
+        return replace(state, streaming=True, streaming_id=None)
 
     if isinstance(action, RunEnded):
-        return replace(state, streaming=False, usage=action.usage if action.usage is not None else state.usage)
+        return replace(
+            state,
+            streaming=False,
+            streaming_id=None,
+            usage=action.usage if action.usage is not None else state.usage,
+        )
 
     if isinstance(action, AssistantDelta):
         return _apply_assistant_delta(state, action)
@@ -183,7 +193,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return replace(state, title=action.title)
 
     if isinstance(action, ClearRows):
-        return replace(state, rows=(), title=None)
+        return replace(state, rows=(), title=None, streaming_id=None)
 
     return state
 
@@ -209,9 +219,21 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
     rows = list(state.rows)
     for i, row in enumerate(rows):
         if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
-            rows[i] = replace(row, text=_merge_stream_text(row.text, action.text))
-            return replace(state, rows=tuple(rows))
-    return _append(state, AssistantRow(text=action.text, id=action.id))
+            merged = _merge_stream_text(row.text, action.text)
+            if merged == row.text:
+                # No-op re-send (e.g. a values snapshot re-emitting history) —
+                # don't mark this as the actively-streaming message.
+                return state
+            rows[i] = replace(row, text=merged)
+            return _mark_streaming(replace(state, rows=tuple(rows)), action.id)
+    return _mark_streaming(_append(state, AssistantRow(text=action.text, id=action.id)), action.id)
+
+
+def _mark_streaming(state: ViewState, message_id: str) -> ViewState:
+    """Record the actively-streaming message id (only while a run is active)."""
+    if state.streaming:
+        return replace(state, streaming_id=message_id)
+    return state
 
 
 def _merge_stream_text(existing: str, incoming: str) -> str:
