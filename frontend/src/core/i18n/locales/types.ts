@@ -119,6 +119,7 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    agentsDisabledTooltip: string;
     channels: string;
   };
 
@@ -129,6 +130,8 @@ export interface Translations {
     newAgent: string;
     emptyTitle: string;
     emptyDescription: string;
+    featureDisabledTitle: string;
+    featureDisabledDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;
